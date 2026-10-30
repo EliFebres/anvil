@@ -185,6 +185,7 @@ pub async fn doctor(wiring: &Wiring) -> anyhow::Result<i32> {
     }
     report_skills(wiring)?;
     report_commands(wiring);
+    report_agents(wiring);
     if failures > 0 {
         bail!("{failures} provider(s) failed");
     }
@@ -233,6 +234,27 @@ fn report_commands(wiring: &Wiring) {
     }
     for error in commands.errors() {
         println!("command error: {}", error.error);
+    }
+}
+
+/// Prints one line per subagent with the provider it resolves to.
+fn report_agents(wiring: &Wiring) {
+    let agents = &wiring.agents;
+    println!("agents: {} loaded", agents.agents().len());
+    for agent in agents.agents() {
+        let (provider, warning) = wiring.resolve_model(agent.model.as_deref());
+        println!(
+            "agent {}: {} provider={provider} ({})",
+            agent.name,
+            agent.origin,
+            agent.path.display()
+        );
+        if let Some(warning) = warning {
+            println!("agent {}: {warning}", agent.name);
+        }
+    }
+    for error in agents.errors() {
+        println!("agent error: {}", error.error);
     }
 }
 

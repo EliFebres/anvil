@@ -5,18 +5,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
-use forge_compat::{CommandSet, SkillRoots, SkillSet, SkillTool};
+use forge_compat::{
+    AgentSet, CommandSet, DelegateTool, SkillRoots, SkillSet, SkillTool, SubagentEnv,
+};
 use forge_core::agent::{
     AutoApprove, CheckCommand, Instruction, LoopConfig, LoopProviders, PlanGate,
 };
 use forge_core::context;
 use forge_core::provider::{self, Provider, SharedBudget, TokenBudget};
-use forge_core::tools::{PermissionPrompt, Permissions, Shell, ToolContext, ToolRegistry};
+use forge_core::tools::{
+    PermissionPrompt, Permissions, PromptAnswer, Shell, StaticPrompt, ToolContext, ToolRegistry,
+};
 use forge_types::ForgeConfig;
 
 use crate::terminal::{TerminalGate, TerminalPrompt};
 
 /// Everything a run or a chat needs, built once from config.
+///
+/// Cloning is cheap (shared sets, one config copy) and lets the `delegate`
+/// tool carry a copy into subagent tasks.
+#[derive(Clone)]
 pub struct Wiring {
     /// The project root.
     pub cwd: PathBuf,
@@ -30,6 +38,8 @@ pub struct Wiring {
     pub skills: Arc<SkillSet>,
     /// Slash commands from the `commands/` directories.
     pub commands: CommandSet,
+    /// Subagents from the `agents/` directories.
+    pub agents: Arc<AgentSet>,
 }
 
 /// The directories skills are discovered from.
@@ -74,6 +84,7 @@ impl Wiring {
         let budget = TokenBudget::shared(config.limits.session_tokens);
         let skills = Arc::new(SkillSet::discover(&skill_roots(&cwd, home.as_deref())));
         let commands = CommandSet::discover(&cwd, home.as_deref());
+        let agents = Arc::new(AgentSet::discover(&cwd, home.as_deref()));
         Ok(Self {
             cwd,
             home,
@@ -81,7 +92,52 @@ impl Wiring {
             budget,
             skills,
             commands,
+            agents,
         })
+    }
+
+    /// Resolves a subagent's `model` key to a provider name.
+    ///
+    /// A role name (`coder`, `reviewer`, `summarizer`) maps through
+    /// `[roles]`; a provider name is used as is; anything else falls back to
+    /// the coder.
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - The agent's `model` key, if any.
+    ///
+    /// # Returns
+    ///
+    /// The provider name and, when the key was unknown, a warning to show.
+    pub fn resolve_model(&self, model: Option<&str>) -> (String, Option<String>) {
+        let roles = &self.config.roles;
+        let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+            return (roles.coder.clone(), None);
+        };
+        let by_role = match model {
+            "coder" => Some(roles.coder.clone()),
+            "summarizer" => Some(roles.summarizer.clone()),
+            "reviewer" => Some(
+                roles
+                    .reviewer
+                    .clone()
+                    .unwrap_or_else(|| roles.coder.clone()),
+            ),
+            _ => None,
+        };
+        if let Some(name) = by_role {
+            return (name, None);
+        }
+        if self.config.providers.contains_key(model) {
+            return (model.to_owned(), None);
+        }
+        (
+            roles.coder.clone(),
+            Some(format!(
+                "model `{model}` is not a role or a provider in the config; using the coder `{}`",
+                roles.coder
+            )),
+        )
     }
 
     /// Expands a `/<name> [args]` line into the message to send: a skill
@@ -166,8 +222,8 @@ impl Wiring {
             .unwrap_or(32_000)
     }
 
-    /// The tool registry with the project's permissions: the built-ins plus
-    /// the `skill` tool.
+    /// The tool registry with the project's permissions: the built-ins, the
+    /// `skill` tool and, when any subagent is defined, the `delegate` tool.
     ///
     /// # Arguments
     ///
@@ -181,6 +237,22 @@ impl Wiring {
     ///
     /// When `.forge/permissions.toml` exists but cannot be read.
     pub fn registry(&self, prompt: Box<dyn PermissionPrompt>) -> anyhow::Result<ToolRegistry> {
+        let mut registry = self.registry_without_delegate(prompt)?;
+        if !self.agents.is_empty() {
+            registry.register(Box::new(DelegateTool::new(
+                Arc::clone(&self.agents),
+                Arc::new(self.clone()),
+            )));
+        }
+        Ok(registry)
+    }
+
+    /// The registry a subagent gets: everything but `delegate`, so
+    /// delegations do not nest.
+    fn registry_without_delegate(
+        &self,
+        prompt: Box<dyn PermissionPrompt>,
+    ) -> anyhow::Result<ToolRegistry> {
         let permissions = Permissions::load(&self.cwd).context("loading permissions")?;
         let mut registry = ToolRegistry::with_builtins(permissions, prompt);
         registry.register(Box::new(SkillTool::new(Arc::clone(&self.skills))));
@@ -189,7 +261,7 @@ impl Wiring {
 
     /// Prompt sections that come from outside forge-core: the Claude Code
     /// instruction files and `@imports` forge-core does not load itself,
-    /// then the skill list.
+    /// then the skill list and the subagent list.
     ///
     /// # Arguments
     ///
@@ -205,6 +277,7 @@ impl Wiring {
         let mut extra =
             forge_compat::instructions::discover_extra(self.home.as_deref(), &self.cwd, &base);
         extra.extend(self.skills.prompt_section(tool_names));
+        extra.extend(self.agents.prompt_section());
         extra
     }
 
@@ -284,5 +357,28 @@ impl Wiring {
     /// The terminal prompt.
     pub fn prompt() -> Box<dyn PermissionPrompt> {
         Box::new(TerminalPrompt)
+    }
+}
+
+impl SubagentEnv for Wiring {
+    fn provider(&self, model: Option<&str>) -> Result<Arc<dyn Provider>, String> {
+        let (name, warning) = self.resolve_model(model);
+        if let Some(warning) = warning {
+            tracing::warn!("{warning}");
+        }
+        Wiring::provider(self, &name).map_err(|error| format!("{error:#}"))
+    }
+
+    fn registry(&self) -> Result<ToolRegistry, String> {
+        self.registry_without_delegate(Box::new(StaticPrompt(PromptAnswer::No)))
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    fn tool_context(&self) -> ToolContext {
+        Wiring::tool_context(self)
+    }
+
+    fn context_window(&self) -> u32 {
+        Wiring::context_window(self)
     }
 }

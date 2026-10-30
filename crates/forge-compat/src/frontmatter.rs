@@ -66,6 +66,36 @@ impl Frontmatter {
             .filter(|text| !text.is_empty())
     }
 
+    /// A list field written either as a YAML list or as a comma-separated
+    /// string, the way Claude Code writes `tools` and `allowed-tools`.
+    ///
+    /// # Arguments
+    ///
+    /// * `field` - The key.
+    ///
+    /// # Returns
+    ///
+    /// The trimmed, non-empty entries, or `None` when the key is absent or
+    /// neither a string nor a list.
+    pub fn get_list(&self, field: &str) -> Option<Vec<String>> {
+        let items: Vec<String> = match self.fields.get(field)? {
+            Value::String(text) => text.split(',').map(str::to_owned).collect(),
+            Value::Array(items) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => return None,
+        };
+        Some(
+            items
+                .into_iter()
+                .map(|item| item.trim().to_owned())
+                .filter(|item| !item.is_empty())
+                .collect(),
+        )
+    }
+
     /// Deserializes the fields into a typed manifest.
     ///
     /// # Arguments
