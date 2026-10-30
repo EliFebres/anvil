@@ -25,6 +25,7 @@ rustc-ice-*.txt
 
 # forge
 .forge/telemetry/
+.forge/sessions/
 *.local.toml
 
 # insta pending snapshots

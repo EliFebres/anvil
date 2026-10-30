@@ -5,3 +5,4 @@
 //! outside through the CLI.
 
 pub mod provider;
+pub mod tools;

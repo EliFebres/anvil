@@ -12,7 +12,7 @@ pub mod schema;
 pub mod skill;
 pub mod ticket;
 
-pub use config::{ForgeConfig, LimitsConfig, Protocol, ProviderConfig, Roles};
+pub use config::{ForgeConfig, LimitsConfig, Protocol, ProviderConfig, Roles, ToolsConfig};
 pub use error::ValidationError;
 pub use skill::SkillManifest;
 pub use ticket::{Priority, TelemetryRef, Ticket, TicketKind, TicketOrigin, TicketStatus};

@@ -33,6 +33,11 @@ coder = "runpod"
 summarizer = "runpod"
 # reviewer = "runpod"
 
+# Optional. The shell program behind the `shell` tool: "powershell", "pwsh",
+# "sh", "bash", "zsh" or "cmd". Default: PowerShell on Windows, sh elsewhere.
+# [tools]
+# shell = "pwsh"
+
 # Every key is optional; these are the defaults.
 # [limits]
 # request_timeout_s = 600      # wall clock for one completion, streaming included
@@ -153,6 +158,16 @@ impl Default for LimitsConfig {
     }
 }
 
+/// Settings for the built-in tools.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct ToolsConfig {
+    /// Program behind the `shell` tool, such as `pwsh` or `bash`. `None`
+    /// means PowerShell on Windows and `sh` elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+}
+
 /// The whole forge configuration file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -165,6 +180,9 @@ pub struct ForgeConfig {
     /// Retry, timeout and budget limits.
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Built-in tool settings.
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 impl ForgeConfig {
@@ -311,5 +329,13 @@ mod tests {
 
         let text = format!("{CONFIG_TEMPLATE}\n[limits]\nmax_turns = 1\n");
         assert!(toml::from_str::<ForgeConfig>(&text).is_err());
+    }
+
+    #[test]
+    fn tools_shell_is_optional() {
+        assert_eq!(template().tools.shell, None);
+        let text = format!("{CONFIG_TEMPLATE}\n[tools]\nshell = \"bash\"\n");
+        let config: ForgeConfig = toml::from_str(&text).expect("parses");
+        assert_eq!(config.tools.shell.as_deref(), Some("bash"));
     }
 }

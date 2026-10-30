@@ -32,10 +32,15 @@ anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
 
 # Async + HTTP (rustls only; no OpenSSL)
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "charset", "http2", "stream"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio-stream = { version = "0.1", default-features = false }
+
+# File walking and searching (no external ripgrep needed)
+ignore = "0.4"
+globset = "0.4"
+grep = "0.4"
 
 # Logging
 tracing = "0.1"

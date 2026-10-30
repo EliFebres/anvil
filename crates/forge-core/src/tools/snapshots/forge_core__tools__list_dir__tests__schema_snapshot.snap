@@ -1,0 +1,18 @@
+---
+source: crates/forge-core/src/tools/list_dir.rs
+expression: ListDir.schema()
+---
+{
+  "description": "Arguments of the `list_dir` tool.",
+  "properties": {
+    "path": {
+      "default": null,
+      "description": "Directory to list, relative to the project root or absolute. Default: the project root.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "type": "object"
+}
