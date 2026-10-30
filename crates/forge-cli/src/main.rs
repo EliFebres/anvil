@@ -13,7 +13,7 @@ mod wiring;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, ConfigCommand};
+use crate::cli::{Cli, Command, CompatCommand, ConfigCommand};
 use crate::wiring::Wiring;
 
 /// Exit code for configuration and setup errors.
@@ -57,6 +57,14 @@ async fn dispatch(cli: Cli) -> anyhow::Result<i32> {
             Ok(0)
         }
         Some(Command::Skill { command }) => skills::run(command, home.as_deref(), &cwd).await,
+        Some(Command::Compat {
+            command: CompatCommand::Check { path },
+        }) => {
+            let config = config_load::load(home.as_deref(), &cwd)
+                .ok()
+                .map(|loaded| loaded.config);
+            commands::compat_check(&path, config.as_ref())
+        }
         Some(Command::Doctor) => {
             let wiring = Wiring::new(config_load::load(home.as_deref(), &cwd)?.config)?;
             commands::doctor(&wiring).await

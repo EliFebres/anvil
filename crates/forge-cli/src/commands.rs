@@ -352,6 +352,43 @@ fn report_hooks(wiring: &Wiring) {
     }
 }
 
+/// Prints what a `.claude` folder would load in forge.
+///
+/// # Arguments
+///
+/// * `path` - The folder.
+/// * `config` - The forge config, when one loads here, to resolve agent models.
+///
+/// # Returns
+///
+/// Zero when nothing would fail to load, one otherwise.
+///
+/// # Errors
+///
+/// When the path is not a directory.
+pub fn compat_check(path: &Path, config: Option<&forge_types::ForgeConfig>) -> anyhow::Result<i32> {
+    let root = if path.starts_with("~") {
+        let home = std::env::home_dir().context("cannot determine the home directory")?;
+        home.join(path.strip_prefix("~").unwrap_or(path))
+    } else {
+        path.to_path_buf()
+    };
+    if !root.is_dir() {
+        bail!("{} is not a directory", root.display());
+    }
+    let builtins = forge_core::tools::ToolRegistry::with_builtins(
+        forge_core::tools::Permissions::empty(),
+        Box::new(forge_core::tools::StaticPrompt(
+            forge_core::tools::PromptAnswer::No,
+        )),
+    );
+    let mut tools: Vec<&str> = builtins.names();
+    tools.extend(["skill", "delegate"]);
+    let report = forge_compat::check::check(&root, config, &tools);
+    print!("{}", report.render());
+    Ok(i32::from(report.has_errors()))
+}
+
 /// Sends one tiny request and returns the reply text and latency.
 async fn ping(wiring: &Wiring, name: &str) -> anyhow::Result<(String, u128)> {
     let provider = wiring.provider(name)?;

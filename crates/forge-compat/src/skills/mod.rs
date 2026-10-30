@@ -450,7 +450,7 @@ pub fn load_skill(skill_file: &Path, source: Origin) -> Result<Skill, CompatErro
 
 /// Every `SKILL.md` under `root`, at most [`MAX_DEPTH`] levels down,
 /// sorted by path. Hidden directories are skipped.
-fn find_skill_files(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn find_skill_files(root: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     walk_for_skill_files(root, 0, &mut found);
     found.sort();

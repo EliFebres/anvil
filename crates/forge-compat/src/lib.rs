@@ -8,6 +8,7 @@
 //! only; never on any factory crate, forge-memory or forge-telemetry.
 
 pub mod agents;
+pub mod check;
 pub mod commands;
 pub mod delegate;
 pub mod error;

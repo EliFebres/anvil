@@ -109,7 +109,7 @@ fn source_path(source: &str, home: Option<&Path>, cwd: &Path) -> Option<PathBuf>
 ///
 /// A token counts when `@` starts a word, the rest has no spaces, and it
 /// is not an e-mail address. Trailing punctuation is dropped.
-fn find_imports(text: &str) -> Vec<String> {
+pub(crate) fn find_imports(text: &str) -> Vec<String> {
     let mut imports = Vec::new();
     let mut in_fence = false;
     for line in text.lines() {

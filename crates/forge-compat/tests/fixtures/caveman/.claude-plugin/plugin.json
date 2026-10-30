@@ -1,0 +1,20 @@
+{
+  "name": "caveman",
+  "version": "4.0.1",
+  "description": "Ultra-compressed communication mode.",
+  "author": { "name": "Julius Brussee", "url": "https://github.com/JuliusBrussee" },
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/caveman-activate.js\"", "timeout": 30, "statusMessage": "Loading caveman mode..." }] }
+    ],
+    "SubagentStart": [
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/caveman-activate.js\" --subagent", "timeout": 30 }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/caveman-mode-tracker.js\"", "timeout": 30 }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/hooks/caveman-stats.js\" --record", "timeout": 5 }] }
+    ]
+  }
+}

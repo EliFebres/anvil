@@ -214,7 +214,7 @@ impl CommandSet {
 }
 
 /// Reads one command file; frontmatter is optional.
-fn load_command(path: &Path, origin: Origin) -> Result<SlashCommand, CompatError> {
+pub(crate) fn load_command(path: &Path, origin: Origin) -> Result<SlashCommand, CompatError> {
     let text = std::fs::read_to_string(path).map_err(|error| CompatError::io(path, &error))?;
     let parsed = frontmatter::parse_optional(&text, path)?;
     let name = path

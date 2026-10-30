@@ -51,6 +51,22 @@ pub enum Command {
         #[command(subcommand)]
         command: SkillCommand,
     },
+    /// Claude Code compatibility checks.
+    Compat {
+        /// Which check to run.
+        #[command(subcommand)]
+        command: CompatCommand,
+    },
+}
+
+/// Subcommands under `forge compat`.
+#[derive(Debug, Subcommand)]
+pub enum CompatCommand {
+    /// Report what a `.claude` folder (or a plugin repository) would load in forge.
+    Check {
+        /// The folder to check, such as `~/.claude` or a project's `.claude`.
+        path: std::path::PathBuf,
+    },
 }
 
 /// Subcommands under `forge skill`.

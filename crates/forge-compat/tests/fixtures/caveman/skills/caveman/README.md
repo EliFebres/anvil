@@ -1,0 +1,1 @@
+Caveman skill readme (fixture).
