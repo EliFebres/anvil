@@ -97,8 +97,19 @@ impl Shell {
         &self.program
     }
 
-    /// Prepares a command that runs `script`.
-    fn command(&self, script: &str) -> tokio::process::Command {
+    /// Prepares a command that runs `script` in this shell.
+    ///
+    /// Nothing is spawned; the caller sets the working directory, standard
+    /// streams and environment before spawning.
+    ///
+    /// # Arguments
+    ///
+    /// * `script` - The command line.
+    ///
+    /// # Returns
+    ///
+    /// The command, ready to configure.
+    pub fn command(&self, script: &str) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.program);
         command.args(&self.args).arg(script);
         command

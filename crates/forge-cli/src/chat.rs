@@ -49,6 +49,14 @@ pub async fn chat(wiring: &Wiring) -> anyhow::Result<i32> {
     let (session_dir, id) = wiring.new_session_dir();
     std::fs::create_dir_all(&session_dir).context("creating the session folder")?;
     eprintln!("chat session {id}; /help for commands");
+    let wiring = &wiring.with_session(&id, &session_dir);
+    let hooks = wiring.hook_runner();
+    let mut session_context = Vec::new();
+    if let Some(hooks) = &hooks {
+        session_context.extend(Wiring::session_start_instruction(
+            hooks.session_start().await,
+        ));
+    }
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::spawn(render::render(rx, false));
     let mut session = ChatSession {
@@ -66,6 +74,8 @@ pub async fn chat(wiring: &Wiring) -> anyhow::Result<i32> {
         touched: BTreeSet::new(),
         tokens_used: 0,
         events: EventSink::new(tx),
+        hooks,
+        session_context,
     };
     let mut editor = DefaultEditor::new().context("starting the line editor")?;
     loop {
@@ -85,7 +95,8 @@ pub async fn chat(wiring: &Wiring) -> anyhow::Result<i32> {
             }
             continue;
         }
-        session.turn(line).await;
+        let text = session.turn(line).await;
+        session.after_turn(text).await;
     }
     tokio::task::yield_now().await;
     Ok(0)
@@ -104,6 +115,8 @@ struct ChatSession<'a> {
     touched: BTreeSet<std::path::PathBuf>,
     tokens_used: u64,
     events: EventSink,
+    hooks: Option<Arc<forge_compat::HookRunner>>,
+    session_context: Vec<forge_core::agent::Instruction>,
 }
 
 impl ChatSession<'_> {
@@ -155,15 +168,37 @@ impl ChatSession<'_> {
             }
             ("quit" | "exit" | "q", _) => return false,
             (other, _) => match self.wiring.expand_slash(&format!("/{command}")) {
-                Some(message) => self.turn(&message).await,
+                Some(message) => {
+                    let text = self.turn(&message).await;
+                    self.after_turn(text).await;
+                }
                 None => eprintln!("unknown command `/{other}`; /help lists them"),
             },
         }
         true
     }
 
+    /// Runs the Stop hooks on a finished turn. A hook that objects gets one
+    /// more turn with its reason, then the hooks run once more with
+    /// `stop_hook_active` set, exactly as Claude Code does.
+    async fn after_turn(&mut self, text: String) {
+        let Some(hooks) = self.hooks.clone() else {
+            return;
+        };
+        let Some(reason) = hooks.stop(&text, false).await else {
+            return;
+        };
+        eprintln!("a Stop hook asked for more work: {reason}");
+        let text = self.turn(&reason).await;
+        if let Some(reason) = hooks.stop(&text, true).await {
+            eprintln!("a Stop hook objected again; stopping anyway: {reason}");
+        }
+    }
+
     /// Sends one user line and runs the model until it stops calling tools.
-    async fn turn(&mut self, line: &str) {
+    ///
+    /// Returns the model's final text, empty when the provider failed.
+    async fn turn(&mut self, line: &str) -> String {
         self.conversation.push(Message::user(line));
         let tools = self.tools();
         loop {
@@ -179,7 +214,7 @@ impl ChatSession<'_> {
                 Ok(turn) => turn,
                 Err(error) => {
                     eprintln!("\nerror: {error}");
-                    return;
+                    return String::new();
                 }
             };
             if let Some(usage) = turn.usage {
@@ -189,7 +224,7 @@ impl ChatSession<'_> {
             self.conversation.push(turn.message());
             if turn.tool_calls.is_empty() {
                 println!();
-                return;
+                return turn.text;
             }
             let mut results = Vec::new();
             for call in &turn.tool_calls {
@@ -284,6 +319,7 @@ impl ChatSession<'_> {
         let mut instructions =
             discover_instructions(self.wiring.home.as_deref(), &self.wiring.cwd, &self.touched);
         instructions.extend(self.wiring.extra_instructions(&self.registry.names()));
+        instructions.extend(self.session_context.iter().cloned());
         prompts::system_prompt(&PromptInputs {
             state: self.mode,
             instructions: &instructions,

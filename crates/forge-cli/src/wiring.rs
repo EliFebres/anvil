@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use forge_compat::{
-    AgentSet, CommandSet, DelegateTool, SkillRoots, SkillSet, SkillTool, SubagentEnv,
+    AgentSet, CommandSet, DelegateTool, HookConfig, HookRunner, SkillRoots, SkillSet, SkillTool,
+    SubagentEnv,
 };
 use forge_core::agent::{
     AutoApprove, CheckCommand, Instruction, LoopConfig, LoopProviders, PlanGate,
@@ -40,6 +41,19 @@ pub struct Wiring {
     pub commands: CommandSet,
     /// Subagents from the `agents/` directories.
     pub agents: Arc<AgentSet>,
+    /// Hooks from the settings files.
+    pub hooks: Arc<HookConfig>,
+    /// The session this wiring serves, once one exists.
+    session: Option<SessionInfo>,
+}
+
+/// The session a run or chat belongs to, for hook payloads.
+#[derive(Debug, Clone)]
+struct SessionInfo {
+    /// The session id.
+    id: String,
+    /// The session folder.
+    dir: PathBuf,
 }
 
 /// The directories skills are discovered from.
@@ -85,6 +99,7 @@ impl Wiring {
         let skills = Arc::new(SkillSet::discover(&skill_roots(&cwd, home.as_deref())));
         let commands = CommandSet::discover(&cwd, home.as_deref());
         let agents = Arc::new(AgentSet::discover(&cwd, home.as_deref()));
+        let hooks = Arc::new(HookConfig::load(&cwd, home.as_deref()));
         Ok(Self {
             cwd,
             home,
@@ -93,6 +108,65 @@ impl Wiring {
             skills,
             commands,
             agents,
+            hooks,
+            session: None,
+        })
+    }
+
+    /// A copy of this wiring bound to a session, so hooks can report it.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The session id.
+    /// * `dir` - The session folder.
+    ///
+    /// # Returns
+    ///
+    /// The bound wiring.
+    pub fn with_session(&self, id: &str, dir: &Path) -> Self {
+        let mut wiring = self.clone();
+        wiring.session = Some(SessionInfo {
+            id: id.to_owned(),
+            dir: dir.to_path_buf(),
+        });
+        wiring
+    }
+
+    /// The hook runner for this session, when any hook is configured.
+    ///
+    /// # Returns
+    ///
+    /// The runner, or `None` when the settings files define no hooks.
+    pub fn hook_runner(&self) -> Option<Arc<HookRunner>> {
+        if self.hooks.is_empty() {
+            return None;
+        }
+        let (id, dir) = match &self.session {
+            Some(session) => (session.id.clone(), Some(session.dir.clone())),
+            None => ("none".to_owned(), None),
+        };
+        Some(Arc::new(HookRunner::new(
+            Arc::clone(&self.hooks),
+            self.cwd.clone(),
+            Shell::from_config(self.config.tools.shell.as_deref()),
+            id,
+            dir,
+        )))
+    }
+
+    /// Wraps `SessionStart` hook output as a prompt section.
+    ///
+    /// # Arguments
+    ///
+    /// * `context` - What the hooks printed.
+    ///
+    /// # Returns
+    ///
+    /// The section, or `None` when they printed nothing.
+    pub fn session_start_instruction(context: Vec<String>) -> Option<Instruction> {
+        (!context.is_empty()).then(|| Instruction {
+            source: "SessionStart hooks".to_owned(),
+            text: context.join("\n"),
         })
     }
 
@@ -256,6 +330,9 @@ impl Wiring {
         let permissions = Permissions::load(&self.cwd).context("loading permissions")?;
         let mut registry = ToolRegistry::with_builtins(permissions, prompt);
         registry.register(Box::new(SkillTool::new(Arc::clone(&self.skills))));
+        if let Some(runner) = self.hook_runner() {
+            registry.set_hook(runner);
+        }
         Ok(registry)
     }
 

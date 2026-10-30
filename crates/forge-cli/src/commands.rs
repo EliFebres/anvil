@@ -32,9 +32,18 @@ use crate::wiring::Wiring;
 pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Result<i32> {
     let (session_dir, id) = wiring.new_session_dir();
     eprintln!("session {id}");
+    let wiring = wiring.with_session(&id, &session_dir);
     let task = wiring.expand_slash(&task).unwrap_or(task);
     let registry = wiring.registry(Wiring::prompt())?;
-    let config = wiring.loop_config(task, session_dir, &registry);
+    let mut config = wiring.loop_config(task, session_dir, &registry);
+    let hooks = wiring.hook_runner();
+    if let Some(hooks) = &hooks {
+        config
+            .extra_instructions
+            .extend(Wiring::session_start_instruction(
+                hooks.session_start().await,
+            ));
+    }
     let agent = AgentLoop::new(
         config,
         wiring.loop_providers()?,
@@ -43,7 +52,19 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
         Wiring::gate(yes),
         sink(),
     );
-    Ok(drive(agent).await.status.exit_code())
+    let result = drive(agent).await;
+    run_stop_hooks(hooks.as_deref(), &result).await;
+    Ok(result.status.exit_code())
+}
+
+/// Runs the Stop hooks after a loop finished. A hook that objects is
+/// reported; the loop is not resumed.
+async fn run_stop_hooks(hooks: Option<&forge_compat::HookRunner>, result: &LoopResult) {
+    if let Some(hooks) = hooks
+        && let Some(reason) = hooks.stop(&result.summary, false).await
+    {
+        eprintln!("a Stop hook objected: {reason}");
+    }
 }
 
 /// Continues a saved session.
@@ -64,8 +85,18 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
 pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32> {
     let snapshot = context::load_session(&wiring.cwd, id).context("loading the session")?;
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
+    let wiring = wiring.with_session(id, &snapshot.dir);
     let registry = wiring.registry(Wiring::prompt())?;
-    let config = wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry);
+    let mut config =
+        wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry);
+    let hooks = wiring.hook_runner();
+    if let Some(hooks) = &hooks {
+        config
+            .extra_instructions
+            .extend(Wiring::session_start_instruction(
+                hooks.session_start().await,
+            ));
+    }
     let agent = AgentLoop::resume(
         snapshot,
         config,
@@ -75,7 +106,9 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
         Wiring::gate(yes),
         sink(),
     );
-    Ok(drive(agent).await.status.exit_code())
+    let result = drive(agent).await;
+    run_stop_hooks(hooks.as_deref(), &result).await;
+    Ok(result.status.exit_code())
 }
 
 /// A sink whose receiver is rendered on a background task.
@@ -186,6 +219,7 @@ pub async fn doctor(wiring: &Wiring) -> anyhow::Result<i32> {
     report_skills(wiring)?;
     report_commands(wiring);
     report_agents(wiring);
+    report_hooks(wiring);
     if failures > 0 {
         bail!("{failures} provider(s) failed");
     }
@@ -255,6 +289,33 @@ fn report_agents(wiring: &Wiring) {
     }
     for error in agents.errors() {
         println!("agent error: {}", error.error);
+    }
+}
+
+/// Prints the hook summary, then entries forge does not run and bad files.
+fn report_hooks(wiring: &Wiring) {
+    let hooks = &wiring.hooks;
+    let events: Vec<String> = hooks.events().iter().map(ToString::to_string).collect();
+    println!(
+        "hooks: {} command(s) for {}",
+        hooks.command_count(),
+        if events.is_empty() {
+            "no events".to_owned()
+        } else {
+            events.join(", ")
+        }
+    );
+    for source in hooks.sources() {
+        println!("hook settings: {}", source.display());
+    }
+    for (name, source) in hooks.unsupported() {
+        println!(
+            "hook unsupported: {name} in {} (forge runs PreToolUse, PostToolUse, Stop and SessionStart command hooks)",
+            source.display()
+        );
+    }
+    for error in hooks.errors() {
+        println!("hook error: {}", error.error);
     }
 }
 

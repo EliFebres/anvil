@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -294,6 +294,66 @@ pub struct Execution {
     pub full_output: Option<PathBuf>,
 }
 
+/// A boxed future returned by a [`ToolHook`].
+pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// What a [`ToolHook`] decided before a tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookDecision {
+    /// Run the tool.
+    Allow,
+    /// Do not run the tool; the reason goes back to the model.
+    Block {
+        /// Why the call was refused.
+        reason: String,
+    },
+}
+
+/// Code that runs around every tool call, after the permission check.
+///
+/// The registry owns at most one hook. The CLI plugs in Claude Code-style
+/// `PreToolUse` and `PostToolUse` hooks through it; forge-core itself only
+/// calls the two methods.
+pub trait ToolHook: Send + Sync {
+    /// Runs before a tool that the permission model allowed.
+    ///
+    /// # Arguments
+    ///
+    /// * `call` - The model's call.
+    /// * `args` - Its parsed arguments.
+    /// * `ctx` - Where the tool would run.
+    ///
+    /// # Returns
+    ///
+    /// Whether to run the tool.
+    fn before<'a>(
+        &'a self,
+        call: &'a ToolCall,
+        args: &'a Value,
+        ctx: &'a ToolContext,
+    ) -> HookFuture<'a, HookDecision>;
+
+    /// Runs after a tool finished, with its result.
+    ///
+    /// # Arguments
+    ///
+    /// * `call` - The model's call.
+    /// * `args` - Its parsed arguments.
+    /// * `result` - What the tool returned, already truncated.
+    /// * `ctx` - Where the tool ran.
+    ///
+    /// # Returns
+    ///
+    /// Text to append to the result for the model, if any.
+    fn after<'a>(
+        &'a self,
+        call: &'a ToolCall,
+        args: &'a Value,
+        result: &'a ToolResult,
+        ctx: &'a ToolContext,
+    ) -> HookFuture<'a, Option<String>>;
+}
+
 /// The tools on offer, with the permission model that guards them.
 pub struct ToolRegistry {
     /// Tools by name.
@@ -302,6 +362,8 @@ pub struct ToolRegistry {
     permissions: Mutex<Permissions>,
     /// Who to ask when a rule says `ask`.
     prompt: Box<dyn PermissionPrompt>,
+    /// Runs around every allowed call.
+    hook: Option<Arc<dyn ToolHook>>,
 }
 
 impl ToolRegistry {
@@ -320,7 +382,18 @@ impl ToolRegistry {
             tools: BTreeMap::new(),
             permissions: Mutex::new(permissions),
             prompt,
+            hook: None,
         }
+    }
+
+    /// Installs the hook that runs around every allowed call, replacing any
+    /// previous one.
+    ///
+    /// # Arguments
+    ///
+    /// * `hook` - The hook.
+    pub fn set_hook(&mut self, hook: Arc<dyn ToolHook>) {
+        self.hook = Some(hook);
     }
 
     /// A registry with every built-in tool.
@@ -441,35 +514,56 @@ impl ToolRegistry {
         if let Some(outcome) = self.check_permission(tool, &args, target.as_deref()) {
             return Execution::finished(call, outcome.0, outcome.1);
         }
+        if let Some(hook) = &self.hook
+            && let HookDecision::Block { reason } = hook.before(call, &args, ctx).await
+        {
+            tracing::info!(tool = %call.name, reason, "blocked by a hook");
+            return Execution::finished(
+                call,
+                ToolOutput::error(format!("blocked by a hook: {reason}")),
+                ToolOutcome::Blocked,
+            );
+        }
 
-        let output = tool.run(args, ctx).await;
+        let output = tool.run(args.clone(), ctx).await;
         let outcome = if output.is_error {
             ToolOutcome::Failed
         } else {
             ToolOutcome::Completed
         };
-        let Some(truncated) = output::truncate(&output.content, tool.output_cap()) else {
-            return Execution::finished(call, output, outcome);
-        };
-        let full_output = ctx.session_dir.as_deref().and_then(|dir| {
-            match output::write_full(dir, &call.id, &output.content) {
-                Ok(path) => Some(path),
-                Err(error) => {
-                    tracing::warn!(%error, "could not keep full tool output");
-                    None
+        let mut execution = match output::truncate(&output.content, tool.output_cap()) {
+            None => Execution::finished(call, output, outcome),
+            Some(truncated) => {
+                let full_output =
+                    ctx.session_dir.as_deref().and_then(|dir| {
+                        match output::write_full(dir, &call.id, &output.content) {
+                            Ok(path) => Some(path),
+                            Err(error) => {
+                                tracing::warn!(%error, "could not keep full tool output");
+                                None
+                            }
+                        }
+                    });
+                let content =
+                    output::with_note(truncated, output.content.len(), full_output.as_deref());
+                Execution {
+                    result: ToolResult {
+                        call_id: call.id.clone(),
+                        content,
+                        is_error: output.is_error,
+                    },
+                    outcome,
+                    full_output,
                 }
             }
-        });
-        let content = output::with_note(truncated, output.content.len(), full_output.as_deref());
-        Execution {
-            result: ToolResult {
-                call_id: call.id.clone(),
-                content,
-                is_error: output.is_error,
-            },
-            outcome,
-            full_output,
+        };
+        if let Some(hook) = &self.hook
+            && let Some(note) = hook.after(call, &args, &execution.result, ctx).await
+        {
+            execution.result.content.push_str("\n\n[hook] ");
+            execution.result.content.push_str(note.trim_end());
         }
+        execution
     }
 
     /// Applies the blocked list and the rules; `None` means the call may run.
@@ -728,6 +822,67 @@ mod tests {
             .await;
         assert_eq!(execution.outcome, ToolOutcome::Failed);
         assert!(execution.result.is_error);
+    }
+
+    /// Blocks calls whose arguments carry `"block": true` and annotates
+    /// those carrying `"note": "<text>"`.
+    struct ScriptedHook;
+
+    impl ToolHook for ScriptedHook {
+        fn before<'a>(
+            &'a self,
+            _call: &'a ToolCall,
+            args: &'a Value,
+            _ctx: &'a ToolContext,
+        ) -> HookFuture<'a, HookDecision> {
+            Box::pin(async move {
+                if args.get("block").and_then(Value::as_bool) == Some(true) {
+                    HookDecision::Block {
+                        reason: "policy says no".to_owned(),
+                    }
+                } else {
+                    HookDecision::Allow
+                }
+            })
+        }
+
+        fn after<'a>(
+            &'a self,
+            _call: &'a ToolCall,
+            args: &'a Value,
+            result: &'a ToolResult,
+            _ctx: &'a ToolContext,
+        ) -> HookFuture<'a, Option<String>> {
+            Box::pin(async move {
+                args.get("note")
+                    .and_then(Value::as_str)
+                    .map(|note| format!("{note} after {}", result.content.len()))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hook_can_block_a_call_and_annotate_a_result() {
+        let mut registry = make_registry("allow = [\"echo\"]", vec![]);
+        registry.set_hook(Arc::new(ScriptedHook));
+        let blocked = registry
+            .execute(
+                &call(r#"{"text": "x", "block": true}"#),
+                &ToolContext::new("."),
+            )
+            .await;
+        assert_eq!(blocked.outcome, ToolOutcome::Blocked);
+        assert!(blocked.result.is_error);
+        assert_eq!(blocked.result.content, "blocked by a hook: policy says no");
+
+        let noted = registry
+            .execute(
+                &call(r#"{"text": "hi", "note": "seen"}"#),
+                &ToolContext::new("."),
+            )
+            .await;
+        assert_eq!(noted.outcome, ToolOutcome::Completed);
+        assert!(noted.result.content.ends_with("\n\n[hook] seen after 2"));
     }
 
     #[tokio::test]
