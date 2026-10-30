@@ -26,6 +26,13 @@ rustc-ice-*.txt
 # forge
 .forge/telemetry/
 .forge/sessions/
+.forge/logs/
+
+# secrets: keys live in .env files, never in the repository
+.env
+.forge/.env
+.factory/env
+deploy/nuc/env
 *.local.toml
 
 # insta pending snapshots

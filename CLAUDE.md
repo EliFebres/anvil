@@ -17,7 +17,7 @@ Workspace lints enforce part of this mechanically: `unsafe_code = "forbid"`, `mi
 
 ## Crates
 
-**`forge-types`** holds shared types only: the Ticket schema, provider and roles config, telemetry references, and the skill manifest, plus the validators for each. Its only logic is validation; the ticket validator is the data boundary between forge and the factory (no project paths, no more than 40 lines of code in `repro` or `spec`). It ships a tiny `forge-types --schema` binary that prints the Ticket JSON Schema. It must never depend on another workspace crate, on tokio, or on reqwest. Every other crate may depend on it.
+**`forge-types`** holds shared types only: the Ticket schema, provider and roles config, telemetry references, and the skill manifest, plus the validators for each. Its only logic is validation; the ticket validator is the data boundary between forge and the factory (no project paths, no more than 40 lines of code in `repro` or `spec`). It also owns the loading both binaries share, since it is the only crate both may depend on: the merged forge config (`config::load`), the `.env` files (`dotenv`) and the `factory.toml` schema (`factory_config`). It ships a tiny `forge-types --schema` binary that prints the Ticket JSON Schema. It must never depend on another workspace crate, on tokio, or on reqwest. Every other crate may depend on it.
 
 **`forge-core`** is the agent loop, tool registry, provider adapters (OpenAI and Anthropic protocols), and context management. It depends on `forge-types` only. It must never depend on `forge-compat`, `forge-memory`, `forge-telemetry`, any `factory-*` crate, or either CLI; those plug into it from the outside through the CLI.
 

@@ -1,4 +1,6 @@
-//! The error type returned by every validator in this crate.
+//! The error types of this crate: validation, config loading and `.env` loading.
+
+use std::path::PathBuf;
 
 use thiserror::Error;
 
@@ -89,6 +91,13 @@ pub enum ValidationError {
         field: &'static str,
     },
 
+    /// A `github.repo` value is not `owner/repo`.
+    #[error("github.repo `{repo}` must be `owner/repo`")]
+    InvalidRepo {
+        /// The value as written.
+        repo: String,
+    },
+
     /// A skill name is not kebab-case or is too long.
     #[error(
         "skill name `{name}` must be kebab-case (a-z, 0-9, single hyphens) and at most {max} characters"
@@ -107,5 +116,59 @@ pub enum ValidationError {
         len: usize,
         /// The limit that was exceeded.
         max: usize,
+    },
+}
+
+/// Why the forge configuration could not be loaded.
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    /// Neither the global nor the project file exists.
+    #[error(
+        "no configuration found; run `forge setup` (global, with the standard providers) or `forge config init` (project template)"
+    )]
+    NotFound,
+
+    /// A configuration file is not valid TOML.
+    #[error("parsing {path}: {source}")]
+    Parse {
+        /// The file that failed to parse.
+        path: PathBuf,
+        /// The TOML error.
+        #[source]
+        source: toml::de::Error,
+    },
+
+    /// The merged TOML does not have the shape of [`crate::ForgeConfig`].
+    #[error("reading {sources}: {source}")]
+    Shape {
+        /// The files that contributed, joined with ` + `.
+        sources: String,
+        /// The TOML error.
+        #[source]
+        source: toml::de::Error,
+    },
+
+    /// The merged configuration failed validation.
+    #[error("validating {sources}: {source}")]
+    Invalid {
+        /// The files that contributed, joined with ` + `.
+        sources: String,
+        /// The validation error.
+        #[source]
+        source: ValidationError,
+    },
+}
+
+/// Why a `.env` file could not be loaded.
+#[derive(Debug, Error)]
+pub enum DotenvError {
+    /// The file exists but could not be read or parsed.
+    #[error("loading {path}: {source}")]
+    Load {
+        /// The offending file.
+        path: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: dotenvy::Error,
     },
 }

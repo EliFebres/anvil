@@ -22,6 +22,8 @@ eval = { path = "crates/eval" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "1.1"
+toml_edit = "0.25"
+dotenvy = "0.15"
 serde-saphyr = "2.0"
 regex = "1"
 schemars = { version = "1.2", features = ["chrono04"] }
@@ -57,6 +59,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # Testing
 insta = { version = "1.49", features = ["json"] }
 tempfile = "3.27"
+wiremock = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

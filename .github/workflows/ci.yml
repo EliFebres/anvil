@@ -29,3 +29,14 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test
         run: cargo test --all
+      - name: scan-keys
+        run: cargo run -q -p forge-cli -- scan-keys
+
+  # One status check named `ci` for branch protection to require.
+  ci:
+    needs: check
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: every leg passed
+        run: test "${{ needs.check.result }}" = "success"

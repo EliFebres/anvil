@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use anyhow::{Context, bail};
 use forge_types::config::CONFIG_TEMPLATE;
 
-use crate::config_load::{CONFIG_DIR, CONFIG_FILE};
 use crate::wiring::home_dir;
+use forge_types::config::{CONFIG_DIR, CONFIG_FILE};
 
 /// Writes the template config and returns its path.
 ///

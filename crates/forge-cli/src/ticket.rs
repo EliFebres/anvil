@@ -20,7 +20,6 @@ use forge_telemetry::{
 use forge_types::{ForgeConfig, TicketStatus};
 
 use crate::cli::TicketCommand;
-use crate::config_load;
 use crate::terminal::read_line;
 use crate::wiring::Wiring;
 
@@ -57,7 +56,7 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
             Ok(0)
         }
         TicketCommand::Submit { id, all } => {
-            let config = config_load::load(home, cwd)
+            let config = forge_types::config::load(home, cwd)
                 .ok()
                 .map(|loaded| loaded.config);
             let remote = remote_name(config.as_ref());
@@ -84,11 +83,11 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
             Ok(i32::from(failures > 0))
         }
         TicketCommand::Draft => {
-            let wiring = Wiring::new(config_load::load(home, cwd)?.config)?;
+            let wiring = Wiring::new(forge_types::config::load(home, cwd)?.config)?;
             draft(&wiring, &mut store).await
         }
         TicketCommand::Review => {
-            let config = config_load::load(home, cwd)
+            let config = forge_types::config::load(home, cwd)
                 .ok()
                 .map(|loaded| loaded.config);
             review(&mut store, cwd, &remote_name(config.as_ref()))

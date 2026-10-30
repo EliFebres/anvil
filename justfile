@@ -7,11 +7,12 @@ default: check
 fmt:
     cargo fmt --all
 
-# fmt (check only), clippy with warnings denied, and all tests.
+# fmt (check only), clippy with warnings denied, all tests, and no API key in a tracked file.
 check:
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
     cargo test --all
+    cargo run -q -p forge-cli -- scan-keys
 
 # Print the Ticket JSON Schema.
 schema:

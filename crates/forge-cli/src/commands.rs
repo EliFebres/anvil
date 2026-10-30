@@ -1,4 +1,5 @@
-//! The subcommands: run, resume, sessions, doctor, config show.
+//! The subcommands: run, resume, sessions, config show, compat check, and
+//! the compat reports `forge doctor` prints.
 
 use std::path::Path;
 use std::time::Instant;
@@ -6,14 +7,13 @@ use std::time::Instant;
 use anyhow::{Context, bail};
 use forge_core::agent::{AgentLoop, LoopResult};
 use forge_core::context;
-use forge_core::provider::{CompletionRequest, Message};
 use forge_telemetry::SessionMode;
 use tokio::task::JoinHandle;
 
-use crate::config_load::LoadedConfig;
 use crate::memory;
 use crate::telemetry::SessionTelemetry;
 use crate::wiring::{Wiring, home_dir};
+use forge_types::LoadedConfig;
 
 /// Runs a task through the loop and returns the process exit code.
 ///
@@ -199,58 +199,16 @@ pub fn config_show(loaded: &LoadedConfig) {
     );
 }
 
-/// Checks the configuration, pings every provider and reports the skills.
+/// Connects to every MCP server, lists its tools and refreshes the cache.
 ///
 /// # Arguments
 ///
-/// * `wiring` - Providers and skills.
+/// * `wiring` - The MCP server definitions.
 ///
 /// # Returns
 ///
-/// Zero when every provider answered, one otherwise. Skill problems are
-/// reported but never fail the check: a skill with an unmet `requires`
-/// still loads.
-///
-/// # Errors
-///
-/// When the permissions file cannot be read.
-pub async fn doctor(wiring: &Wiring) -> anyhow::Result<i32> {
-    let roles = &wiring.config.roles;
-    println!(
-        "roles: coder={} summarizer={} reviewer={}",
-        roles.coder,
-        roles.summarizer,
-        roles.reviewer.as_deref().unwrap_or("(coder)")
-    );
-    let mut failures = 0;
-    for (name, entry) in &wiring.config.providers {
-        print!(
-            "{name}: {:?} {} model={} context_window={} ... ",
-            entry.protocol, entry.base_url, entry.model, entry.context_window
-        );
-        match ping(wiring, name).await {
-            Ok((text, millis)) => println!("ok in {millis} ms: {}", text.trim()),
-            Err(error) => {
-                failures += 1;
-                println!("FAILED: {error:#}");
-            }
-        }
-    }
-    report_skills(wiring)?;
-    report_commands(wiring);
-    report_agents(wiring);
-    report_hooks(wiring);
-    failures += report_mcp(wiring).await;
-    if failures > 0 {
-        bail!("{failures} provider(s) or MCP server(s) failed");
-    }
-    Ok(0)
-}
-
-/// Connects to every MCP server, lists its tools and refreshes the cache.
-///
-/// Returns how many servers failed.
-async fn report_mcp(wiring: &Wiring) -> usize {
+/// How many servers failed.
+pub(crate) async fn report_mcp(wiring: &Wiring) -> usize {
     let servers = &wiring.mcp_servers;
     println!("mcp servers: {} defined", servers.servers().len());
     for error in servers.errors() {
@@ -280,7 +238,7 @@ async fn report_mcp(wiring: &Wiring) -> usize {
 }
 
 /// Prints one line per skill, then unmet requirements and load errors.
-fn report_skills(wiring: &Wiring) -> anyhow::Result<()> {
+pub(crate) fn report_skills(wiring: &Wiring) -> anyhow::Result<()> {
     let skills = &wiring.skills;
     println!("skills: {} loaded", skills.skills().len());
     for skill in skills.skills() {
@@ -302,7 +260,7 @@ fn report_skills(wiring: &Wiring) -> anyhow::Result<()> {
 }
 
 /// Prints one line per slash command, then skipped files and load errors.
-fn report_commands(wiring: &Wiring) {
+pub(crate) fn report_commands(wiring: &Wiring) {
     let commands = &wiring.commands;
     println!("commands: {} loaded", commands.commands().len());
     for command in commands.commands() {
@@ -325,7 +283,7 @@ fn report_commands(wiring: &Wiring) {
 }
 
 /// Prints one line per subagent with the provider it resolves to.
-fn report_agents(wiring: &Wiring) {
+pub(crate) fn report_agents(wiring: &Wiring) {
     let agents = &wiring.agents;
     println!("agents: {} loaded", agents.agents().len());
     for agent in agents.agents() {
@@ -346,7 +304,7 @@ fn report_agents(wiring: &Wiring) {
 }
 
 /// Prints the hook summary, then entries forge does not run and bad files.
-fn report_hooks(wiring: &Wiring) {
+pub(crate) fn report_hooks(wiring: &Wiring) {
     let hooks = &wiring.hooks;
     let events: Vec<String> = hooks.events().iter().map(ToString::to_string).collect();
     println!(
@@ -407,18 +365,4 @@ pub fn compat_check(path: &Path, config: Option<&forge_types::ForgeConfig>) -> a
     let report = forge_compat::check::check(&root, config, &tools);
     print!("{}", report.render());
     Ok(i32::from(report.has_errors()))
-}
-
-/// Sends one tiny request and returns the reply text and latency.
-async fn ping(wiring: &Wiring, name: &str) -> anyhow::Result<(String, u128)> {
-    let provider = wiring.provider(name)?;
-    let request = CompletionRequest {
-        system: "Reply with the single word OK.".to_owned(),
-        messages: vec![Message::user("ping")],
-        tools: Vec::new(),
-        max_output_tokens: Some(16),
-    };
-    let started = Instant::now();
-    let (text, _) = context::collect_text(&*provider, request).await?;
-    Ok((text, started.elapsed().as_millis()))
 }

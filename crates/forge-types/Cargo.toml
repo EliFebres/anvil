@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 chrono.workspace = true
+dotenvy.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,6 +25,7 @@ ulid.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

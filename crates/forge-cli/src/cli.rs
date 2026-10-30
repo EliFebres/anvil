@@ -43,8 +43,18 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Check the configuration, ping every provider and report loaded skills.
-    Doctor,
+    /// Write ~/.forge/.env, ~/.forge/config.toml, factory.toml and deploy/nuc/env.template
+    /// without overwriting anything already filled in; exit 2 while placeholders remain.
+    Setup,
+    /// Check keys, providers, factory.toml, GitHub access, branch protection, tools and
+    /// tracked files, one row per check with the fix for each failure.
+    Doctor {
+        /// Set the `main` branch protection and squash merging through an authenticated `gh`.
+        #[arg(long)]
+        fix_github: bool,
+    },
+    /// Fail if any tracked file contains an API key (`just check` runs this).
+    ScanKeys,
     /// Install, list, inspect and remove skills (Claude Code `SKILL.md` folders).
     Skill {
         /// Which skill action to take.
