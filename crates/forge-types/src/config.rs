@@ -43,6 +43,12 @@ summarizer = "runpod"
 # request_timeout_s = 600      # wall clock for one completion, streaming included
 # max_retries = 4              # on HTTP 429 and 5xx, with exponential backoff
 # session_tokens = 2000000     # abort the session once this many tokens are used
+#
+# Per-state budgets (plan, build, review, optimize, verify), summed over every
+# visit to the state. Exceeding one ends the session as incomplete.
+# [limits.build]
+# max_turns = 100
+# max_tokens = 1000000
 "#;
 
 /// Wire protocol a provider speaks.
@@ -136,6 +142,25 @@ pub struct Roles {
     pub reviewer: Option<String>,
 }
 
+/// What one agent-loop state may spend before the session ends as incomplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct StateBudget {
+    /// Model completions allowed in the state, summed over every visit.
+    pub max_turns: u32,
+    /// Tokens (input, output and cached) allowed in the state, summed over every visit.
+    pub max_tokens: u64,
+}
+
+impl Default for StateBudget {
+    fn default() -> Self {
+        Self {
+            max_turns: 100,
+            max_tokens: 1_000_000,
+        }
+    }
+}
+
 /// Retry, timeout and budget limits. Every field has a default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
@@ -146,6 +171,16 @@ pub struct LimitsConfig {
     pub max_retries: u32,
     /// Tokens (input, output and cached) a session may consume before it aborts.
     pub session_tokens: u64,
+    /// Budget of the Plan state.
+    pub plan: StateBudget,
+    /// Budget of the Build state.
+    pub build: StateBudget,
+    /// Budget of the Review state.
+    pub review: StateBudget,
+    /// Budget of the Optimize state.
+    pub optimize: StateBudget,
+    /// Budget of the Verify state.
+    pub verify: StateBudget,
 }
 
 impl Default for LimitsConfig {
@@ -154,6 +189,11 @@ impl Default for LimitsConfig {
             request_timeout_s: 600,
             max_retries: 4,
             session_tokens: 2_000_000,
+            plan: StateBudget::default(),
+            build: StateBudget::default(),
+            review: StateBudget::default(),
+            optimize: StateBudget::default(),
+            verify: StateBudget::default(),
         }
     }
 }
@@ -328,6 +368,18 @@ mod tests {
         assert_eq!(config.limits.request_timeout_s, 600);
 
         let text = format!("{CONFIG_TEMPLATE}\n[limits]\nmax_turns = 1\n");
+        assert!(toml::from_str::<ForgeConfig>(&text).is_err());
+    }
+
+    #[test]
+    fn state_budgets_accept_partial_tables() {
+        let text = format!("{CONFIG_TEMPLATE}\n[limits.build]\nmax_turns = 7\n");
+        let config: ForgeConfig = toml::from_str(&text).expect("parses");
+        assert_eq!(config.limits.build.max_turns, 7);
+        assert_eq!(config.limits.build.max_tokens, 1_000_000);
+        assert_eq!(config.limits.plan, StateBudget::default());
+
+        let text = format!("{CONFIG_TEMPLATE}\n[limits.build]\nmax_rounds = 7\n");
         assert!(toml::from_str::<ForgeConfig>(&text).is_err());
     }
 

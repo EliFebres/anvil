@@ -1,12 +1,14 @@
 //! Errors a provider can return.
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Why a completion failed.
 ///
 /// Every variant holds plain data so the error is `Clone` and `PartialEq`,
 /// which lets tests script and compare it.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "error")]
 pub enum ProviderError {
     /// The configured API key environment variable is unset or empty.
     #[error("API key environment variable `{env}` is not set")]

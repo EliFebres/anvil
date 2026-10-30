@@ -170,7 +170,8 @@ impl Tool for ShellTool {
 }
 
 /// What a finished command produced.
-struct CommandRun {
+#[derive(Debug)]
+pub struct CommandRun {
     /// Combined stdout and stderr, possibly cut at [`MEMORY_CAP`].
     output: Vec<u8>,
     /// Whether output beyond [`MEMORY_CAP`] was discarded.
@@ -184,8 +185,31 @@ struct CommandRun {
 }
 
 impl CommandRun {
+    /// Whether the command exited with code zero before the timeout.
+    ///
+    /// # Returns
+    ///
+    /// `true` on success.
+    pub fn succeeded(&self) -> bool {
+        !self.timed_out && self.exit_code == Some(0)
+    }
+
+    /// The combined output as text.
+    ///
+    /// # Returns
+    ///
+    /// Lossy UTF-8 of stdout and stderr.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.output).into_owned()
+    }
+
     /// Renders the run for the model.
-    fn into_output(self) -> ToolOutput {
+    ///
+    /// # Returns
+    ///
+    /// The output with the exit code or timeout note appended; an error when
+    /// the command failed.
+    pub fn into_output(self) -> ToolOutput {
         let mut text = String::from_utf8_lossy(&self.output).into_owned();
         if text.is_empty() {
             text.push_str("(no output)");
@@ -212,8 +236,23 @@ impl CommandRun {
     }
 }
 
-/// Spawns the command and streams its output until it exits or times out.
-async fn run_command(
+/// Spawns a command in the context's shell and streams its output until it
+/// exits or times out.
+///
+/// # Arguments
+///
+/// * `ctx` - Supplies the shell and working directory.
+/// * `script` - The command line.
+/// * `timeout` - When to kill the process.
+///
+/// # Returns
+///
+/// The run.
+///
+/// # Errors
+///
+/// When the shell cannot be spawned.
+pub async fn run_command(
     ctx: &ToolContext,
     script: &str,
     timeout: Duration,

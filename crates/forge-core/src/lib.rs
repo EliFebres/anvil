@@ -4,5 +4,6 @@
 //! forge-telemetry, any factory crate, or either CLI; those plug in from the
 //! outside through the CLI.
 
+pub mod agent;
 pub mod provider;
 pub mod tools;

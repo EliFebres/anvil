@@ -298,6 +298,22 @@ impl Permissions {
         })
     }
 
+    /// Adds an `allow` rule in memory only, never written to disk.
+    ///
+    /// The agent loop uses this for its own session folder.
+    ///
+    /// # Arguments
+    ///
+    /// * `rule` - `tool` or `tool:glob`.
+    ///
+    /// # Errors
+    ///
+    /// [`PermissionError::InvalidRule`] when the glob does not compile.
+    pub fn allow_unsaved(&mut self, rule: &str) -> Result<(), PermissionError> {
+        self.allow.push(Rule::parse(rule)?);
+        Ok(())
+    }
+
     /// The rules as written.
     ///
     /// # Returns
