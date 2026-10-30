@@ -24,6 +24,7 @@ model = "<model name as served>"
 context_window = 131072
 supports_tools = true
 supports_reasoning = true
+# max_output_tokens = 16384   # optional; Anthropic requires one and defaults to 16384
 
 # Each role names a provider above, so the coder, the summarizer and (in the
 # factory) the reviewer can each be a different model.
@@ -31,6 +32,12 @@ supports_reasoning = true
 coder = "runpod"
 summarizer = "runpod"
 # reviewer = "runpod"
+
+# Every key is optional; these are the defaults.
+# [limits]
+# request_timeout_s = 600      # wall clock for one completion, streaming included
+# max_retries = 4              # on HTTP 429 and 5xx, with exponential backoff
+# session_tokens = 2000000     # abort the session once this many tokens are used
 "#;
 
 /// Wire protocol a provider speaks.
@@ -61,6 +68,10 @@ pub struct ProviderConfig {
     pub supports_tools: bool,
     /// Whether the model emits reasoning content.
     pub supports_reasoning: bool,
+    /// Cap on output tokens per completion. Anthropic requires one and falls
+    /// back to 16384; OpenAI-style servers use their own default when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
 }
 
 impl ProviderConfig {
@@ -120,6 +131,28 @@ pub struct Roles {
     pub reviewer: Option<String>,
 }
 
+/// Retry, timeout and budget limits. Every field has a default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct LimitsConfig {
+    /// Wall-clock seconds allowed for one completion, including streaming and retries.
+    pub request_timeout_s: u64,
+    /// How many times a request is retried on HTTP 429 or 5xx before giving up.
+    pub max_retries: u32,
+    /// Tokens (input, output and cached) a session may consume before it aborts.
+    pub session_tokens: u64,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            request_timeout_s: 600,
+            max_retries: 4,
+            session_tokens: 2_000_000,
+        }
+    }
+}
+
 /// The whole forge configuration file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -129,6 +162,9 @@ pub struct ForgeConfig {
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Which provider does which job.
     pub roles: Roles,
+    /// Retry, timeout and budget limits.
+    #[serde(default)]
+    pub limits: LimitsConfig,
 }
 
 impl ForgeConfig {
@@ -253,6 +289,27 @@ mod tests {
     #[test]
     fn unknown_keys_are_rejected() {
         let text = format!("{CONFIG_TEMPLATE}\n[roles]\nplanner = \"runpod\"\n");
+        assert!(toml::from_str::<ForgeConfig>(&text).is_err());
+    }
+
+    #[test]
+    fn limits_default_when_absent() {
+        let config = template();
+        assert_eq!(config.limits, LimitsConfig::default());
+        assert_eq!(config.limits.request_timeout_s, 600);
+        assert_eq!(config.limits.max_retries, 4);
+        assert_eq!(config.limits.session_tokens, 2_000_000);
+        assert_eq!(config.providers["runpod"].max_output_tokens, None);
+    }
+
+    #[test]
+    fn limits_accept_partial_tables_and_reject_unknown_keys() {
+        let text = format!("{CONFIG_TEMPLATE}\n[limits]\nmax_retries = 1\n");
+        let config: ForgeConfig = toml::from_str(&text).expect("parses");
+        assert_eq!(config.limits.max_retries, 1);
+        assert_eq!(config.limits.request_timeout_s, 600);
+
+        let text = format!("{CONFIG_TEMPLATE}\n[limits]\nmax_turns = 1\n");
         assert!(toml::from_str::<ForgeConfig>(&text).is_err());
     }
 }
