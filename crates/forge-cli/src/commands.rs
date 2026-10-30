@@ -1,0 +1,207 @@
+//! The subcommands: run, resume, sessions, doctor, config show.
+
+use std::path::Path;
+use std::time::Instant;
+
+use anyhow::{Context, bail};
+use forge_core::agent::{AgentLoop, EventSink, LoopResult};
+use forge_core::context;
+use forge_core::provider::{CompletionRequest, Event, Message};
+use futures_util::StreamExt;
+use tokio::sync::mpsc;
+
+use crate::config_load::LoadedConfig;
+use crate::render;
+use crate::wiring::Wiring;
+
+/// Runs a task through the loop and returns the process exit code.
+///
+/// # Arguments
+///
+/// * `wiring` - Providers and paths.
+/// * `task` - The task.
+/// * `yes` - Skip plan approval.
+///
+/// # Returns
+///
+/// The exit code for the run's status.
+///
+/// # Errors
+///
+/// When providers or permissions cannot be set up.
+pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Result<i32> {
+    let (session_dir, id) = wiring.new_session_dir();
+    eprintln!("session {id}");
+    let config = wiring.loop_config(task, session_dir);
+    let agent = AgentLoop::new(
+        config,
+        wiring.loop_providers()?,
+        wiring.registry(Wiring::prompt())?,
+        wiring.tool_context(),
+        Wiring::gate(yes),
+        sink(),
+    );
+    Ok(drive(agent).await.status.exit_code())
+}
+
+/// Continues a saved session.
+///
+/// # Arguments
+///
+/// * `wiring` - Providers and paths.
+/// * `id` - The session id.
+/// * `yes` - Skip plan approval if planning resumes.
+///
+/// # Returns
+///
+/// The exit code for the run's status.
+///
+/// # Errors
+///
+/// When the session cannot be loaded or providers cannot be built.
+pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32> {
+    let snapshot = context::load_session(&wiring.cwd, id).context("loading the session")?;
+    eprintln!("resuming session {id}: {}", snapshot.meta.task);
+    let config = wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone());
+    let agent = AgentLoop::resume(
+        snapshot,
+        config,
+        wiring.loop_providers()?,
+        wiring.registry(Wiring::prompt())?,
+        wiring.tool_context(),
+        Wiring::gate(yes),
+        sink(),
+    );
+    Ok(drive(agent).await.status.exit_code())
+}
+
+/// A sink whose receiver is rendered on a background task.
+fn sink() -> EventSink {
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(render::render(rx, false));
+    EventSink::new(tx)
+}
+
+/// Runs the loop and gives the renderer a moment to flush.
+async fn drive(agent: AgentLoop) -> LoopResult {
+    let result = agent.run().await;
+    tokio::task::yield_now().await;
+    result
+}
+
+/// Prints the saved sessions, newest first.
+///
+/// # Arguments
+///
+/// * `cwd` - The project root.
+///
+/// # Errors
+///
+/// When the sessions folder cannot be read.
+pub fn sessions(cwd: &Path) -> anyhow::Result<()> {
+    let sessions = context::list_sessions(cwd).context("listing sessions")?;
+    if sessions.is_empty() {
+        println!(
+            "no sessions under {}",
+            cwd.join(context::session::SESSIONS_DIR).display()
+        );
+        return Ok(());
+    }
+    for session in sessions {
+        let status = session
+            .status
+            .map(|status| status.to_string())
+            .or_else(|| {
+                session
+                    .last_state
+                    .map(|state| format!("stopped in {state}"))
+            })
+            .unwrap_or_else(|| "empty".to_owned());
+        println!(
+            "{}  {}  {}  {}",
+            session.meta.id,
+            session.meta.created_at.format("%Y-%m-%d %H:%M"),
+            status,
+            session.meta.task
+        );
+    }
+    Ok(())
+}
+
+/// Prints the merged configuration as TOML.
+///
+/// # Arguments
+///
+/// * `loaded` - The merged configuration.
+pub fn config_show(loaded: &LoadedConfig) {
+    for source in &loaded.sources {
+        println!("# from {}", source.display());
+    }
+    println!(
+        "{}",
+        toml::to_string_pretty(&loaded.merged).unwrap_or_default()
+    );
+}
+
+/// Checks the configuration and pings every provider.
+///
+/// # Arguments
+///
+/// * `wiring` - Providers.
+///
+/// # Returns
+///
+/// Zero when every provider answered, one otherwise.
+///
+/// # Errors
+///
+/// Never; problems are printed per provider.
+pub async fn doctor(wiring: &Wiring) -> anyhow::Result<i32> {
+    let roles = &wiring.config.roles;
+    println!(
+        "roles: coder={} summarizer={} reviewer={}",
+        roles.coder,
+        roles.summarizer,
+        roles.reviewer.as_deref().unwrap_or("(coder)")
+    );
+    let mut failures = 0;
+    for (name, entry) in &wiring.config.providers {
+        print!(
+            "{name}: {:?} {} model={} context_window={} ... ",
+            entry.protocol, entry.base_url, entry.model, entry.context_window
+        );
+        match ping(wiring, name).await {
+            Ok((text, millis)) => println!("ok in {millis} ms: {}", text.trim()),
+            Err(error) => {
+                failures += 1;
+                println!("FAILED: {error:#}");
+            }
+        }
+    }
+    if failures > 0 {
+        bail!("{failures} provider(s) failed");
+    }
+    Ok(0)
+}
+
+/// Sends one tiny request and returns the reply text and latency.
+async fn ping(wiring: &Wiring, name: &str) -> anyhow::Result<(String, u128)> {
+    let provider = wiring.provider(name)?;
+    let request = CompletionRequest {
+        system: "Reply with the single word OK.".to_owned(),
+        messages: vec![Message::user("ping")],
+        tools: Vec::new(),
+        max_output_tokens: Some(16),
+    };
+    let started = Instant::now();
+    let mut stream = provider.complete(request);
+    let mut text = String::new();
+    while let Some(item) = stream.next().await {
+        match item? {
+            Event::TextDelta(delta) => text.push_str(&delta),
+            Event::Done { .. } => break,
+            _ => {}
+        }
+    }
+    Ok((text, started.elapsed().as_millis()))
+}

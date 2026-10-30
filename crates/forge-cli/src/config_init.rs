@@ -5,11 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, bail};
 use forge_types::config::CONFIG_TEMPLATE;
 
-/// Directory that holds forge configuration, both globally and per project.
-const CONFIG_DIR: &str = ".forge";
-
-/// File name of the configuration file inside [`CONFIG_DIR`].
-const CONFIG_FILE: &str = "config.toml";
+use crate::config_load::{CONFIG_DIR, CONFIG_FILE};
 
 /// Writes the template config and returns its path.
 ///

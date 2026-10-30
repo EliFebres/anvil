@@ -11,7 +11,7 @@ pub mod events;
 pub mod gate;
 pub mod prompts;
 pub mod state;
-mod turn;
+pub mod turn;
 pub mod verdict;
 
 use std::collections::{BTreeMap, BTreeSet};
