@@ -132,8 +132,10 @@ pub(crate) fn build_body(
         "stream_options": {"include_usage": true},
         "messages": messages,
     });
+    // OpenAI rejects the older `max_tokens` on current models; vLLM and the
+    // Gemini compatibility layer accept `max_completion_tokens` too.
     if let Some(max_tokens) = max_tokens {
-        body["max_tokens"] = json!(max_tokens);
+        body["max_completion_tokens"] = json!(max_tokens);
     }
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(request.tools.iter().map(tool_json).collect());
@@ -483,7 +485,8 @@ mod tests {
         let body = build_body("m", Some(99), &request());
         assert_eq!(body["stream"], json!(true));
         assert_eq!(body["stream_options"]["include_usage"], json!(true));
-        assert_eq!(body["max_tokens"], json!(99));
+        assert_eq!(body["max_completion_tokens"], json!(99));
+        assert!(body.get("max_tokens").is_none());
         assert_eq!(
             body["messages"][0],
             json!({"role": "system", "content": "sys"})
@@ -492,7 +495,7 @@ mod tests {
         assert_eq!(body["tools"][0]["function"]["name"], json!("read_file"));
         assert!(
             build_body("m", None, &request())
-                .get("max_tokens")
+                .get("max_completion_tokens")
                 .is_none()
         );
     }
