@@ -1,10 +1,11 @@
 //! Builds the core objects from configuration: providers, tools, paths.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
-use forge_compat::{SkillRoots, SkillSet, SkillTool};
+use forge_compat::{CommandSet, SkillRoots, SkillSet, SkillTool};
 use forge_core::agent::{
     AutoApprove, CheckCommand, Instruction, LoopConfig, LoopProviders, PlanGate,
 };
@@ -27,6 +28,8 @@ pub struct Wiring {
     pub budget: SharedBudget,
     /// Skills discovered from the project, the home directory and the bundle.
     pub skills: Arc<SkillSet>,
+    /// Slash commands from the `commands/` directories.
+    pub commands: CommandSet,
 }
 
 /// The directories skills are discovered from.
@@ -70,13 +73,31 @@ impl Wiring {
         let home = std::env::home_dir();
         let budget = TokenBudget::shared(config.limits.session_tokens);
         let skills = Arc::new(SkillSet::discover(&skill_roots(&cwd, home.as_deref())));
+        let commands = CommandSet::discover(&cwd, home.as_deref());
         Ok(Self {
             cwd,
             home,
             config,
             budget,
             skills,
+            commands,
         })
+    }
+
+    /// Expands a `/<name> [args]` line into the message to send: a skill
+    /// invocation first, then a slash command.
+    ///
+    /// # Arguments
+    ///
+    /// * `line` - The user's line.
+    ///
+    /// # Returns
+    ///
+    /// The message, or `None` when the line is not a known slash command.
+    pub fn expand_slash(&self, line: &str) -> Option<String> {
+        self.skills
+            .expand_slash(line)
+            .or_else(|| self.commands.expand_slash(line))
     }
 
     /// Builds the provider for a config entry.
@@ -166,7 +187,9 @@ impl Wiring {
         Ok(registry)
     }
 
-    /// Prompt sections that come from outside forge-core: the skill list.
+    /// Prompt sections that come from outside forge-core: the Claude Code
+    /// instruction files and `@imports` forge-core does not load itself,
+    /// then the skill list.
     ///
     /// # Arguments
     ///
@@ -177,7 +200,12 @@ impl Wiring {
     ///
     /// The sections, possibly empty.
     pub fn extra_instructions(&self, tool_names: &[&str]) -> Vec<Instruction> {
-        self.skills.prompt_section(tool_names).into_iter().collect()
+        let base =
+            context::discover_instructions(self.home.as_deref(), &self.cwd, &BTreeSet::new());
+        let mut extra =
+            forge_compat::instructions::discover_extra(self.home.as_deref(), &self.cwd, &base);
+        extra.extend(self.skills.prompt_section(tool_names));
+        extra
     }
 
     /// Where tools run.

@@ -4,8 +4,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::{SKILL_FILE, Skill, SkillSource, load_skill};
+use super::{SKILL_FILE, Skill, load_skill};
 use crate::error::CompatError;
+use crate::paths::Origin;
 
 /// How deep to look for `SKILL.md` files when suggesting candidates.
 const CANDIDATE_DEPTH: usize = 4;
@@ -47,10 +48,10 @@ impl Scope {
     }
 
     /// The source label skills installed here load under.
-    fn source(self) -> SkillSource {
+    fn source(self) -> Origin {
         match self {
-            Self::Global => SkillSource::HomeForge,
-            Self::Project => SkillSource::ProjectForge,
+            Self::Global => Origin::HomeForge,
+            Self::Project => Origin::ProjectForge,
         }
     }
 }

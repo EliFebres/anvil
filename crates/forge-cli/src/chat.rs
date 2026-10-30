@@ -145,9 +145,16 @@ impl ChatSession<'_> {
                         eprintln!("{line}");
                     }
                 }
+                let commands = self.wiring.commands.help_lines();
+                if !commands.is_empty() {
+                    eprintln!("\ncommands (from .forge/commands and .claude/commands):");
+                    for line in commands {
+                        eprintln!("{line}");
+                    }
+                }
             }
             ("quit" | "exit" | "q", _) => return false,
-            (other, _) => match self.wiring.skills.expand_slash(&format!("/{command}")) {
+            (other, _) => match self.wiring.expand_slash(&format!("/{command}")) {
                 Some(message) => self.turn(&message).await,
                 None => eprintln!("unknown command `/{other}`; /help lists them"),
             },

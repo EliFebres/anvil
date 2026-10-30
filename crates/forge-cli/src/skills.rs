@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use forge_compat::skills::install::{self, Scope, Source};
-use forge_compat::{Skill, SkillSet};
+use forge_compat::{Origin, Skill, SkillSet};
 
 use crate::cli::SkillCommand;
 use crate::wiring::skill_roots;
@@ -58,7 +58,7 @@ pub async fn run(command: SkillCommand, home: Option<&Path>, cwd: &Path) -> anyh
                 println!(
                     "{:<24} {:<18} {}",
                     skill.name(),
-                    skill.source.to_string(),
+                    source_label(skill),
                     one_line(&skill.manifest.description, 80)
                 );
             }
@@ -81,7 +81,7 @@ pub async fn run(command: SkillCommand, home: Option<&Path>, cwd: &Path) -> anyh
                 format!("no skill named `{name}`; `forge skill list` shows them")
             })?;
             println!("name: {}", skill.name());
-            println!("source: {} ({})", skill.source, skill.dir.display());
+            println!("source: {} ({})", source_label(skill), skill.dir.display());
             print_summary(skill);
             println!();
             print!("{}", skill.body);
@@ -96,6 +96,14 @@ fn scope(project: bool) -> Scope {
         Scope::Project
     } else {
         Scope::Global
+    }
+}
+
+/// The directory a skill came from, as `forge skill list` shows it.
+pub fn source_label(skill: &Skill) -> String {
+    match skill.source {
+        Origin::Bundled => "bundled skills/".to_owned(),
+        origin => format!("{origin}/skills"),
     }
 }
 

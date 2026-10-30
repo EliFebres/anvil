@@ -32,7 +32,7 @@ use crate::wiring::Wiring;
 pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Result<i32> {
     let (session_dir, id) = wiring.new_session_dir();
     eprintln!("session {id}");
-    let task = wiring.skills.expand_slash(&task).unwrap_or(task);
+    let task = wiring.expand_slash(&task).unwrap_or(task);
     let registry = wiring.registry(Wiring::prompt())?;
     let config = wiring.loop_config(task, session_dir, &registry);
     let agent = AgentLoop::new(
@@ -184,6 +184,7 @@ pub async fn doctor(wiring: &Wiring) -> anyhow::Result<i32> {
         }
     }
     report_skills(wiring)?;
+    report_commands(wiring);
     if failures > 0 {
         bail!("{failures} provider(s) failed");
     }
@@ -198,7 +199,7 @@ fn report_skills(wiring: &Wiring) -> anyhow::Result<()> {
         println!(
             "skill {}: {} ({})",
             skill.name(),
-            skill.source,
+            crate::skills::source_label(skill),
             skill.dir.display()
         );
     }
@@ -210,6 +211,29 @@ fn report_skills(wiring: &Wiring) -> anyhow::Result<()> {
         println!("skill error: {}", error.error);
     }
     Ok(())
+}
+
+/// Prints one line per slash command, then skipped files and load errors.
+fn report_commands(wiring: &Wiring) {
+    let commands = &wiring.commands;
+    println!("commands: {} loaded", commands.commands().len());
+    for command in commands.commands() {
+        println!(
+            "command /{}: {} ({})",
+            command.name,
+            command.origin,
+            command.path.display()
+        );
+    }
+    for path in commands.skipped() {
+        println!(
+            "command skipped: {} (only Markdown commands are read)",
+            path.display()
+        );
+    }
+    for error in commands.errors() {
+        println!("command error: {}", error.error);
+    }
 }
 
 /// Sends one tiny request and returns the reply text and latency.

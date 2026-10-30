@@ -9,7 +9,6 @@ pub mod install;
 pub mod tool;
 
 use std::collections::BTreeSet;
-use std::fmt;
 use std::path::{Path, PathBuf};
 
 use forge_core::agent::Instruction;
@@ -17,12 +16,16 @@ use forge_types::SkillManifest;
 
 pub use tool::SkillTool;
 
-use crate::error::CompatError;
+use crate::error::{CompatError, LoadError};
 use crate::frontmatter;
 use crate::names::to_forge_name;
+use crate::paths::{Origin, config_dirs};
 
 /// The file that makes a directory a skill.
 pub const SKILL_FILE: &str = "SKILL.md";
+
+/// The subdirectory skills live in.
+pub const SKILLS_DIR: &str = "skills";
 
 /// How deep below a root a `SKILL.md` may sit. Claude Code's synced skills
 /// live at `skills/synced/<id>/<name>/SKILL.md`.
@@ -30,33 +33,6 @@ const MAX_DEPTH: usize = 3;
 
 /// Most supporting files listed for one skill.
 const MAX_LISTED_FILES: usize = 200;
-
-/// Where a skill was found, in priority order (first wins on a name clash).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SkillSource {
-    /// `<project>/.forge/skills`.
-    ProjectForge,
-    /// `<project>/.claude/skills`.
-    ProjectClaude,
-    /// `~/.forge/skills`.
-    HomeForge,
-    /// `~/.claude/skills`.
-    HomeClaude,
-    /// The `skills/` directory that ships with forge.
-    Bundled,
-}
-
-impl fmt::Display for SkillSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::ProjectForge => ".forge/skills",
-            Self::ProjectClaude => ".claude/skills",
-            Self::HomeForge => "~/.forge/skills",
-            Self::HomeClaude => "~/.claude/skills",
-            Self::Bundled => "bundled skills/",
-        })
-    }
-}
 
 /// The directories skills are discovered from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,24 +51,11 @@ impl SkillRoots {
     ///
     /// # Returns
     ///
-    /// Each root with its source label.
-    pub fn ordered(&self) -> Vec<(PathBuf, SkillSource)> {
-        let mut roots = vec![
-            (
-                self.project.join(".forge").join("skills"),
-                SkillSource::ProjectForge,
-            ),
-            (
-                self.project.join(".claude").join("skills"),
-                SkillSource::ProjectClaude,
-            ),
-        ];
-        if let Some(home) = &self.home {
-            roots.push((home.join(".forge").join("skills"), SkillSource::HomeForge));
-            roots.push((home.join(".claude").join("skills"), SkillSource::HomeClaude));
-        }
+    /// Each root with its origin.
+    pub fn ordered(&self) -> Vec<(PathBuf, Origin)> {
+        let mut roots = config_dirs(&self.project, self.home.as_deref(), SKILLS_DIR);
         if let Some(bundled) = &self.bundled {
-            roots.push((bundled.clone(), SkillSource::Bundled));
+            roots.push((bundled.clone(), Origin::Bundled));
         }
         roots
     }
@@ -110,7 +73,7 @@ pub struct Skill {
     /// Supporting files, relative to `dir` with forward slashes, sorted.
     pub files: Vec<String>,
     /// Which root it came from.
-    pub source: SkillSource,
+    pub source: Origin,
 }
 
 impl Skill {
@@ -175,15 +138,6 @@ impl Skill {
         text.push('\n');
         text
     }
-}
-
-/// A skill directory that failed to load.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoadError {
-    /// The `SKILL.md` that failed.
-    pub path: PathBuf,
-    /// Why.
-    pub error: CompatError,
 }
 
 /// Every skill found, deduplicated by name in root priority order.
@@ -467,7 +421,7 @@ fn invocation_prompt(name: &str, args: &str) -> String {
 /// when it cannot be parsed, [`CompatError::MissingField`] when `name` or
 /// `description` is absent, or [`CompatError::Validation`] when the
 /// manifest fails [`SkillManifest::validate`].
-pub fn load_skill(skill_file: &Path, source: SkillSource) -> Result<Skill, CompatError> {
+pub fn load_skill(skill_file: &Path, source: Origin) -> Result<Skill, CompatError> {
     let text =
         std::fs::read_to_string(skill_file).map_err(|error| CompatError::io(skill_file, &error))?;
     let parsed = frontmatter::parse(&text, skill_file)?;
@@ -605,11 +559,11 @@ mod tests {
         assert_eq!(set.names(), ["alpha", "beta", "gamma"]);
         assert_eq!(
             set.get("alpha").map(|skill| skill.source),
-            Some(SkillSource::ProjectForge)
+            Some(Origin::ProjectForge)
         );
         assert_eq!(
             set.get("gamma").map(|skill| skill.source),
-            Some(SkillSource::HomeClaude)
+            Some(Origin::HomeClaude)
         );
         assert_eq!(set.shadowed().len(), 1);
         assert!(set.errors().is_empty());

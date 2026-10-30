@@ -63,6 +63,15 @@ pub enum CompatError {
     },
 }
 
+/// A file that looked like one of ours but did not load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadError {
+    /// The file that failed.
+    pub path: PathBuf,
+    /// Why.
+    pub error: CompatError,
+}
+
 impl CompatError {
     /// Wraps an I/O error with the path it concerned.
     ///
