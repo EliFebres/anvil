@@ -1,7 +1,9 @@
 //! The skill manifest: the frontmatter of a Claude Code-format `SKILL.md`.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ValidationError;
 
@@ -15,7 +17,10 @@ pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
 ///
 /// Mirrors Claude Code's skill format so skills in `skills/` load unchanged
 /// there. Parsing the Markdown file is `forge-compat`'s job; this is the
-/// typed result.
+/// typed result. Keys this struct does not know are kept in [`extra`] so a
+/// skill written for a newer Claude Code never fails to load.
+///
+/// [`extra`]: SkillManifest::extra
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SkillManifest {
     /// Kebab-case name, also the skill's directory name.
@@ -23,12 +28,27 @@ pub struct SkillManifest {
     /// What the skill does and when to use it. This is the trigger text.
     pub description: String,
     /// Tools the skill may use without asking. Empty means no restriction.
+    ///
+    /// Claude Code writes this as a comma-separated string; a YAML list is
+    /// accepted too.
     #[serde(
         rename = "allowed-tools",
         default,
+        deserialize_with = "string_or_list",
         skip_serializing_if = "Vec::is_empty"
     )]
     pub allowed_tools: Vec<String>,
+    /// Tools or MCP servers the skill needs to do its job. Loading succeeds
+    /// without them; `forge doctor` reports the gap and the model is told.
+    #[serde(
+        default,
+        deserialize_with = "string_or_list",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub requires: Vec<String>,
+    /// Every other frontmatter key, passed through untouched.
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl SkillManifest {
@@ -79,6 +99,25 @@ fn is_kebab_case(name: &str) -> bool {
         })
 }
 
+/// Accepts `"Read, Grep"` or `["Read", "Grep"]`; blank entries are dropped.
+fn string_or_list<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        One(String),
+        Many(Vec<String>),
+    }
+    let items = match Either::deserialize(deserializer)? {
+        Either::One(text) => text.split(',').map(str::to_owned).collect(),
+        Either::Many(items) => items,
+    };
+    Ok(items
+        .into_iter()
+        .map(|item| item.trim().to_owned())
+        .filter(|item| !item.is_empty())
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +129,8 @@ mod tests {
                 "Review Rust changes for clippy-clean, idiomatic code. Use before committing."
                     .to_owned(),
             allowed_tools: vec!["Read".to_owned(), "Grep".to_owned()],
+            requires: Vec::new(),
+            extra: BTreeMap::new(),
         }
     }
 
@@ -115,6 +156,41 @@ mod tests {
         let minimal: SkillManifest =
             toml::from_str("name = \"x\"\ndescription = \"y\"\n").expect("parses");
         assert!(minimal.allowed_tools.is_empty());
+        assert!(minimal.requires.is_empty());
+        assert!(minimal.extra.is_empty());
+    }
+
+    #[test]
+    fn allowed_tools_accepts_a_comma_separated_string() {
+        let manifest: SkillManifest = serde_json::from_str(
+            r#"{"name": "x", "description": "y", "allowed-tools": "Read, Grep,, Bash(git:*) "}"#,
+        )
+        .expect("parses");
+        assert_eq!(manifest.allowed_tools, ["Read", "Grep", "Bash(git:*)"]);
+    }
+
+    #[test]
+    fn requires_accepts_a_list_or_a_string() {
+        let list: SkillManifest = toml::from_str(
+            "name = \"x\"\ndescription = \"y\"\nrequires = [\"shell\", \"playwright\"]\n",
+        )
+        .expect("parses");
+        assert_eq!(list.requires, ["shell", "playwright"]);
+        let text: SkillManifest = serde_json::from_str(
+            r#"{"name": "x", "description": "y", "requires": "shell, playwright"}"#,
+        )
+        .expect("parses");
+        assert_eq!(text.requires, list.requires);
+    }
+
+    #[test]
+    fn unknown_keys_are_kept_in_extra() {
+        let manifest: SkillManifest = serde_json::from_str(
+            r#"{"name": "x", "description": "y", "license": "MIT", "metadata": {"version": 2}}"#,
+        )
+        .expect("parses");
+        assert_eq!(manifest.extra["license"], serde_json::json!("MIT"));
+        assert_eq!(manifest.extra["metadata"]["version"], serde_json::json!(2));
     }
 
     #[test]

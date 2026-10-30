@@ -32,11 +32,13 @@ use crate::wiring::Wiring;
 pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Result<i32> {
     let (session_dir, id) = wiring.new_session_dir();
     eprintln!("session {id}");
-    let config = wiring.loop_config(task, session_dir);
+    let task = wiring.skills.expand_slash(&task).unwrap_or(task);
+    let registry = wiring.registry(Wiring::prompt())?;
+    let config = wiring.loop_config(task, session_dir, &registry);
     let agent = AgentLoop::new(
         config,
         wiring.loop_providers()?,
-        wiring.registry(Wiring::prompt())?,
+        registry,
         wiring.tool_context(),
         Wiring::gate(yes),
         sink(),
@@ -62,12 +64,13 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
 pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32> {
     let snapshot = context::load_session(&wiring.cwd, id).context("loading the session")?;
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
-    let config = wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone());
+    let registry = wiring.registry(Wiring::prompt())?;
+    let config = wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry);
     let agent = AgentLoop::resume(
         snapshot,
         config,
         wiring.loop_providers()?,
-        wiring.registry(Wiring::prompt())?,
+        registry,
         wiring.tool_context(),
         Wiring::gate(yes),
         sink(),
@@ -143,19 +146,21 @@ pub fn config_show(loaded: &LoadedConfig) {
     );
 }
 
-/// Checks the configuration and pings every provider.
+/// Checks the configuration, pings every provider and reports the skills.
 ///
 /// # Arguments
 ///
-/// * `wiring` - Providers.
+/// * `wiring` - Providers and skills.
 ///
 /// # Returns
 ///
-/// Zero when every provider answered, one otherwise.
+/// Zero when every provider answered, one otherwise. Skill problems are
+/// reported but never fail the check: a skill with an unmet `requires`
+/// still loads.
 ///
 /// # Errors
 ///
-/// Never; problems are printed per provider.
+/// When the permissions file cannot be read.
 pub async fn doctor(wiring: &Wiring) -> anyhow::Result<i32> {
     let roles = &wiring.config.roles;
     println!(
@@ -178,10 +183,33 @@ pub async fn doctor(wiring: &Wiring) -> anyhow::Result<i32> {
             }
         }
     }
+    report_skills(wiring)?;
     if failures > 0 {
         bail!("{failures} provider(s) failed");
     }
     Ok(0)
+}
+
+/// Prints one line per skill, then unmet requirements and load errors.
+fn report_skills(wiring: &Wiring) -> anyhow::Result<()> {
+    let skills = &wiring.skills;
+    println!("skills: {} loaded", skills.skills().len());
+    for skill in skills.skills() {
+        println!(
+            "skill {}: {} ({})",
+            skill.name(),
+            skill.source,
+            skill.dir.display()
+        );
+    }
+    let registry = wiring.registry(Wiring::prompt())?;
+    for (skill, requirement) in skills.missing_requires(&registry.names()) {
+        println!("skill {skill}: requires `{requirement}`, which is not available");
+    }
+    for error in skills.errors() {
+        println!("skill error: {}", error.error);
+    }
+    Ok(())
 }
 
 /// Sends one tiny request and returns the reply text and latency.

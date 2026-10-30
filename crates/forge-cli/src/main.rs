@@ -7,6 +7,7 @@ mod config_init;
 mod config_load;
 mod logging;
 mod render;
+mod skills;
 mod terminal;
 mod wiring;
 
@@ -55,6 +56,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<i32> {
             commands::sessions(&cwd)?;
             Ok(0)
         }
+        Some(Command::Skill { command }) => skills::run(command, home.as_deref(), &cwd).await,
         Some(Command::Doctor) => {
             let wiring = Wiring::new(config_load::load(home.as_deref(), &cwd)?.config)?;
             commands::doctor(&wiring).await

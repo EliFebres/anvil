@@ -141,3 +141,69 @@ fn doctor_reports_a_missing_api_key_without_a_network() {
     assert!(stdout.contains("FORGE_RUNPOD_KEY"), "{stdout}");
     assert!(stdout.contains("FAILED"), "{stdout}");
 }
+
+#[test]
+fn skill_add_list_show_and_remove_in_project_scope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("my-skill");
+    std::fs::create_dir_all(source.join("scripts")).expect("mkdir");
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\r\nname: my-skill\r\ndescription: Does the thing. Use when asked.\r\nlicense: MIT\r\n---\r\n\r\nTHE BODY TEXT\r\n",
+    )
+    .expect("write");
+    std::fs::write(source.join("scripts").join("go.sh"), "echo go\n").expect("write");
+
+    let out = forge(dir.path())
+        .args(["skill", "add", "my-skill", "--project"])
+        .output()
+        .expect("forge runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("installed skill `my-skill`"), "{stdout}");
+    assert!(stdout.contains("files: scripts/go.sh"), "{stdout}");
+    assert!(dir.path().join(".forge/skills/my-skill/SKILL.md").is_file());
+
+    let again = forge(dir.path())
+        .args(["skill", "add", "my-skill", "--project"])
+        .output()
+        .expect("forge runs");
+    assert_eq!(again.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("--force"));
+
+    let list = forge(dir.path())
+        .args(["skill", "list"])
+        .output()
+        .expect("forge runs");
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(stdout.contains("my-skill"), "{stdout}");
+    assert!(stdout.contains(".forge/skills"), "{stdout}");
+    assert!(!stdout.contains("THE BODY TEXT"), "{stdout}");
+
+    let show = forge(dir.path())
+        .args(["skill", "show", "my-skill"])
+        .output()
+        .expect("forge runs");
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert!(stdout.contains("THE BODY TEXT"), "{stdout}");
+    assert!(stdout.contains("description: Does the thing."), "{stdout}");
+
+    let removed = forge(dir.path())
+        .args(["skill", "remove", "my-skill", "--project"])
+        .output()
+        .expect("forge runs");
+    assert!(removed.status.success());
+    assert!(!dir.path().join(".forge/skills/my-skill").exists());
+
+    // The home directory's own skills may still be listed (Windows finds the
+    // home without the environment variables), so only check ours is gone.
+    let after = forge(dir.path())
+        .args(["skill", "list"])
+        .output()
+        .expect("forge runs");
+    assert!(!String::from_utf8_lossy(&after.stdout).contains("my-skill"));
+}

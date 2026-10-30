@@ -1,10 +1,13 @@
 //! Builds the core objects from configuration: providers, tools, paths.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
-use forge_core::agent::{AutoApprove, CheckCommand, LoopConfig, LoopProviders, PlanGate};
+use forge_compat::{SkillRoots, SkillSet, SkillTool};
+use forge_core::agent::{
+    AutoApprove, CheckCommand, Instruction, LoopConfig, LoopProviders, PlanGate,
+};
 use forge_core::context;
 use forge_core::provider::{self, Provider, SharedBudget, TokenBudget};
 use forge_core::tools::{PermissionPrompt, Permissions, Shell, ToolContext, ToolRegistry};
@@ -22,6 +25,30 @@ pub struct Wiring {
     pub config: ForgeConfig,
     /// The session's token budget, shared by every provider.
     pub budget: SharedBudget,
+    /// Skills discovered from the project, the home directory and the bundle.
+    pub skills: Arc<SkillSet>,
+}
+
+/// The directories skills are discovered from.
+///
+/// The bundled `skills/` directory is the one next to this source tree; it is
+/// only present on a machine that builds forge from the monorepo.
+///
+/// # Arguments
+///
+/// * `cwd` - The project root.
+/// * `home` - The home directory, if known.
+///
+/// # Returns
+///
+/// The roots.
+pub fn skill_roots(cwd: &Path, home: Option<&Path>) -> SkillRoots {
+    let bundled = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../skills"));
+    SkillRoots {
+        project: cwd.to_path_buf(),
+        home: home.map(Path::to_path_buf),
+        bundled: bundled.is_dir().then_some(bundled),
+    }
 }
 
 impl Wiring {
@@ -40,12 +67,15 @@ impl Wiring {
     /// When the current directory cannot be determined.
     pub fn new(config: ForgeConfig) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir().context("cannot determine the current directory")?;
+        let home = std::env::home_dir();
         let budget = TokenBudget::shared(config.limits.session_tokens);
+        let skills = Arc::new(SkillSet::discover(&skill_roots(&cwd, home.as_deref())));
         Ok(Self {
             cwd,
-            home: std::env::home_dir(),
+            home,
             config,
             budget,
+            skills,
         })
     }
 
@@ -115,7 +145,8 @@ impl Wiring {
             .unwrap_or(32_000)
     }
 
-    /// The tool registry with the project's permissions.
+    /// The tool registry with the project's permissions: the built-ins plus
+    /// the `skill` tool.
     ///
     /// # Arguments
     ///
@@ -130,7 +161,23 @@ impl Wiring {
     /// When `.forge/permissions.toml` exists but cannot be read.
     pub fn registry(&self, prompt: Box<dyn PermissionPrompt>) -> anyhow::Result<ToolRegistry> {
         let permissions = Permissions::load(&self.cwd).context("loading permissions")?;
-        Ok(ToolRegistry::with_builtins(permissions, prompt))
+        let mut registry = ToolRegistry::with_builtins(permissions, prompt);
+        registry.register(Box::new(SkillTool::new(Arc::clone(&self.skills))));
+        Ok(registry)
+    }
+
+    /// Prompt sections that come from outside forge-core: the skill list.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_names` - The registered tools, to flag skills whose
+    ///   `requires` are unmet.
+    ///
+    /// # Returns
+    ///
+    /// The sections, possibly empty.
+    pub fn extra_instructions(&self, tool_names: &[&str]) -> Vec<Instruction> {
+        self.skills.prompt_section(tool_names).into_iter().collect()
     }
 
     /// Where tools run.
@@ -152,11 +199,17 @@ impl Wiring {
     ///
     /// * `task` - The task.
     /// * `session_dir` - The session folder.
+    /// * `registry` - The tools the run will have, for the skill list.
     ///
     /// # Returns
     ///
     /// The config.
-    pub fn loop_config(&self, task: String, session_dir: PathBuf) -> LoopConfig {
+    pub fn loop_config(
+        &self,
+        task: String,
+        session_dir: PathBuf,
+        registry: &ToolRegistry,
+    ) -> LoopConfig {
         LoopConfig {
             task,
             cwd: self.cwd.clone(),
@@ -165,6 +218,7 @@ impl Wiring {
             check: CheckCommand::Detect,
             context_window: self.context_window(),
             home_dir: self.home.clone(),
+            extra_instructions: self.extra_instructions(&registry.names()),
         }
     }
 

@@ -43,8 +43,45 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Check the configuration and ping every provider.
+    /// Check the configuration, ping every provider and report loaded skills.
     Doctor,
+    /// Install, list, inspect and remove skills (Claude Code `SKILL.md` folders).
+    Skill {
+        /// Which skill action to take.
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
+}
+
+/// Subcommands under `forge skill`.
+#[derive(Debug, Subcommand)]
+pub enum SkillCommand {
+    /// Copy a skill folder into `~/.forge/skills/<name>` (or the project with --project).
+    Add {
+        /// A directory, a git URL, or a GitHub `owner/repo[/subdir]` shorthand.
+        source: String,
+        /// Install into the project's `.forge/skills` instead of the home directory.
+        #[arg(long)]
+        project: bool,
+        /// Replace a skill of the same name that is already installed.
+        #[arg(long)]
+        force: bool,
+    },
+    /// List every skill forge would load from here, highest priority first.
+    List,
+    /// Delete an installed skill by name.
+    Remove {
+        /// The skill name.
+        name: String,
+        /// Remove from the project's `.forge/skills` instead of the home directory.
+        #[arg(long)]
+        project: bool,
+    },
+    /// Print a skill's metadata, supporting files and full instructions.
+    Show {
+        /// The skill name.
+        name: String,
+    },
 }
 
 /// Subcommands under `forge config`.

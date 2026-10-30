@@ -136,9 +136,21 @@ impl ChatSession<'_> {
                     self.tokens_used
                 );
             }
-            ("help", _) => eprintln!("{HELP}"),
+            ("help", _) => {
+                eprintln!("{HELP}");
+                let skills = self.wiring.skills.help_lines();
+                if !skills.is_empty() {
+                    eprintln!("\nskills (each loads its instructions into the chat):");
+                    for line in skills {
+                        eprintln!("{line}");
+                    }
+                }
+            }
             ("quit" | "exit" | "q", _) => return false,
-            (other, _) => eprintln!("unknown command `/{other}`; /help lists them"),
+            (other, _) => match self.wiring.skills.expand_slash(&format!("/{command}")) {
+                Some(message) => self.turn(&message).await,
+                None => eprintln!("unknown command `/{other}`; /help lists them"),
+            },
         }
         true
     }
@@ -262,8 +274,9 @@ impl ChatSession<'_> {
         if self.mode == State::Review {
             return prompts::REVIEW.to_owned();
         }
-        let instructions =
+        let mut instructions =
             discover_instructions(self.wiring.home.as_deref(), &self.wiring.cwd, &self.touched);
+        instructions.extend(self.wiring.extra_instructions(&self.registry.names()));
         prompts::system_prompt(&PromptInputs {
             state: self.mode,
             instructions: &instructions,

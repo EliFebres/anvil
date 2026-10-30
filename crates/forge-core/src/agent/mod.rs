@@ -70,6 +70,9 @@ pub struct LoopConfig {
     pub context_window: u32,
     /// The user's home directory, for `~/.forge/FORGE.md`.
     pub home_dir: Option<PathBuf>,
+    /// Prompt sections supplied from outside the loop, such as a skill list,
+    /// appended after the instruction files found on disk.
+    pub extra_instructions: Vec<Instruction>,
 }
 
 /// The models a run talks to.
@@ -356,11 +359,12 @@ impl AgentLoop {
 
     /// Builds the system prompt for a state, with instruction files found so far.
     fn system_prompt_for(&self, state: State, tools: &[ToolSpec]) -> String {
-        let instructions = discover_instructions(
+        let mut instructions = discover_instructions(
             self.config.home_dir.as_deref(),
             &self.config.cwd,
             &self.touched,
         );
+        instructions.extend(self.config.extra_instructions.iter().cloned());
         system_prompt(&PromptInputs {
             state,
             instructions: &instructions,
@@ -917,6 +921,7 @@ mod tests {
                 check,
                 context_window: 100_000,
                 home_dir: None,
+                extra_instructions: Vec::new(),
             }
         }
 
@@ -1527,6 +1532,33 @@ mod tests {
         let reloaded = crate::context::load_session(h.dir.path(), "t1").expect("log");
         assert_eq!(reloaded.status, Some(Status::Done));
         assert!(reloaded.messages.len() > request.messages.len());
+    }
+
+    #[tokio::test]
+    async fn extra_instructions_follow_the_instruction_files() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("nothing to simplify"),
+            ],
+            vec![approve()],
+        );
+        std::fs::write(h.dir.path().join("CLAUDE.md"), "repo rules").expect("write");
+        let mut config = h.config(CheckCommand::Command("exit 0".to_owned()));
+        config.extra_instructions.push(Instruction {
+            source: "skills".to_owned(),
+            text: "- caveman: terse voice".to_owned(),
+        });
+        let coder = Arc::clone(&h.coder) as Arc<dyn Provider>;
+        let agent = h.agent(config, coder, "", Box::new(AutoApprove));
+        assert_eq!(agent.run().await.status, Status::Done);
+        let system = &h.coder.requests()[0].system;
+        let repo = system.find("# Instructions from CLAUDE.md").expect("repo");
+        let skills = system.find("# Instructions from skills").expect("skills");
+        let tools = system.find("# Tools").expect("tools");
+        assert!(repo < skills && skills < tools, "{system}");
+        assert!(system.contains("- caveman: terse voice"));
     }
 
     #[tokio::test]
