@@ -33,6 +33,9 @@ use self::prompts::{PromptInputs, system_prompt};
 use self::state::{StateOutcome, Step, transition};
 use self::turn::{Turn, complete_turn};
 use self::verdict::parse_verdict;
+use crate::context::{
+    Conversation, SessionLog, SessionMeta, SessionRecord, SessionSnapshot, discover_instructions,
+};
 use crate::provider::{
     CompletionRequest, Message, Provider, ProviderError, ToolCall, ToolResult, ToolSpec,
 };
@@ -63,8 +66,10 @@ pub struct LoopConfig {
     pub limits: LimitsConfig,
     /// How Verify runs the project's checks.
     pub check: CheckCommand,
-    /// Instruction files to put in the system prompt.
-    pub instructions: Vec<Instruction>,
+    /// The coder's context window in tokens; compaction runs at 80% of it.
+    pub context_window: u32,
+    /// The user's home directory, for `~/.forge/FORGE.md`.
+    pub home_dir: Option<PathBuf>,
 }
 
 /// The models a run talks to.
@@ -74,6 +79,8 @@ pub struct LoopProviders {
     pub coder: Arc<dyn Provider>,
     /// Reviews the diff. May be the same provider as `coder`.
     pub reviewer: Arc<dyn Provider>,
+    /// Writes compaction summaries. May be the same provider as `coder`.
+    pub summarizer: Arc<dyn Provider>,
 }
 
 /// Turns and tokens spent in one state.
@@ -117,14 +124,20 @@ pub struct AgentLoop {
     gate: Box<dyn PlanGate>,
     events: EventSink,
     /// The coder-side conversation, shared by every state except Review.
-    messages: Vec<Message>,
+    conversation: Conversation,
+    /// The session log, when the folder is writable.
+    log: Option<SessionLog>,
+    /// Where the run starts: Plan, or the restored state when resuming.
+    start_state: State,
     spend: BTreeMap<State, Spend>,
     visits: BTreeMap<State, u32>,
     rounds: Rounds,
     /// Whether any tool call was denied, declined or blocked.
     denial_seen: bool,
     /// Paths given to `write_file` and `edit_file`, for the review fallback.
-    touched: BTreeSet<String>,
+    written: BTreeSet<String>,
+    /// Paths read or written, for instruction file discovery.
+    touched: BTreeSet<PathBuf>,
     plan: Option<String>,
     /// Git tree of the working tree at session start.
     baseline: Option<String>,
@@ -167,6 +180,30 @@ impl AgentLoop {
                 tracing::warn!(%error, rule, "could not allow session folder writes");
             }
         }
+        let log = match SessionLog::open(&config.session_dir) {
+            Ok(mut log) => {
+                if log.is_empty() {
+                    let meta = SessionMeta {
+                        id: config
+                            .session_dir
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        created_at: chrono::Utc::now(),
+                        task: config.task.clone(),
+                        cwd: config.cwd.clone(),
+                    };
+                    if let Err(error) = log.append(&SessionRecord::Meta(meta)) {
+                        tracing::warn!(%error, "cannot write the session meta record");
+                    }
+                }
+                Some(log)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "session will not be persisted");
+                None
+            }
+        };
         Self {
             config,
             providers,
@@ -174,17 +211,74 @@ impl AgentLoop {
             ctx,
             gate,
             events,
-            messages: Vec::new(),
+            conversation: Conversation::new(),
+            log,
+            start_state: State::Plan,
             spend: BTreeMap::new(),
             visits: BTreeMap::new(),
             rounds: Rounds::default(),
             denial_seen: false,
+            written: BTreeSet::new(),
             touched: BTreeSet::new(),
             plan: None,
             baseline: None,
             pending_feedback: None,
             last_text: String::new(),
         }
+    }
+
+    /// Prepares a run that continues a saved session.
+    ///
+    /// The conversation and git baseline are restored from the snapshot. The
+    /// run re-enters the last recorded state; a session that had already
+    /// finished restarts at Build with its outcome as feedback.
+    ///
+    /// # Arguments
+    ///
+    /// * `snapshot` - The saved session, from `load_session`.
+    /// * `config` - Task, paths and budgets; `task` and `session_dir` should
+    ///   come from the snapshot.
+    /// * `providers`, `registry`, `ctx`, `gate`, `events` - As for [`AgentLoop::new`].
+    ///
+    /// # Returns
+    ///
+    /// The loop.
+    pub fn resume(
+        snapshot: SessionSnapshot,
+        config: LoopConfig,
+        providers: LoopProviders,
+        registry: ToolRegistry,
+        ctx: ToolContext,
+        gate: Box<dyn PlanGate>,
+        events: EventSink,
+    ) -> Self {
+        let mut agent = Self::new(config, providers, registry, ctx, gate, events);
+        agent.conversation = Conversation::from_messages(snapshot.messages);
+        agent.baseline = snapshot.baseline;
+        agent.plan = std::fs::read_to_string(snapshot.dir.join(PLAN_FILE)).ok();
+        let (start, note) = match (snapshot.last_state, snapshot.status) {
+            (_, Some(status)) => (
+                State::Build,
+                format!(
+                    "This session was resumed. It had ended with: {status}. Continue the task from where it stopped."
+                ),
+            ),
+            (Some(State::Plan) | None, None) => (State::Plan, String::new()),
+            (Some(State::Done), None) => (
+                State::Build,
+                "This session was resumed. Continue the task from where it stopped.".to_owned(),
+            ),
+            (Some(state), None) => (
+                state,
+                "This session was resumed after an interruption. Continue from where it stopped."
+                    .to_owned(),
+            ),
+        };
+        agent.start_state = start;
+        if !note.is_empty() {
+            agent.pending_feedback = Some(note);
+        }
+        agent
     }
 
     /// Runs the state machine to completion.
@@ -196,16 +290,21 @@ impl AgentLoop {
         if let Err(error) = std::fs::create_dir_all(&self.config.session_dir) {
             self.warn(format!("cannot create the session folder: {error}"));
         }
-        self.baseline = diff::snapshot_tree(&self.config.cwd, &self.config.session_dir).await;
         if self.baseline.is_none() {
-            self.warn(
-                "not a git repository; the reviewer will see touched files instead of a diff"
-                    .to_owned(),
-            );
+            self.baseline = diff::snapshot_tree(&self.config.cwd, &self.config.session_dir).await;
+            match &self.baseline {
+                Some(tree) => self.log(SessionRecord::Baseline { tree: tree.clone() }),
+                None => self.warn(
+                    "not a git repository; the reviewer will see touched files instead of a diff"
+                        .to_owned(),
+                ),
+            }
         }
-        self.messages.push(Message::user(self.config.task.clone()));
+        if self.conversation.is_empty() {
+            self.push_message(Message::user(self.config.task.clone()));
+        }
 
-        let mut state = State::Plan;
+        let mut state = self.start_state;
         self.enter(state);
         loop {
             let outcome = self.run_state(state).await;
@@ -233,10 +332,79 @@ impl AgentLoop {
     fn enter(&mut self, state: State) {
         let visit = self.visits.entry(state).or_insert(0);
         *visit += 1;
-        self.events.emit(LoopEvent::StateEntered {
-            state,
-            visit: *visit,
+        let visit = *visit;
+        self.events.emit(LoopEvent::StateEntered { state, visit });
+        self.log(SessionRecord::State { state, visit });
+    }
+
+    /// Appends to the conversation and the session log.
+    fn push_message(&mut self, message: Message) {
+        self.log(SessionRecord::Message {
+            message: message.clone(),
         });
+        self.conversation.push(message);
+    }
+
+    /// Appends a record to the session log, if there is one.
+    fn log(&mut self, record: SessionRecord) {
+        if let Some(log) = &mut self.log
+            && let Err(error) = log.append(&record)
+        {
+            tracing::warn!(%error, "cannot append to the session log");
+        }
+    }
+
+    /// Builds the system prompt for a state, with instruction files found so far.
+    fn system_prompt_for(&self, state: State, tools: &[ToolSpec]) -> String {
+        let instructions = discover_instructions(
+            self.config.home_dir.as_deref(),
+            &self.config.cwd,
+            &self.touched,
+        );
+        system_prompt(&PromptInputs {
+            state,
+            instructions: &instructions,
+            tools,
+            task: &self.config.task,
+        })
+    }
+
+    /// Compacts the conversation when the next request would be too large.
+    async fn compact_if_needed(&mut self, system: &str) {
+        if !self
+            .conversation
+            .needs_compaction(system, self.config.context_window)
+        {
+            return;
+        }
+        let max_chars = usize::try_from(self.config.context_window)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(2);
+        let result = self
+            .conversation
+            .compact(
+                &*self.providers.summarizer,
+                &self.config.task,
+                &self.config.session_dir,
+                max_chars,
+            )
+            .await;
+        match result {
+            Ok(Some(compaction)) => {
+                self.log(SessionRecord::Compacted {
+                    messages: self.conversation.messages().to_vec(),
+                    summary_path: compaction.summary_path.clone(),
+                });
+                self.events.emit(LoopEvent::Compacted {
+                    dropped_messages: compaction.dropped_messages,
+                    summary_path: compaction.summary_path,
+                });
+            }
+            Ok(None) => tracing::debug!("context is large but there are too few turns to compact"),
+            Err(error) => self.warn(format!(
+                "compaction failed; continuing uncompacted: {error}"
+            )),
+        }
     }
 
     /// Dispatches to the state's handler.
@@ -438,21 +606,18 @@ impl AgentLoop {
         tools: Vec<ToolSpec>,
     ) -> ModelEnd {
         if let Some(intro) = intro {
-            self.messages.push(Message::user(intro));
+            self.push_message(Message::user(intro));
         }
-        let system = system_prompt(&PromptInputs {
-            state,
-            instructions: &self.config.instructions,
-            tools: &tools,
-            task: &self.config.task,
-        });
         loop {
             if let Some(reason) = self.budget_exceeded(state) {
                 return ModelEnd::Interrupted(StateOutcome::Stop(reason));
             }
+            let system = self.system_prompt_for(state, &tools);
+            self.compact_if_needed(&system).await;
+            let request_len = self.conversation.messages().len();
             let request = CompletionRequest {
-                system: system.clone(),
-                messages: self.messages.clone(),
+                system,
+                messages: self.conversation.messages().to_vec(),
                 tools: tools.clone(),
                 max_output_tokens: None,
             };
@@ -461,13 +626,16 @@ impl AgentLoop {
                 Err(error) => return ModelEnd::Interrupted(self.provider_failure(error)),
             };
             self.record_turn(state, &turn);
-            self.messages.push(turn.message());
+            if let Some(usage) = turn.usage {
+                self.conversation.record_usage(request_len, usage);
+            }
+            self.push_message(turn.message());
             self.last_text = turn.text.clone();
             if turn.tool_calls.is_empty() {
                 return ModelEnd::Finished(turn.text);
             }
             let results = self.run_tools(&turn.tool_calls).await;
-            self.messages.push(Message::ToolResults { results });
+            self.push_message(Message::ToolResults { results });
         }
     }
 
@@ -481,12 +649,15 @@ impl AgentLoop {
             if execution.outcome.is_denial() {
                 self.denial_seen = true;
             }
-            if matches!(call.name.as_str(), "write_file" | "edit_file")
+            if matches!(call.name.as_str(), "read_file" | "write_file" | "edit_file")
                 && let Some(path) = serde_json::from_str::<serde_json::Value>(&call.arguments_json)
                     .ok()
                     .and_then(|args| args.get("path").and_then(|p| p.as_str()).map(str::to_owned))
             {
-                self.touched.insert(path);
+                self.touched.insert(self.ctx.resolve(&path));
+                if call.name != "read_file" {
+                    self.written.insert(path);
+                }
             }
             self.events.emit(LoopEvent::ToolFinished {
                 call_id: call.id.clone(),
@@ -547,11 +718,11 @@ impl AgentLoop {
             }
             return diff;
         }
-        if self.touched.is_empty() {
+        if self.written.is_empty() {
             return "(no git diff available and no files were written)".to_owned();
         }
         let list = self
-            .touched
+            .written
             .iter()
             .map(|path| format!("- {path}"))
             .collect::<Vec<_>>()
@@ -590,11 +761,14 @@ impl AgentLoop {
     }
 
     /// Writes the summary and builds the result.
-    fn finish(self, status: Status) -> LoopResult {
+    fn finish(mut self, status: Status) -> LoopResult {
         let status = match status {
             Status::Incomplete { reason } if self.denial_seen => Status::Denied { reason },
             other => other,
         };
+        self.log(SessionRecord::Finished {
+            status: status.clone(),
+        });
         let summary = self.summary(&status);
         let summary_path = self.config.session_dir.join(SUMMARY_FILE);
         if let Err(error) = std::fs::write(&summary_path, &summary) {
@@ -625,9 +799,9 @@ impl AgentLoop {
                 spend.turns, spend.tokens
             ));
         }
-        if !self.touched.is_empty() {
+        if !self.written.is_empty() {
             text.push_str("\n## Files written\n\n");
-            for path in &self.touched {
+            for path in &self.written {
                 text.push_str(&format!("- {path}\n"));
             }
         }
@@ -704,11 +878,20 @@ mod tests {
         dir: tempfile::TempDir,
         coder: Arc<FakeProvider>,
         reviewer: Arc<FakeProvider>,
+        summarizer: Arc<FakeProvider>,
         events: mpsc::UnboundedReceiver<LoopEvent>,
     }
 
     impl Harness {
         fn new(coder: Vec<Script>, reviewer: Vec<Script>) -> Self {
+            Self::with_summarizer(coder, reviewer, vec![])
+        }
+
+        fn with_summarizer(
+            coder: Vec<Script>,
+            reviewer: Vec<Script>,
+            summarizer: Vec<Script>,
+        ) -> Self {
             let dir = tempfile::tempdir().expect("tempdir");
             let (tx, rx) = mpsc::unbounded_channel();
             drop(tx);
@@ -716,6 +899,7 @@ mod tests {
                 dir,
                 coder: Arc::new(FakeProvider::new(coder)),
                 reviewer: Arc::new(FakeProvider::new(reviewer)),
+                summarizer: Arc::new(FakeProvider::new(summarizer)),
                 events: rx,
             }
         }
@@ -731,7 +915,8 @@ mod tests {
                 session_dir: self.session_dir(),
                 limits: LimitsConfig::default(),
                 check,
-                instructions: Vec::new(),
+                context_window: 100_000,
+                home_dir: None,
             }
         }
 
@@ -753,6 +938,7 @@ mod tests {
                 LoopProviders {
                     coder,
                     reviewer: Arc::clone(&self.reviewer) as Arc<dyn Provider>,
+                    summarizer: Arc::clone(&self.summarizer) as Arc<dyn Provider>,
                 },
                 registry,
                 ToolContext::new(self.dir.path()),
@@ -1202,6 +1388,182 @@ mod tests {
             e,
             LoopEvent::ToolFinished { outcome: ToolOutcome::Completed, name, .. } if name == "edit_file"
         )));
+    }
+
+    /// A tool turn whose usage reports a large prompt, to drive compaction.
+    fn heavy_tool_turn(id: &str, prompt_tokens: u64) -> Script {
+        vec![
+            Ok(Event::ToolCall(ToolCall {
+                id: id.to_owned(),
+                name: "list_dir".to_owned(),
+                arguments_json: "{}".to_owned(),
+            })),
+            Ok(Event::Usage(crate::provider::Usage {
+                input: prompt_tokens,
+                output: 5,
+                cached: 0,
+            })),
+            Ok(Event::Done {
+                stop_reason: StopReason::ToolUse,
+            }),
+        ]
+    }
+
+    #[tokio::test]
+    async fn compaction_runs_at_the_threshold_and_keeps_four_turns() {
+        let mut h = Harness::with_summarizer(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                heavy_tool_turn("t1", 100),
+                heavy_tool_turn("t2", 100),
+                heavy_tool_turn("t3", 100),
+                heavy_tool_turn("t4", 900),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("simplified"),
+            ],
+            vec![approve()],
+            vec![FakeProvider::text_turn("## Task\nsummary of earlier work")],
+        );
+        let mut config = h.config(CheckCommand::Command("exit 0".to_owned()));
+        config.context_window = 1000;
+        let coder = Arc::clone(&h.coder) as Arc<dyn Provider>;
+        let agent = h.agent(config, coder, "", Box::new(AutoApprove));
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        assert_eq!(h.summarizer.calls(), 1, "one compaction");
+        let compacted_request = &h.coder.requests()[5];
+        assert!(matches!(
+            &compacted_request.messages[0],
+            Message::User { text } if text.contains("compacted") && text.contains("summary of earlier work")
+        ));
+        let assistant_turns = compacted_request
+            .messages
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant { .. }))
+            .count();
+        assert_eq!(assistant_turns, 4);
+        assert!(h.session_dir().join("compaction-1.md").exists());
+        let events = h.drain();
+        assert!(events.iter().any(
+            |e| matches!(e, LoopEvent::Compacted { dropped_messages, .. } if *dropped_messages > 0)
+        ));
+        let snapshot = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        assert!(
+            matches!(&snapshot.messages[0], Message::User { text } if text.contains("compacted"))
+        );
+        assert_eq!(snapshot.status, Some(Status::Done));
+    }
+
+    #[tokio::test]
+    async fn session_log_records_the_run_and_resume_continues_it() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![ToolCall {
+                    id: "ls".to_owned(),
+                    name: "list_dir".to_owned(),
+                    arguments_json: "{}".to_owned(),
+                }]),
+            ],
+            vec![],
+        );
+        let mut config = h.config(CheckCommand::Command("exit 0".to_owned()));
+        config.limits.build.max_turns = 1;
+        let coder = Arc::clone(&h.coder) as Arc<dyn Provider>;
+        let agent = h.agent(config, coder, "", Box::new(AutoApprove));
+        let first = agent.run().await;
+        assert!(matches!(first.status, Status::Incomplete { .. }));
+
+        let snapshot = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        assert_eq!(snapshot.meta.task, "add a --dry-run flag");
+        assert_eq!(snapshot.last_state, Some(State::Build));
+        assert_eq!(
+            snapshot.messages.len(),
+            5,
+            "task, plan, intro, tool call, results"
+        );
+        let sessions = crate::context::list_sessions(h.dir.path()).expect("list");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].meta.id, "t1");
+
+        // Resume with fresh providers: Build continues from the saved conversation.
+        let resumed_coder = Arc::new(FakeProvider::new(vec![
+            FakeProvider::text_turn("finished the build"),
+            FakeProvider::text_turn("simplified"),
+        ]));
+        h.reviewer = Arc::new(FakeProvider::new(vec![approve()]));
+        let config = h.config(CheckCommand::Command("exit 0".to_owned()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        h.events = rx;
+        let registry = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(StaticPrompt(PromptAnswer::No)),
+        );
+        let agent = AgentLoop::resume(
+            snapshot,
+            config,
+            LoopProviders {
+                coder: Arc::clone(&resumed_coder) as Arc<dyn Provider>,
+                reviewer: Arc::clone(&h.reviewer) as Arc<dyn Provider>,
+                summarizer: Arc::clone(&h.summarizer) as Arc<dyn Provider>,
+            },
+            registry,
+            ToolContext::new(h.dir.path()),
+            Box::new(AutoApprove),
+            EventSink::new(tx),
+        );
+        let second = agent.run().await;
+        assert_eq!(second.status, Status::Done);
+        assert_eq!(
+            h.states(),
+            vec![State::Build, State::Review, State::Optimize, State::Verify]
+        );
+        let request = &resumed_coder.requests()[0];
+        assert!(request.messages.len() > 5, "saved conversation restored");
+        assert!(request.messages.iter().any(|m| matches!(
+            m,
+            Message::User { text } if text.contains("This session was resumed")
+        )));
+        let reloaded = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        assert_eq!(reloaded.status, Some(Status::Done));
+        assert!(reloaded.messages.len() > request.messages.len());
+    }
+
+    #[tokio::test]
+    async fn instruction_files_enter_the_prompt_as_files_are_touched() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![ToolCall {
+                    id: "r".to_owned(),
+                    name: "read_file".to_owned(),
+                    arguments_json: serde_json::json!({"path": "crates/a/src/lib.rs"}).to_string(),
+                }]),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("simplified"),
+            ],
+            vec![approve()],
+        );
+        std::fs::write(h.dir.path().join("CLAUDE.md"), "repo rules").expect("write");
+        let nested = h.dir.path().join("crates").join("a");
+        std::fs::create_dir_all(nested.join("src")).expect("mkdir");
+        std::fs::write(nested.join("CLAUDE.md"), "crate rules").expect("write");
+        std::fs::write(nested.join("src").join("lib.rs"), "").expect("write");
+        let agent = h.default_agent(CheckCommand::Command("exit 0".to_owned()), "");
+        assert_eq!(agent.run().await.status, Status::Done);
+        let requests = h.coder.requests();
+        assert!(requests[0].system.contains("# Instructions from CLAUDE.md"));
+        assert!(!requests[0].system.contains("crate rules"));
+        assert!(
+            requests[2]
+                .system
+                .contains("# Instructions from crates/a/CLAUDE.md")
+        );
+        let base = requests[2].system.find("You are forge").expect("base");
+        let repo = requests[2].system.find("repo rules").expect("repo");
+        let nested = requests[2].system.find("crate rules").expect("nested");
+        let tools = requests[2].system.find("# Tools").expect("tools");
+        assert!(base < repo && repo < nested && nested < tools);
     }
 
     #[test]

@@ -5,5 +5,6 @@
 //! outside through the CLI.
 
 pub mod agent;
+pub mod context;
 pub mod provider;
 pub mod tools;

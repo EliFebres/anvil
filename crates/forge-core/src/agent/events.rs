@@ -79,6 +79,13 @@ pub enum LoopEvent {
         /// The last lines of its output.
         output_tail: String,
     },
+    /// Older turns were replaced by a summary.
+    Compacted {
+        /// How many messages the summary replaced.
+        dropped_messages: usize,
+        /// Where the summary was written.
+        summary_path: PathBuf,
+    },
     /// Something non-fatal worth telling the user.
     Warning(String),
     /// The run ended.
