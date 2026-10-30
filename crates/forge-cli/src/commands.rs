@@ -220,10 +220,43 @@ pub async fn doctor(wiring: &Wiring) -> anyhow::Result<i32> {
     report_commands(wiring);
     report_agents(wiring);
     report_hooks(wiring);
+    failures += report_mcp(wiring).await;
     if failures > 0 {
-        bail!("{failures} provider(s) failed");
+        bail!("{failures} provider(s) or MCP server(s) failed");
     }
     Ok(0)
+}
+
+/// Connects to every MCP server, lists its tools and refreshes the cache.
+///
+/// Returns how many servers failed.
+async fn report_mcp(wiring: &Wiring) -> usize {
+    let servers = &wiring.mcp_servers;
+    println!("mcp servers: {} defined", servers.servers().len());
+    for error in servers.errors() {
+        println!("mcp error: {}", error.error);
+    }
+    if servers.is_empty() {
+        return 0;
+    }
+    let started = Instant::now();
+    let tools = forge_compat::McpTools::load(servers, &wiring.cwd, true).await;
+    let millis = started.elapsed().as_millis();
+    let mut failures = 0;
+    for report in tools.reports() {
+        match &report.tools {
+            Ok(count) => println!("mcp {}: ok, {count} tool(s)", report.name),
+            Err(error) => {
+                failures += 1;
+                println!("mcp {}: FAILED: {error}", report.name);
+            }
+        }
+    }
+    for name in tools.names() {
+        println!("mcp tool: {name}");
+    }
+    println!("mcp: connected and listed in {millis} ms");
+    failures
 }
 
 /// Prints one line per skill, then unmet requirements and load errors.

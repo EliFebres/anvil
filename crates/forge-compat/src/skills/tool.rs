@@ -43,11 +43,11 @@ impl SkillTool {
 }
 
 impl Tool for SkillTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "skill"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Loads a skill's full instructions. Call it with the name of a skill from the \
          system prompt's skill list when a task matches its description or the user asks \
          for it by name, then follow the instructions it returns."

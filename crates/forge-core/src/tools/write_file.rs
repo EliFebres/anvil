@@ -19,11 +19,11 @@ pub struct WriteFileArgs {
 pub struct WriteFile;
 
 impl Tool for WriteFile {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "write_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Writes the given content to a file, creating parent directories and replacing any \
          existing contents. Prefer edit_file for small changes to existing files."
     }

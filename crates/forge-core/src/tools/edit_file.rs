@@ -24,11 +24,11 @@ pub struct EditFileArgs {
 pub struct EditFile;
 
 impl Tool for EditFile {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "edit_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Replaces an exact string in a file. Fails when the old string is missing or, unless \
          replace_all is true, when it occurs more than once; include more surrounding context \
          to make it unique."

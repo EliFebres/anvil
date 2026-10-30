@@ -26,11 +26,11 @@ pub struct ReadFileArgs {
 pub struct ReadFile;
 
 impl Tool for ReadFile {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "read_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Reads a UTF-8 text file and returns its lines prefixed with 1-based line numbers. \
          Use offset and limit to page through large files."
     }

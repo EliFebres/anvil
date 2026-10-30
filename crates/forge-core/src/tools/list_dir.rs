@@ -18,11 +18,11 @@ pub struct ListDirArgs {
 pub struct ListDir;
 
 impl Tool for ListDir {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "list_dir"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Lists the entries of one directory, sorted by name, with a trailing slash on \
          subdirectories. Not recursive; use glob to find files by pattern."
     }

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use forge_compat::{
-    AgentSet, CommandSet, DelegateTool, HookConfig, HookRunner, SkillRoots, SkillSet, SkillTool,
-    SubagentEnv,
+    AgentSet, CommandSet, DelegateTool, HookConfig, HookRunner, McpTools, ServerSet, SkillRoots,
+    SkillSet, SkillTool, SubagentEnv,
 };
 use forge_core::agent::{
     AutoApprove, CheckCommand, Instruction, LoopConfig, LoopProviders, PlanGate,
@@ -43,6 +43,10 @@ pub struct Wiring {
     pub agents: Arc<AgentSet>,
     /// Hooks from the settings files.
     pub hooks: Arc<HookConfig>,
+    /// MCP server definitions from `.mcp.json`, settings and `~/.forge/mcp.toml`.
+    pub mcp_servers: ServerSet,
+    /// MCP tools, resolved by [`Wiring::load_mcp`]; empty until then.
+    pub mcp: Arc<McpTools>,
     /// The session this wiring serves, once one exists.
     session: Option<SessionInfo>,
 }
@@ -100,6 +104,7 @@ impl Wiring {
         let commands = CommandSet::discover(&cwd, home.as_deref());
         let agents = Arc::new(AgentSet::discover(&cwd, home.as_deref()));
         let hooks = Arc::new(HookConfig::load(&cwd, home.as_deref()));
+        let mcp_servers = ServerSet::load(&cwd, home.as_deref());
         Ok(Self {
             cwd,
             home,
@@ -109,8 +114,25 @@ impl Wiring {
             commands,
             agents,
             hooks,
+            mcp_servers,
+            mcp: Arc::new(McpTools::default()),
             session: None,
         })
+    }
+
+    /// Resolves every MCP server's tool list so [`Wiring::registry`] can
+    /// register them: from the cache when it is current, by connecting
+    /// otherwise. Servers that cannot be reached are logged and skipped.
+    pub async fn load_mcp(&mut self) {
+        if self.mcp_servers.is_empty() {
+            return;
+        }
+        self.mcp = Arc::new(McpTools::load(&self.mcp_servers, &self.cwd, false).await);
+        for report in self.mcp.reports() {
+            if let Err(error) = &report.tools {
+                eprintln!("warning: {error}");
+            }
+        }
     }
 
     /// A copy of this wiring bound to a session, so hooks can report it.
@@ -330,6 +352,7 @@ impl Wiring {
         let permissions = Permissions::load(&self.cwd).context("loading permissions")?;
         let mut registry = ToolRegistry::with_builtins(permissions, prompt);
         registry.register(Box::new(SkillTool::new(Arc::clone(&self.skills))));
+        self.mcp.register(&mut registry);
         if let Some(runner) = self.hook_runner() {
             registry.set_hook(runner);
         }

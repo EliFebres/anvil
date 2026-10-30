@@ -26,11 +26,11 @@ pub struct GlobArgs {
 pub struct Glob;
 
 impl Tool for Glob {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "glob"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Finds files whose path relative to the search root matches a glob pattern. `*` does \
          not cross directory separators; use `**/` to recurse. Honors .gitignore and skips \
          hidden files. Returns paths relative to the project root, sorted."

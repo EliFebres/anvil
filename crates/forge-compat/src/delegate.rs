@@ -108,11 +108,11 @@ impl DelegateTool {
 }
 
 impl Tool for DelegateTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "delegate"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Runs a subagent from the system prompt's subagent list on a self-contained task \
          and returns only its final message. The subagent starts with no memory of this \
          conversation, so the task must say what to do, where to look and what to report."

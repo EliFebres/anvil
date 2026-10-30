@@ -130,11 +130,11 @@ pub struct ShellArgs {
 pub struct ShellTool;
 
 impl Tool for ShellTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "shell"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the \
          project root and returns its combined stdout and stderr followed by the exit code. \
          Output is capped at 30 KB; the full output is kept in the session folder."

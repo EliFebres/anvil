@@ -33,11 +33,11 @@ pub struct GrepArgs {
 pub struct Grep;
 
 impl Tool for Grep {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "grep"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Searches file contents for a regular expression and returns matching lines as \
          `path:line:text`. Honors .gitignore, skips hidden and binary files. Optionally \
          restrict to a directory and a file glob."

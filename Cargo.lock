@@ -501,8 +501,10 @@ version = "0.1.0"
 dependencies = [
  "forge-core",
  "forge-types",
+ "futures-util",
  "insta",
  "regex",
+ "reqwest",
  "schemars",
  "serde",
  "serde-saphyr",
@@ -510,6 +512,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
 ]
 

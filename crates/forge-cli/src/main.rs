@@ -62,11 +62,13 @@ async fn dispatch(cli: Cli) -> anyhow::Result<i32> {
             commands::doctor(&wiring).await
         }
         Some(Command::Chat) => {
-            let wiring = Wiring::new(config_load::load(home.as_deref(), &cwd)?.config)?;
+            let mut wiring = Wiring::new(config_load::load(home.as_deref(), &cwd)?.config)?;
+            wiring.load_mcp().await;
             chat::chat(&wiring).await
         }
         Some(Command::Resume { id }) => {
-            let wiring = Wiring::new(config_load::load(home.as_deref(), &cwd)?.config)?;
+            let mut wiring = Wiring::new(config_load::load(home.as_deref(), &cwd)?.config)?;
+            wiring.load_mcp().await;
             commands::resume(&wiring, &id, cli.yes).await
         }
         Some(Command::Run { task }) => run(home.as_deref(), &cwd, task, cli.yes).await,
@@ -83,6 +85,7 @@ async fn run(
     yes: bool,
 ) -> anyhow::Result<i32> {
     let task = words.join(" ");
-    let wiring = Wiring::new(config_load::load(home, cwd)?.config)?;
+    let mut wiring = Wiring::new(config_load::load(home, cwd)?.config)?;
+    wiring.load_mcp().await;
     commands::run_task(&wiring, task, yes).await
 }

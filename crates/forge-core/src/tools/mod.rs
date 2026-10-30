@@ -110,10 +110,10 @@ impl Access {
 /// A tool the model can call.
 pub trait Tool: Send + Sync {
     /// The name the model uses to call it.
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     /// What it does, for the model.
-    fn description(&self) -> &'static str;
+    fn description(&self) -> &str;
 
     /// JSON Schema of its arguments object.
     fn schema(&self) -> Value;
@@ -357,7 +357,7 @@ pub trait ToolHook: Send + Sync {
 /// The tools on offer, with the permission model that guards them.
 pub struct ToolRegistry {
     /// Tools by name.
-    tools: BTreeMap<&'static str, Box<dyn Tool>>,
+    tools: BTreeMap<String, Box<dyn Tool>>,
     /// Rules, mutated when the user answers `always`.
     permissions: Mutex<Permissions>,
     /// Who to ask when a rule says `ask`.
@@ -424,7 +424,7 @@ impl ToolRegistry {
     ///
     /// * `tool` - The tool.
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.name(), tool);
+        self.tools.insert(tool.name().to_owned(), tool);
     }
 
     /// Looks a tool up by name.
@@ -445,8 +445,8 @@ impl ToolRegistry {
     /// # Returns
     ///
     /// The names.
-    pub fn names(&self) -> Vec<&'static str> {
-        self.tools.keys().copied().collect()
+    pub fn names(&self) -> Vec<&str> {
+        self.tools.keys().map(String::as_str).collect()
     }
 
     /// The tool list to send to a provider.
@@ -655,10 +655,10 @@ mod tests {
     }
 
     impl Tool for Echo {
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "echo"
         }
-        fn description(&self) -> &'static str {
+        fn description(&self) -> &str {
             "Echoes."
         }
         fn schema(&self) -> Value {
