@@ -29,6 +29,7 @@ use serde_json::Value;
 use crate::provider::lock_or_recover;
 use crate::provider::types::{ToolCall, ToolResult, ToolSpec};
 
+pub use output::{OutputStats, digest};
 pub use permissions::{
     Decision, PermissionError, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
     ScriptedPrompt, StaticPrompt,
@@ -292,6 +293,8 @@ pub struct Execution {
     pub outcome: ToolOutcome,
     /// Where the untruncated output was written, if it was truncated.
     pub full_output: Option<PathBuf>,
+    /// Size and digest of the full output, for telemetry.
+    pub stats: OutputStats,
 }
 
 /// A boxed future returned by a [`ToolHook`].
@@ -554,6 +557,7 @@ impl ToolRegistry {
                     },
                     outcome,
                     full_output,
+                    stats: OutputStats::of(&output.content, true),
                 }
             }
         };
@@ -627,6 +631,7 @@ impl Execution {
     /// Wraps an untruncated output.
     fn finished(call: &ToolCall, output: ToolOutput, outcome: ToolOutcome) -> Self {
         Self {
+            stats: OutputStats::of(&output.content, false),
             result: ToolResult {
                 call_id: call.id.clone(),
                 content: output.content,
@@ -787,6 +792,12 @@ mod tests {
         let path = execution.full_output.expect("full output kept");
         assert_eq!(path, dir.path().join("tool-output").join("c1.txt"));
         assert_eq!(std::fs::read_to_string(&path).expect("file").len(), 500);
+        assert!(execution.stats.truncated);
+        assert_eq!(execution.stats.bytes, 500);
+        assert_eq!(
+            execution.stats.digest,
+            digest(std::fs::read_to_string(&path).expect("file").as_bytes())
+        );
         assert!(
             execution
                 .result

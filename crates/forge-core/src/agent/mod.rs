@@ -426,6 +426,7 @@ impl AgentLoop {
                 self.events.emit(LoopEvent::Compacted {
                     dropped_messages: compaction.dropped_messages,
                     summary_path: compaction.summary_path,
+                    usage: compaction.usage,
                 });
             }
             Ok(None) => tracing::debug!("context is large but there are too few turns to compact"),
@@ -756,6 +757,7 @@ impl AgentLoop {
                 name: call.name.clone(),
                 outcome: execution.outcome,
                 preview: preview(&execution.result.content),
+                stats: execution.stats,
             });
             results.push(execution.result);
         }
@@ -773,6 +775,8 @@ impl AgentLoop {
             state,
             stop_reason: turn.stop_reason.clone(),
             usage: turn.usage,
+            latency_ms: turn.latency_ms,
+            retries: turn.retries,
         });
     }
 

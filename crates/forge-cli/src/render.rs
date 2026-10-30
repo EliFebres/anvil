@@ -151,6 +151,7 @@ impl Renderer {
             LoopEvent::Compacted {
                 dropped_messages,
                 summary_path,
+                ..
             } => {
                 self.end_line();
                 eprintln!(

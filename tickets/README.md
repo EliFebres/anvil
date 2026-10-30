@@ -6,4 +6,4 @@ A ticket records what went wrong or was missing (`symptom`), the interface wante
 
 This directory is the data boundary between forge and the factory. The validator refuses any ticket whose `repro` or `spec` contains a path outside this repository or more than 40 lines of code, and `cargo test -p forge-types` runs that validator over every file here.
 
-Lifecycle: `open` → `claimed` → `in_review` → `merged` or `rejected`. Only `open/` exists for now.
+Lifecycle: `draft` → `open` → `claimed` → `in_review` → `merged` or `rejected`. `forge ticket draft` writes drafts to `tickets/draft/` (per machine, not committed); `forge ticket submit` validates one, moves it to `open/` and pushes it on a `tickets/<id>` branch. Only `open/` is committed.

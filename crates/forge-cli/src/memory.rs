@@ -19,6 +19,7 @@ use forge_memory::{
     Decision, FactStore, MEMORY_TOKEN_CAP, Proposal, Rule, RuleSet, load_memory, paths, run_checks,
 };
 
+use crate::telemetry::SessionTelemetry;
 use crate::terminal::read_line;
 use crate::wiring::Wiring;
 
@@ -311,9 +312,20 @@ pub fn terminal_decider(yes: bool) -> Box<dyn FnMut(&Proposal) -> Decision> {
 /// * `session_id` - The session.
 /// * `messages` - The session's conversation.
 /// * `yes` - Whether `--yes` was given.
-pub async fn finish_session(wiring: &Wiring, session_id: &str, messages: &[Message], yes: bool) {
+/// * `telemetry` - Where the summarizer's completions are recorded, if anywhere.
+pub async fn finish_session(
+    wiring: &Wiring,
+    session_id: &str,
+    messages: &[Message],
+    yes: bool,
+    telemetry: Option<&SessionTelemetry>,
+) {
     let outcome = async {
-        let summarizer = wiring.provider(&wiring.config.roles.summarizer)?;
+        let name = &wiring.config.roles.summarizer;
+        let mut summarizer = wiring.provider(name)?;
+        if let Some(telemetry) = telemetry {
+            summarizer = telemetry.recorded(name, summarizer, "memory");
+        }
         let mut decide = terminal_decider(yes);
         extract_after_session(
             &*summarizer,

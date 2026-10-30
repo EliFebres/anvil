@@ -13,7 +13,8 @@ pub mod skill;
 pub mod ticket;
 
 pub use config::{
-    ForgeConfig, LimitsConfig, Protocol, ProviderConfig, Roles, StateBudget, ToolsConfig,
+    ForgeConfig, LimitsConfig, Price, Protocol, ProviderConfig, Roles, StateBudget,
+    TelemetryConfig, TicketsConfig, ToolsConfig,
 };
 pub use error::ValidationError;
 pub use skill::SkillManifest;

@@ -166,6 +166,12 @@ pub enum Event {
     ToolCall(ToolCall),
     /// Token usage for the whole completion.
     Usage(Usage),
+    /// The request was re-sent after retryable failures. Sent at most once,
+    /// before any content, and only when at least one retry happened.
+    Retried {
+        /// How many retries preceded the successful attempt.
+        retries: u32,
+    },
     /// The completion finished.
     Done {
         /// Why the model stopped.

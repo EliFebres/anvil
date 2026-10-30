@@ -278,3 +278,65 @@ fn skill_add_list_show_and_remove_in_project_scope() {
         .expect("forge runs");
     assert!(!String::from_utf8_lossy(&after.stdout).contains("my-skill"));
 }
+
+#[test]
+fn ticket_list_and_stats_work_on_an_empty_project() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = tempfile::tempdir().expect("home");
+    let list = forge(dir.path())
+        .env("FORGE_HOME", home.path())
+        .args(["ticket", "list"])
+        .output()
+        .expect("forge runs");
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    assert!(String::from_utf8_lossy(&list.stdout).contains("no tickets"));
+
+    let stats = forge(dir.path())
+        .env("FORGE_HOME", home.path())
+        .args(["stats", "--since", "2w"])
+        .output()
+        .expect("forge runs");
+    assert!(
+        stats.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stats.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&stats.stdout);
+    assert!(stdout.contains("sessions: 0"), "{stdout}");
+    assert!(stdout.contains("completion rate: n/a"), "{stdout}");
+
+    let bad = forge(dir.path())
+        .env("FORGE_HOME", home.path())
+        .args(["stats", "--since", "soon"])
+        .output()
+        .expect("forge runs");
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("not a duration"));
+
+    let missing = forge(dir.path())
+        .env("FORGE_HOME", home.path())
+        .args(["ticket", "show", "01NOPE"])
+        .output()
+        .expect("forge runs");
+    assert!(!missing.status.success());
+}
+
+#[test]
+fn ticket_submit_help_states_the_outbound_rule() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let help = forge(dir.path())
+        .args(["ticket", "submit", "--help"])
+        .output()
+        .expect("forge runs");
+    assert!(help.status.success());
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(
+        stdout.contains("only thing that ever leaves this machine"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("--all"), "{stdout}");
+}

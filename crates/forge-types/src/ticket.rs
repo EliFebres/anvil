@@ -49,6 +49,8 @@ pub enum Priority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TicketStatus {
+    /// Drafted by forge in `tickets/draft/`, not yet submitted.
+    Draft,
     /// Waiting in `tickets/open/`.
     Open,
     /// A factory worker has taken it.

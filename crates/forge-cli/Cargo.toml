@@ -11,10 +11,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 clap.workspace = true
 forge-compat.workspace = true
 forge-core.workspace = true
 forge-memory.workspace = true
+forge-telemetry.workspace = true
 forge-types.workspace = true
 futures-util.workspace = true
 rustyline.workspace = true
@@ -24,6 +26,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

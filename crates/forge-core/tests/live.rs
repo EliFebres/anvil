@@ -29,6 +29,7 @@ async fn live_endpoint_answers_pong() {
         supports_tools: std::env::var("FORGE_LIVE_NO_TOOLS").is_err(),
         supports_reasoning: std::env::var("FORGE_LIVE_REASONING").is_ok(),
         max_output_tokens: Some(256),
+        price_per_mtoken: None,
     };
     let provider = provider::from_config(
         "live",

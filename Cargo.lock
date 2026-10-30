@@ -480,10 +480,12 @@ name = "forge-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "forge-compat",
  "forge-core",
  "forge-memory",
+ "forge-telemetry",
  "forge-types",
  "futures-util",
  "insta",
@@ -495,6 +497,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "ulid",
 ]
 
 [[package]]
@@ -558,6 +561,18 @@ dependencies = [
 [[package]]
 name = "forge-telemetry"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "forge-types",
+ "insta",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "tracing",
+ "ulid",
+]
 
 [[package]]
 name = "forge-types"

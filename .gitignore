@@ -31,3 +31,6 @@ rustc-ice-*.txt
 # insta pending snapshots
 *.snap.new
 .forge/mcp-cache/
+
+# forge ticket drafts are per machine; only tickets/open/ is committed
+tickets/draft/

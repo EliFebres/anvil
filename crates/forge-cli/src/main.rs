@@ -10,7 +10,10 @@ mod memory;
 mod render;
 mod rules;
 mod skills;
+mod stats;
+mod telemetry;
 mod terminal;
+mod ticket;
 mod wiring;
 
 use clap::Parser;
@@ -60,6 +63,13 @@ async fn dispatch(cli: Cli) -> anyhow::Result<i32> {
         }
         Some(Command::Skill { command }) => skills::run(command, home.as_deref(), &cwd).await,
         Some(Command::Rules { command }) => rules::run(command, home.as_deref(), &cwd),
+        Some(Command::Stats { since }) => {
+            let config = config_load::load(home.as_deref(), &cwd)
+                .ok()
+                .map(|loaded| loaded.config);
+            stats::run(config.as_ref(), &cwd, &since)
+        }
+        Some(Command::Ticket { command }) => ticket::run(command, home.as_deref(), &cwd).await,
         Some(Command::Compat {
             command: CompatCommand::Check { path },
         }) => {

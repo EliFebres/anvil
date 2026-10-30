@@ -63,6 +63,52 @@ pub enum Command {
         #[command(subcommand)]
         command: RulesCommand,
     },
+    /// Summarize this project's telemetry: sessions, completion rate, tokens and cost.
+    Stats {
+        /// How far back to look: a number followed by m, h, d or w.
+        #[arg(long, default_value = "7d")]
+        since: String,
+    },
+    /// Draft, review and submit improvement tickets from this project's telemetry.
+    Ticket {
+        /// Which ticket action to take.
+        #[command(subcommand)]
+        command: TicketCommand,
+    },
+}
+
+/// Subcommands under `forge ticket`.
+#[derive(Debug, Subcommand)]
+pub enum TicketCommand {
+    /// Turn recorded signals into ticket drafts under `tickets/draft/` with the summarizer.
+    Draft,
+    /// List drafts and open tickets.
+    List,
+    /// Print one ticket.
+    Show {
+        /// A ticket id or a unique prefix of one.
+        id: String,
+    },
+    /// Validate a draft, move it to `tickets/open/`, commit it on a `tickets/<id>` branch and push.
+    ///
+    /// This push is the only thing that ever leaves this machine toward the
+    /// factory. The ticket carries no project code, paths or session text;
+    /// the validator refuses one that does. Nothing is fetched.
+    Submit {
+        /// A ticket id or a unique prefix of one.
+        #[arg(required_unless_present = "all")]
+        id: Option<String>,
+        /// Submit every draft.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Delete a draft.
+    Drop {
+        /// A ticket id or a unique prefix of one.
+        id: String,
+    },
+    /// Walk through every draft and submit, drop or edit each one.
+    Review,
 }
 
 /// Subcommands under `forge rules`.

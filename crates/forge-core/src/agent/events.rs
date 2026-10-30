@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use super::state::{State, Status};
 use super::verdict::ReviewVerdict;
 use crate::provider::{StopReason, ToolCall, Usage};
-use crate::tools::ToolOutcome;
+use crate::tools::{OutputStats, ToolOutcome};
 
 /// Something the loop did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +38,10 @@ pub enum LoopEvent {
         stop_reason: StopReason,
         /// Tokens it used, when the provider reported them.
         usage: Option<Usage>,
+        /// Wall-clock milliseconds the completion took.
+        latency_ms: u64,
+        /// Retries before the request got through.
+        retries: u32,
     },
     /// A tool call is about to run.
     ToolStarted {
@@ -54,6 +58,8 @@ pub enum LoopEvent {
         outcome: ToolOutcome,
         /// The first line of the result.
         preview: String,
+        /// Size and digest of the full result.
+        stats: OutputStats,
     },
     /// The plan was written to disk.
     PlanWritten {
@@ -85,6 +91,8 @@ pub enum LoopEvent {
         dropped_messages: usize,
         /// Where the summary was written.
         summary_path: PathBuf,
+        /// Tokens the summarizer used, when reported.
+        usage: Option<Usage>,
     },
     /// Something non-fatal worth telling the user.
     Warning(String),

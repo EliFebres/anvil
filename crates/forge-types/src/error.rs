@@ -57,6 +57,13 @@ pub enum ValidationError {
         provider: String,
     },
 
+    /// A provider price is negative.
+    #[error("provider `{name}` has a negative price_per_mtoken")]
+    NegativePrice {
+        /// The provider entry name.
+        name: String,
+    },
+
     /// A provider base URL is not an http or https URL.
     #[error("provider `{name}` has base_url `{base_url}`; it must start with http:// or https://")]
     InvalidBaseUrl {

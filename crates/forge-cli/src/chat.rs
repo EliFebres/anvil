@@ -16,12 +16,12 @@ use forge_core::agent::{EventSink, LoopEvent, State};
 use forge_core::context::{Conversation, discover_instructions};
 use forge_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use forge_core::tools::{Access, ToolContext, ToolRegistry};
+use forge_telemetry::{RecordKind, SessionMode, SessionOutcome};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
-use tokio::sync::mpsc;
 
 use crate::memory;
-use crate::render;
+use crate::telemetry::SessionTelemetry;
 use crate::wiring::Wiring;
 
 /// Lines of help printed by `/help`.
@@ -33,6 +33,7 @@ rule: <text>     save a standing rule to ~/.forge/rules.toml
 /compact         summarize older turns with the summarizer
 /model <name>    switch the coder to a provider from [providers]
 /cost            tokens used so far
+/ticket <text>   flag something about forge for a ticket; `forge ticket draft` writes it
 /quit            leave";
 
 /// Runs the REPL until the user quits, then proposes facts to remember.
@@ -55,6 +56,7 @@ pub async fn chat(wiring: &Wiring, yes: bool) -> anyhow::Result<i32> {
     std::fs::create_dir_all(&session_dir).context("creating the session folder")?;
     eprintln!("chat session {id}; /help for commands");
     let wiring = &wiring.with_session(&id, &session_dir);
+    let telemetry = SessionTelemetry::start(wiring, &id, SessionMode::Chat);
     memory::prompt_sections(wiring.home.as_deref(), &wiring.cwd)?;
     let hooks = wiring.hook_runner();
     let mut session_context = Vec::new();
@@ -63,14 +65,15 @@ pub async fn chat(wiring: &Wiring, yes: bool) -> anyhow::Result<i32> {
             hooks.session_start().await,
         ));
     }
-    let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(render::render(rx, false));
+    let (events, tee) = telemetry.sink(true);
+    let registry = wiring.registry(telemetry.prompt())?;
+    telemetry.record_skill_requires(wiring, &registry);
     let mut session = ChatSession {
         wiring,
         mode: State::Build,
         coder_name: wiring.config.roles.coder.clone(),
         coder: wiring.provider(&wiring.config.roles.coder)?,
-        registry: wiring.registry(Wiring::prompt())?,
+        registry,
         ctx: ToolContext {
             session_dir: Some(session_dir.clone()),
             ..wiring.tool_context()
@@ -79,9 +82,10 @@ pub async fn chat(wiring: &Wiring, yes: bool) -> anyhow::Result<i32> {
         conversation: Conversation::new(),
         touched: BTreeSet::new(),
         tokens_used: 0,
-        events: EventSink::new(tx),
+        events,
         hooks,
         session_context,
+        telemetry: telemetry.clone(),
     };
     let mut editor = DefaultEditor::new().context("starting the line editor")?;
     loop {
@@ -115,8 +119,11 @@ pub async fn chat(wiring: &Wiring, yes: bool) -> anyhow::Result<i32> {
         let text = session.turn(line).await;
         session.after_turn(text).await;
     }
-    tokio::task::yield_now().await;
-    memory::finish_session(wiring, &id, session.conversation.messages(), yes).await;
+    let messages = session.conversation.messages().to_vec();
+    drop(session);
+    let _ = tee.await;
+    memory::finish_session(wiring, &id, &messages, yes, Some(&telemetry)).await;
+    telemetry.finish(SessionOutcome::Chat);
     Ok(0)
 }
 
@@ -135,6 +142,7 @@ struct ChatSession<'a> {
     events: EventSink,
     hooks: Option<Arc<forge_compat::HookRunner>>,
     session_context: Vec<forge_core::agent::Instruction>,
+    telemetry: SessionTelemetry,
 }
 
 impl ChatSession<'_> {
@@ -150,6 +158,7 @@ impl ChatSession<'_> {
                 Ok(provider) => {
                     self.coder = provider;
                     self.coder_name = name.to_owned();
+                    self.telemetry.set_coder(name);
                     eprintln!("coder is now `{name}`");
                 }
                 Err(error) => eprintln!("error: {error:#}"),
@@ -181,6 +190,22 @@ impl ChatSession<'_> {
                     eprintln!("\ncommands (from .forge/commands and .claude/commands):");
                     for line in commands {
                         eprintln!("{line}");
+                    }
+                }
+            }
+            ("ticket", _) => {
+                let text = command.trim_start_matches("ticket").trim();
+                if text.is_empty() {
+                    eprintln!("usage: /ticket <what forge should do better>");
+                } else {
+                    match RecordKind::user_flag(text) {
+                        Ok(flag) => {
+                            self.telemetry.record(flag);
+                            eprintln!(
+                                "flagged; `forge ticket draft` after this chat turns it into a ticket"
+                            );
+                        }
+                        Err(error) => eprintln!("not recorded: {error}"),
                     }
                 }
             }
@@ -231,10 +256,19 @@ impl ChatSession<'_> {
             let turn = match complete_turn(&*self.coder, request, &self.events).await {
                 Ok(turn) => turn,
                 Err(error) => {
+                    self.telemetry
+                        .record_provider_error(&self.coder_name, &error);
                     eprintln!("\nerror: {error}");
                     return String::new();
                 }
             };
+            self.events.emit(LoopEvent::TurnFinished {
+                state: self.mode,
+                stop_reason: turn.stop_reason.clone(),
+                usage: turn.usage,
+                latency_ms: turn.latency_ms,
+                retries: turn.retries,
+            });
             if let Some(usage) = turn.usage {
                 self.tokens_used += usage.total();
                 self.conversation.record_usage(request_len, usage);
@@ -266,6 +300,7 @@ impl ChatSession<'_> {
                         .next()
                         .unwrap_or("")
                         .to_owned(),
+                    stats: execution.stats,
                 });
                 results.push(execution.result);
             }

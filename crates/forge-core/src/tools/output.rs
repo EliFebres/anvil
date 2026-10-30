@@ -5,6 +5,56 @@ use std::path::{Path, PathBuf};
 /// Folder under the session directory that holds full tool outputs.
 const OUTPUT_DIR: &str = "tool-output";
 
+/// Size and shape of a tool's full output, for telemetry that must never
+/// see the content itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OutputStats {
+    /// Byte length of the full output, before truncation.
+    pub bytes: usize,
+    /// Whether the model saw a truncated copy.
+    pub truncated: bool,
+    /// [`digest`] of the full output.
+    pub digest: u64,
+}
+
+impl OutputStats {
+    /// Measures an output.
+    ///
+    /// # Arguments
+    ///
+    /// * `content` - The full output.
+    /// * `truncated` - Whether the model saw a truncated copy.
+    ///
+    /// # Returns
+    ///
+    /// The stats.
+    pub fn of(content: &str, truncated: bool) -> Self {
+        Self {
+            bytes: content.len(),
+            truncated,
+            digest: digest(content.as_bytes()),
+        }
+    }
+}
+
+/// A stable 64-bit FNV-1a digest, for telemetry keys that must not reveal
+/// the text they stand for.
+///
+/// # Arguments
+///
+/// * `bytes` - What to digest.
+///
+/// # Returns
+///
+/// The digest.
+pub fn digest(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes.iter().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(PRIME)
+    })
+}
+
 /// Cuts `content` to at most `cap` bytes on a character boundary.
 ///
 /// # Arguments
@@ -89,6 +139,16 @@ pub(crate) fn write_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_is_stable_and_stats_measure_bytes() {
+        assert_eq!(digest(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(digest(b"a"), 0xaf63_dc4c_8601_ec8c);
+        let stats = OutputStats::of("héllo", false);
+        assert_eq!(stats.bytes, 6);
+        assert!(!stats.truncated);
+        assert_eq!(stats.digest, digest("héllo".as_bytes()));
+    }
 
     #[test]
     fn truncate_respects_char_boundaries() {

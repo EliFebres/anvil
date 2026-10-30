@@ -121,7 +121,22 @@ where
     F: FnMut(u32) -> Fut,
     Fut: Future<Output = Attempt<ByteStream>>,
 {
-    let mut bytes = retry(policy, attempt).await?;
+    let mut last_attempt = 0;
+    let mut bytes = retry(policy, |index| {
+        last_attempt = index;
+        attempt(index)
+    })
+    .await?;
+    if last_attempt > 0
+        && tx
+            .send(Ok(Event::Retried {
+                retries: last_attempt,
+            }))
+            .await
+            .is_err()
+    {
+        return Ok(());
+    }
     let mut parser = SseParser::default();
     while let Some(chunk) = bytes.next().await {
         let chunk = chunk?;
@@ -327,8 +342,9 @@ mod tests {
             TextDecoder::default(),
         );
         let items = collect(events).await;
-        assert_eq!(items[0], Ok(Event::TextDelta("ok".to_owned())));
-        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], Ok(Event::Retried { retries: 1 }));
+        assert_eq!(items[1], Ok(Event::TextDelta("ok".to_owned())));
+        assert_eq!(items.len(), 3);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 

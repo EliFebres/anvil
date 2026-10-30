@@ -170,6 +170,11 @@ expression: ticket_schema()
       "description": "Where a ticket is in its lifecycle.",
       "oneOf": [
         {
+          "description": "Drafted by forge in `tickets/draft/`, not yet submitted.",
+          "type": "string",
+          "const": "draft"
+        },
+        {
           "description": "Waiting in `tickets/open/`.",
           "type": "string",
           "const": "open"

@@ -4,14 +4,15 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, bail};
-use forge_core::agent::{AgentLoop, EventSink, LoopResult};
+use forge_core::agent::{AgentLoop, LoopResult};
 use forge_core::context;
 use forge_core::provider::{CompletionRequest, Message};
-use tokio::sync::mpsc;
+use forge_telemetry::SessionMode;
+use tokio::task::JoinHandle;
 
 use crate::config_load::LoadedConfig;
 use crate::memory;
-use crate::render;
+use crate::telemetry::SessionTelemetry;
 use crate::wiring::{Wiring, home_dir};
 
 /// Runs a task through the loop and returns the process exit code.
@@ -33,8 +34,10 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
     let (session_dir, id) = wiring.new_session_dir();
     eprintln!("session {id}");
     let wiring = wiring.with_session(&id, &session_dir);
+    let telemetry = SessionTelemetry::start(&wiring, &id, SessionMode::Run);
     let task = wiring.expand_slash(&task).unwrap_or(task);
-    let registry = wiring.registry(Wiring::prompt())?;
+    let registry = wiring.registry(telemetry.prompt())?;
+    telemetry.record_skill_requires(&wiring, &registry);
     let mut config = wiring.loop_config(task, session_dir, &registry)?;
     let hooks = wiring.hook_runner();
     if let Some(hooks) = &hooks {
@@ -44,27 +47,31 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
                 hooks.session_start().await,
             ));
     }
+    let (sink, tee) = telemetry.sink(true);
     let mut agent = AgentLoop::new(
         config,
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
         Wiring::gate(yes),
-        sink(),
+        sink,
     );
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = drive(agent).await;
+    let result = drive(agent, tee).await;
     run_stop_hooks(hooks.as_deref(), &result).await;
-    remember(&wiring, &id, yes).await;
+    remember(&wiring, &id, yes, &telemetry).await;
+    telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())
 }
 
 /// Runs the memory extraction over the session log of a finished run.
-async fn remember(wiring: &Wiring, id: &str, yes: bool) {
+async fn remember(wiring: &Wiring, id: &str, yes: bool, telemetry: &SessionTelemetry) {
     match context::load_session(&wiring.cwd, id) {
-        Ok(snapshot) => memory::finish_session(wiring, id, &snapshot.messages, yes).await,
+        Ok(snapshot) => {
+            memory::finish_session(wiring, id, &snapshot.messages, yes, Some(telemetry)).await;
+        }
         Err(error) => eprintln!("warning: memory extraction skipped: {error}"),
     }
 }
@@ -98,7 +105,9 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
     let snapshot = context::load_session(&wiring.cwd, id).context("loading the session")?;
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
     let wiring = wiring.with_session(id, &snapshot.dir);
-    let registry = wiring.registry(Wiring::prompt())?;
+    let telemetry = SessionTelemetry::start(&wiring, id, SessionMode::Resume);
+    let registry = wiring.registry(telemetry.prompt())?;
+    telemetry.record_skill_requires(&wiring, &registry);
     let mut config =
         wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry)?;
     let hooks = wiring.hook_runner();
@@ -109,6 +118,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
                 hooks.session_start().await,
             ));
     }
+    let (sink, tee) = telemetry.sink(true);
     let mut agent = AgentLoop::resume(
         snapshot,
         config,
@@ -116,28 +126,22 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
         registry,
         wiring.tool_context(),
         Wiring::gate(yes),
-        sink(),
+        sink,
     );
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = drive(agent).await;
+    let result = drive(agent, tee).await;
     run_stop_hooks(hooks.as_deref(), &result).await;
-    remember(&wiring, id, yes).await;
+    remember(&wiring, id, yes, &telemetry).await;
+    telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())
 }
 
-/// A sink whose receiver is rendered on a background task.
-fn sink() -> EventSink {
-    let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(render::render(rx, false));
-    EventSink::new(tx)
-}
-
-/// Runs the loop and gives the renderer a moment to flush.
-async fn drive(agent: AgentLoop) -> LoopResult {
+/// Runs the loop, then waits for every event to be recorded and rendered.
+async fn drive(agent: AgentLoop, tee: JoinHandle<()>) -> LoopResult {
     let result = agent.run().await;
-    tokio::task::yield_now().await;
+    let _ = tee.await;
     result
 }
 

@@ -157,6 +157,7 @@ mod tests {
             supports_tools,
             supports_reasoning: false,
             max_output_tokens: None,
+            price_per_mtoken: None,
         }
     }
 
