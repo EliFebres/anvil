@@ -1,6 +1,35 @@
-//! Detects how a project runs its checks.
+//! Detects how a project runs its checks, and the hook for checks that
+//! come from outside the loop.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// What a check supplied from outside the loop reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeCheckFailure {
+    /// Which check failed, as the model should cite it.
+    pub name: String,
+    /// What it reported.
+    pub output: String,
+}
+
+/// Checks the Verify state runs on the files the session changed, before
+/// the project's own check command.
+///
+/// The CLI supplies them; forge-core only knows that a failure sends the
+/// loop back to Build with the output as feedback.
+pub trait ChangeChecks: Send + Sync {
+    /// Runs every check on the changed files.
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The project root.
+    /// * `changed` - Absolute paths of the files the session changed.
+    ///
+    /// # Returns
+    ///
+    /// One entry per failed check; empty when everything passed.
+    fn run(&self, cwd: &Path, changed: &[PathBuf]) -> Vec<ChangeCheckFailure>;
+}
 
 /// How the Verify state runs the project's checks.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

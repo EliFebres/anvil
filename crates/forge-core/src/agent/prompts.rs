@@ -1,8 +1,9 @@
 //! System prompt assembly from the prompt files compiled into the binary.
 //!
 //! Order: forge's base prompt, the active state's prompt, instruction files,
-//! the tool list, then the user's task. The prompt files live in
-//! `crates/forge-core/prompts/` and are snapshot-tested here.
+//! sections supplied from outside the loop, the tool list, then the user's
+//! task. The prompt files live in `crates/forge-core/prompts/` and are
+//! snapshot-tested here.
 
 use super::state::State;
 use crate::provider::ToolSpec;
@@ -54,6 +55,25 @@ pub struct Instruction {
     pub text: String,
 }
 
+/// A section supplied from outside the loop, rendered under its own heading.
+///
+/// The CLI uses it for things forge-core does not know about, such as the
+/// user's standing rules and what forge remembers about the repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptSection {
+    /// The heading, without the `# `.
+    pub heading: String,
+    /// The section body.
+    pub text: String,
+}
+
+impl PromptSection {
+    /// `# heading` followed by the body.
+    fn render(&self) -> String {
+        format!("# {}\n\n{}", self.heading.trim(), self.text.trim_end())
+    }
+}
+
 /// Everything that goes into one system prompt.
 #[derive(Debug, Clone)]
 pub struct PromptInputs<'a> {
@@ -61,6 +81,8 @@ pub struct PromptInputs<'a> {
     pub state: State,
     /// Instruction files, in the order they apply.
     pub instructions: &'a [Instruction],
+    /// Sections from outside the loop, after the instruction files.
+    pub sections: &'a [PromptSection],
     /// Tools on offer in this state.
     pub tools: &'a [ToolSpec],
     /// The user's task.
@@ -77,20 +99,36 @@ pub struct PromptInputs<'a> {
 ///
 /// The prompt text.
 pub fn system_prompt(inputs: &PromptInputs<'_>) -> String {
-    let mut sections = vec![
+    let mut parts = vec![
         BASE.trim_end().to_owned(),
         state_prompt(inputs.state).trim_end().to_owned(),
     ];
     for instruction in inputs.instructions {
-        sections.push(format!(
+        parts.push(format!(
             "# Instructions from {}\n\n{}",
             instruction.source,
             instruction.text.trim_end()
         ));
     }
-    sections.push(tool_section(inputs.tools));
-    sections.push(format!("# Task\n\n{}", inputs.task.trim_end()));
-    sections.join("\n\n")
+    parts.extend(inputs.sections.iter().map(PromptSection::render));
+    parts.push(tool_section(inputs.tools));
+    parts.push(format!("# Task\n\n{}", inputs.task.trim_end()));
+    parts.join("\n\n")
+}
+
+/// Assembles the reviewer's system prompt: [`REVIEW`] plus any sections.
+///
+/// # Arguments
+///
+/// * `sections` - Sections from outside the loop, such as standing rules.
+///
+/// # Returns
+///
+/// The prompt text.
+pub fn review_prompt(sections: &[PromptSection]) -> String {
+    let mut parts = vec![REVIEW.trim_end().to_owned()];
+    parts.extend(sections.iter().map(PromptSection::render));
+    parts.join("\n\n")
 }
 
 /// Lists the tools by name and description.
@@ -128,6 +166,7 @@ mod tests {
         system_prompt(&PromptInputs {
             state,
             instructions,
+            sections: &[],
             tools,
             task: "add a --dry-run flag to the export command",
         })
@@ -172,5 +211,37 @@ mod tests {
         assert!(base < state && state < tools && tools < task);
         assert!(text.contains("No tools are available"));
         assert_eq!(state_prompt(State::Done), "");
+    }
+
+    #[test]
+    fn extra_sections_follow_the_instruction_files() {
+        let instructions = [Instruction {
+            source: "CLAUDE.md".to_owned(),
+            text: "repo rules".to_owned(),
+        }];
+        let sections = [PromptSection {
+            heading: "Standing rules".to_owned(),
+            text: "1. [x] be kind\n".to_owned(),
+        }];
+        let text = system_prompt(&PromptInputs {
+            state: State::Build,
+            instructions: &instructions,
+            sections: &sections,
+            tools: &[],
+            task: "t",
+        });
+        let repo = text.find("# Instructions from CLAUDE.md").expect("repo");
+        let rules = text
+            .find("# Standing rules\n\n1. [x] be kind\n\n# Tools")
+            .expect("rules");
+        assert!(repo < rules, "{text}");
+
+        let review = review_prompt(&sections);
+        assert!(review.starts_with(REVIEW.trim_end()));
+        assert!(
+            review.ends_with("# Standing rules\n\n1. [x] be kind"),
+            "{review}"
+        );
+        assert_eq!(review_prompt(&[]), REVIEW.trim_end());
     }
 }

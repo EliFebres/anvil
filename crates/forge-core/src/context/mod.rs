@@ -5,7 +5,9 @@ pub mod conversation;
 pub mod instructions;
 pub mod session;
 
-pub use conversation::{Compaction, Conversation, KEEP_LAST_TURNS, estimate_tokens};
+pub use conversation::{
+    Compaction, Conversation, KEEP_LAST_TURNS, collect_text, estimate_tokens, render_transcript,
+};
 pub use instructions::discover_instructions;
 pub use session::{
     SessionError, SessionLog, SessionMeta, SessionRecord, SessionSnapshot, SessionSummary,

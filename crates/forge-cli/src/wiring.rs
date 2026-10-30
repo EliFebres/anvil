@@ -10,7 +10,7 @@ use forge_compat::{
     SkillSet, SkillTool, SubagentEnv,
 };
 use forge_core::agent::{
-    AutoApprove, CheckCommand, Instruction, LoopConfig, LoopProviders, PlanGate,
+    AutoApprove, ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders, PlanGate,
 };
 use forge_core::context;
 use forge_core::provider::{self, Provider, SharedBudget, TokenBudget};
@@ -19,7 +19,22 @@ use forge_core::tools::{
 };
 use forge_types::ForgeConfig;
 
+use crate::memory::{self, RuleChecks};
 use crate::terminal::{TerminalGate, TerminalPrompt};
+
+/// The home directory: `FORGE_HOME` when set, otherwise the OS home.
+///
+/// The override exists so tests can point `~/.forge` at a temp folder;
+/// Windows finds the real home without `HOME` or `USERPROFILE`.
+///
+/// # Returns
+///
+/// The directory, if any.
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("FORGE_HOME")
+        .map(PathBuf::from)
+        .or_else(std::env::home_dir)
+}
 
 /// Everything a run or a chat needs, built once from config.
 ///
@@ -98,7 +113,7 @@ impl Wiring {
     /// When the current directory cannot be determined.
     pub fn new(config: ForgeConfig) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir().context("cannot determine the current directory")?;
-        let home = std::env::home_dir();
+        let home = home_dir();
         let budget = TokenBudget::shared(config.limits.session_tokens);
         let skills = Arc::new(SkillSet::discover(&skill_roots(&cwd, home.as_deref())));
         let commands = CommandSet::discover(&cwd, home.as_deref());
@@ -394,7 +409,8 @@ impl Wiring {
         }
     }
 
-    /// The loop settings for a task.
+    /// The loop settings for a task, with the standing rules and the
+    /// remembered facts as prompt sections.
     ///
     /// # Arguments
     ///
@@ -405,13 +421,18 @@ impl Wiring {
     /// # Returns
     ///
     /// The config.
+    ///
+    /// # Errors
+    ///
+    /// When `~/.forge/rules.toml` is malformed.
     pub fn loop_config(
         &self,
         task: String,
         session_dir: PathBuf,
         registry: &ToolRegistry,
-    ) -> LoopConfig {
-        LoopConfig {
+    ) -> anyhow::Result<LoopConfig> {
+        let sections = memory::prompt_sections(self.home.as_deref(), &self.cwd)?;
+        Ok(LoopConfig {
             task,
             cwd: self.cwd.clone(),
             session_dir,
@@ -420,6 +441,24 @@ impl Wiring {
             context_window: self.context_window(),
             home_dir: self.home.clone(),
             extra_instructions: self.extra_instructions(&registry.names()),
+            sections: sections.coder,
+            review_sections: sections.review,
+        })
+    }
+
+    /// The standing rule checks for the Verify state.
+    ///
+    /// # Returns
+    ///
+    /// The checks, or `None` without a home directory.
+    ///
+    /// # Errors
+    ///
+    /// When `~/.forge/rules.toml` is malformed.
+    pub fn change_checks(&self) -> anyhow::Result<Option<Arc<dyn ChangeChecks>>> {
+        match &self.home {
+            Some(home) => Ok(Some(Arc::new(RuleChecks::load(home)?))),
+            None => Ok(None),
         }
     }
 

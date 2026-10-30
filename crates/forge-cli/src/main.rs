@@ -6,7 +6,9 @@ mod commands;
 mod config_init;
 mod config_load;
 mod logging;
+mod memory;
 mod render;
+mod rules;
 mod skills;
 mod terminal;
 mod wiring;
@@ -14,7 +16,7 @@ mod wiring;
 use clap::Parser;
 
 use crate::cli::{Cli, Command, CompatCommand, ConfigCommand};
-use crate::wiring::Wiring;
+use crate::wiring::{Wiring, home_dir};
 
 /// Exit code for configuration and setup errors.
 const SETUP_FAILURE: i32 = 1;
@@ -36,7 +38,7 @@ async fn main() {
 async fn dispatch(cli: Cli) -> anyhow::Result<i32> {
     let cwd = std::env::current_dir()?;
     let _log_guard = logging::init(&cwd);
-    let home = std::env::home_dir();
+    let home = home_dir();
     match cli.command {
         Some(Command::Config {
             command: ConfigCommand::Init { global },
@@ -57,6 +59,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<i32> {
             Ok(0)
         }
         Some(Command::Skill { command }) => skills::run(command, home.as_deref(), &cwd).await,
+        Some(Command::Rules { command }) => rules::run(command, home.as_deref(), &cwd),
         Some(Command::Compat {
             command: CompatCommand::Check { path },
         }) => {
@@ -72,7 +75,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<i32> {
         Some(Command::Chat) => {
             let mut wiring = Wiring::new(config_load::load(home.as_deref(), &cwd)?.config)?;
             wiring.load_mcp().await;
-            chat::chat(&wiring).await
+            chat::chat(&wiring, cli.yes).await
         }
         Some(Command::Resume { id }) => {
             let mut wiring = Wiring::new(config_load::load(home.as_deref(), &cwd)?.config)?;

@@ -245,7 +245,21 @@ impl Conversation {
 }
 
 /// Runs a completion without tools and returns its text.
-async fn collect_text(
+///
+/// # Arguments
+///
+/// * `provider` - The model.
+/// * `request` - The request.
+///
+/// # Returns
+///
+/// The concatenated text deltas and the usage, if reported.
+///
+/// # Errors
+///
+/// The provider's error, or a malformed-stream error when the stream ends
+/// without a `Done` event.
+pub async fn collect_text(
     provider: &dyn Provider,
     request: CompletionRequest,
 ) -> Result<(String, Option<Usage>), ProviderError> {
@@ -265,7 +279,7 @@ async fn collect_text(
         }
     }
     Err(ProviderError::malformed(
-        "summarizer stream ended without a Done event",
+        "the stream ended without a Done event",
     ))
 }
 
@@ -312,9 +326,18 @@ fn estimate_messages(messages: &[Message]) -> u64 {
         .sum()
 }
 
-/// Renders messages as text for the summarizer, oldest first, dropping the
-/// oldest content when the cap is exceeded.
-fn render_transcript(messages: &[Message], max_chars: usize) -> String {
+/// Renders messages as text for a summarizer, oldest first, dropping the
+/// oldest messages when the cap is exceeded.
+///
+/// # Arguments
+///
+/// * `messages` - The conversation.
+/// * `max_chars` - Cap on the text; a leading note counts the omitted messages.
+///
+/// # Returns
+///
+/// The transcript.
+pub fn render_transcript(messages: &[Message], max_chars: usize) -> String {
     let mut parts: Vec<String> = messages
         .iter()
         .map(|message| match message {

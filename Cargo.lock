@@ -483,8 +483,10 @@ dependencies = [
  "clap",
  "forge-compat",
  "forge-core",
+ "forge-memory",
  "forge-types",
  "futures-util",
+ "insta",
  "rustyline",
  "serde_json",
  "tempfile",
@@ -543,6 +545,15 @@ dependencies = [
 [[package]]
 name = "forge-memory"
 version = "0.1.0"
+dependencies = [
+ "insta",
+ "regex",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "toml",
+ "tracing",
+]
 
 [[package]]
 name = "forge-telemetry"

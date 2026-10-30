@@ -6,6 +6,7 @@ use anyhow::{Context, bail};
 use forge_types::config::CONFIG_TEMPLATE;
 
 use crate::config_load::{CONFIG_DIR, CONFIG_FILE};
+use crate::wiring::home_dir;
 
 /// Writes the template config and returns its path.
 ///
@@ -42,7 +43,7 @@ pub fn run(global: bool) -> anyhow::Result<PathBuf> {
 /// Resolves the global or project config path.
 fn config_path(global: bool) -> anyhow::Result<PathBuf> {
     let base = if global {
-        std::env::home_dir().context("cannot determine the home directory")?
+        home_dir().context("cannot determine the home directory")?
     } else {
         PathBuf::new()
     };

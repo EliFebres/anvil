@@ -57,6 +57,46 @@ pub enum Command {
         #[command(subcommand)]
         command: CompatCommand,
     },
+    /// Manage the standing coding rules in `~/.forge/rules.toml`.
+    Rules {
+        /// Which rules action to take.
+        #[command(subcommand)]
+        command: RulesCommand,
+    },
+}
+
+/// Subcommands under `forge rules`.
+#[derive(Debug, Subcommand)]
+pub enum RulesCommand {
+    /// List every rule, seeding the file with the defaults on first use.
+    List,
+    /// Add a rule. Options go before the rule text.
+    Add {
+        /// The rule id, kebab-case.
+        id: String,
+        /// Languages the rule applies to, comma-separated; `*` for all.
+        #[arg(long, default_value = "*")]
+        languages: String,
+        /// A regex that must not match any line of a changed file.
+        #[arg(long, conflicts_with = "command")]
+        regex: Option<String>,
+        /// A command that gets the changed files as arguments and must exit zero.
+        #[arg(long)]
+        command: Option<String>,
+        /// The rule, one sentence.
+        #[arg(required = true, num_args = 1..)]
+        rule: Vec<String>,
+    },
+    /// Remove a rule by id.
+    Remove {
+        /// The rule id.
+        id: String,
+    },
+    /// Run every rule check on the given files, or on the files changed since HEAD.
+    Check {
+        /// Files to check; relative paths resolve against the current directory.
+        paths: Vec<std::path::PathBuf>,
+    },
 }
 
 /// Subcommands under `forge compat`.

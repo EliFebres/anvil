@@ -3,7 +3,8 @@
 //! The prompt shows the current mode (`[plan] >`, `[build] >`,
 //! `[review] >`), which picks the system prompt and the tool set for the
 //! next turns. Slash commands switch modes, compact, swap the model and
-//! report cost.
+//! report cost. A line starting with `rule:` becomes a standing rule
+//! instead of a message, and leaving the chat runs the memory extraction.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -19,11 +20,13 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use tokio::sync::mpsc;
 
+use crate::memory;
 use crate::render;
 use crate::wiring::Wiring;
 
 /// Lines of help printed by `/help`.
 const HELP: &str = "\
+rule: <text>     save a standing rule to ~/.forge/rules.toml
 /plan            read-only tools, planning prompt
 /build           all tools, build prompt
 /review          no tools, reviewer prompt
@@ -32,11 +35,12 @@ const HELP: &str = "\
 /cost            tokens used so far
 /quit            leave";
 
-/// Runs the REPL until the user quits.
+/// Runs the REPL until the user quits, then proposes facts to remember.
 ///
 /// # Arguments
 ///
 /// * `wiring` - Providers and paths.
+/// * `yes` - Whether `--yes` was given, which keeps every proposed fact.
 ///
 /// # Returns
 ///
@@ -44,12 +48,14 @@ const HELP: &str = "\
 ///
 /// # Errors
 ///
-/// When providers, permissions or the line editor cannot be set up.
-pub async fn chat(wiring: &Wiring) -> anyhow::Result<i32> {
+/// When providers, permissions, the rules file or the line editor cannot
+/// be set up.
+pub async fn chat(wiring: &Wiring, yes: bool) -> anyhow::Result<i32> {
     let (session_dir, id) = wiring.new_session_dir();
     std::fs::create_dir_all(&session_dir).context("creating the session folder")?;
     eprintln!("chat session {id}; /help for commands");
     let wiring = &wiring.with_session(&id, &session_dir);
+    memory::prompt_sections(wiring.home.as_deref(), &wiring.cwd)?;
     let hooks = wiring.hook_runner();
     let mut session_context = Vec::new();
     if let Some(hooks) = &hooks {
@@ -89,6 +95,17 @@ pub async fn chat(wiring: &Wiring) -> anyhow::Result<i32> {
             continue;
         }
         let _ = editor.add_history_entry(line);
+        match memory::add_rule_from_message(line, wiring.home.as_deref()) {
+            Ok(Some(rule)) => {
+                eprintln!("added standing rule `{}`: {}", rule.id, rule.rule);
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                continue;
+            }
+        }
         if let Some(command) = line.strip_prefix('/') {
             if !session.command(command).await {
                 break;
@@ -99,6 +116,7 @@ pub async fn chat(wiring: &Wiring) -> anyhow::Result<i32> {
         session.after_turn(text).await;
     }
     tokio::task::yield_now().await;
+    memory::finish_session(wiring, &id, session.conversation.messages(), yes).await;
     Ok(0)
 }
 
@@ -311,10 +329,19 @@ impl ChatSession<'_> {
         }
     }
 
-    /// The system prompt for the current mode.
+    /// The system prompt for the current mode. The rules and facts are
+    /// reloaded each turn so a `rule:` line applies to the next message.
     fn system_prompt(&self, tools: &[ToolSpec]) -> String {
+        let sections = match memory::prompt_sections(self.wiring.home.as_deref(), &self.wiring.cwd)
+        {
+            Ok(sections) => sections,
+            Err(error) => {
+                eprintln!("warning: {error:#}");
+                memory::PromptSections::default()
+            }
+        };
         if self.mode == State::Review {
-            return prompts::REVIEW.to_owned();
+            return prompts::review_prompt(&sections.review);
         }
         let mut instructions =
             discover_instructions(self.wiring.home.as_deref(), &self.wiring.cwd, &self.touched);
@@ -323,6 +350,7 @@ impl ChatSession<'_> {
         prompts::system_prompt(&PromptInputs {
             state: self.mode,
             instructions: &instructions,
+            sections: &sections.coder,
             tools,
             task: "Interactive chat: do what the user asks in each message.",
         })

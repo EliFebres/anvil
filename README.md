@@ -12,4 +12,9 @@ Two Rust binaries that share one types crate and a file-based ticket queue.
 - Factory-side crates: `factory-core`, `factory-review`, `factory-cli`.
 - `skills/` holds Claude Code-format skills that ship with forge.
 
+Forge remembers two things across sessions, both as plain files under `~/.forge/` you can edit by hand:
+
+- `rules.toml` holds standing coding rules (`forge rules list|add|remove|check`). They enter every system prompt, the reviewer must cite a rule id for any violation, and rules with a `check` run on the session's changed files in Verify; a failure sends the loop back to Build. In `forge chat`, a line starting with `rule:` saves a new rule on the spot.
+- `memory/` holds one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`. They load into the prompt under a 2,000-token cap, and at the end of every session the summarizer proposes new facts that you keep or drop one by one (`--yes` keeps all).
+
 Run `just check` (fmt, clippy, test) before committing. See `CLAUDE.md` for conventions and crate boundaries.

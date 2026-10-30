@@ -143,6 +143,77 @@ fn doctor_reports_a_missing_api_key_without_a_network() {
 }
 
 #[test]
+fn rules_list_add_check_and_remove_with_a_temp_home() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("home");
+    let rules = |args: &[&str]| {
+        forge(dir.path())
+            .env("FORGE_HOME", &home)
+            .arg("rules")
+            .args(args)
+            .output()
+            .expect("forge runs")
+    };
+
+    let list = rules(&["list"]);
+    assert!(
+        list.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(stdout.contains("google-docstrings"), "{stdout}");
+    assert!(stdout.contains("readable-first"), "{stdout}");
+    assert!(String::from_utf8_lossy(&list.stderr).contains("seeded"));
+    assert!(home.join(".forge").join("rules.toml").is_file());
+    assert!(
+        home.join(".forge")
+            .join("checks")
+            .join("docstrings.py")
+            .is_file()
+    );
+
+    let add = rules(&[
+        "add",
+        "no-todo",
+        "--languages",
+        "rust,python",
+        "--regex",
+        "TODO",
+        "Leave",
+        "no",
+        "TODO",
+        "comments.",
+    ]);
+    assert!(
+        add.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let listed = rules(&["list"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(stdout.contains("no-todo"), "{stdout}");
+    assert!(stdout.contains("Leave no TODO comments."), "{stdout}");
+    assert!(stdout.contains("check: regex `TODO`"), "{stdout}");
+
+    std::fs::write(dir.path().join("x.rs"), "// TODO later\npub fn f() {}\n").expect("write");
+    let check = rules(&["check", "x.rs"]);
+    assert_eq!(check.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&check.stdout);
+    assert!(stdout.contains("[no-todo] check failed"), "{stdout}");
+    assert!(stdout.contains("x.rs:1: // TODO later"), "{stdout}");
+
+    let removed = rules(&["remove", "no-todo"]);
+    assert!(removed.status.success());
+    let listed = rules(&["list"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout);
+    assert!(!stdout.contains("no-todo"), "{stdout}");
+    let again = rules(&["remove", "no-todo"]);
+    assert_eq!(again.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("no rule with id"));
+}
+
+#[test]
 fn skill_add_list_show_and_remove_in_project_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = dir.path().join("my-skill");

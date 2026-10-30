@@ -6,13 +6,13 @@ use std::time::Instant;
 use anyhow::{Context, bail};
 use forge_core::agent::{AgentLoop, EventSink, LoopResult};
 use forge_core::context;
-use forge_core::provider::{CompletionRequest, Event, Message};
-use futures_util::StreamExt;
+use forge_core::provider::{CompletionRequest, Message};
 use tokio::sync::mpsc;
 
 use crate::config_load::LoadedConfig;
+use crate::memory;
 use crate::render;
-use crate::wiring::Wiring;
+use crate::wiring::{Wiring, home_dir};
 
 /// Runs a task through the loop and returns the process exit code.
 ///
@@ -35,7 +35,7 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
     let wiring = wiring.with_session(&id, &session_dir);
     let task = wiring.expand_slash(&task).unwrap_or(task);
     let registry = wiring.registry(Wiring::prompt())?;
-    let mut config = wiring.loop_config(task, session_dir, &registry);
+    let mut config = wiring.loop_config(task, session_dir, &registry)?;
     let hooks = wiring.hook_runner();
     if let Some(hooks) = &hooks {
         config
@@ -44,7 +44,7 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
                 hooks.session_start().await,
             ));
     }
-    let agent = AgentLoop::new(
+    let mut agent = AgentLoop::new(
         config,
         wiring.loop_providers()?,
         registry,
@@ -52,9 +52,21 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
         Wiring::gate(yes),
         sink(),
     );
+    if let Some(checks) = wiring.change_checks()? {
+        agent = agent.with_change_checks(checks);
+    }
     let result = drive(agent).await;
     run_stop_hooks(hooks.as_deref(), &result).await;
+    remember(&wiring, &id, yes).await;
     Ok(result.status.exit_code())
+}
+
+/// Runs the memory extraction over the session log of a finished run.
+async fn remember(wiring: &Wiring, id: &str, yes: bool) {
+    match context::load_session(&wiring.cwd, id) {
+        Ok(snapshot) => memory::finish_session(wiring, id, &snapshot.messages, yes).await,
+        Err(error) => eprintln!("warning: memory extraction skipped: {error}"),
+    }
 }
 
 /// Runs the Stop hooks after a loop finished. A hook that objects is
@@ -88,7 +100,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
     let wiring = wiring.with_session(id, &snapshot.dir);
     let registry = wiring.registry(Wiring::prompt())?;
     let mut config =
-        wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry);
+        wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry)?;
     let hooks = wiring.hook_runner();
     if let Some(hooks) = &hooks {
         config
@@ -97,7 +109,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
                 hooks.session_start().await,
             ));
     }
-    let agent = AgentLoop::resume(
+    let mut agent = AgentLoop::resume(
         snapshot,
         config,
         wiring.loop_providers()?,
@@ -106,8 +118,12 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
         Wiring::gate(yes),
         sink(),
     );
+    if let Some(checks) = wiring.change_checks()? {
+        agent = agent.with_change_checks(checks);
+    }
     let result = drive(agent).await;
     run_stop_hooks(hooks.as_deref(), &result).await;
+    remember(&wiring, id, yes).await;
     Ok(result.status.exit_code())
 }
 
@@ -368,7 +384,7 @@ fn report_hooks(wiring: &Wiring) {
 /// When the path is not a directory.
 pub fn compat_check(path: &Path, config: Option<&forge_types::ForgeConfig>) -> anyhow::Result<i32> {
     let root = if path.starts_with("~") {
-        let home = std::env::home_dir().context("cannot determine the home directory")?;
+        let home = home_dir().context("cannot determine the home directory")?;
         home.join(path.strip_prefix("~").unwrap_or(path))
     } else {
         path.to_path_buf()
@@ -399,14 +415,6 @@ async fn ping(wiring: &Wiring, name: &str) -> anyhow::Result<(String, u128)> {
         max_output_tokens: Some(16),
     };
     let started = Instant::now();
-    let mut stream = provider.complete(request);
-    let mut text = String::new();
-    while let Some(item) = stream.next().await {
-        match item? {
-            Event::TextDelta(delta) => text.push_str(&delta),
-            Event::Done { .. } => break,
-            _ => {}
-        }
-    }
+    let (text, _) = context::collect_text(&*provider, request).await?;
     Ok((text, started.elapsed().as_millis()))
 }

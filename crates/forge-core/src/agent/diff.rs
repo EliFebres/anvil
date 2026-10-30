@@ -55,6 +55,45 @@ pub async fn diff_since(cwd: &Path, session_dir: &Path, baseline: &str) -> Optio
     Some(cap(diff))
 }
 
+/// The files that differ between a snapshot and the working tree now.
+///
+/// # Arguments
+///
+/// * `cwd` - The project root.
+/// * `session_dir` - Where the private index file lives.
+/// * `baseline` - A tree hash from [`snapshot_tree`].
+///
+/// # Returns
+///
+/// Absolute paths of added, copied, modified and renamed files, or `None`
+/// when git is unavailable. Deleted files are left out.
+pub async fn changed_files(cwd: &Path, session_dir: &Path, baseline: &str) -> Option<Vec<PathBuf>> {
+    let current = snapshot_tree(cwd, session_dir).await?;
+    let index = session_dir.join(INDEX_FILE);
+    let names = git(
+        cwd,
+        &index,
+        &[
+            "-c",
+            "core.quotepath=false",
+            "diff",
+            "--name-only",
+            "--diff-filter=ACMR",
+            baseline,
+            &current,
+        ],
+    )
+    .await?;
+    Some(
+        names
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| cwd.join(line))
+            .collect(),
+    )
+}
+
 /// Runs git with a private index file and returns stdout on success.
 async fn git(cwd: &Path, index: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
@@ -156,6 +195,11 @@ mod tests {
         assert!(!diff.contains("ignored.txt"), "{diff}");
         assert!(!diff.contains("plan.md"), "{diff}");
         assert!(root.join("a.txt").exists(), "working tree untouched");
+
+        let changed = changed_files(root, &session, &baseline)
+            .await
+            .expect("changed files");
+        assert_eq!(changed, vec![root.join("a.txt"), root.join("new.txt")]);
     }
 
     #[tokio::test]

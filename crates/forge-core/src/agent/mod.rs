@@ -22,10 +22,10 @@ use std::time::Duration;
 use forge_types::LimitsConfig;
 use serde::{Deserialize, Serialize};
 
-pub use checks::CheckCommand;
+pub use checks::{ChangeCheckFailure, ChangeChecks, CheckCommand};
 pub use events::{EventSink, LoopEvent};
 pub use gate::{AutoApprove, PlanDecision, PlanGate, ScriptedGate};
-pub use prompts::Instruction;
+pub use prompts::{Instruction, PromptSection};
 pub use state::{IncompleteReason, Rounds, State, Status};
 pub use verdict::{ReviewVerdict, VerifyVerdict};
 
@@ -73,6 +73,11 @@ pub struct LoopConfig {
     /// Prompt sections supplied from outside the loop, such as a skill list,
     /// appended after the instruction files found on disk.
     pub extra_instructions: Vec<Instruction>,
+    /// Sections under their own headings for every coder-side state, such
+    /// as the user's standing rules, after the instruction files.
+    pub sections: Vec<PromptSection>,
+    /// Sections appended to the reviewer's prompt.
+    pub review_sections: Vec<PromptSection>,
 }
 
 /// The models a run talks to.
@@ -126,6 +131,8 @@ pub struct AgentLoop {
     ctx: ToolContext,
     gate: Box<dyn PlanGate>,
     events: EventSink,
+    /// Checks run on the changed files in Verify, before the project's own.
+    change_checks: Option<Arc<dyn ChangeChecks>>,
     /// The coder-side conversation, shared by every state except Review.
     conversation: Conversation,
     /// The session log, when the folder is writable.
@@ -214,6 +221,7 @@ impl AgentLoop {
             ctx,
             gate,
             events,
+            change_checks: None,
             conversation: Conversation::new(),
             log,
             start_state: State::Plan,
@@ -282,6 +290,21 @@ impl AgentLoop {
             agent.pending_feedback = Some(note);
         }
         agent
+    }
+
+    /// Adds checks that Verify runs on the changed files before the
+    /// project's check command. A failure sends the loop back to Build.
+    ///
+    /// # Arguments
+    ///
+    /// * `checks` - The checks.
+    ///
+    /// # Returns
+    ///
+    /// The loop.
+    pub fn with_change_checks(mut self, checks: Arc<dyn ChangeChecks>) -> Self {
+        self.change_checks = Some(checks);
+        self
     }
 
     /// Runs the state machine to completion.
@@ -368,6 +391,7 @@ impl AgentLoop {
         system_prompt(&PromptInputs {
             state,
             instructions: &instructions,
+            sections: &self.config.sections,
             tools,
             task: &self.config.task,
         })
@@ -497,7 +521,7 @@ impl AgentLoop {
         let mut verdict = None;
         for attempt in 0..2 {
             let request = CompletionRequest {
-                system: prompts::REVIEW.to_owned(),
+                system: prompts::review_prompt(&self.config.review_sections),
                 messages: messages.clone(),
                 tools: Vec::new(),
                 max_output_tokens: None,
@@ -544,8 +568,12 @@ impl AgentLoop {
         }
     }
 
-    /// Verify: run the project's checks, or have the model write a test.
+    /// Verify: the change checks first, then the project's checks, or
+    /// have the model write a test.
     async fn run_verify(&mut self) -> StateOutcome {
+        if let Some(outcome) = self.run_change_checks().await {
+            return outcome;
+        }
         let Some(command) = self.config.check.resolve(&self.config.cwd) else {
             return self.run_model_verify().await;
         };
@@ -571,6 +599,66 @@ impl AgentLoop {
             "Verification failed. `{command}` exited with an error:\n```\n{tail}\n```\nFix the cause, then end your turn with what you changed."
         ));
         StateOutcome::VerifyFailed(tail)
+    }
+
+    /// Runs the checks supplied from outside the loop on the changed files.
+    ///
+    /// Returns the failing outcome, or `None` when there are no checks or
+    /// they all passed.
+    async fn run_change_checks(&mut self) -> Option<StateOutcome> {
+        let checks = Arc::clone(self.change_checks.as_ref()?);
+        let changed = self.changed_files().await;
+        let label = "standing rule checks".to_owned();
+        self.events.emit(LoopEvent::CheckStarted {
+            command: label.clone(),
+        });
+        let cwd = self.config.cwd.clone();
+        let failures = tokio::task::spawn_blocking(move || checks.run(&cwd, &changed))
+            .await
+            .unwrap_or_else(|error| {
+                vec![ChangeCheckFailure {
+                    name: "checks".to_owned(),
+                    output: format!("the checks did not finish: {error}"),
+                }]
+            });
+        let passed = failures.is_empty();
+        let report = failures
+            .iter()
+            .map(|failure| {
+                format!(
+                    "Standing rule `{}` check failed on the changed files:\n```\n{}\n```",
+                    failure.name,
+                    failure.output.trim_end()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        self.events.emit(LoopEvent::CheckFinished {
+            command: label,
+            passed,
+            output_tail: report.clone(),
+        });
+        if passed {
+            return None;
+        }
+        self.pending_feedback = Some(format!(
+            "Verification failed. {report}\nFix the cause, then end your turn with what you changed."
+        ));
+        Some(StateOutcome::VerifyFailed(report))
+    }
+
+    /// The files the session changed: from git, or the paths tools wrote.
+    async fn changed_files(&self) -> Vec<PathBuf> {
+        if let Some(baseline) = &self.baseline
+            && let Some(files) =
+                diff::changed_files(&self.config.cwd, &self.config.session_dir, baseline).await
+        {
+            return files;
+        }
+        self.written
+            .iter()
+            .map(|path| self.ctx.resolve(path))
+            .collect()
     }
 
     /// Verify without a runner: the model writes and runs one test.
@@ -922,6 +1010,8 @@ mod tests {
                 context_window: 100_000,
                 home_dir: None,
                 extra_instructions: Vec::new(),
+                sections: Vec::new(),
+                review_sections: Vec::new(),
             }
         }
 
@@ -1596,6 +1686,122 @@ mod tests {
         let nested = requests[2].system.find("crate rules").expect("nested");
         let tools = requests[2].system.find("# Tools").expect("tools");
         assert!(base < repo && repo < nested && nested < tools);
+    }
+
+    /// Change checks that fail a scripted number of times, then pass.
+    struct FlakyChecks {
+        failures_left: std::sync::Mutex<u32>,
+        seen: std::sync::Mutex<Vec<Vec<PathBuf>>>,
+    }
+
+    impl ChangeChecks for FlakyChecks {
+        fn run(&self, _cwd: &std::path::Path, changed: &[PathBuf]) -> Vec<ChangeCheckFailure> {
+            crate::provider::lock_or_recover(&self.seen).push(changed.to_vec());
+            let mut left = crate::provider::lock_or_recover(&self.failures_left);
+            if *left == 0 {
+                return Vec::new();
+            }
+            *left -= 1;
+            vec![ChangeCheckFailure {
+                name: "google-docstrings".to_owned(),
+                output: "hello.txt:1: public fn `x` has no doc comment".to_owned(),
+            }]
+        }
+    }
+
+    #[tokio::test]
+    async fn change_check_failures_send_verify_back_to_build() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![write_call("hello.txt")]),
+                FakeProvider::text_turn("b1"),
+                FakeProvider::text_turn("o1"),
+                FakeProvider::text_turn("b2"),
+                FakeProvider::text_turn("o2"),
+            ],
+            vec![approve(), approve()],
+        );
+        let checks = Arc::new(FlakyChecks {
+            failures_left: std::sync::Mutex::new(1),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let agent = h
+            .default_agent(
+                CheckCommand::Command("exit 0".to_owned()),
+                "allow = [\"write_file\"]",
+            )
+            .with_change_checks(Arc::clone(&checks) as Arc<dyn ChangeChecks>);
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        assert_eq!(result.rounds.verify, 1);
+        let seen = crate::provider::lock_or_recover(&checks.seen).clone();
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen[0].iter().any(|path| path.ends_with("hello.txt")),
+            "{seen:?}"
+        );
+        let rebuild = &h.coder.requests()[4];
+        assert!(rebuild.messages.iter().any(|m| matches!(
+            m,
+            Message::User { text } if text.contains("Standing rule `google-docstrings` check failed")
+                && text.contains("hello.txt:1")
+        )));
+        let events = h.drain();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            LoopEvent::CheckFinished { command, passed: false, .. } if command == "standing rule checks"
+        )));
+        let project_checks = events
+            .iter()
+            .filter(
+                |e| matches!(e, LoopEvent::CheckFinished { command, .. } if command == "exit 0"),
+            )
+            .count();
+        assert_eq!(
+            project_checks, 1,
+            "the project check runs only once the rule checks pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn sections_reach_the_coder_and_the_reviewer() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("nothing to simplify"),
+            ],
+            vec![approve()],
+        );
+        std::fs::write(h.dir.path().join("CLAUDE.md"), "repo rules").expect("write");
+        let mut config = h.config(CheckCommand::Command("exit 0".to_owned()));
+        config.sections.push(PromptSection {
+            heading: "Standing rules".to_owned(),
+            text: "1. [tidy] keep it tidy".to_owned(),
+        });
+        config.review_sections.push(PromptSection {
+            heading: "Standing rules".to_owned(),
+            text: "cite [tidy] on violations".to_owned(),
+        });
+        let coder = Arc::clone(&h.coder) as Arc<dyn Provider>;
+        let agent = h.agent(config, coder, "", Box::new(AutoApprove));
+        assert_eq!(agent.run().await.status, Status::Done);
+        for request in h.coder.requests() {
+            let repo = request.system.find("repo rules").expect("repo");
+            let rules = request
+                .system
+                .find("# Standing rules\n\n1. [tidy]")
+                .expect("rules");
+            let tools = request.system.find("# Tools").expect("tools");
+            assert!(repo < rules && rules < tools, "{}", request.system);
+        }
+        let review = &h.reviewer.requests()[0].system;
+        assert!(review.starts_with(prompts::REVIEW.trim_end()), "{review}");
+        assert!(
+            review.ends_with("# Standing rules\n\ncite [tidy] on violations"),
+            "{review}"
+        );
     }
 
     #[test]
