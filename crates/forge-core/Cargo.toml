@@ -1,0 +1,11 @@
+[package]
+name = "forge-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Agent loop, tool registry, provider adapters and context management for forge."
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "forge-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Cross-project memory and coding-style rules for forge."
+
+[dependencies]
+
+[lints]
+workspace = true

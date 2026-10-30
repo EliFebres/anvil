@@ -1,0 +1,258 @@
+//! Provider and role configuration: which model does which job.
+//!
+//! Lives at `~/.forge/config.toml` (global) and `.forge/config.toml`
+//! (project, overrides global). Models are swapped by editing these files,
+//! never by changing code.
+
+use std::collections::BTreeMap;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::error::ValidationError;
+
+/// The commented template written by `forge config init`.
+pub const CONFIG_TEMPLATE: &str = r#"# forge configuration.
+# Global: ~/.forge/config.toml   Project: .forge/config.toml (project overrides global).
+# Swap models by editing this file; no code changes are needed.
+
+[providers.runpod]
+protocol = "openai"          # "openai" or "anthropic"
+base_url = "https://<pod-id>-8000.proxy.runpod.net/v1"
+api_key_env = "FORGE_RUNPOD_KEY"   # environment variable that holds the API key
+model = "<model name as served>"
+context_window = 131072
+supports_tools = true
+supports_reasoning = true
+
+# Each role names a provider above, so the coder, the summarizer and (in the
+# factory) the reviewer can each be a different model.
+[roles]
+coder = "runpod"
+summarizer = "runpod"
+# reviewer = "runpod"
+"#;
+
+/// Wire protocol a provider speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    /// OpenAI chat-completions style API.
+    Openai,
+    /// Anthropic messages style API.
+    Anthropic,
+}
+
+/// One model endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    /// Which API shape to speak.
+    pub protocol: Protocol,
+    /// Base URL of the API, including any version prefix such as `/v1`.
+    pub base_url: String,
+    /// Name of the environment variable that holds the API key.
+    pub api_key_env: String,
+    /// Model name exactly as the server expects it.
+    pub model: String,
+    /// Context window in tokens.
+    pub context_window: u32,
+    /// Whether the model accepts tool definitions and emits tool calls.
+    pub supports_tools: bool,
+    /// Whether the model emits reasoning content.
+    pub supports_reasoning: bool,
+}
+
+impl ProviderConfig {
+    /// Checks one provider entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The entry's key under `[providers]`, for error messages.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when `base_url` is http or https, `api_key_env` and `model`
+    /// are non-empty, and `context_window` is positive.
+    ///
+    /// # Errors
+    ///
+    /// The first [`ValidationError`] found.
+    pub fn validate(&self, name: &str) -> Result<(), ValidationError> {
+        let is_http = self.base_url.starts_with("http://") || self.base_url.starts_with("https://");
+        if !is_http {
+            return Err(ValidationError::InvalidBaseUrl {
+                name: name.to_owned(),
+                base_url: self.base_url.clone(),
+            });
+        }
+        if self.api_key_env.trim().is_empty() {
+            return Err(ValidationError::EmptyProviderField {
+                name: name.to_owned(),
+                field: "api_key_env",
+            });
+        }
+        if self.model.trim().is_empty() {
+            return Err(ValidationError::EmptyProviderField {
+                name: name.to_owned(),
+                field: "model",
+            });
+        }
+        if self.context_window == 0 {
+            return Err(ValidationError::ZeroContextWindow {
+                name: name.to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Which provider handles each job.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Roles {
+    /// Provider that writes code in the agent loop.
+    pub coder: String,
+    /// Provider that compacts context and summarizes.
+    pub summarizer: String,
+    /// Provider that reviews factory pull requests. Only the factory needs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
+}
+
+/// The whole forge configuration file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ForgeConfig {
+    /// Named model endpoints.
+    #[serde(default)]
+    pub providers: BTreeMap<String, ProviderConfig>,
+    /// Which provider does which job.
+    pub roles: Roles,
+}
+
+impl ForgeConfig {
+    /// Checks every provider and that every role names a declared provider.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when all providers validate and `coder`, `summarizer` and
+    /// (if set) `reviewer` each name a key in `providers`.
+    ///
+    /// # Errors
+    ///
+    /// The first [`ValidationError`] found, providers first.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        for (name, provider) in &self.providers {
+            provider.validate(name)?;
+        }
+        self.check_role("coder", &self.roles.coder)?;
+        self.check_role("summarizer", &self.roles.summarizer)?;
+        if let Some(reviewer) = &self.roles.reviewer {
+            self.check_role("reviewer", reviewer)?;
+        }
+        Ok(())
+    }
+
+    /// Fails unless `provider` is a key in `providers`.
+    fn check_role(&self, role: &'static str, provider: &str) -> Result<(), ValidationError> {
+        if self.providers.contains_key(provider) {
+            Ok(())
+        } else {
+            Err(ValidationError::UnknownProvider {
+                role,
+                provider: provider.to_owned(),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn template() -> ForgeConfig {
+        toml::from_str(CONFIG_TEMPLATE).expect("template parses")
+    }
+
+    #[test]
+    fn template_parses_and_validates() {
+        let config = template();
+        config.validate().expect("template validates");
+        assert_eq!(config.roles.coder, "runpod");
+        assert_eq!(config.roles.reviewer, None);
+        let runpod = &config.providers["runpod"];
+        assert_eq!(runpod.protocol, Protocol::Openai);
+        assert_eq!(runpod.context_window, 131_072);
+        assert!(runpod.supports_tools && runpod.supports_reasoning);
+    }
+
+    #[test]
+    fn toml_round_trip() {
+        let mut config = template();
+        config.roles.reviewer = Some("runpod".to_owned());
+        let text = toml::to_string_pretty(&config).expect("serializes");
+        let back: ForgeConfig = toml::from_str(&text).expect("parses back");
+        assert_eq!(back, config);
+    }
+
+    #[test]
+    fn protocol_spellings_are_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&Protocol::Anthropic).expect("serializes"),
+            "\"anthropic\""
+        );
+        let parsed: Protocol = serde_json::from_str("\"openai\"").expect("parses");
+        assert_eq!(parsed, Protocol::Openai);
+    }
+
+    #[test]
+    fn role_must_name_a_declared_provider() {
+        let mut config = template();
+        config.roles.summarizer = "missing".to_owned();
+        assert_eq!(
+            config.validate(),
+            Err(ValidationError::UnknownProvider {
+                role: "summarizer",
+                provider: "missing".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn provider_fields_are_checked() {
+        let mut config = template();
+        config.providers.get_mut("runpod").expect("exists").base_url = "ftp://x".to_owned();
+        assert!(matches!(
+            config.validate(),
+            Err(ValidationError::InvalidBaseUrl { .. })
+        ));
+
+        let mut config = template();
+        config
+            .providers
+            .get_mut("runpod")
+            .expect("exists")
+            .context_window = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(ValidationError::ZeroContextWindow { .. })
+        ));
+
+        let mut config = template();
+        config.providers.get_mut("runpod").expect("exists").model = String::new();
+        assert_eq!(
+            config.validate(),
+            Err(ValidationError::EmptyProviderField {
+                name: "runpod".to_owned(),
+                field: "model"
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        let text = format!("{CONFIG_TEMPLATE}\n[roles]\nplanner = \"runpod\"\n");
+        assert!(toml::from_str::<ForgeConfig>(&text).is_err());
+    }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "factory-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The factory binary: the unattended improvement service. Argument parsing and wiring only."
+
+[[bin]]
+name = "factory"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

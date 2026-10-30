@@ -1,0 +1,11 @@
+[package]
+name = "forge-telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Usage recording, failure classification and ticket drafting for forge."
+
+[dependencies]
+
+[lints]
+workspace = true

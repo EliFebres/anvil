@@ -1,0 +1,11 @@
+[package]
+name = "forge-compat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Claude Code compatibility for forge: SKILL.md, CLAUDE.md, commands, agents, hooks, MCP client."
+
+[dependencies]
+
+[lints]
+workspace = true
