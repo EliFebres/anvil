@@ -98,6 +98,13 @@ pub enum ValidationError {
         repo: String,
     },
 
+    /// A numeric field that must be positive is zero.
+    #[error("field `{field}` must be at least 1")]
+    ZeroField {
+        /// Name of the field.
+        field: &'static str,
+    },
+
     /// A skill name is not kebab-case or is too long.
     #[error(
         "skill name `{name}` must be kebab-case (a-z, 0-9, single hyphens) and at most {max} characters"

@@ -15,7 +15,8 @@ use anvil_core::provider::{
     CompletionRequest, Event, EventStream, Provider, ProviderError, StopReason,
 };
 use anvil_core::tools::{
-    PermissionPrompt, PermissionRequest, PromptAnswer, ToolOutcome, ToolRegistry, permissions,
+    PermissionPrompt, PermissionRequest, PromptAnswer, StaticPrompt, ToolOutcome, ToolRegistry,
+    permissions,
 };
 use anvil_telemetry::paths::signals_file;
 use anvil_telemetry::{
@@ -159,14 +160,24 @@ impl SessionTelemetry {
         });
     }
 
-    /// The terminal permission prompt, with every answer recorded.
+    /// The permission prompt, with every answer recorded.
+    ///
+    /// # Arguments
+    ///
+    /// * `yes` - Whether the run is unattended; then every call is approved
+    ///   without asking (the built-in block list still applies).
     ///
     /// # Returns
     ///
     /// The prompt.
-    pub fn prompt(&self) -> Box<dyn PermissionPrompt> {
+    pub fn prompt(&self, yes: bool) -> Box<dyn PermissionPrompt> {
+        let inner: Box<dyn PermissionPrompt> = if yes {
+            Box::new(StaticPrompt(PromptAnswer::Yes))
+        } else {
+            Box::new(TerminalPrompt)
+        };
         Box::new(RecordingPrompt {
-            inner: Box::new(TerminalPrompt),
+            inner,
             telemetry: self.clone(),
         })
     }
@@ -579,6 +590,34 @@ mod tests {
             }
         }
         found
+    }
+
+    #[test]
+    fn unattended_prompt_approves_and_records_every_call() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let telemetry = SessionTelemetry::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "fast",
+            None,
+            "fast",
+            BTreeMap::new(),
+            TelemetryConfig::default(),
+        );
+        let request = PermissionRequest {
+            tool: "write_file".to_owned(),
+            target: Some("notes.txt".to_owned()),
+            arguments: serde_json::json!({"path": "notes.txt"}),
+        };
+        assert_eq!(telemetry.prompt(true).ask(&request), PromptAnswer::Yes);
+        let records = load_records(&telemetry.project_dir(), None).expect("records");
+        assert!(records.iter().any(|r| matches!(
+            &r.kind,
+            RecordKind::Permission { tool, answer: PermissionAnswer::Yes, .. } if tool == "write_file"
+        )));
     }
 
     #[tokio::test]

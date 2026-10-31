@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(name = "anvil", version, about, arg_required_else_help = true)]
 pub struct Cli {
-    /// Skip plan approval and run unattended.
+    /// Skip plan approval and every permission prompt; run unattended.
     #[arg(long, global = true)]
     pub yes: bool,
 

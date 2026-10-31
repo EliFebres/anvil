@@ -16,6 +16,9 @@ pub const FACTORY_FILE: &str = "factory.toml";
 /// The placeholder `anvil setup` writes when no GitHub remote is found.
 pub const REPO_PLACEHOLDER: &str = "<owner>/<repo>";
 
+/// Eval tasks that run at once when `[eval] parallel` is not set.
+pub const DEFAULT_EVAL_PARALLEL: u32 = 2;
+
 /// The template written by `anvil setup`; `{repo}` is replaced with the
 /// `owner/repo` detected from the git remote.
 pub const FACTORY_TEMPLATE: &str = r#"# factory configuration, written by `anvil setup` and committed.
@@ -41,6 +44,10 @@ focus = "style"
 [[reviewers]]
 provider = "google"
 focus = "simplicity"
+
+# How many eval tasks run at once. Default: 2.
+# [eval]
+# parallel = 2
 
 [github]
 repo = "{repo}"
@@ -84,6 +91,22 @@ pub struct NotifyConfig {
     pub webhook_env: String,
 }
 
+/// How the eval harness runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct EvalConfig {
+    /// How many eval tasks run at once.
+    pub parallel: u32,
+}
+
+impl Default for EvalConfig {
+    fn default() -> Self {
+        Self {
+            parallel: DEFAULT_EVAL_PARALLEL,
+        }
+    }
+}
+
 /// The whole `factory.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -96,6 +119,9 @@ pub struct FactoryConfig {
     pub github: GithubConfig,
     /// Where notifications go.
     pub notify: NotifyConfig,
+    /// How the eval harness runs; every key has a default.
+    #[serde(default)]
+    pub eval: EvalConfig,
 }
 
 impl FactoryConfig {
@@ -117,7 +143,8 @@ impl FactoryConfig {
     /// # Returns
     ///
     /// `Ok(())` when there is at least one reviewer, no text field is empty or
-    /// a placeholder, and `github.repo` is `owner/repo`.
+    /// a placeholder, `github.repo` is `owner/repo` and `eval.parallel` is at
+    /// least 1.
     ///
     /// # Errors
     ///
@@ -142,7 +169,13 @@ impl FactoryConfig {
                 repo: self.github.repo.clone(),
             });
         }
-        check_filled("notify.webhook_env", &self.notify.webhook_env)
+        check_filled("notify.webhook_env", &self.notify.webhook_env)?;
+        if self.eval.parallel == 0 {
+            return Err(ValidationError::ZeroField {
+                field: "eval.parallel",
+            });
+        }
+        Ok(())
     }
 
     /// The fields that still hold template placeholders.
@@ -228,6 +261,30 @@ mod tests {
             config.validate(),
             Err(ValidationError::EmptyField {
                 field: "reviewers.focus"
+            })
+        );
+    }
+
+    #[test]
+    fn eval_section_defaults_and_rejects_zero() {
+        let config = filled();
+        assert_eq!(config.eval, EvalConfig::default());
+        assert_eq!(config.eval.parallel, DEFAULT_EVAL_PARALLEL);
+        let text = format!(
+            "{}
+[eval]
+parallel = 4
+",
+            FactoryConfig::template("o/r")
+        );
+        let config: FactoryConfig = toml::from_str(&text).expect("parses");
+        assert_eq!(config.eval.parallel, 4);
+        let mut config = filled();
+        config.eval.parallel = 0;
+        assert_eq!(
+            config.validate(),
+            Err(ValidationError::ZeroField {
+                field: "eval.parallel"
             })
         );
     }
