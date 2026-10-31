@@ -3,9 +3,27 @@ name = "factory-review"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Multi-model review for the factory."
+description = "Multi-model review for the factory: four stances, aggregated into one verdict."
+
+[lib]
+name = "factory_review"
+path = "src/lib.rs"
 
 [dependencies]
+anvil-types.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+wiremock.workspace = true
 
 [lints]
 workspace = true
