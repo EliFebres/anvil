@@ -1,8 +1,12 @@
 //! `factory`: the unattended improvement service. Argument parsing and wiring only.
 
+mod github;
+mod review;
+
 use std::path::{Path, PathBuf};
 
 use anvil_types::dotenv;
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 /// The Dark Factory: works tickets from `tickets/open/` into reviewed pull requests.
@@ -24,6 +28,15 @@ enum Command {
     Env {
         /// The variable name.
         name: String,
+    },
+    /// Run the review swarm on a pull request and post its minor findings as comments.
+    ///
+    /// Prints the aggregate verdict with every reviewer's raw result. Exits 0
+    /// when the swarm approves and 2 when it asks for changes; blocker and
+    /// major findings are printed, never posted. Needs GITHUB_TOKEN.
+    Review {
+        /// The pull request number in the repository named by factory.toml.
+        number: u64,
     },
 }
 
@@ -64,6 +77,10 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
         Command::Env { name } => {
             println!("{}", describe_variable(&name, &env_files)?);
             Ok(0)
+        }
+        Command::Review { number } => {
+            let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
+            runtime.block_on(review::run(review::Options { number, cwd, home }))
         }
     }
 }
