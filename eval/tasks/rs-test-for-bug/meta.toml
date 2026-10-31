@@ -1,0 +1,3 @@
+tags = ["rust", "test-for-bug"]
+timeout_s = 600
+max_tokens = 400000

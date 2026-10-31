@@ -1,0 +1,1 @@
+Add a `--dry-run` flag to `scripts/cleanup.sh`. With `--dry-run` the script prints the path of every `*.tmp` file it would delete, one per line, and deletes nothing. Without the flag it must still delete them and stay silent.

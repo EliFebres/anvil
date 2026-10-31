@@ -1,0 +1,14 @@
+---
+source: crates/eval/src/results.rs
+expression: result.to_string()
+---
+task    result    status
+py-one  PASS 2/3  done incomplete(turn_budget) done
+rs-two  FAIL 0/3  incomplete(turn_budget) incomplete(turn_budget) incomplete(turn_budget)
+
+tasks passing         1/2
+pass rate             33.3% (spread 0.0%..50.0%)
+tokens                6,900
+cost (USD)            0.0600
+cost per passed task  0.0600
+wall                  2m05s

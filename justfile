@@ -28,3 +28,12 @@ no-old-name:
 # Print the Ticket JSON Schema.
 schema:
     cargo run -q -p anvil-types -- --schema
+
+# Prove every eval task both ways: the check fails on the raw fixture and
+# passes on fixture + solution. Compiles the Rust fixtures, so it is not in `check`.
+eval-tasks:
+    cargo test -p eval --test tasks -- --ignored
+
+# Score the coder role three times over and commit the result under eval/results/.
+eval-baseline:
+    cargo run -q -p eval -- baseline
