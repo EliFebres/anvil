@@ -631,6 +631,20 @@ version = "0.1.0"
 [[package]]
 name = "factory-review"
 version = "0.1.0"
+dependencies = [
+ "anvil-types",
+ "futures-util",
+ "insta",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "wiremock",
+]
 
 [[package]]
 name = "fastrand"

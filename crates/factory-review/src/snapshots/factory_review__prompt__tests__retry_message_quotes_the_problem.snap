@@ -1,0 +1,7 @@
+---
+source: crates/factory-review/src/prompt.rs
+expression: text
+---
+Your reply was not a well-formed review: invalid review JSON: expected `,` at line 3
+
+Reply again with exactly one JSON object matching the contract: a `verdict` of "approve" or "changes" and a `findings` array. No prose, no code fences.

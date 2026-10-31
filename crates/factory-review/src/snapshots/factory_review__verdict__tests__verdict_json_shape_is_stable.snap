@@ -1,0 +1,55 @@
+---
+source: crates/factory-review/src/verdict.rs
+expression: "Verdict::aggregate(raw)"
+---
+{
+  "decision": "approve",
+  "reason": "no blocking findings",
+  "findings": [],
+  "minors": [
+    {
+      "reviewer": {
+        "provider": "openai",
+        "stance": "correctness",
+        "model": "openai-model"
+      },
+      "finding": {
+        "severity": "minor",
+        "file": "a.rs",
+        "line": 3,
+        "message": "nit",
+        "suggested_fix": null
+      }
+    }
+  ],
+  "raw": [
+    {
+      "reviewer": {
+        "provider": "openai",
+        "stance": "correctness",
+        "model": "openai-model"
+      },
+      "outcome": {
+        "kind": "reviewed",
+        "review": {
+          "verdict": "approve",
+          "findings": [
+            {
+              "severity": "minor",
+              "file": "a.rs",
+              "line": 3,
+              "message": "nit",
+              "suggested_fix": null
+            }
+          ]
+        }
+      },
+      "usage": {
+        "input_tokens": 1200,
+        "output_tokens": 300,
+        "cached_tokens": 0,
+        "cost_usd": 0.0123
+      }
+    }
+  ]
+}
