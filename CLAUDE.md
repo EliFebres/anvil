@@ -12,6 +12,7 @@ This is a Cargo workspace (Rust 2024 edition) containing `forge`, a CLI coding a
 - No `unwrap()` outside tests. No `unsafe`.
 - Tests live next to the code (`#[cfg(test)]`) plus `tests/` for integration. Use `insta` for snapshot tests of prompts and tool schemas, because those drift silently.
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` must pass before any commit. Add a `justfile` with `just check` that runs all three.
+- Every workflow declares a top-level `permissions:` block with the minimum it needs. `release.yml` gets `contents: write`; everything else gets `contents: read`. `cargo test -p forge-types` checks every file in `.github/workflows/`.
 
 Workspace lints enforce part of this mechanically: `unsafe_code = "forbid"`, `missing_docs = "warn"`, and `clippy::unwrap_used = "warn"` (allowed in tests via `clippy.toml`). With `-D warnings` these are hard failures.
 
