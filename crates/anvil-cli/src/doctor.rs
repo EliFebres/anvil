@@ -5,7 +5,7 @@
 //! protection on `main`, the tools on `PATH` and the key scan over tracked
 //! files. The skill, command, agent, hook and MCP reports follow unchanged.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -366,15 +366,15 @@ fn report_reviewers(
         );
         return Some(factory);
     }
-    match reviewer_problems(config, &factory) {
-        Some(problem) => report.fail(
+    match factory.check_independence(config) {
+        Err(problem) => report.fail(
             "reviewers",
-            problem,
+            problem.to_string(),
             format!(
                 "give each reviewer in {FACTORY_FILE} a provider whose base_url differs from the coder's and from the other reviewers'"
             ),
         ),
-        None => {
+        Ok(()) => {
             let names: BTreeSet<&str> = factory
                 .reviewers
                 .iter()
@@ -391,50 +391,6 @@ fn report_reviewers(
         }
     }
     Some(factory)
-}
-
-/// Why the reviewers are not independent of the coder and of each other.
-///
-/// Every reviewer must sit on a different base URL from the coder, and the
-/// distinct reviewer providers must sit on different base URLs from one
-/// another (two reviewers may share a provider with different focuses).
-fn reviewer_problems(config: &AnvilConfig, factory: &FactoryConfig) -> Option<String> {
-    let base_url = |name: &str| {
-        config
-            .providers
-            .get(name)
-            .map(|provider| provider.base_url.trim_end_matches('/').to_owned())
-    };
-    let coder = &factory.roles.coder;
-    let Some(coder_url) = base_url(coder) else {
-        return Some(format!(
-            "coder `{coder}` is not a provider in ~/.anvil/config.toml"
-        ));
-    };
-    let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    for reviewer in &factory.reviewers {
-        let name = &reviewer.provider;
-        let Some(url) = base_url(name) else {
-            return Some(format!(
-                "reviewer `{name}` is not a provider in ~/.anvil/config.toml"
-            ));
-        };
-        if url == coder_url {
-            return Some(format!(
-                "reviewer `{name}` shares base_url {url} with coder `{coder}`"
-            ));
-        }
-        if let Some(other) = seen.get(&url) {
-            if other != name {
-                return Some(format!(
-                    "reviewers `{other}` and `{name}` share base_url {url}"
-                ));
-            }
-        } else {
-            seen.insert(url, name.clone());
-        }
-    }
-    None
 }
 
 /// The `owner/repo` of the `origin` remote, when it is on GitHub.
@@ -1110,22 +1066,6 @@ fn head(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anvil_types::config::SETUP_PROVIDERS;
-
-    fn setup_config() -> AnvilConfig {
-        toml::from_str(SETUP_PROVIDERS).expect("parses")
-    }
-
-    fn factory(coder: &str, reviewers: &[&str]) -> FactoryConfig {
-        let mut text = format!("[roles]\ncoder = \"{coder}\"\n");
-        for reviewer in reviewers {
-            text.push_str(&format!(
-                "[[reviewers]]\nprovider = \"{reviewer}\"\nfocus = \"f\"\n"
-            ));
-        }
-        text.push_str("[github]\nrepo = \"o/r\"\n[notify]\nwebhook_env = \"W\"\n");
-        toml::from_str(&text).expect("parses")
-    }
 
     #[test]
     fn report_renders_aligned_rows_with_fixes_under_failures() {
@@ -1139,28 +1079,6 @@ mod tests {
             "PASS  env            loaded a\nFAIL  key:LONG_NAME  not set\n      fix: add it\nSKIP  x              n/a\n"
         );
         assert_eq!(report.failures(), 1);
-    }
-
-    #[test]
-    fn reviewers_must_differ_from_the_coder_and_each_other() {
-        let config = setup_config();
-        assert_eq!(
-            reviewer_problems(
-                &config,
-                &factory("anthropic", &["openai", "google", "openai"])
-            ),
-            None
-        );
-        let shares_coder = reviewer_problems(&config, &factory("anthropic", &["anthropic"]));
-        assert!(shares_coder.is_some_and(|p| p.contains("coder")));
-        let unknown = reviewer_problems(&config, &factory("anthropic", &["nope"]));
-        assert!(unknown.is_some_and(|p| p.contains("`nope`")));
-
-        let mut config = setup_config();
-        let openai_url = config.providers["openai"].base_url.clone();
-        config.providers.get_mut("google").expect("google").base_url = openai_url;
-        let shared = reviewer_problems(&config, &factory("anthropic", &["openai", "google"]));
-        assert!(shared.is_some_and(|p| p.contains("share base_url")));
     }
 
     #[test]

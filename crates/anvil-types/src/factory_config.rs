@@ -4,9 +4,13 @@
 //! The file lives at the repository root and is committed. Provider names
 //! refer to entries in the anvil configuration (`~/.anvil/config.toml`).
 
+use std::collections::BTreeMap;
+use std::fmt;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::config::AnvilConfig;
 use crate::dotenv::is_placeholder;
 use crate::error::ValidationError;
 
@@ -27,23 +31,25 @@ pub const FACTORY_TEMPLATE: &str = r#"# factory configuration, written by `anvil
 [roles]
 coder = "anthropic"
 
-# Each reviewer reads the pull request with one focus. Reviewers must sit on
-# different base URLs from the coder, so no model reviews its own work.
+# Each reviewer reads the pull request with one stance: correctness, safety,
+# style or simplicity. Reviewers must sit on different base URLs from the
+# coder, so no model reviews its own work, and on at least two base URLs
+# between them, so no single model's blind spots decide a review.
 [[reviewers]]
 provider = "openai"
-focus = "correctness"
+stance = "correctness"
 
 [[reviewers]]
 provider = "google"
-focus = "safety"
+stance = "safety"
 
 [[reviewers]]
 provider = "openai"
-focus = "style"
+stance = "style"
 
 [[reviewers]]
 provider = "google"
-focus = "simplicity"
+stance = "simplicity"
 
 # How many eval tasks run at once. Default: 2.
 # [eval]
@@ -65,14 +71,63 @@ pub struct FactoryRoles {
     pub coder: String,
 }
 
+/// What one reviewer concentrates on.
+///
+/// Each stance has its own prompt in `factory-review`; together the four
+/// cover a pull request without overlapping.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Stance {
+    /// Does the change do what the ticket's acceptance list says; edge cases; error paths.
+    Correctness,
+    /// Permissions, shell commands, network calls, secrets; anything that widens what anvil can do.
+    Safety,
+    /// The standing rules from `~/.anvil/rules.toml` and `CLAUDE.md`, cited by rule id.
+    Style,
+    /// What could be deleted; duplicated logic; YAGNI violations; tests that test nothing.
+    Simplicity,
+}
+
+impl Stance {
+    /// Every stance, in the order the template lists them.
+    pub const ALL: [Stance; 4] = [
+        Stance::Correctness,
+        Stance::Safety,
+        Stance::Style,
+        Stance::Simplicity,
+    ];
+
+    /// The stance as it is written in `factory.toml`.
+    ///
+    /// # Returns
+    ///
+    /// The lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stance::Correctness => "correctness",
+            Stance::Safety => "safety",
+            Stance::Style => "style",
+            Stance::Simplicity => "simplicity",
+        }
+    }
+}
+
+impl fmt::Display for Stance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// One reviewer of a factory pull request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Reviewer {
     /// Provider that reviews.
     pub provider: String,
-    /// What the review concentrates on: `correctness`, `safety`, `style`, ...
-    pub focus: String,
+    /// What the review concentrates on.
+    pub stance: Stance,
 }
 
 /// Where pull requests go.
@@ -156,7 +211,6 @@ impl FactoryConfig {
         }
         for reviewer in &self.reviewers {
             check_filled("reviewers.provider", &reviewer.provider)?;
-            check_filled("reviewers.focus", &reviewer.focus)?;
         }
         check_filled("github.repo", &self.github.repo)?;
         let mut parts = self.github.repo.split('/');
@@ -174,6 +228,69 @@ impl FactoryConfig {
             return Err(ValidationError::ZeroField {
                 field: "eval.parallel",
             });
+        }
+        Ok(())
+    }
+
+    /// Checks that the reviewers are independent of the coder and of each other.
+    ///
+    /// Different training, different blind spots: that is the point of the
+    /// swarm. Base URLs are compared with any trailing `/` removed.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The merged anvil configuration whose `[providers]` the
+    ///   names resolve against.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the coder and every reviewer name a provider, no reviewer
+    /// shares a base URL with the coder, two differently named reviewers never
+    /// share a base URL, and the reviewers span at least two base URLs.
+    ///
+    /// # Errors
+    ///
+    /// The first [`ValidationError`] found.
+    pub fn check_independence(&self, config: &AnvilConfig) -> Result<(), ValidationError> {
+        let base_url = |role: &'static str, name: &str| {
+            config
+                .providers
+                .get(name)
+                .map(|provider| provider.base_url.trim_end_matches('/').to_owned())
+                .ok_or_else(|| ValidationError::UnknownProvider {
+                    role,
+                    provider: name.to_owned(),
+                })
+        };
+        let coder = &self.roles.coder;
+        let coder_url = base_url("coder", coder)?;
+        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+        for reviewer in &self.reviewers {
+            let name = reviewer.provider.as_str();
+            let url = base_url("reviewer", name)?;
+            if url == coder_url {
+                return Err(ValidationError::ReviewerSharesCoderUrl {
+                    reviewer: name.to_owned(),
+                    coder: coder.clone(),
+                    base_url: url,
+                });
+            }
+            match seen.get(&url) {
+                Some(other) if *other != name => {
+                    return Err(ValidationError::ReviewersShareUrl {
+                        first: (*other).to_owned(),
+                        second: name.to_owned(),
+                        base_url: url,
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    seen.insert(url, name);
+                }
+            }
+        }
+        if seen.len() < 2 {
+            return Err(ValidationError::TooFewReviewerUrls { found: seen.len() });
         }
         Ok(())
     }
@@ -216,7 +333,7 @@ mod tests {
         assert_eq!(config.roles.coder, "anthropic");
         assert_eq!(config.reviewers.len(), 4);
         assert_eq!(config.reviewers[1].provider, "google");
-        assert_eq!(config.reviewers[1].focus, "safety");
+        assert_eq!(config.reviewers[1].stance, Stance::Safety);
         assert_eq!(config.github.repo, "owner/repo");
         assert_eq!(config.notify.webhook_env, "WEBHOOK_URL");
         assert!(config.unfilled().is_empty());
@@ -256,12 +373,112 @@ mod tests {
             Err(ValidationError::EmptyField { field: "reviewers" })
         );
         let mut config = filled();
-        config.reviewers[0].focus = " ".to_owned();
+        config.reviewers[0].provider = " ".to_owned();
         assert_eq!(
             config.validate(),
             Err(ValidationError::EmptyField {
-                field: "reviewers.focus"
+                field: "reviewers.provider"
             })
+        );
+    }
+
+    #[test]
+    fn stance_round_trips_and_rejects_unknown_names() {
+        for stance in Stance::ALL {
+            let text = format!("\"{stance}\"");
+            let parsed: Stance = serde_json::from_str(&text).expect("parses");
+            assert_eq!(parsed, stance);
+            assert_eq!(serde_json::to_string(&stance).expect("serializes"), text);
+        }
+        let text = FactoryConfig::template("o/r").replace("\"safety\"", "\"vibes\"");
+        let error = toml::from_str::<FactoryConfig>(&text).expect_err("rejected");
+        assert!(error.to_string().contains("vibes"), "{error}");
+    }
+
+    fn providers() -> AnvilConfig {
+        toml::from_str(crate::config::SETUP_PROVIDERS).expect("parses")
+    }
+
+    fn with_reviewers(coder: &str, reviewers: &[&str]) -> FactoryConfig {
+        let mut config = filled();
+        config.roles.coder = coder.to_owned();
+        config.reviewers = reviewers
+            .iter()
+            .zip(Stance::ALL.iter().cycle())
+            .map(|(provider, stance)| Reviewer {
+                provider: (*provider).to_owned(),
+                stance: *stance,
+            })
+            .collect();
+        config
+    }
+
+    #[test]
+    fn the_template_layout_is_independent() {
+        filled()
+            .check_independence(&providers())
+            .expect("independent");
+        with_reviewers("anthropic", &["openai", "google", "openai"])
+            .check_independence(&providers())
+            .expect("a provider may review twice with different stances");
+    }
+
+    #[test]
+    fn a_reviewer_on_the_coder_url_is_rejected() {
+        let error = with_reviewers("anthropic", &["anthropic", "openai"])
+            .check_independence(&providers())
+            .expect_err("rejected");
+        assert!(
+            matches!(
+                &error,
+                ValidationError::ReviewerSharesCoderUrl { reviewer, coder, .. }
+                    if reviewer == "anthropic" && coder == "anthropic"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn two_reviewers_on_one_url_are_rejected() {
+        let mut config = providers();
+        let openai_url = config.providers["openai"].base_url.clone();
+        config.providers.get_mut("google").expect("google").base_url = format!("{openai_url}/");
+        let error = with_reviewers("anthropic", &["openai", "google"])
+            .check_independence(&config)
+            .expect_err("rejected");
+        assert!(
+            matches!(
+                &error,
+                ValidationError::ReviewersShareUrl { first, second, .. }
+                    if first == "openai" && second == "google"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn reviewers_must_span_two_urls() {
+        let error = with_reviewers("anthropic", &["openai", "openai"])
+            .check_independence(&providers())
+            .expect_err("rejected");
+        assert_eq!(error, ValidationError::TooFewReviewerUrls { found: 1 });
+    }
+
+    #[test]
+    fn unknown_providers_are_named() {
+        let error = with_reviewers("nope", &["openai", "google"])
+            .check_independence(&providers())
+            .expect_err("rejected");
+        assert!(
+            matches!(&error, ValidationError::UnknownProvider { role: "coder", provider } if provider == "nope"),
+            "{error}"
+        );
+        let error = with_reviewers("anthropic", &["openai", "nope"])
+            .check_independence(&providers())
+            .expect_err("rejected");
+        assert!(
+            matches!(&error, ValidationError::UnknownProvider { role: "reviewer", provider } if provider == "nope"),
+            "{error}"
         );
     }
 
