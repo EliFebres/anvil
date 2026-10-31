@@ -1,5 +1,5 @@
-# factory configuration, written by `forge setup` and committed.
-# Provider names refer to [providers.<name>] entries in ~/.forge/config.toml.
+# factory configuration, written by `anvil setup` and committed.
+# Provider names refer to [providers.<name>] entries in ~/.anvil/config.toml.
 
 [roles]
 coder = "anthropic"

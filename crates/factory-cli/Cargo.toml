@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-forge-types.workspace = true
+anvil-types.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

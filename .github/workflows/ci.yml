@@ -34,7 +34,12 @@ jobs:
       - name: test
         run: cargo test --all
       - name: scan-keys
-        run: cargo run -q -p forge-cli -- scan-keys
+        run: cargo run -q -p anvil-cli -- scan-keys
+      - name: no-old-name
+        shell: bash
+        # The old program name may survive only in the legacy migration module and its test.
+        run: |
+          rg -i 'f[o]rge' --hidden --glob '!.git' --glob '!target' --glob '!crates/anvil-cli/src/legacy.rs' --glob '!crates/anvil-cli/tests/legacy.rs' . ; test $? -eq 1
 
   # One status check named `ci` for branch protection to require.
   ci:
