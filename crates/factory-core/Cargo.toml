@@ -1,0 +1,11 @@
+[package]
+name = "factory-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Ticket queue, worker loop, git operations and merge policy for the factory."
+
+[dependencies]
+
+[lints]
+workspace = true

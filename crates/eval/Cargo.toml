@@ -1,0 +1,11 @@
+[package]
+name = "eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Eval harness: scores a model or a build against a fixed task set."
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,30 @@
+# factory configuration, written by `forge setup` and committed.
+# Provider names refer to [providers.<name>] entries in ~/.forge/config.toml.
+
+[roles]
+coder = "anthropic"
+
+# Each reviewer reads the pull request with one focus. Reviewers must sit on
+# different base URLs from the coder, so no model reviews its own work.
+[[reviewers]]
+provider = "openai"
+focus = "correctness"
+
+[[reviewers]]
+provider = "google"
+focus = "safety"
+
+[[reviewers]]
+provider = "openai"
+focus = "style"
+
+[[reviewers]]
+provider = "google"
+focus = "simplicity"
+
+[github]
+repo = "EliFebres/anvil"
+
+# The environment variable that holds a Discord, Slack or ntfy webhook URL.
+[notify]
+webhook_env = "WEBHOOK_URL"

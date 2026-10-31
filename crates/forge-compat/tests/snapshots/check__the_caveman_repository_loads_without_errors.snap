@@ -1,0 +1,21 @@
+---
+source: crates/forge-compat/tests/check.rs
+expression: "render(\"caveman\", None)"
+---
+compat check: <fixtures>/caveman
+LOADS  instructions  CLAUDE.md                        3 lines, 2 @import(s)
+LOADS  import        CLAUDE.md                        @AGENTS.md
+SKIP   import        CLAUDE.md                        @docs/missing.md does not exist; the import is ignored
+LOADS  skill         skills/caveman/SKILL.md          `caveman`, 1 supporting file(s)
+LOADS  skill         skills/caveman-explore/SKILL.md  `caveman-explore`, 0 supporting file(s); allowed-tools -> read_file, grep; requires playwright (not available here; the skill still loads); extra keys kept: model, tools
+LOADS  command       commands/caveman-init.md         /caveman-init: Drop the always-on caveman activation rule into the current repo for every IDE agent, uses $ARGUMENTS
+SKIP   command       commands/caveman.toml            TOML commands are not supported; convert to Markdown with a `description` frontmatter
+LOADS  agent         agents/cavecrew-builder.md       `cavecrew-builder`; tools: read_file, edit_file, write_file, shell
+LOADS  agent         agents/cavecrew-reviewer.md      `cavecrew-reviewer`; all tools; model `haiku` (no forge config here to resolve it against)
+SKIP   agent         agents                           1 entry that is not a Markdown agent file is ignored
+SKIP   plugin        .claude-plugin/plugin.json       plugin `caveman`: forge does not install plugins; its skills/, commands/ and agents/ above are checked as plain folders
+SKIP   hook          .claude-plugin/plugin.json       SessionStart: 1 command(s); hooks in a plugin manifest are not run, copy them to .claude/settings.json
+SKIP   hook          .claude-plugin/plugin.json       SessionEnd: not supported (forge runs PreToolUse, PostToolUse, Stop, SessionStart command hooks)
+SKIP   hook          .claude-plugin/plugin.json       SubagentStart: not supported (forge runs PreToolUse, PostToolUse, Stop, SessionStart command hooks)
+SKIP   hook          .claude-plugin/plugin.json       UserPromptSubmit: not supported (forge runs PreToolUse, PostToolUse, Stop, SessionStart command hooks)
+7 would load, 8 skipped, 0 error(s)

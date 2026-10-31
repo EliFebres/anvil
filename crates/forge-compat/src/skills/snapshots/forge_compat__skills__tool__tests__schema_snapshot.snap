@@ -1,0 +1,25 @@
+---
+source: crates/forge-compat/src/skills/tool.rs
+expression: "SkillTool::new(Arc::default()).schema()"
+---
+{
+  "description": "Arguments of the `skill` tool.",
+  "properties": {
+    "args": {
+      "default": null,
+      "description": "Free text to pass to the skill, such as what the user typed after `/<name>`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "description": "The skill's name, exactly as listed in the system prompt.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "type": "object"
+}

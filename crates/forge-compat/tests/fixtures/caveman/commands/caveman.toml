@@ -1,0 +1,2 @@
+description = "Switch caveman intensity level (lite/full/ultra/off)"
+prompt = "Switch to caveman {{args}} mode."

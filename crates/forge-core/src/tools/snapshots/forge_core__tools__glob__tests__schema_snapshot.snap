@@ -1,0 +1,25 @@
+---
+source: crates/forge-core/src/tools/glob.rs
+expression: Glob.schema()
+---
+{
+  "description": "Arguments of the `glob` tool.",
+  "properties": {
+    "path": {
+      "default": null,
+      "description": "Directory to search, relative to the project root or absolute. Default: the project root.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pattern": {
+      "description": "Glob such as `**/*.rs` or `src/*.toml`, matched against paths relative to the search root.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "pattern"
+  ],
+  "type": "object"
+}
