@@ -1,0 +1,23 @@
+[package]
+name = "anvil-telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Usage recording, failure classification and ticket drafting for anvil."
+
+[dependencies]
+chrono.workspace = true
+anvil-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

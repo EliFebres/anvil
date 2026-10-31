@@ -2,8 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use anvil_types::dotenv;
 use clap::{Parser, Subcommand};
-use forge_types::dotenv;
 
 /// The Dark Factory: works tickets from `tickets/open/` into reviewed pull requests.
 #[derive(Debug, Parser)]
@@ -20,7 +20,7 @@ enum Command {
     /// Say whether an environment variable is set after the env files load, and where it came from.
     ///
     /// The value is never printed. Files load in this order, first definition
-    /// wins: the real environment, ~/.factory/env, ~/.forge/.env, .forge/.env.
+    /// wins: the real environment, ~/.factory/env, ~/.anvil/.env, .anvil/.env.
     Env {
         /// The variable name.
         name: String,

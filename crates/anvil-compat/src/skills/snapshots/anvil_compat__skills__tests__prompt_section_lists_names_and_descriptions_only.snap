@@ -1,0 +1,7 @@
+---
+source: crates/anvil-compat/src/skills/mod.rs
+expression: section.text
+---
+Skills are instruction sets loaded on demand. When a task matches a skill's description, or the user asks for it by name, call the `skill` tool with its name (and any arguments) and follow the instructions it returns. Do not guess at a skill's contents.
+
+- browse: Does browse things. Use when asked. (requires `playwright`, not available in this session)

@@ -49,8 +49,8 @@ fn env_loads_factory_env_first_and_the_real_environment_wins() {
     let project = dir.path().join("project");
     std::fs::create_dir_all(&project).expect("mkdir");
     let factory_env = home.join(".factory").join("env");
-    let forge_env = home.join(".forge").join(".env");
-    let project_env = project.join(".forge").join(".env");
+    let anvil_env = home.join(".anvil").join(".env");
+    let project_env = project.join(".anvil").join(".env");
 
     let run = |extra: Option<&str>| {
         let mut command = factory(&project, &home);
@@ -78,10 +78,10 @@ fn env_loads_factory_env_first_and_the_real_environment_wins() {
         "{out}"
     );
 
-    write(&forge_env, "FACTORY_TEST_PROBE=forge\n");
+    write(&anvil_env, "FACTORY_TEST_PROBE=anvil\n");
     let out = run(None);
     assert!(
-        out.ends_with(&format!("(from {})", forge_env.display())),
+        out.ends_with(&format!("(from {})", anvil_env.display())),
         "{out}"
     );
 
