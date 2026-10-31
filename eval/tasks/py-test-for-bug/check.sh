@@ -8,7 +8,11 @@ grep -q '90m' tests/test_duration.py || { echo "no test mentions 90m"; exit 1; }
 scratch=$(mktemp -d)
 cp -r . "$scratch"
 cp "$EVAL_TASK_DIR/expected/duration_buggy.py" "$scratch/duration.py"
-if (cd "$scratch" && "$PY" -m pytest -q >/dev/null 2>&1); then
-  echo "the new test does not fail on the buggy implementation"
+# Only a failing test counts: an import error or a missing interpreter also
+# exits non-zero, and that must not pass as "the test caught the bug".
+output=$(cd "$scratch" && "$PY" -m pytest -q 2>&1 || true)
+if ! grep -Eq '[0-9]+ failed' <<<"$output"; then
+  echo "the new test does not fail on the buggy implementation:"
+  tail -n 20 <<<"$output"
   exit 1
 fi
