@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "plugins": {
+    "ponytail@ponytail": [{ "scope": "user", "version": "4.8.4" }],
+    "rust-analyzer-lsp@claude-plugins-official": [{ "scope": "user", "version": "1.0.0" }]
+  }
+}

@@ -1,0 +1,11 @@
+[package]
+name = "factory-review"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Multi-model review for the factory."
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,69 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+
+[workspace.dependencies]
+# Workspace crates
+forge-types = { path = "crates/forge-types" }
+forge-core = { path = "crates/forge-core" }
+forge-compat = { path = "crates/forge-compat" }
+forge-memory = { path = "crates/forge-memory" }
+forge-telemetry = { path = "crates/forge-telemetry" }
+factory-core = { path = "crates/factory-core" }
+factory-review = { path = "crates/factory-review" }
+eval = { path = "crates/eval" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1"
+toml_edit = "0.25"
+dotenvy = "0.15"
+serde-saphyr = "2.0"
+regex = "1"
+schemars = { version = "1.2", features = ["chrono04"] }
+
+# Errors
+thiserror = "2.0"
+anyhow = "1.0"
+
+# CLI
+clap = { version = "4.6", features = ["derive"] }
+rustyline = "19.0"
+
+# Async + HTTP (rustls only; no OpenSSL)
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "charset", "http2", "stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio-stream = { version = "0.1", default-features = false }
+
+# File walking and searching (no external ripgrep needed)
+ignore = "0.4"
+globset = "0.4"
+grep = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+
+# Identifiers and time
+ulid = { version = "3.0", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Testing
+insta = { version = "1.49", features = ["json"] }
+tempfile = "3.27"
+wiremock = "0.6"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"

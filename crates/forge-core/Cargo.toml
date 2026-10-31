@@ -1,0 +1,32 @@
+[package]
+name = "forge-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Agent loop, tool registry, provider adapters and context management for forge."
+
+[dependencies]
+chrono.workspace = true
+forge-types.workspace = true
+futures-util.workspace = true
+globset.workspace = true
+grep.workspace = true
+ignore.workspace = true
+reqwest.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+toml.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true
