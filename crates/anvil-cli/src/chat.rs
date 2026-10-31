@@ -66,7 +66,7 @@ pub async fn chat(wiring: &Wiring, yes: bool) -> anyhow::Result<i32> {
         ));
     }
     let (events, tee) = telemetry.sink(true);
-    let registry = wiring.registry(telemetry.prompt())?;
+    let registry = wiring.registry(telemetry.prompt(false))?;
     telemetry.record_skill_requires(wiring, &registry);
     let mut session = ChatSession {
         wiring,

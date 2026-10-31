@@ -21,6 +21,8 @@ pub use config::{
     TelemetryConfig, TicketsConfig, ToolsConfig,
 };
 pub use error::{ConfigError, DotenvError, ValidationError};
-pub use factory_config::{FactoryConfig, FactoryRoles, GithubConfig, NotifyConfig, Reviewer};
+pub use factory_config::{
+    EvalConfig, FactoryConfig, FactoryRoles, GithubConfig, NotifyConfig, Reviewer,
+};
 pub use skill::SkillManifest;
 pub use ticket::{Priority, TelemetryRef, Ticket, TicketKind, TicketOrigin, TicketStatus};

@@ -36,7 +36,7 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
     let wiring = wiring.with_session(&id, &session_dir);
     let telemetry = SessionTelemetry::start(&wiring, &id, SessionMode::Run);
     let task = wiring.expand_slash(&task).unwrap_or(task);
-    let registry = wiring.registry(telemetry.prompt())?;
+    let registry = wiring.registry(telemetry.prompt(yes))?;
     telemetry.record_skill_requires(&wiring, &registry);
     let mut config = wiring.loop_config(task, session_dir, &registry)?;
     let hooks = wiring.hook_runner();
@@ -106,7 +106,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
     let wiring = wiring.with_session(id, &snapshot.dir);
     let telemetry = SessionTelemetry::start(&wiring, id, SessionMode::Resume);
-    let registry = wiring.registry(telemetry.prompt())?;
+    let registry = wiring.registry(telemetry.prompt(yes))?;
     telemetry.record_skill_requires(&wiring, &registry);
     let mut config =
         wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry)?;
