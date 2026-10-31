@@ -1,0 +1,3 @@
+tags = ["rust", "subcommand"]
+timeout_s = 600
+max_tokens = 400000

@@ -1,0 +1,6 @@
+# Shell scripts and everything the eval harness runs through bash or diffs
+# must stay LF, whatever core.autocrlf says: CRLF breaks `#!/usr/bin/env bash`
+# and makes every expected-file diff fail on Windows.
+*.sh text eol=lf
+eval/** text eol=lf
+crates/eval/tests/fixtures/** text eol=lf

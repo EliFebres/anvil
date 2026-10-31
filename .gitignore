@@ -41,3 +41,7 @@ deploy/nuc/env
 
 # anvil ticket drafts are per machine; only tickets/open/ is committed
 tickets/draft/
+
+# eval fixtures run in temp copies, but a hand run in place leaves these behind
+__pycache__/
+.pytest_cache/

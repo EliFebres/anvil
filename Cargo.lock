@@ -600,6 +600,19 @@ checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 [[package]]
 name = "eval"
 version = "0.1.0"
+dependencies = [
+ "anvil-types",
+ "chrono",
+ "clap",
+ "insta",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+]
 
 [[package]]
 name = "factory-cli"
