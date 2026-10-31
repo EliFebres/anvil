@@ -98,6 +98,35 @@ pub enum ValidationError {
         repo: String,
     },
 
+    /// A reviewer sits on the same base URL as the coder, so a model would review its own work.
+    #[error("reviewer `{reviewer}` shares base_url {base_url} with coder `{coder}`")]
+    ReviewerSharesCoderUrl {
+        /// The reviewer's provider name.
+        reviewer: String,
+        /// The coder's provider name.
+        coder: String,
+        /// The shared URL.
+        base_url: String,
+    },
+
+    /// Two differently named reviewers sit on one base URL.
+    #[error("reviewers `{first}` and `{second}` share base_url {base_url}")]
+    ReviewersShareUrl {
+        /// The reviewer seen first.
+        first: String,
+        /// The reviewer seen second.
+        second: String,
+        /// The shared URL.
+        base_url: String,
+    },
+
+    /// The reviewers do not span two base URLs, so one model's blind spots decide every review.
+    #[error("reviewers use {found} distinct base_url(s); at least 2 are needed")]
+    TooFewReviewerUrls {
+        /// How many distinct base URLs the reviewers use.
+        found: usize,
+    },
+
     /// A numeric field that must be positive is zero.
     #[error("field `{field}` must be at least 1")]
     ZeroField {

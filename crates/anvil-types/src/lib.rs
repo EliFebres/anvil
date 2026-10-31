@@ -22,7 +22,7 @@ pub use config::{
 };
 pub use error::{ConfigError, DotenvError, ValidationError};
 pub use factory_config::{
-    EvalConfig, FactoryConfig, FactoryRoles, GithubConfig, NotifyConfig, Reviewer,
+    EvalConfig, FactoryConfig, FactoryRoles, GithubConfig, NotifyConfig, Reviewer, Stance,
 };
 pub use skill::SkillManifest;
 pub use ticket::{Priority, TelemetryRef, Ticket, TicketKind, TicketOrigin, TicketStatus};
