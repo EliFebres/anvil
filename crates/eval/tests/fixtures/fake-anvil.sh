@@ -15,10 +15,18 @@ fail() { echo "fake-anvil: $1" >&2; exit 97; }
 [ -f "$ANVIL_HOME/.anvil/config.toml" ] || fail "no config.toml in ANVIL_HOME"
 [ -f .anvil/config.toml ] || fail "no project .anvil/config.toml"
 
+# Attempts run in parallel and share this home, so every file is written
+# whole under a unique name and renamed into place; a rename that loses the
+# race leaves the other attempt's copy, which the tests accept.
+record() {
+  tmp="$2.$$.tmp"
+  printf '%s' "$1" > "$tmp"
+  mv -f "$tmp" "$2" 2>/dev/null || rm -f "$tmp"
+}
 mkdir -p "$ANVIL_HOME/.anvil/memory"
-echo "eval run" > "$ANVIL_HOME/.anvil/memory/touched"
-printf '%s' "$3" > "$ANVIL_HOME/.anvil/last-prompt.txt"
-cp .anvil/config.toml "$ANVIL_HOME/.anvil/last-project-config.toml"
+record "eval run" "$ANVIL_HOME/.anvil/memory/touched"
+record "$3" "$ANVIL_HOME/.anvil/last-prompt.txt"
+record "$(cat .anvil/config.toml)" "$ANVIL_HOME/.anvil/last-project-config.toml"
 
 session=01ARZ3NDEKTSV4RRFFQ69G5FAV
 echo "session $session" >&2
