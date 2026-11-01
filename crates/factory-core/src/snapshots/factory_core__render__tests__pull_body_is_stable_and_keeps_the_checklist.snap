@@ -1,0 +1,53 @@
+---
+source: crates/factory-core/src/render.rs
+expression: body
+---
+Ticket `01J9Z6Q4K8XW2R3T5V7Y9B1D3F` (Tool, P1), opened by the factory.
+
+## Symptom
+
+The agent reads whole files to find one symbol.
+
+## Reproduction
+
+```
+anvil run "find callers of foo"
+```
+
+## Spec
+
+Tool `grep` with `pattern`, `path`, `max_results` (default 50) in anvil-core.
+
+## Acceptance
+
+- [ ] cargo test -p anvil-core passes
+- [ ] the tool schema snapshot is updated
+
+## Gates
+
+| gate | result | detail |
+|---|---|---|
+| A: just check | pass | passed on attempt 1 |
+| B: eval | pass | 0 regressions \| 1 fixed |
+| C: review | pass | approve: no blocking findings |
+
+## Eval against main
+
+```
+task          main  branch
+rs-grep       PASS  PASS
+gate: PASS (0 regressions)
+```
+
+## Reviewers
+
+| reviewer | verdict |
+|---|---|
+| openai/correctness | approve |
+| google/safety | approve |
+
+## Needs a human
+
+This change touches protected paths and is not merged automatically:
+
+- `deploy/nuc/Containerfile`

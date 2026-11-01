@@ -9,13 +9,16 @@
 use std::path::Path;
 use std::process::Command;
 
+use anvil_types::ticket::dirs::STATE_BRANCH;
+
 use crate::error::TelemetryError;
 use crate::paths::OPEN_DIR;
 
 /// Builds the branch `tickets/<id>` holding one submitted ticket and pushes it.
 ///
-/// The base is `refs/remotes/<remote>/main` when that ref exists, otherwise
-/// `HEAD`. The push is the only network operation; nothing is fetched.
+/// The base is `refs/remotes/<remote>/factory/state` when that ref exists
+/// (the branch the factory reads tickets from), else `refs/remotes/<remote>/main`,
+/// else `HEAD`. The push is the only network operation; nothing is fetched.
 ///
 /// # Arguments
 ///
@@ -60,15 +63,7 @@ fn build_and_push(
     index: &str,
 ) -> Result<(), TelemetryError> {
     let blob = git(root, None, &["hash-object", "-w", file])?;
-    let remote_main = format!("refs/remotes/{remote}/main");
-    let base = match git(
-        root,
-        None,
-        &["rev-parse", "--verify", "--quiet", &remote_main],
-    ) {
-        Ok(commit) => commit,
-        Err(_) => git(root, None, &["rev-parse", "--verify", "HEAD"])?,
-    };
+    let base = base_commit(root, remote)?;
     git(root, Some(index), &["read-tree", &base])?;
     let cacheinfo = format!("100644,{blob},{file}");
     git(
@@ -90,6 +85,22 @@ fn build_and_push(
     git(root, None, &["update-ref", &reference, &commit])?;
     git(root, None, &["push", remote, &reference])?;
     Ok(())
+}
+
+/// The commit the ticket branch starts from: the remote state branch, else
+/// the remote main, else `HEAD`.
+fn base_commit(root: &Path, remote: &str) -> Result<String, TelemetryError> {
+    for branch in [STATE_BRANCH, "main"] {
+        let reference = format!("refs/remotes/{remote}/{branch}");
+        if let Ok(commit) = git(
+            root,
+            None,
+            &["rev-parse", "--verify", "--quiet", &reference],
+        ) {
+            return Ok(commit);
+        }
+    }
+    git(root, None, &["rev-parse", "--verify", "HEAD"])
 }
 
 /// Runs one git command and returns its trimmed stdout.
@@ -150,6 +161,14 @@ mod tests {
             &["remote", "add", "origin", &bare.to_string_lossy()]
         ));
         assert!(setup(&repo, &["push", "-q", "origin", "main"]));
+        std::fs::write(repo.join("state.txt"), "state\n").expect("write");
+        assert!(setup(&repo, &["add", "state.txt"]));
+        assert!(setup(&repo, &["commit", "-q", "-m", "state"]));
+        assert!(setup(
+            &repo,
+            &["push", "-q", "origin", "main:factory/state"]
+        ));
+        assert!(setup(&repo, &["reset", "-q", "--hard", "HEAD~1"]));
 
         let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
         let open = repo.join(OPEN_DIR);
@@ -172,6 +191,10 @@ mod tests {
         .expect("ls-tree");
         assert!(listed.contains(&format!("{OPEN_DIR}/{id}.toml")));
         assert!(listed.contains("README.md"));
+        assert!(
+            listed.contains("state.txt"),
+            "the branch starts from origin/factory/state, not main: {listed}"
+        );
         assert!(!listed.contains("dirty.txt"));
         let subject = git(
             &bare,

@@ -10,6 +10,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub yes: bool,
 
+    /// A named profile, `~/.anvil/profiles/<name>.toml`, layered over the global and
+    /// project configuration; its `[permissions]` table replaces `.anvil/permissions.toml`.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub profile: Option<String>,
+
     /// What to do.
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -78,6 +83,13 @@ pub enum Command {
         /// How far back to look: a number followed by m, h, d or w.
         #[arg(long, default_value = "7d")]
         since: String,
+    },
+    /// Download the latest release for this platform, verify its SHA256, swap the binary
+    /// and print the changes since the installed version.
+    Update {
+        /// The binary to replace instead of this executable (for tests).
+        #[arg(long, hide = true)]
+        exe: Option<std::path::PathBuf>,
     },
     /// Draft, review and submit improvement tickets from this project's telemetry.
     Ticket {

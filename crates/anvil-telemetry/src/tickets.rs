@@ -297,6 +297,10 @@ mod tests {
             priority: Priority::P2,
             status: TicketStatus::Draft,
             origin: TicketOrigin::Cli,
+            claimed_at: None,
+            claimed_by: None,
+            pr: None,
+            note: None,
         }
     }
 

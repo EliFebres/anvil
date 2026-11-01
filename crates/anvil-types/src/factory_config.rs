@@ -58,10 +58,70 @@ stance = "simplicity"
 [github]
 repo = "{repo}"
 
-# The environment variable that holds a Discord, Slack or ntfy webhook URL.
+# The environment variable that holds a Discord, Slack or ntfy webhook URL,
+# and the local time of the daily digest.
 [notify]
 webhook_env = "WEBHOOK_URL"
+digest_at = "08:00"
+
+# How often `factory run` polls factory/state and the tickets/* branches.
+[service]
+poll_minutes = 5
+
+# Where the implementer runs. `runtime` is "podman", "docker" or "none" (no
+# container; for tests and development only). `egress_allow` lists the hosts
+# the container may reach besides every provider's base URL.
+[worker]
+runtime = "podman"
+image = "localhost/anvil-factory:latest"
+anvil_bin = "anvil"
+egress_allow = ["github.com", "index.crates.io", "static.crates.io"]
+
+# Per-ticket limits. Exceeding one rejects the ticket with the reason.
+[budget]
+wall_clock_minutes = 90
+tokens = 6000000
+
+# Paths the factory never merges on its own: a pull request touching one is
+# labelled `needs-human` and its ticket waits. Globs match repository-relative
+# paths. With `cargo_dependencies`, a new key under any `[dependencies]`-like
+# table of any Cargo.toml needs a human too.
+[protected]
+paths = [
+  "crates/factory-core/**",
+  "crates/factory-review/**",
+  "crates/eval/**",
+  "deploy/**",
+  ".github/**",
+  "CLAUDE.md",
+  "justfile",
+  "factory.toml",
+  "tickets/**",
+  "crates/anvil-types/src/ticket.rs",
+  "crates/anvil-types/src/boundary.rs",
+  "crates/anvil-types/tests/queue.rs",
+  "**/permissions*.toml",
+]
+cargo_dependencies = true
 "#;
+
+/// Minutes between polls when `[service] poll_minutes` is not set.
+pub const DEFAULT_POLL_MINUTES: u64 = 5;
+
+/// Wall clock per ticket when `[budget] wall_clock_minutes` is not set.
+pub const DEFAULT_WALL_CLOCK_MINUTES: u64 = 90;
+
+/// Token budget per ticket when `[budget] tokens` is not set.
+pub const DEFAULT_TOKEN_BUDGET: u64 = 6_000_000;
+
+/// Local time of the daily digest when `[notify] digest_at` is not set.
+pub const DEFAULT_DIGEST_AT: &str = "08:00";
+
+/// Container image when `[worker] image` is not set.
+pub const DEFAULT_IMAGE: &str = "localhost/anvil-factory:latest";
+
+/// Hosts the container may reach when `[worker] egress_allow` is not set.
+pub const DEFAULT_EGRESS_ALLOW: [&str; 3] = ["github.com", "index.crates.io", "static.crates.io"];
 
 /// Which provider writes the code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -144,6 +204,98 @@ pub struct GithubConfig {
 pub struct NotifyConfig {
     /// Environment variable that holds the webhook URL.
     pub webhook_env: String,
+    /// Local time of the daily digest, `HH:MM`.
+    #[serde(default = "default_digest_at")]
+    pub digest_at: String,
+}
+
+fn default_digest_at() -> String {
+    DEFAULT_DIGEST_AT.to_owned()
+}
+
+/// How the service loop runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct ServiceConfig {
+    /// Minutes between polls of the state branch.
+    pub poll_minutes: u64,
+}
+
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            poll_minutes: DEFAULT_POLL_MINUTES,
+        }
+    }
+}
+
+/// What runs the implementer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainerRuntime {
+    /// Rootless podman.
+    Podman,
+    /// Docker.
+    Docker,
+    /// No container: the implementer runs on the host. Tests and development only.
+    None,
+}
+
+/// Where and how the implementer runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct WorkerConfig {
+    /// The container runtime.
+    pub runtime: ContainerRuntime,
+    /// The image built from `deploy/nuc/Containerfile`.
+    pub image: String,
+    /// The anvil binary inside the container, or a host path with `runtime = "none"`.
+    pub anvil_bin: String,
+    /// Hosts the container may reach, besides every provider's base URL.
+    pub egress_allow: Vec<String>,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            runtime: ContainerRuntime::Podman,
+            image: DEFAULT_IMAGE.to_owned(),
+            anvil_bin: "anvil".to_owned(),
+            egress_allow: DEFAULT_EGRESS_ALLOW
+                .iter()
+                .map(|host| (*host).to_owned())
+                .collect(),
+        }
+    }
+}
+
+/// Per-ticket limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct BudgetConfig {
+    /// Wall clock a ticket may take, from claim to merge.
+    pub wall_clock_minutes: u64,
+    /// Tokens the implementer may use over every attempt.
+    pub tokens: u64,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            wall_clock_minutes: DEFAULT_WALL_CLOCK_MINUTES,
+            tokens: DEFAULT_TOKEN_BUDGET,
+        }
+    }
+}
+
+/// What the factory never merges without a human.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProtectedConfig {
+    /// Globs over repository-relative paths.
+    pub paths: Vec<String>,
+    /// Whether a new key under a `[dependencies]`-like table holds the pull request.
+    pub cargo_dependencies: bool,
 }
 
 /// How the eval harness runs.
@@ -177,6 +329,18 @@ pub struct FactoryConfig {
     /// How the eval harness runs; every key has a default.
     #[serde(default)]
     pub eval: EvalConfig,
+    /// How the service loop runs; every key has a default.
+    #[serde(default)]
+    pub service: ServiceConfig,
+    /// Where the implementer runs; every key has a default.
+    #[serde(default)]
+    pub worker: WorkerConfig,
+    /// Per-ticket limits; every key has a default.
+    #[serde(default)]
+    pub budget: BudgetConfig,
+    /// What needs a human. Empty by default; `factory run` refuses an empty list.
+    #[serde(default)]
+    pub protected: ProtectedConfig,
 }
 
 impl FactoryConfig {
@@ -198,8 +362,8 @@ impl FactoryConfig {
     /// # Returns
     ///
     /// `Ok(())` when there is at least one reviewer, no text field is empty or
-    /// a placeholder, `github.repo` is `owner/repo` and `eval.parallel` is at
-    /// least 1.
+    /// a placeholder, `github.repo` is `owner/repo`, every count is at least
+    /// 1, `notify.digest_at` is `HH:MM` and every protected path is a glob.
     ///
     /// # Errors
     ///
@@ -224,10 +388,26 @@ impl FactoryConfig {
             });
         }
         check_filled("notify.webhook_env", &self.notify.webhook_env)?;
-        if self.eval.parallel == 0 {
-            return Err(ValidationError::ZeroField {
-                field: "eval.parallel",
-            });
+        check_time("notify.digest_at", &self.notify.digest_at)?;
+        let counts: [(&'static str, u64); 4] = [
+            ("eval.parallel", u64::from(self.eval.parallel)),
+            ("service.poll_minutes", self.service.poll_minutes),
+            ("budget.wall_clock_minutes", self.budget.wall_clock_minutes),
+            ("budget.tokens", self.budget.tokens),
+        ];
+        for (field, value) in counts {
+            if value == 0 {
+                return Err(ValidationError::ZeroField { field });
+            }
+        }
+        check_filled("worker.image", &self.worker.image)?;
+        check_filled("worker.anvil_bin", &self.worker.anvil_bin)?;
+        for glob in &self.protected.paths {
+            globset::Glob::new(glob).map_err(|error| ValidationError::InvalidGlob {
+                field: "protected.paths",
+                glob: glob.clone(),
+                detail: error.to_string(),
+            })?;
         }
         Ok(())
     }
@@ -318,6 +498,21 @@ fn check_filled(field: &'static str, value: &str) -> Result<(), ValidationError>
     }
 }
 
+/// Fails unless `value` is `HH:MM` on a 24-hour clock.
+fn check_time(field: &'static str, value: &str) -> Result<(), ValidationError> {
+    let invalid = || ValidationError::InvalidTime {
+        field,
+        value: value.to_owned(),
+    };
+    let (hours, minutes) = value.split_once(':').ok_or_else(invalid)?;
+    let hours: u8 = hours.parse().map_err(|_| invalid())?;
+    let minutes: u8 = minutes.parse().map_err(|_| invalid())?;
+    if hours > 23 || minutes > 59 || value.len() != 5 {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,7 +531,64 @@ mod tests {
         assert_eq!(config.reviewers[1].stance, Stance::Safety);
         assert_eq!(config.github.repo, "owner/repo");
         assert_eq!(config.notify.webhook_env, "WEBHOOK_URL");
+        assert_eq!(config.notify.digest_at, DEFAULT_DIGEST_AT);
+        assert_eq!(config.service, ServiceConfig::default());
+        assert_eq!(config.worker, WorkerConfig::default());
+        assert_eq!(config.budget, BudgetConfig::default());
+        assert!(config.protected.cargo_dependencies);
+        assert!(config.protected.paths.contains(&"factory.toml".to_owned()));
         assert!(config.unfilled().is_empty());
+    }
+
+    #[test]
+    fn new_sections_default_when_absent() {
+        let text = "[roles]\ncoder = \"a\"\n[[reviewers]]\nprovider = \"b\"\nstance = \"safety\"\n[github]\nrepo = \"o/r\"\n[notify]\nwebhook_env = \"W\"\n";
+        let config: FactoryConfig = toml::from_str(text).expect("parses without the new sections");
+        config.validate().expect("validates");
+        assert_eq!(config.service.poll_minutes, DEFAULT_POLL_MINUTES);
+        assert_eq!(config.worker.runtime, ContainerRuntime::Podman);
+        assert_eq!(config.budget.tokens, DEFAULT_TOKEN_BUDGET);
+        assert!(config.protected.paths.is_empty());
+        assert!(!config.protected.cargo_dependencies);
+    }
+
+    #[test]
+    fn counts_times_and_globs_are_checked() {
+        let mut config = filled();
+        config.service.poll_minutes = 0;
+        assert_eq!(
+            config.validate(),
+            Err(ValidationError::ZeroField {
+                field: "service.poll_minutes"
+            })
+        );
+        let mut config = filled();
+        config.budget.tokens = 0;
+        assert_eq!(
+            config.validate(),
+            Err(ValidationError::ZeroField {
+                field: "budget.tokens"
+            })
+        );
+        for bad in ["8:00", "24:00", "08:60", "noon", "08-00"] {
+            let mut config = filled();
+            config.notify.digest_at = bad.to_owned();
+            assert!(
+                matches!(config.validate(), Err(ValidationError::InvalidTime { .. })),
+                "{bad}"
+            );
+        }
+        let mut config = filled();
+        config.notify.digest_at = "23:59".to_owned();
+        config.validate().expect("23:59 is a time");
+        let mut config = filled();
+        config.protected.paths.push("crates/[".to_owned());
+        assert!(matches!(
+            config.validate(),
+            Err(ValidationError::InvalidGlob { glob, .. }) if glob == "crates/["
+        ));
+        let text = FactoryConfig::template("o/r").replace("\"podman\"", "\"lxc\"");
+        assert!(toml::from_str::<FactoryConfig>(&text).is_err());
     }
 
     #[test]

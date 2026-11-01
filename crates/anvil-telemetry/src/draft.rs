@@ -266,6 +266,10 @@ pub fn assemble(
         priority: signal.kind.priority(),
         status: TicketStatus::Draft,
         origin: TicketOrigin::Cli,
+        claimed_at: None,
+        claimed_by: None,
+        pr: None,
+        note: None,
     };
     ticket.validate()?;
     boundary::check_text("symptom", &ticket.symptom)?;

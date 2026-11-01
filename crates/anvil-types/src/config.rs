@@ -18,6 +18,9 @@ pub const CONFIG_DIR: &str = ".anvil";
 /// File name of the configuration file inside [`CONFIG_DIR`].
 pub const CONFIG_FILE: &str = "config.toml";
 
+/// Folder of named profiles under the home directory: `~/.anvil/profiles/<name>.toml`.
+pub const PROFILES_DIR: &str = ".anvil/profiles";
+
 /// The commented template written by `anvil config init`.
 pub const CONFIG_TEMPLATE: &str = r#"# anvil configuration.
 # Global: ~/.anvil/config.toml   Project: .anvil/config.toml (project overrides global).
@@ -389,6 +392,39 @@ impl Default for TicketsConfig {
     }
 }
 
+/// What a call gets when no permission rule matches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Unmatched {
+    /// Run it.
+    Allow,
+    /// Prompt first.
+    Ask,
+    /// Refuse it.
+    Deny,
+}
+
+/// Tool permission rules: `tool` or `tool:glob`, where the glob matches the
+/// call's path or command. `deny` wins, then `allow`, then `ask`, then
+/// `default`, then the tool's own default (allow for reads, ask for writes).
+///
+/// A project keeps them in `.anvil/permissions.toml`; a profile under
+/// `~/.anvil/profiles/` carries them as its `[permissions]` table, which
+/// then replaces the project file.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PermissionRules {
+    /// Calls that run without asking.
+    pub allow: Vec<String>,
+    /// Calls that prompt first.
+    pub ask: Vec<String>,
+    /// Calls that are refused.
+    pub deny: Vec<String>,
+    /// What an unmatched call gets instead of the tool's own default.
+    #[serde(rename = "default", skip_serializing_if = "Option::is_none")]
+    pub unmatched: Option<Unmatched>,
+}
+
 /// The whole anvil configuration file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -410,6 +446,10 @@ pub struct AnvilConfig {
     /// Where submitted tickets go.
     #[serde(default)]
     pub tickets: TicketsConfig,
+    /// Tool permission rules that replace the project's `.anvil/permissions.toml`.
+    /// Normally set by a profile, not by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<PermissionRules>,
 }
 
 impl AnvilConfig {
@@ -498,11 +538,67 @@ pub fn config_path(home: Option<&Path>, global: bool) -> Option<PathBuf> {
 ///
 /// When neither file exists, a file does not parse, or validation fails.
 pub fn load(home: Option<&Path>, cwd: &Path) -> Result<LoadedConfig, ConfigError> {
+    load_profile(home, cwd, None)
+}
+
+/// The path of a named profile.
+///
+/// # Arguments
+///
+/// * `home` - The home directory.
+/// * `name` - The profile name, as given to `--profile`.
+///
+/// # Returns
+///
+/// `<home>/.anvil/profiles/<name>.toml`.
+pub fn profile_path(home: &Path, name: &str) -> PathBuf {
+    home.join(PROFILES_DIR).join(format!("{name}.toml"))
+}
+
+/// Loads the global and project files, then a named profile on top.
+///
+/// A profile is a third layer, `~/.anvil/profiles/<name>.toml`, with the
+/// same shape as the other two. Unlike them it is required when named:
+/// running with a profile that does not exist would silently drop the
+/// restrictions the caller asked for.
+///
+/// # Arguments
+///
+/// * `home` - The home directory, if known.
+/// * `cwd` - The project root.
+/// * `profile` - The profile name, if any.
+///
+/// # Returns
+///
+/// The merged configuration.
+///
+/// # Errors
+///
+/// [`ConfigError::ProfileNotFound`] when a profile is named but missing (or
+/// `home` is unknown), and the errors of [`load`].
+pub fn load_profile(
+    home: Option<&Path>,
+    cwd: &Path,
+    profile: Option<&str>,
+) -> Result<LoadedConfig, ConfigError> {
     let mut merged = toml::Table::new();
     let mut sources = Vec::new();
+    let profile_file = match profile {
+        Some(name) => {
+            let path = home
+                .map(|home| profile_path(home, name))
+                .unwrap_or_else(|| PathBuf::from(PROFILES_DIR).join(format!("{name}.toml")));
+            if !path.is_file() {
+                return Err(ConfigError::ProfileNotFound { path });
+            }
+            Some(path)
+        }
+        None => None,
+    };
     let candidates = [
         home.map(|home| home.join(CONFIG_DIR).join(CONFIG_FILE)),
         Some(cwd.join(CONFIG_DIR).join(CONFIG_FILE)),
+        profile_file,
     ];
     for path in candidates.into_iter().flatten() {
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -604,6 +700,57 @@ mod tests {
         assert_eq!(loaded.config.limits.max_retries, 1);
         assert_eq!(loaded.config.limits.request_timeout_s, 600);
         assert_eq!(loaded.config.roles.coder, "runpod");
+    }
+
+    #[test]
+    fn profile_is_a_third_layer_and_must_exist() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write(home.path(), CONFIG_TEMPLATE);
+        let profile = profile_path(home.path(), "factory");
+        std::fs::create_dir_all(profile.parent().expect("parent")).expect("mkdir");
+        std::fs::write(
+            &profile,
+            "[limits]\nsession_tokens = 7\n[permissions]\nallow = [\"shell:cargo *\"]\ndefault = \"deny\"\n",
+        )
+        .expect("write");
+        let loaded = load_profile(Some(home.path()), cwd.path(), Some("factory")).expect("loads");
+        assert_eq!(loaded.sources.len(), 2);
+        assert_eq!(loaded.sources[1], profile);
+        assert_eq!(loaded.config.limits.session_tokens, 7);
+        let rules = loaded
+            .config
+            .permissions
+            .expect("permissions from the profile");
+        assert_eq!(rules.allow, vec!["shell:cargo *".to_owned()]);
+        assert_eq!(rules.unmatched, Some(Unmatched::Deny));
+        assert!(
+            load(Some(home.path()), cwd.path())
+                .expect("no profile")
+                .config
+                .permissions
+                .is_none()
+        );
+
+        let error = load_profile(Some(home.path()), cwd.path(), Some("work")).expect_err("missing");
+        assert!(
+            matches!(&error, ConfigError::ProfileNotFound { path } if path.ends_with("work.toml")),
+            "{error}"
+        );
+        assert!(matches!(
+            load_profile(None, cwd.path(), Some("work")),
+            Err(ConfigError::ProfileNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn permission_rules_reject_unknown_keys_and_round_trip() {
+        let rules: PermissionRules =
+            toml::from_str("allow = [\"shell\"]\ndefault = \"ask\"\n").expect("parses");
+        assert_eq!(rules.unmatched, Some(Unmatched::Ask));
+        assert!(toml::from_str::<PermissionRules>("block = []").is_err());
+        let text = toml::to_string(&PermissionRules::default()).expect("serializes");
+        assert!(!text.contains("default"), "{text}");
     }
 
     #[test]

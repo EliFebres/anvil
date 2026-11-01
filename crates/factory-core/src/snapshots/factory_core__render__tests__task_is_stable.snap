@@ -1,0 +1,26 @@
+---
+source: crates/factory-core/src/render.rs
+expression: task(&sample())
+---
+# Add a `grep` tool with a max-results flag
+
+## Symptom
+
+The agent reads whole files to find one symbol.
+
+## Reproduction
+
+```
+anvil run "find callers of foo"
+```
+
+## Spec
+
+Tool `grep` with `pattern`, `path`, `max_results` (default 50) in anvil-core.
+
+## Acceptance
+
+- [ ] cargo test -p anvil-core passes
+- [ ] the tool schema snapshot is updated
+
+Add or update tests for every acceptance item; do not touch files outside the crates the spec names unless a shared type in anvil-types must change, and if so say why in the PR body.

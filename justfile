@@ -16,14 +16,19 @@ check: no-old-name
 
 # The program used to have another name. It may survive only in the legacy
 # migration module and its test; `f[o]rge` keeps this recipe from matching itself.
-# ripgrep exits 1 when nothing matched, which is the only passing outcome.
+# git grep ships with git, so no extra tool is needed on any machine or runner; it
+# exits non-zero when nothing matched, which is the only passing outcome.
 [unix]
 no-old-name:
-    rg -i 'f[o]rge' --hidden --glob '!.git' --glob '!target' --glob '!crates/anvil-cli/src/legacy.rs' --glob '!crates/anvil-cli/tests/legacy.rs' . ; test $? -eq 1
+    ! git grep -i -I -E --untracked 'f[o]rge' -- . ':!crates/anvil-cli/src/legacy.rs' ':!crates/anvil-cli/tests/legacy.rs'
 
 [windows]
 no-old-name:
-    rg -i 'f[o]rge' --hidden --glob '!.git' --glob '!target' --glob '!crates/anvil-cli/src/legacy.rs' --glob '!crates/anvil-cli/tests/legacy.rs' . ; if ($LASTEXITCODE -ne 1) { exit 1 }; exit 0
+    git grep -i -I -E --untracked 'f[o]rge' -- . ':!crates/anvil-cli/src/legacy.rs' ':!crates/anvil-cli/tests/legacy.rs' ; if ($LASTEXITCODE -ne 1) { exit 1 }; exit 0
+
+# Build the factory's worker image (needs podman; the NUC does this in bootstrap.sh).
+image:
+    podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc
 
 # Print the Ticket JSON Schema.
 schema:

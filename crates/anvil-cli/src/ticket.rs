@@ -308,6 +308,7 @@ fn status_label(status: TicketStatus) -> &'static str {
         TicketStatus::Open => "open",
         TicketStatus::Claimed => "claimed",
         TicketStatus::InReview => "review",
+        TicketStatus::Waiting => "waiting",
         TicketStatus::Merged => "merged",
         TicketStatus::Rejected => "closed",
     }

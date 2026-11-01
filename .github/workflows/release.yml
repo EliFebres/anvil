@@ -1,0 +1,88 @@
+name: release
+
+# Every merge to main becomes a release: anvil for Linux and Windows, tagged
+# with the date and the short sha, marked latest. `anvil update` reads the
+# `## SHA256` section of the notes before it swaps a binary in.
+on:
+  push:
+    branches: [main]
+
+# The only workflow that writes: it pushes a tag and uploads release assets.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: anvil-x86_64-unknown-linux-gnu
+            binary: anvil
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: anvil-x86_64-pc-windows-msvc.exe
+            binary: anvil.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        shell: bash
+        env:
+          # Baked into the binary so `anvil update` knows what is installed.
+          ANVIL_BUILD_SHA: ${{ github.sha }}
+          ANVIL_RELEASE_REPO: ${{ github.repository }}
+        run: |
+          cargo build --release -p anvil-cli
+          mkdir -p dist
+          cp "target/release/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The changelog spans the commits since the previous release tag.
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: tag, notes and release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(date -u +%Y-%m-%d)-${GITHUB_SHA::7}"
+          previous="$(git describe --tags --abbrev=0 --match '20??-??-??-*' "HEAD^" 2>/dev/null || true)"
+          {
+            echo "## Changes"
+            echo
+            # Squash-merged pull requests carry their ticket titles as subjects.
+            if [ -n "$previous" ]; then
+              git log --first-parent --format='- %s' "$previous..HEAD"
+            else
+              git log --first-parent --format='- %s' -n 20 HEAD
+            fi
+            echo
+            echo "## SHA256"
+            echo
+            (cd dist && sha256sum ./*)
+          } > notes.md
+          cat notes.md
+          gh release create "$tag" dist/* --title "$tag" --notes-file notes.md --latest

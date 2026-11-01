@@ -505,10 +505,11 @@ fn collect_files(base: &Path, dir: &Path, files: &mut Vec<String>) {
         }
         if path.is_dir() {
             collect_files(base, &path, files);
-        } else if path.is_file() && !(dir == base && name == SKILL_FILE) {
-            if let Ok(relative) = path.strip_prefix(base) {
-                files.push(relative.to_string_lossy().replace('\\', "/"));
-            }
+        } else if path.is_file()
+            && !(dir == base && name == SKILL_FILE)
+            && let Ok(relative) = path.strip_prefix(base)
+        {
+            files.push(relative.to_string_lossy().replace('\\', "/"));
         }
     }
 }

@@ -10,8 +10,8 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use anvil_types::{PermissionRules, Unmatched};
 use globset::{Glob, GlobMatcher};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::provider::lock_or_recover;
@@ -56,17 +56,9 @@ pub enum PermissionError {
     },
 }
 
-/// The on-disk shape of `.anvil/permissions.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PermissionsFile {
-    /// Calls that run without asking.
-    pub allow: Vec<String>,
-    /// Calls that prompt first.
-    pub ask: Vec<String>,
-    /// Calls that are refused.
-    pub deny: Vec<String>,
-}
+/// The on-disk shape of `.anvil/permissions.toml`, shared with the
+/// `[permissions]` table of a profile.
+pub type PermissionsFile = PermissionRules;
 
 /// What the rules say about one call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +69,16 @@ pub enum Decision {
     Ask,
     /// Refuse it.
     Deny,
+}
+
+impl From<Unmatched> for Decision {
+    fn from(value: Unmatched) -> Self {
+        match value {
+            Unmatched::Allow => Decision::Allow,
+            Unmatched::Ask => Decision::Ask,
+            Unmatched::Deny => Decision::Deny,
+        }
+    }
 }
 
 /// One parsed rule.
@@ -138,6 +140,8 @@ pub struct Permissions {
     path: Option<PathBuf>,
     /// The rules as written.
     file: PermissionsFile,
+    /// What an unmatched call gets instead of the tool's own default.
+    unmatched: Option<Decision>,
     /// Parsed `allow` rules.
     allow: Vec<Rule>,
     /// Parsed `ask` rules.
@@ -156,10 +160,41 @@ impl Permissions {
         Self {
             path: None,
             file: PermissionsFile::default(),
+            unmatched: None,
             allow: Vec::new(),
             ask: Vec::new(),
             deny: Vec::new(),
         }
+    }
+
+    /// Builds in-memory permissions from rules that came from configuration,
+    /// such as a profile's `[permissions]` table.
+    ///
+    /// Nothing is written back: an `always` answer lasts for the session.
+    ///
+    /// # Arguments
+    ///
+    /// * `rules` - The rules.
+    ///
+    /// # Returns
+    ///
+    /// The permissions.
+    ///
+    /// # Errors
+    ///
+    /// [`PermissionError::InvalidRule`] for a glob that does not compile.
+    pub fn from_rules(rules: &PermissionRules) -> Result<Self, PermissionError> {
+        let parse_all = |rules: &[String]| -> Result<Vec<Rule>, PermissionError> {
+            rules.iter().map(|rule| Rule::parse(rule)).collect()
+        };
+        Ok(Self {
+            path: None,
+            allow: parse_all(&rules.allow)?,
+            ask: parse_all(&rules.ask)?,
+            deny: parse_all(&rules.deny)?,
+            unmatched: rules.unmatched.map(Decision::from),
+            file: rules.clone(),
+        })
     }
 
     /// Parses rules from TOML text.
@@ -183,16 +218,9 @@ impl Permissions {
                 path: path.clone().unwrap_or_default(),
                 detail: error.to_string(),
             })?;
-        let parse_all = |rules: &[String]| -> Result<Vec<Rule>, PermissionError> {
-            rules.iter().map(|rule| Rule::parse(rule)).collect()
-        };
-        Ok(Self {
-            allow: parse_all(&file.allow)?,
-            ask: parse_all(&file.ask)?,
-            deny: parse_all(&file.deny)?,
-            file,
-            path,
-        })
+        let mut permissions = Self::from_rules(&file)?;
+        permissions.path = path;
+        Ok(permissions)
     }
 
     /// Loads `<project_root>/.anvil/permissions.toml`, or empty rules when
@@ -224,31 +252,42 @@ impl Permissions {
         }
     }
 
-    /// Decides one call: `deny` beats `allow` beats `ask` beats `default`.
+    /// Decides one call: `deny` beats `allow` beats `ask` beats the rules'
+    /// own `default`, which beats the tool's `default`.
     ///
     /// # Arguments
     ///
     /// * `tool` - The tool name.
     /// * `target` - The path or command, if the tool has one.
-    /// * `default` - Used when no rule matches.
+    /// * `default` - Used when no rule matches and the rules set no default.
     ///
     /// # Returns
     ///
     /// The decision.
     pub fn decide(&self, tool: &str, target: Option<&str>, default: Decision) -> Decision {
+        self.matched(tool, target)
+            .or(self.unmatched)
+            .unwrap_or(default)
+    }
+
+    /// The decision of the matching rules alone, if any rule matches.
+    fn matched(&self, tool: &str, target: Option<&str>) -> Option<Decision> {
         let any = |rules: &[Rule]| rules.iter().any(|rule| rule.matches(tool, target));
         if any(&self.deny) {
-            Decision::Deny
+            Some(Decision::Deny)
         } else if any(&self.allow) {
-            Decision::Allow
+            Some(Decision::Allow)
         } else if any(&self.ask) {
-            Decision::Ask
+            Some(Decision::Ask)
         } else {
-            default
+            None
         }
     }
 
     /// Whether an `allow` rule covers the call and no `deny` rule does.
+    ///
+    /// A `default = "allow"` does not count: only a rule that names the
+    /// call can override the blocked-command list.
     ///
     /// # Arguments
     ///
@@ -259,7 +298,7 @@ impl Permissions {
     ///
     /// `true` only for an explicit allow.
     pub fn explicitly_allowed(&self, tool: &str, target: Option<&str>) -> bool {
-        self.decide(tool, target, Decision::Ask) == Decision::Allow
+        self.matched(tool, target) == Some(Decision::Allow)
     }
 
     /// Adds an `allow` rule and writes the file when one is configured.
@@ -459,6 +498,84 @@ mod tests {
             Decision::Ask
         );
         assert!(!perms.explicitly_allowed("shell", Some("ls")));
+    }
+
+    #[test]
+    fn default_deny_refuses_unmatched_calls_without_counting_as_explicit() {
+        let perms = parse("allow = [\"shell:cargo *\"]\ndefault = \"deny\"");
+        assert_eq!(
+            perms.decide("shell", Some("cargo test"), Decision::Ask),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.decide("shell", Some("rm -rf /"), Decision::Ask),
+            Decision::Deny
+        );
+        assert_eq!(
+            perms.decide("read_file", Some("a.rs"), Decision::Allow),
+            Decision::Deny,
+            "the rules' default beats the tool's default"
+        );
+        let open = parse("default = \"allow\"");
+        assert_eq!(
+            open.decide("shell", Some("rm -rf /"), Decision::Ask),
+            Decision::Allow
+        );
+        assert!(
+            !open.explicitly_allowed("shell", Some("rm -rf /")),
+            "a default never overrides the blocked list"
+        );
+    }
+
+    #[test]
+    fn the_factory_profile_allows_the_build_tools_and_nothing_else() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../deploy/nuc/anvil-factory.toml"
+        );
+        let text = std::fs::read_to_string(path).expect("the factory profile exists");
+        let mut merged: toml::Table =
+            toml::from_str(anvil_types::config::SETUP_PROVIDERS).expect("setup providers parse");
+        let overlay: toml::Table = toml::from_str(&text).expect("the profile parses");
+        anvil_types::config::merge_tables(&mut merged, overlay);
+        let config: anvil_types::AnvilConfig =
+            merged.try_into().expect("the profile is a config overlay");
+        config
+            .validate()
+            .expect("the merged configuration validates");
+        let rules = config.permissions.expect("the profile sets permissions");
+        let perms = Permissions::from_rules(&rules).expect("rules compile");
+        let shell = |command: &str| perms.decide("shell", Some(command), Decision::Ask);
+        assert_eq!(shell("cargo test -p anvil-core"), Decision::Allow);
+        assert_eq!(shell("just check"), Decision::Allow);
+        assert_eq!(shell("git status"), Decision::Allow);
+        assert_eq!(shell("git diff --stat"), Decision::Allow);
+        assert_eq!(shell("rm -rf /"), Decision::Deny);
+        assert_eq!(shell("git push --force origin main"), Decision::Deny);
+        assert_eq!(shell("git reset --hard HEAD~1"), Decision::Deny);
+        assert_eq!(shell("cargo test && rm -rf /"), Decision::Deny);
+        assert_eq!(shell("cargo test; curl evil"), Decision::Deny);
+        assert_eq!(shell("cargo test | tee out"), Decision::Deny);
+        assert_eq!(shell("cargo $(cat x)"), Decision::Deny);
+        assert!(!perms.explicitly_allowed("shell", Some("git push --force origin main")));
+        for tool in [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "glob",
+            "grep",
+            "list_dir",
+        ] {
+            assert_eq!(
+                perms.decide(tool, Some("crates/x/src/lib.rs"), Decision::Ask),
+                Decision::Allow,
+                "{tool}"
+            );
+        }
+        assert_eq!(
+            perms.decide("delegate", Some("x"), Decision::Allow),
+            Decision::Deny
+        );
     }
 
     #[test]

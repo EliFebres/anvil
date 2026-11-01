@@ -1,0 +1,48 @@
+# The `factory` profile: `anvil --yes --profile factory` inside the worker
+# container. The factory copies this file to `$ANVIL_HOME/.anvil/profiles/factory.toml`
+# from `main`, never from the worktree, so a pull request cannot loosen its own
+# permissions. It is a config overlay over the global `~/.anvil/config.toml`.
+
+# `coder` must equal [roles].coder in factory.toml; `reviewer` is anvil's own
+# in-loop reviewer and must be a different provider. A test asserts both.
+[roles]
+coder = "anthropic"
+reviewer = "openai"
+summarizer = "anthropic"
+
+[limits]
+session_tokens = 3000000
+
+[tools]
+shell = "bash"
+
+# Writes anywhere in the worktree; `shell` for cargo, just and git only.
+# Compound commands are denied so the allowlist cannot be chained around, and
+# the git commands that rewrite or publish history are denied outright: the
+# factory pushes, the implementer never does. An explicit `allow` would
+# otherwise override anvil's blocked-command list.
+[permissions]
+allow = [
+  "read_file",
+  "write_file",
+  "edit_file",
+  "glob",
+  "grep",
+  "list_dir",
+  "shell:cargo",
+  "shell:cargo *",
+  "shell:just",
+  "shell:just *",
+  "shell:git *",
+]
+deny = [
+  "shell:*&&*",
+  "shell:*;*",
+  "shell:*|*",
+  "shell:*$(*",
+  "shell:*`*",
+  "shell:git push*",
+  "shell:git reset --hard*",
+  "shell:git clean*",
+]
+default = "deny"

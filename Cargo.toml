@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.86"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Workspace crates
@@ -38,7 +38,7 @@ rustyline = "19.0"
 
 # Async + HTTP (rustls only; no OpenSSL)
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "charset", "http2", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "charset", "http2", "stream", "system-proxy"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio-stream = { version = "0.1", default-features = false }
 
@@ -54,6 +54,7 @@ tracing-appender = "0.2"
 
 # Identifiers and time
 ulid = { version = "3.0", features = ["serde"] }
+sha2 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
 # Testing

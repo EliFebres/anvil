@@ -107,6 +107,104 @@ pub trait EvalRunner: Send + Sync {
     fn run_attempt<'a>(&'a self, attempt: &'a AttemptContext<'a>) -> AttemptFuture<'a>;
 }
 
+/// A runner that follows a script: per task, one outcome per attempt index.
+///
+/// A scripted success writes `DONE` and `notes.md` into the fixture copy,
+/// which the fixture tasks under `tests/fixtures/tasks` check for. Anything
+/// not in the script fails. For tests of the harness and of the factory.
+#[derive(Debug, Clone)]
+pub struct FakeRunner {
+    /// Outcomes per task name, by attempt index.
+    script: HashMap<String, Vec<bool>>,
+    /// Panic instead of answering, to test harness recovery.
+    panic: bool,
+}
+
+impl FakeRunner {
+    /// A runner that follows `entries`.
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - Task name and the outcome of each attempt, in order.
+    ///
+    /// # Returns
+    ///
+    /// The runner, shared so it can be handed to [`run_with`].
+    pub fn scripted(entries: &[(&str, &[bool])]) -> Arc<dyn EvalRunner> {
+        Arc::new(FakeRunner {
+            script: entries
+                .iter()
+                .map(|(name, outcomes)| ((*name).to_owned(), outcomes.to_vec()))
+                .collect(),
+            panic: false,
+        })
+    }
+
+    /// A runner that panics on every attempt.
+    ///
+    /// # Returns
+    ///
+    /// The runner.
+    pub fn panicking() -> Arc<dyn EvalRunner> {
+        Arc::new(FakeRunner {
+            script: HashMap::new(),
+            panic: true,
+        })
+    }
+}
+
+impl EvalRunner for FakeRunner {
+    fn label(&self) -> String {
+        "fake".to_owned()
+    }
+
+    fn run_attempt<'a>(&'a self, attempt: &'a AttemptContext<'a>) -> AttemptFuture<'a> {
+        Box::pin(async move {
+            assert!(!self.panic, "scripted panic");
+            let succeed = self
+                .script
+                .get(attempt.task.name.as_str())
+                .and_then(|outcomes| outcomes.get(attempt.index as usize - 1))
+                .copied()
+                .unwrap_or(false);
+            if succeed {
+                std::fs::write(
+                    attempt.work_dir.join("DONE"),
+                    "done
+",
+                )
+                .map_err(|e| EvalError::io("writing", attempt.work_dir, e))?;
+                std::fs::write(
+                    attempt.work_dir.join("notes.md"),
+                    "a marker here
+",
+                )
+                .map_err(|e| EvalError::io("writing", attempt.work_dir, e))?;
+            }
+            Ok(AttemptOutcome {
+                status: if succeed {
+                    AttemptStatus::Done
+                } else {
+                    AttemptStatus::Incomplete {
+                        reason: "scripted".to_owned(),
+                    }
+                },
+                session: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
+                provider: Some("fake".to_owned()),
+                model: Some("fake-1".to_owned()),
+                tokens: Usage {
+                    input: 1000,
+                    output: 100,
+                    cached: 0,
+                },
+                cost_usd: Some(0.0012),
+                anvil_ms: 10,
+                stderr_tail: "done".to_owned(),
+            })
+        })
+    }
+}
+
 /// One finished attempt, reported as the run goes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Progress {

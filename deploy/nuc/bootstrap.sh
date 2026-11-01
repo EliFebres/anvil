@@ -3,9 +3,11 @@
 #
 #   ssh nuc 'bash -s' < deploy/nuc/bootstrap.sh
 #
-# Installs rustup, git, just and podman; clones the monorepo to ~/factory-repo;
-# seeds ~/.factory/env and ~/.anvil/config.toml only when absent; builds anvil
-# and factory in release mode into ~/.local/bin; runs anvil doctor.
+# Installs rustup, git, just, podman and the eval check tools; clones the
+# monorepo to ~/factory-repo; seeds ~/.factory/env and ~/.anvil/config.toml
+# only when absent; builds anvil and factory in release mode into
+# ~/.local/bin; builds the worker image; installs the systemd user service;
+# runs anvil doctor.
 set -euo pipefail
 
 REPO_URL="${FACTORY_REPO_URL:-https://github.com/EliFebres/anvil.git}"
@@ -17,15 +19,15 @@ export PATH="$HOME/.cargo/bin:$BIN_DIR:$PATH"
 log() { printf '\n== %s\n' "$*"; }
 
 install_packages() {
-    log "packages: git curl just podman"
+    log "packages: git curl just podman socat python3 pytest pandas"
     if command -v apt-get >/dev/null; then
         sudo apt-get update -qq
-        sudo apt-get install -y -qq git curl build-essential pkg-config podman
+        sudo apt-get install -y -qq git curl build-essential pkg-config podman socat             python3 python3-pytest python3-pandas
         sudo apt-get install -y -qq just || true
     elif command -v dnf >/dev/null; then
-        sudo dnf install -y git curl gcc make podman just
+        sudo dnf install -y git curl gcc make podman socat python3 python3-pytest python3-pandas just
     elif command -v pacman >/dev/null; then
-        sudo pacman -Sy --noconfirm --needed git curl base-devel podman just
+        sudo pacman -Sy --noconfirm --needed git curl base-devel podman socat             python python-pytest python-pandas just
     else
         echo "no supported package manager (apt-get, dnf, pacman); install git, curl, just and podman by hand" >&2
         exit 1
@@ -75,6 +77,16 @@ build_binaries() {
     ln -sf "$REPO_DIR/target/release/factory" "$BIN_DIR/factory"
 }
 
+build_image() {
+    log "image: localhost/anvil-factory:latest"
+    (cd "$REPO_DIR" && podman build -q -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc)
+}
+
+install_service() {
+    log "service: factory.service"
+    (cd "$REPO_DIR" && factory install-service) || true
+}
+
 seed_config() {
     # `anvil setup` writes ~/.anvil/config.toml with the same provider entries
     # only when it is absent, and never overwrites a filled-in value. It exits
@@ -88,7 +100,9 @@ install_rust
 clone_repo
 seed_env
 build_binaries
+build_image
 seed_config
+install_service
 
 log "doctor"
 (cd "$REPO_DIR" && anvil doctor) || true

@@ -364,7 +364,12 @@ impl Wiring {
         &self,
         prompt: Box<dyn PermissionPrompt>,
     ) -> anyhow::Result<ToolRegistry> {
-        let permissions = Permissions::load(&self.cwd).context("loading permissions")?;
+        let permissions = match &self.config.permissions {
+            Some(rules) => {
+                Permissions::from_rules(rules).context("permissions in the configuration")?
+            }
+            None => Permissions::load(&self.cwd).context("loading permissions")?,
+        };
         let mut registry = ToolRegistry::with_builtins(permissions, prompt);
         registry.register(Box::new(SkillTool::new(Arc::clone(&self.skills))));
         self.mcp.register(&mut registry);
