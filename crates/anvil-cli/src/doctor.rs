@@ -1014,8 +1014,12 @@ fn manual_steps(repo: &str) -> String {
 
 /// Whether `gh` is installed and logged in.
 async fn gh_authenticated() -> bool {
+    let mut command = Command::new("gh");
+    command.args(["auth", "status"]);
+    // Same as gh_api: judge the login, not a token loaded from ~/.anvil/.env.
+    command.env_remove("GITHUB_TOKEN").env_remove("GH_TOKEN");
     matches!(
-        tokio::time::timeout(SHORT_TIMEOUT, Command::new("gh").args(["auth", "status"]).output()).await,
+        tokio::time::timeout(SHORT_TIMEOUT, command.output()).await,
         Ok(Ok(out)) if out.status.success()
     )
 }
@@ -1026,6 +1030,10 @@ async fn gh_api(method: &str, path: &str, body: Option<&Value>) -> anyhow::Resul
 
     let mut command = Command::new("gh");
     command.args(["api", "-X", method, path]);
+    // gh prefers a token in the environment over its own login, and the
+    // fine-grained GITHUB_TOKEN loaded from ~/.anvil/.env cannot administer
+    // branches: its answers were 404s.
+    command.env_remove("GITHUB_TOKEN").env_remove("GH_TOKEN");
     if body.is_some() {
         command.args(["--input", "-"]);
         command.stdin(std::process::Stdio::piped());
