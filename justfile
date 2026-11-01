@@ -17,10 +17,10 @@ check: no-old-name
 # The program used to have another name. It may survive only in the legacy
 # migration module and its test; `f[o]rge` keeps this recipe from matching itself.
 # git grep ships with git, so no extra tool is needed on any machine or runner; it
-# exits 1 when nothing matched, which is the only passing outcome.
+# exits non-zero when nothing matched, which is the only passing outcome.
 [unix]
 no-old-name:
-    git grep -i -I -E --untracked 'f[o]rge' -- . ':!crates/anvil-cli/src/legacy.rs' ':!crates/anvil-cli/tests/legacy.rs' ; test $? -eq 1
+    ! git grep -i -I -E --untracked 'f[o]rge' -- . ':!crates/anvil-cli/src/legacy.rs' ':!crates/anvil-cli/tests/legacy.rs'
 
 [windows]
 no-old-name:

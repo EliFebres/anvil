@@ -38,9 +38,10 @@ jobs:
       - name: no-old-name
         shell: bash
         # The old program name may survive only in the legacy migration module and its test.
-        # git grep is on every runner; ripgrep is missing on windows-latest.
+        # git grep is on every runner; ripgrep is missing on windows-latest. The
+        # step runs under `bash -e`, so the no-match exit is negated, not tested.
         run: |
-          git grep -i -I -E --untracked 'f[o]rge' -- . ':!crates/anvil-cli/src/legacy.rs' ':!crates/anvil-cli/tests/legacy.rs' ; test $? -eq 1
+          ! git grep -i -I -E --untracked 'f[o]rge' -- . ':!crates/anvil-cli/src/legacy.rs' ':!crates/anvil-cli/tests/legacy.rs'
 
   # One status check named `ci` for branch protection to require.
   ci:
