@@ -17,6 +17,7 @@ mod stats;
 mod telemetry;
 mod terminal;
 mod ticket;
+mod update;
 mod wiring;
 
 use std::path::{Path, PathBuf};
@@ -119,6 +120,14 @@ async fn dispatch(cli: Cli, env: Env) -> anyhow::Result<i32> {
             stats::run(config.as_ref(), cwd, &since)
         }
         Some(Command::Ticket { command }) => ticket::run(command, home, cwd).await,
+        Some(Command::Update { exe }) => {
+            let repo = std::fs::read_to_string(cwd.join(anvil_types::factory_config::FACTORY_FILE))
+                .ok()
+                .and_then(|text| toml::from_str::<anvil_types::FactoryConfig>(&text).ok())
+                .map(|factory| factory.github.repo);
+            let options = update::UpdateOptions::for_this_binary(repo.as_deref(), exe)?;
+            update::run(options).await
+        }
         Some(Command::Compat {
             command: CompatCommand::Check { path },
         }) => {
