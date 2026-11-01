@@ -13,8 +13,9 @@ pub const SIGNALS_FILE: &str = "signals.jsonl";
 /// Drafted tickets, relative to the repository root. Per machine, not committed.
 pub const DRAFT_DIR: &str = "tickets/draft";
 
-/// Submitted tickets, relative to the repository root. Committed.
-pub const OPEN_DIR: &str = "tickets/open";
+/// Submitted tickets, relative to the repository root. Committed on the
+/// `factory/state` branch; the name is shared with the factory.
+pub use anvil_types::ticket::dirs::OPEN_DIR;
 
 /// The telemetry folder of a project.
 ///

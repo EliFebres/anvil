@@ -2,8 +2,10 @@
 //!
 //! Rows: the `.env` files loaded, every API key, every provider, the
 //! reviewers in `factory.toml`, GitHub access for both tokens, branch
-//! protection on `main`, the tools on `PATH` and the key scan over tracked
-//! files. The skill, command, agent, hook and MCP reports follow unchanged.
+//! protection on `main`, the `factory/state` branch and its ruleset, that
+//! `main` takes pull requests only, the tools on `PATH` and the key scan over
+//! tracked files. The skill, command, agent, hook and MCP reports follow
+//! unchanged.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -35,6 +37,12 @@ const GITHUB_API_ENV: &str = "ANVIL_GITHUB_API_URL";
 
 /// The status check branch protection must require.
 const REQUIRED_CHECK: &str = "ci";
+
+/// The branch that carries ticket state; the factory pushes to it directly.
+const STATE_BRANCH: &str = anvil_types::ticket::dirs::STATE_BRANCH;
+
+/// The ruleset `--fix-github` creates for the state branch.
+const STATE_RULESET: &str = "factory-state";
 
 /// What a run of doctor needs besides the wiring.
 pub struct Options<'a> {
@@ -516,6 +524,7 @@ async fn report_github(report: &mut Report, repo: Option<&str>, fix_github: bool
         }
     }
 
+    let mut factory_client = None;
     match std::env::var("FACTORY_GITHUB_TOKEN") {
         Err(_) => report.skip(
             "github:factory-token",
@@ -527,12 +536,250 @@ async fn report_github(report: &mut Report, repo: Option<&str>, fix_github: bool
             format!("set FACTORY_GITHUB_TOKEN in ~/.factory/env to a token from {token_path} scoped to {repo}: Contents read and write, Pull requests read and write, Workflows read"),
         ),
         Ok(token) => match GitHub::new(&token) {
-            Ok(client) => report_factory_token(report, &client, repo).await,
+            Ok(client) => {
+                report_factory_token(report, &client, repo).await;
+                factory_client = Some(client);
+            }
             Err(error) => report.fail("github:factory-token", format!("{error:#}"), "retry"),
         },
     }
 
     report_protection(report, personal_client.as_ref(), repo, fix_github).await;
+    match factory_client.as_ref().or(personal_client.as_ref()) {
+        Some(client) => {
+            report_state_branch(report, client, repo).await;
+            report_main_locked(report, client, repo).await;
+        }
+        None => {
+            for row in ["github:state-branch", "github:main-locked"] {
+                report.skip(row, "no usable token");
+            }
+        }
+    }
+}
+
+/// The `github:state-branch` row: `factory/state` exists and a ruleset
+/// forbids deleting or force-pushing it without requiring pull requests, so
+/// the factory can commit ticket moves to it directly.
+async fn report_state_branch(report: &mut Report, client: &GitHub, repo: &str) {
+    let row = "github:state-branch";
+    let fix = format!(
+        "run `anvil doctor --fix-github`, or create branch `{STATE_BRANCH}` from main and a ruleset for it with the rules `Restrict deletions` and `Block force pushes` only"
+    );
+    let branch = match client
+        .get(&format!(
+            "/repos/{repo}/branches/{}",
+            encode_branch(STATE_BRANCH)
+        ))
+        .await
+    {
+        Ok(answer) => answer,
+        Err(error) => {
+            report.fail(row, format!("{error:#}"), "check the network and the token");
+            return;
+        }
+    };
+    let rules = match client
+        .get(&format!(
+            "/repos/{repo}/rules/branches/{}",
+            encode_branch(STATE_BRANCH)
+        ))
+        .await
+    {
+        Ok((200, rules)) => rules,
+        Ok((status, body)) => {
+            report.fail(
+                row,
+                format!(
+                    "cannot read the rules of {STATE_BRANCH}: {}",
+                    github_message(status, &body)
+                ),
+                fix,
+            );
+            return;
+        }
+        Err(error) => {
+            report.fail(row, format!("{error:#}"), "check the network and the token");
+            return;
+        }
+    };
+    let gaps = state_branch_gaps(branch.0, &rules);
+    if gaps.is_empty() {
+        report.pass(
+            row,
+            format!(
+                "{STATE_BRANCH} exists; deletion and force pushes blocked, no pull request required"
+            ),
+        );
+    } else {
+        report.fail(row, gaps.join("; "), fix);
+    }
+}
+
+/// What is wrong with the state branch, given the branch lookup status and
+/// the rules in effect for it.
+fn state_branch_gaps(branch_status: u16, rules: &Value) -> Vec<String> {
+    let mut gaps = Vec::new();
+    if branch_status == 404 {
+        gaps.push(format!("branch `{STATE_BRANCH}` does not exist"));
+        return gaps;
+    }
+    if branch_status != 200 {
+        gaps.push(format!(
+            "cannot read branch `{STATE_BRANCH}` (HTTP {branch_status})"
+        ));
+        return gaps;
+    }
+    let types = rule_types(rules);
+    if !types.iter().any(|t| t == "deletion") {
+        gaps.push("deletion of the state branch is not blocked".to_owned());
+    }
+    if !types.iter().any(|t| t == "non_fast_forward") {
+        gaps.push("force pushes to the state branch are not blocked".to_owned());
+    }
+    if types.iter().any(|t| t == "pull_request") {
+        gaps.push(
+            "the state branch requires pull requests, so the factory cannot commit ticket moves to it"
+                .to_owned(),
+        );
+    }
+    gaps
+}
+
+/// The `github:main-locked` row: `main` takes pull requests only, through a
+/// ruleset with no bypass actors or through classic protection that binds
+/// admins too, so no token can push code to it directly.
+async fn report_main_locked(report: &mut Report, client: &GitHub, repo: &str) {
+    let row = "github:main-locked";
+    let fix = format!(
+        "open https://github.com/{repo}/settings/rules and give `main` a ruleset with `Require a pull request before merging` and no bypass actors"
+    );
+    let rules = match client
+        .get(&format!("/repos/{repo}/rules/branches/main"))
+        .await
+    {
+        Ok((200, rules)) => rules,
+        Ok((status, body)) => {
+            report.fail(
+                row,
+                format!(
+                    "cannot read the rules of main: {}",
+                    github_message(status, &body)
+                ),
+                fix,
+            );
+            return;
+        }
+        Err(error) => {
+            report.fail(row, format!("{error:#}"), "check the network and the token");
+            return;
+        }
+    };
+    let mut rulesets = Vec::new();
+    for id in ruleset_ids(&rules) {
+        match client.get(&format!("/repos/{repo}/rulesets/{id}")).await {
+            Ok((200, ruleset)) => rulesets.push(ruleset),
+            Ok((status, body)) => {
+                report.fail(
+                    row,
+                    format!(
+                        "cannot read ruleset {id}: {}",
+                        github_message(status, &body)
+                    ),
+                    fix,
+                );
+                return;
+            }
+            Err(error) => {
+                report.fail(row, format!("{error:#}"), "check the network and the token");
+                return;
+            }
+        }
+    }
+    let classic = match client
+        .get(&format!("/repos/{repo}/branches/main/protection"))
+        .await
+    {
+        Ok((200, protection)) => Some(protection),
+        _ => None,
+    };
+    let gaps = main_lock_gaps(&rules, &rulesets, classic.as_ref());
+    if gaps.is_empty() {
+        report.pass(
+            row,
+            "main takes pull requests only; no token can push to it directly",
+        );
+    } else {
+        report.fail(row, gaps.join("; "), fix);
+    }
+}
+
+/// What lets a token push to `main` directly, given the rules in effect, the
+/// rulesets behind them and the classic protection, if any.
+fn main_lock_gaps(rules: &Value, rulesets: &[Value], classic: Option<&Value>) -> Vec<String> {
+    let types = rule_types(rules);
+    if types.iter().any(|t| t == "pull_request") {
+        let mut gaps = Vec::new();
+        for ruleset in rulesets {
+            let actors = ruleset
+                .get("bypass_actors")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            if actors > 0 {
+                let name = ruleset.get("name").and_then(Value::as_str).unwrap_or("?");
+                gaps.push(format!(
+                    "ruleset `{name}` has {actors} bypass actor(s) who may push to main directly"
+                ));
+            }
+        }
+        return gaps;
+    }
+    let classic_locks = classic.is_some_and(|protection| {
+        protection
+            .pointer("/enforce_admins/enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && protection
+                .get("required_pull_request_reviews")
+                .is_some_and(|v| !v.is_null())
+    });
+    if classic_locks {
+        return Vec::new();
+    }
+    vec!["main does not require pull requests through a ruleset, and classic protection does not bind admins to pull requests either".to_owned()]
+}
+
+/// The `type` of every rule in a `GET /rules/branches/<name>` answer.
+fn rule_types(rules: &Value) -> Vec<String> {
+    rules
+        .as_array()
+        .map(|rules| {
+            rules
+                .iter()
+                .filter_map(|rule| rule.get("type").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The distinct `ruleset_id`s behind the rules, in order of appearance.
+fn ruleset_ids(rules: &Value) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for rule in rules.as_array().into_iter().flatten() {
+        if let Some(id) = rule.get("ruleset_id").and_then(Value::as_u64)
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+/// A branch name as a URL path segment: `factory/state` becomes `factory%2Fstate`.
+fn encode_branch(branch: &str) -> String {
+    branch.replace('/', "%2F")
 }
 
 /// A token from the environment, or why it is unusable.
@@ -761,7 +1008,7 @@ fn protection_gaps(protection: &Value, repo_settings: &Value) -> ProtectionGaps 
 /// The manual steps for the settings pages.
 fn manual_steps(repo: &str) -> String {
     format!(
-        "open https://github.com/{repo}/settings/branches, add or edit the rule for `main`: tick `Require status checks to pass before merging` and add `{REQUIRED_CHECK}`, leave `Allow force pushes` unticked; then open https://github.com/{repo}/settings and tick `Allow squash merging`"
+        "open https://github.com/{repo}/settings/branches, add or edit the rule for `main`: tick `Require status checks to pass before merging` and add `{REQUIRED_CHECK}`, leave `Allow force pushes` unticked; then open https://github.com/{repo}/settings and tick `Allow squash merging`; then create branch `{STATE_BRANCH}` from main with a ruleset that blocks deletions and force pushes only"
     )
 }
 
@@ -917,6 +1164,48 @@ async fn apply_protection(repo: &str) -> anyhow::Result<()> {
         Some(&json!({ "allow_squash_merge": true })),
     )
     .await?;
+    ensure_state_branch(repo).await?;
+    Ok(())
+}
+
+/// Creates `factory/state` from `main` when it is missing, and its ruleset
+/// (deletion and force pushes blocked, nothing else) when none has the name.
+async fn ensure_state_branch(repo: &str) -> anyhow::Result<()> {
+    let branch_path = format!("repos/{repo}/branches/{}", encode_branch(STATE_BRANCH));
+    if gh_api("GET", &branch_path, None).await.is_err() {
+        let main = gh_api("GET", &format!("repos/{repo}/git/ref/heads/main"), None).await?;
+        let sha = main
+            .pointer("/object/sha")
+            .and_then(Value::as_str)
+            .context("main has no head commit")?;
+        gh_api(
+            "POST",
+            &format!("repos/{repo}/git/refs"),
+            Some(&json!({ "ref": format!("refs/heads/{STATE_BRANCH}"), "sha": sha })),
+        )
+        .await
+        .context("creating the state branch")?;
+    }
+    let rulesets = gh_api("GET", &format!("repos/{repo}/rulesets"), None).await?;
+    let exists = rulesets.as_array().is_some_and(|list| {
+        list.iter()
+            .any(|r| r.get("name").and_then(Value::as_str) == Some(STATE_RULESET))
+    });
+    if !exists {
+        gh_api(
+            "POST",
+            &format!("repos/{repo}/rulesets"),
+            Some(&json!({
+                "name": STATE_RULESET,
+                "target": "branch",
+                "enforcement": "active",
+                "conditions": { "ref_name": { "include": [format!("refs/heads/{STATE_BRANCH}")], "exclude": [] } },
+                "rules": [{ "type": "deletion" }, { "type": "non_fast_forward" }],
+            })),
+        )
+        .await
+        .context("creating the state-branch ruleset")?;
+    }
     Ok(())
 }
 
@@ -1079,6 +1368,47 @@ mod tests {
             "PASS  env            loaded a\nFAIL  key:LONG_NAME  not set\n      fix: add it\nSKIP  x              n/a\n"
         );
         assert_eq!(report.failures(), 1);
+    }
+
+    #[test]
+    fn state_branch_gaps_want_deletion_and_force_push_rules_only() {
+        let good = json!([
+            { "type": "deletion", "ruleset_id": 7 },
+            { "type": "non_fast_forward", "ruleset_id": 7 }
+        ]);
+        assert!(state_branch_gaps(200, &good).is_empty());
+        assert_eq!(
+            state_branch_gaps(404, &good),
+            vec!["branch `factory/state` does not exist".to_owned()]
+        );
+        let gaps = state_branch_gaps(200, &json!([{ "type": "pull_request", "ruleset_id": 1 }]));
+        assert_eq!(gaps.len(), 3, "{gaps:?}");
+        assert!(gaps[0].contains("deletion"));
+        assert!(gaps[1].contains("force"));
+        assert!(gaps[2].contains("pull requests"));
+        assert_eq!(encode_branch("factory/state"), "factory%2Fstate");
+    }
+
+    #[test]
+    fn main_is_locked_by_a_ruleset_without_bypass_or_by_classic_admin_protection() {
+        let pr_rule = json!([{ "type": "pull_request", "ruleset_id": 3 }]);
+        let clean = json!({ "name": "main", "bypass_actors": [] });
+        assert!(main_lock_gaps(&pr_rule, &[clean], None).is_empty());
+        let leaky = json!({ "name": "main", "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole" }] });
+        let gaps = main_lock_gaps(&pr_rule, &[leaky], None);
+        assert_eq!(gaps.len(), 1);
+        assert!(gaps[0].contains("`main` has 1 bypass actor"), "{gaps:?}");
+
+        let none = json!([]);
+        let classic = json!({ "enforce_admins": { "enabled": true }, "required_pull_request_reviews": { "required_approving_review_count": 0 } });
+        assert!(main_lock_gaps(&none, &[], Some(&classic)).is_empty());
+        let weak = json!({ "enforce_admins": { "enabled": false }, "required_pull_request_reviews": null });
+        assert_eq!(main_lock_gaps(&none, &[], Some(&weak)).len(), 1);
+        assert_eq!(main_lock_gaps(&none, &[], None).len(), 1);
+        assert_eq!(
+            ruleset_ids(&json!([{ "ruleset_id": 3 }, { "ruleset_id": 3 }, { "ruleset_id": 9 }])),
+            vec![3, 9]
+        );
     }
 
     #[test]

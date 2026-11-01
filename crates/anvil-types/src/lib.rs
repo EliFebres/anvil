@@ -17,12 +17,13 @@ pub mod skill;
 pub mod ticket;
 
 pub use config::{
-    AnvilConfig, LimitsConfig, LoadedConfig, Price, Protocol, ProviderConfig, Roles, StateBudget,
-    TelemetryConfig, TicketsConfig, ToolsConfig,
+    AnvilConfig, LimitsConfig, LoadedConfig, PermissionRules, Price, Protocol, ProviderConfig,
+    Roles, StateBudget, TelemetryConfig, TicketsConfig, ToolsConfig, Unmatched,
 };
 pub use error::{ConfigError, DotenvError, ValidationError};
 pub use factory_config::{
-    EvalConfig, FactoryConfig, FactoryRoles, GithubConfig, NotifyConfig, Reviewer, Stance,
+    BudgetConfig, ContainerRuntime, EvalConfig, FactoryConfig, FactoryRoles, GithubConfig,
+    NotifyConfig, ProtectedConfig, Reviewer, ServiceConfig, Stance, WorkerConfig,
 };
 pub use skill::SkillManifest;
 pub use ticket::{Priority, TelemetryRef, Ticket, TicketKind, TicketOrigin, TicketStatus};

@@ -1,89 +1,13 @@
 //! The run loop over the three fixture tasks with a scripted runner.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use eval::{
-    AttemptContext, AttemptFuture, AttemptOutcome, AttemptStatus, EvalError, EvalRunner,
-    RunOptions, Usage, run_with,
-};
+use eval::{AttemptStatus, EvalError, FakeRunner, RunOptions, run_with};
 
 /// The three fixture tasks next to this test.
 fn tasks_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tasks")
-}
-
-/// A runner that follows a script: per task, one outcome per attempt index.
-struct FakeRunner {
-    script: HashMap<&'static str, Vec<bool>>,
-    panic: bool,
-}
-
-impl FakeRunner {
-    fn scripted(entries: &[(&'static str, &[bool])]) -> Arc<dyn EvalRunner> {
-        Arc::new(FakeRunner {
-            script: entries
-                .iter()
-                .map(|(name, outcomes)| (*name, outcomes.to_vec()))
-                .collect(),
-            panic: false,
-        })
-    }
-}
-
-impl EvalRunner for FakeRunner {
-    fn label(&self) -> String {
-        "fake".to_owned()
-    }
-
-    fn run_attempt<'a>(&'a self, attempt: &'a AttemptContext<'a>) -> AttemptFuture<'a> {
-        Box::pin(async move {
-            if self.panic {
-                panic!("scripted panic");
-            }
-            let succeed = self
-                .script
-                .get(attempt.task.name.as_str())
-                .and_then(|outcomes| outcomes.get(attempt.index as usize - 1))
-                .copied()
-                .unwrap_or(false);
-            assert!(
-                attempt.work_dir.join(".git").is_dir(),
-                "the fixture copy is a git repository"
-            );
-            assert!(
-                attempt.env.iter().any(|(k, _)| k == "CARGO_TARGET_DIR"),
-                "the shared environment reaches the runner"
-            );
-            if succeed {
-                std::fs::write(attempt.work_dir.join("DONE"), "done\n")
-                    .map_err(|e| EvalError::io("writing", attempt.work_dir, e))?;
-                std::fs::write(attempt.work_dir.join("notes.md"), "a marker here\n")
-                    .map_err(|e| EvalError::io("writing", attempt.work_dir, e))?;
-            }
-            Ok(AttemptOutcome {
-                status: if succeed {
-                    AttemptStatus::Done
-                } else {
-                    AttemptStatus::Incomplete {
-                        reason: "scripted".to_owned(),
-                    }
-                },
-                session: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
-                provider: Some("fake".to_owned()),
-                model: Some("fake-1".to_owned()),
-                tokens: Usage {
-                    input: 1000,
-                    output: 100,
-                    cached: 0,
-                },
-                cost_usd: Some(0.0012),
-                anvil_ms: 10,
-                stderr_tail: "done".to_owned(),
-            })
-        })
-    }
 }
 
 fn options(tags: &[&str], repeat: u32) -> RunOptions {
@@ -182,10 +106,7 @@ async fn progress_is_reported_once_per_attempt() {
 
 #[tokio::test]
 async fn a_panicking_runner_is_a_harness_error_not_a_crash() {
-    let runner: Arc<dyn EvalRunner> = Arc::new(FakeRunner {
-        script: HashMap::new(),
-        panic: true,
-    });
+    let runner = FakeRunner::panicking();
     let result = run_with(&options(&["fast"], 1), runner)
         .await
         .expect("runs");

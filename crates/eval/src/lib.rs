@@ -34,8 +34,8 @@ pub use results::{
     AttemptRecord, AttemptStatus, RESULTS_DIR, RunResult, SCHEMA_VERSION, TaskResult, Totals, Usage,
 };
 pub use runner::{
-    AttemptContext, AttemptFuture, AttemptOutcome, EvalRunner, Progress, ProgressFn, RunOptions,
-    run_with,
+    AttemptContext, AttemptFuture, AttemptOutcome, EvalRunner, FakeRunner, Progress, ProgressFn,
+    RunOptions, run_with,
 };
 pub use task::{TASKS_DIR, Task, TaskMeta, load_tasks};
 

@@ -17,11 +17,12 @@ mod stats;
 mod telemetry;
 mod terminal;
 mod ticket;
+mod update;
 mod wiring;
 
 use std::path::{Path, PathBuf};
 
-use anvil_types::config::load as load_config;
+use anvil_types::config::load_profile;
 use anvil_types::dotenv;
 use clap::Parser;
 
@@ -66,10 +67,10 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
     let cwd = std::env::current_dir()?;
     let home = home_dir();
     for (parent, prefix) in [(home.as_deref(), "~/"), (Some(cwd.as_path()), "")] {
-        if let Some(parent) = parent {
-            if let Some(line) = legacy::migrate(parent, prefix)? {
-                eprintln!("{line}");
-            }
+        if let Some(parent) = parent
+            && let Some(line) = legacy::migrate(parent, prefix)?
+        {
+            eprintln!("{line}");
         }
     }
     let env_files = dotenv::env_files(home.as_deref(), &cwd, false);
@@ -89,6 +90,8 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
 async fn dispatch(cli: Cli, env: Env) -> anyhow::Result<i32> {
     let cwd = &env.cwd;
     let home = env.home.as_deref();
+    let profile = cli.profile.as_deref();
+    let load_config = |home: Option<&Path>, cwd: &Path| load_profile(home, cwd, profile);
     match cli.command {
         Some(Command::Config {
             command: ConfigCommand::Init { global },
@@ -117,6 +120,14 @@ async fn dispatch(cli: Cli, env: Env) -> anyhow::Result<i32> {
             stats::run(config.as_ref(), cwd, &since)
         }
         Some(Command::Ticket { command }) => ticket::run(command, home, cwd).await,
+        Some(Command::Update { exe }) => {
+            let repo = std::fs::read_to_string(cwd.join(anvil_types::factory_config::FACTORY_FILE))
+                .ok()
+                .and_then(|text| toml::from_str::<anvil_types::FactoryConfig>(&text).ok())
+                .map(|factory| factory.github.repo);
+            let options = update::UpdateOptions::for_this_binary(repo.as_deref(), exe)?;
+            update::run(options).await
+        }
         Some(Command::Compat {
             command: CompatCommand::Check { path },
         }) => {
@@ -142,8 +153,8 @@ async fn dispatch(cli: Cli, env: Env) -> anyhow::Result<i32> {
             wiring.load_mcp().await;
             commands::resume(&wiring, &id, cli.yes).await
         }
-        Some(Command::Run { task }) => run(home, cwd, task, cli.yes).await,
-        None if !cli.task.is_empty() => run(home, cwd, cli.task, cli.yes).await,
+        Some(Command::Run { task }) => run(home, cwd, profile, task, cli.yes).await,
+        None if !cli.task.is_empty() => run(home, cwd, profile, cli.task, cli.yes).await,
         None => anyhow::bail!("nothing to do; pass a task or a subcommand (see --help)"),
     }
 }
@@ -152,11 +163,12 @@ async fn dispatch(cli: Cli, env: Env) -> anyhow::Result<i32> {
 async fn run(
     home: Option<&Path>,
     cwd: &Path,
+    profile: Option<&str>,
     words: Vec<String>,
     yes: bool,
 ) -> anyhow::Result<i32> {
     let task = words.join(" ");
-    let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
+    let mut wiring = Wiring::new(load_profile(home, cwd, profile)?.config)?;
     wiring.load_mcp().await;
     commands::run_task(&wiring, task, yes).await
 }

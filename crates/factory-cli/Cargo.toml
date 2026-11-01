@@ -5,25 +5,35 @@ edition.workspace = true
 rust-version.workspace = true
 description = "The factory binary: the unattended improvement service. Argument parsing and wiring only."
 
+# The library holds the wiring so the tests can run the service in-process
+# with fakes; the binary parses arguments and calls into it.
+[lib]
+name = "factory_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "factory"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-clap.workspace = true
 anvil-types.workspace = true
+chrono.workspace = true
+clap.workspace = true
+eval.workspace = true
+factory-core.workspace = true
 factory-review.workspace = true
-# rustls on aws-lc-rs only: the workspace already uses that provider through
-# reqwest, and a second one (octocrab's default `rustls-ring`) panics at runtime.
-octocrab = { version = "0.54", default-features = false, features = ["rustls", "rustls-aws-lc-rs", "follow-redirect", "retry", "timeout", "default-client"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+ulid.workspace = true
 wiremock.workspace = true
 
 [lints]
