@@ -13,12 +13,14 @@ path = "src/main.rs"
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 anvil-compat.workspace = true
 anvil-core.workspace = true
 anvil-memory.workspace = true
 anvil-telemetry.workspace = true
 anvil-types.workspace = true
 futures-util.workspace = true
+ratatui.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rustyline.workspace = true
@@ -32,6 +34,7 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 ulid.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

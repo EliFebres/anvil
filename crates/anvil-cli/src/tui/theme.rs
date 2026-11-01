@@ -1,0 +1,104 @@
+//! One theme that reads on dark and light terminals.
+//!
+//! Only state banners, user messages and tool failures carry a color (the
+//! modal border joins them when modals land). Everything else uses the
+//! terminal's default foreground with bold or dim, so `NO_COLOR` loses
+//! nothing but the accents.
+
+use ratatui::style::{Color, Modifier, Style};
+
+/// The styles the UI draws with.
+#[derive(Debug, Clone, Copy)]
+pub struct Theme {
+    /// State banners.
+    pub state: Style,
+    /// The user's own messages.
+    pub user: Style,
+    /// Failed tool calls and error notices.
+    pub failure: Style,
+    /// Secondary text: notices, continuation markers.
+    pub dim: Style,
+    /// The input prompt prefix.
+    pub prompt: Style,
+    /// The status line.
+    pub status: Style,
+}
+
+impl Theme {
+    /// The theme for this process: monochrome when `NO_COLOR` is set to a
+    /// non-empty value, the accented theme otherwise.
+    ///
+    /// # Returns
+    ///
+    /// The theme.
+    pub fn detect() -> Self {
+        match std::env::var_os("NO_COLOR") {
+            Some(value) if !value.is_empty() => Self::mono(),
+            _ => Self::color(),
+        }
+    }
+
+    /// The accented theme, using only the eight basic ANSI colors and no
+    /// backgrounds so it reads on either terminal background.
+    ///
+    /// # Returns
+    ///
+    /// The theme.
+    pub fn color() -> Self {
+        Self {
+            state: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            user: Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+            failure: Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ..Self::mono()
+        }
+    }
+
+    /// The monochrome theme: bold, dim and underline only.
+    ///
+    /// # Returns
+    ///
+    /// The theme.
+    pub fn mono() -> Self {
+        Self {
+            state: Style::new().add_modifier(Modifier::BOLD),
+            user: Style::new().add_modifier(Modifier::BOLD),
+            failure: Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            dim: Style::new().add_modifier(Modifier::DIM),
+            prompt: Style::new().add_modifier(Modifier::BOLD),
+            status: Style::new().add_modifier(Modifier::REVERSED),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_uses_no_colors() {
+        let theme = Theme::mono();
+        for style in [
+            theme.state,
+            theme.user,
+            theme.failure,
+            theme.dim,
+            theme.prompt,
+            theme.status,
+        ] {
+            assert_eq!(style.fg, None);
+            assert_eq!(style.bg, None);
+        }
+    }
+
+    #[test]
+    fn color_accents_only_the_accent_styles() {
+        let theme = Theme::color();
+        assert!(theme.state.fg.is_some());
+        assert!(theme.user.fg.is_some());
+        assert!(theme.failure.fg.is_some());
+        for style in [theme.dim, theme.prompt, theme.status] {
+            assert_eq!(style.fg, None);
+            assert_eq!(style.bg, None);
+        }
+    }
+}

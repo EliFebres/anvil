@@ -4,14 +4,16 @@
 use std::path::Path;
 use std::time::Instant;
 
-use anvil_core::agent::{AgentLoop, LoopResult};
+use anvil_core::agent::{AgentLoop, LoopResult, State};
 use anvil_core::context;
 use anvil_telemetry::SessionMode;
 use anyhow::{Context, bail};
 use tokio::task::JoinHandle;
 
+use crate::frontend::{Frontend, UiKind, session_info};
 use crate::memory;
 use crate::telemetry::SessionTelemetry;
+use crate::tui::SessionKind;
 use crate::wiring::{Wiring, home_dir};
 use anvil_types::LoadedConfig;
 
@@ -47,7 +49,11 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
                 hooks.session_start().await,
             ));
     }
-    let (sink, tee) = telemetry.sink(true);
+    let (frontend, events) = Frontend::start(
+        UiKind::Plain,
+        session_info(&wiring, SessionKind::Run, yes, State::Plan),
+    );
+    let (sink, tee) = telemetry.sink(Some(events));
     let mut agent = AgentLoop::new(
         config,
         wiring.loop_providers()?,
@@ -59,7 +65,7 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = drive(agent, tee).await;
+    let result = drive(agent, tee, frontend).await?;
     run_stop_hooks(hooks.as_deref(), &result).await;
     remember(&wiring, &id, yes, &telemetry).await;
     telemetry.finish_run(&result.status);
@@ -118,7 +124,11 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
                 hooks.session_start().await,
             ));
     }
-    let (sink, tee) = telemetry.sink(true);
+    let (frontend, events) = Frontend::start(
+        UiKind::Plain,
+        session_info(&wiring, SessionKind::Run, yes, State::Plan),
+    );
+    let (sink, tee) = telemetry.sink(Some(events));
     let mut agent = AgentLoop::resume(
         snapshot,
         config,
@@ -131,7 +141,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = drive(agent, tee).await;
+    let result = drive(agent, tee, frontend).await?;
     run_stop_hooks(hooks.as_deref(), &result).await;
     remember(&wiring, id, yes, &telemetry).await;
     telemetry.finish_run(&result.status);
@@ -139,10 +149,15 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
 }
 
 /// Runs the loop, then waits for every event to be recorded and rendered.
-async fn drive(agent: AgentLoop, tee: JoinHandle<()>) -> LoopResult {
+async fn drive(
+    agent: AgentLoop,
+    tee: JoinHandle<()>,
+    frontend: Frontend,
+) -> anyhow::Result<LoopResult> {
     let result = agent.run().await;
     let _ = tee.await;
-    result
+    frontend.shutdown(false).await?;
+    Ok(result)
 }
 
 /// Prints the saved sessions, newest first.
