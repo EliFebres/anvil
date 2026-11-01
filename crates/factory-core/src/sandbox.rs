@@ -594,20 +594,20 @@ fn runtime_name(runtime: ContainerRuntime) -> &'static str {
 }
 
 /// `uid:gid` of this process for `docker --user`; `1000:1000` where unknown.
+#[cfg(unix)]
 fn current_uid_gid() -> String {
-    #[cfg(unix)]
-    {
-        let out = std::process::Command::new("id").arg("-u").output().ok();
-        let uid = out
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            .unwrap_or_else(|| "1000".to_owned());
-        return format!("{uid}:{uid}");
-    }
-    #[cfg(not(unix))]
-    {
-        "1000:1000".to_owned()
-    }
+    let out = std::process::Command::new("id").arg("-u").output().ok();
+    let uid = out
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_else(|| "1000".to_owned());
+    format!("{uid}:{uid}")
+}
+
+/// `uid:gid` for `docker --user`; there is no uid on Windows, so the usual first user.
+#[cfg(not(unix))]
+fn current_uid_gid() -> String {
+    "1000:1000".to_owned()
 }
 
 /// The host of a base URL, without scheme, port or path.
