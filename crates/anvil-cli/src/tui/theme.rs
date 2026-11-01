@@ -16,8 +16,12 @@ pub struct Theme {
     pub user: Style,
     /// Failed tool calls and error notices.
     pub failure: Style,
-    /// Secondary text: notices, continuation markers.
+    /// Secondary text: notices, borders, tool summaries.
     pub dim: Style,
+    /// Inline and fenced code.
+    pub code: Style,
+    /// Markdown headings and the plan title.
+    pub heading: Style,
     /// The input prompt prefix.
     pub prompt: Style,
     /// The status line.
@@ -64,6 +68,8 @@ impl Theme {
             user: Style::new().add_modifier(Modifier::BOLD),
             failure: Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             dim: Style::new().add_modifier(Modifier::DIM),
+            code: Style::new().add_modifier(Modifier::BOLD),
+            heading: Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             prompt: Style::new().add_modifier(Modifier::BOLD),
             status: Style::new().add_modifier(Modifier::REVERSED),
         }
@@ -82,6 +88,8 @@ mod tests {
             theme.user,
             theme.failure,
             theme.dim,
+            theme.code,
+            theme.heading,
             theme.prompt,
             theme.status,
         ] {
@@ -96,7 +104,13 @@ mod tests {
         assert!(theme.state.fg.is_some());
         assert!(theme.user.fg.is_some());
         assert!(theme.failure.fg.is_some());
-        for style in [theme.dim, theme.prompt, theme.status] {
+        for style in [
+            theme.dim,
+            theme.code,
+            theme.heading,
+            theme.prompt,
+            theme.status,
+        ] {
             assert_eq!(style.fg, None);
             assert_eq!(style.bg, None);
         }

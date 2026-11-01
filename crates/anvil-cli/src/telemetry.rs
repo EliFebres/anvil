@@ -15,8 +15,7 @@ use anvil_core::provider::{
     CompletionRequest, Event, EventStream, Provider, ProviderError, StopReason,
 };
 use anvil_core::tools::{
-    PermissionPrompt, PermissionRequest, PromptAnswer, StaticPrompt, ToolOutcome, ToolRegistry,
-    permissions,
+    PermissionPrompt, PermissionRequest, PromptAnswer, ToolOutcome, ToolRegistry, permissions,
 };
 use anvil_telemetry::paths::signals_file;
 use anvil_telemetry::{
@@ -29,7 +28,6 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::terminal::TerminalPrompt;
 use crate::wiring::Wiring;
 
 /// How far back the cross-session history reaches.
@@ -157,25 +155,6 @@ impl SessionTelemetry {
             kind,
             http_status,
         });
-    }
-
-    /// The permission prompt, with every answer recorded.
-    ///
-    /// # Arguments
-    ///
-    /// * `yes` - Whether the run is unattended; then every call is approved
-    ///   without asking (the built-in block list still applies).
-    ///
-    /// # Returns
-    ///
-    /// The prompt.
-    pub fn prompt(&self, yes: bool) -> Box<dyn PermissionPrompt> {
-        let inner: Box<dyn PermissionPrompt> = if yes {
-            Box::new(StaticPrompt(PromptAnswer::Yes))
-        } else {
-            Box::new(TerminalPrompt)
-        };
-        self.recording(inner)
     }
 
     /// Wraps a prompt so every answer is recorded.
@@ -618,7 +597,8 @@ mod tests {
             target: Some("notes.txt".to_owned()),
             arguments: serde_json::json!({"path": "notes.txt"}),
         };
-        assert_eq!(telemetry.prompt(true).ask(&request), PromptAnswer::Yes);
+        let prompt = telemetry.recording(Box::new(StaticPrompt(PromptAnswer::Yes)));
+        assert_eq!(prompt.ask(&request), PromptAnswer::Yes);
         let records = load_records(&telemetry.project_dir(), None).expect("records");
         assert!(records.iter().any(|r| matches!(
             &r.kind,

@@ -201,6 +201,7 @@ mod tests {
     fn info() -> SessionInfo {
         SessionInfo {
             kind: SessionKind::Chat,
+            cwd: std::path::PathBuf::new(),
             model: "main (sonnet)".to_owned(),
             context_window: 131_072,
             price: Some(Price {

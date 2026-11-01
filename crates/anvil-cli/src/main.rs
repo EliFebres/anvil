@@ -81,7 +81,10 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
     }
     let env_files = dotenv::env_files(home.as_deref(), &cwd, false);
     let loaded_env = dotenv::load(&env_files)?;
-    let interactive = matches!(cli.command, Some(Command::Chat));
+    let interactive = matches!(
+        cli.command,
+        Some(Command::Chat | Command::Run { .. } | Command::Resume { .. })
+    ) || (cli.command.is_none() && !cli.task.is_empty());
     let ui = UiKind::choose(cli.plain, cli.yes, interactive);
     let _log_guard = logging::init(&cwd, ui == UiKind::Plain);
     let env = Env {
@@ -159,10 +162,10 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         Some(Command::Resume { id }) => {
             let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
             wiring.load_mcp().await;
-            commands::resume(&wiring, &id, cli.yes).await
+            commands::resume(&wiring, &id, cli.yes, ui).await
         }
-        Some(Command::Run { task }) => run(home, cwd, profile, task, cli.yes).await,
-        None if !cli.task.is_empty() => run(home, cwd, profile, cli.task, cli.yes).await,
+        Some(Command::Run { task }) => run(home, cwd, profile, task, cli.yes, ui).await,
+        None if !cli.task.is_empty() => run(home, cwd, profile, cli.task, cli.yes, ui).await,
         None => anyhow::bail!("nothing to do; pass a task or a subcommand (see --help)"),
     }
 }
@@ -174,9 +177,10 @@ async fn run(
     profile: Option<&str>,
     words: Vec<String>,
     yes: bool,
+    ui: UiKind,
 ) -> anyhow::Result<i32> {
     let task = words.join(" ");
     let mut wiring = Wiring::new(load_profile(home, cwd, profile)?.config)?;
     wiring.load_mcp().await;
-    commands::run_task(&wiring, task, yes).await
+    commands::run_task(&wiring, task, yes, ui).await
 }

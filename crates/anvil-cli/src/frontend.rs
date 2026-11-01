@@ -3,10 +3,11 @@
 //! for input, prompts and a console, and never knows which it got.
 
 use std::io::{self, IsTerminal};
+use std::sync::Arc;
 use std::time::Instant;
 
-use anvil_core::agent::{LoopEvent, State};
-use anvil_core::tools::{PermissionPrompt, PromptAnswer, StaticPrompt};
+use anvil_core::agent::{AutoApprove, LoopEvent, PlanDecision, PlanGate, State};
+use anvil_core::tools::{PermissionPrompt, PromptAnswer, StaticPrompt, ToolHook, ToolRegistry};
 use anyhow::Context;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -15,9 +16,11 @@ use tokio::task::JoinHandle;
 
 use crate::console::Console;
 use crate::render;
-use crate::terminal::TerminalPrompt;
+use crate::terminal::{TerminalGate, TerminalPrompt};
 use crate::tui::runner::{UiChannels, run_ui};
-use crate::tui::{App, Input, SessionInfo, SessionKind, Theme, UiExit, UiHandle, UiMsg};
+use crate::tui::{
+    App, Input, Level, ResultTee, SessionInfo, SessionKind, Theme, UiExit, UiHandle, UiMsg,
+};
 use crate::wiring::Wiring;
 
 /// Which renderer a session uses.
@@ -74,11 +77,15 @@ pub struct PlainFrontend {
 pub struct TuiFrontend {
     ui: UiHandle,
     input: mpsc::UnboundedReceiver<Input>,
-    task: JoinHandle<io::Result<UiExit>>,
+    task: JoinHandle<io::Result<()>>,
 }
 
 impl Frontend {
     /// Starts a front end.
+    ///
+    /// When the full-screen UI closes before the session is over, the
+    /// events it did not show continue on the line renderer, so a run never
+    /// goes silent.
     ///
     /// # Arguments
     ///
@@ -98,15 +105,19 @@ impl Frontend {
             UiKind::Tui => {
                 let (msg_tx, msg_rx) = mpsc::unbounded_channel();
                 let (input_tx, input_rx) = mpsc::unbounded_channel();
+                let cwd = info.cwd.clone();
                 let app = App::new(info, Theme::detect(), Instant::now());
-                let task = tokio::spawn(run_ui(
-                    app,
-                    UiChannels {
-                        events: events_rx,
-                        msgs: msg_rx,
-                        input: input_tx,
-                    },
-                ));
+                let channels = UiChannels {
+                    events: events_rx,
+                    msgs: msg_rx,
+                    input: input_tx,
+                    cwd,
+                };
+                let task = tokio::spawn(async move {
+                    let UiExit::Quit { events } = run_ui(app, channels).await?;
+                    render::render(events, false).await;
+                    Ok(())
+                });
                 Frontend::Tui(TuiFrontend {
                     ui: UiHandle::new(msg_tx),
                     input: input_rx,
@@ -132,7 +143,7 @@ impl Frontend {
     /// Who answers `ask` permission decisions.
     ///
     /// Under the full-screen UI every asked call is declined until the
-    /// permission modal lands; the status line says so.
+    /// permission modal lands.
     ///
     /// # Arguments
     ///
@@ -148,6 +159,41 @@ impl Frontend {
         match self {
             Frontend::Plain(_) => Box::new(TerminalPrompt),
             Frontend::Tui(_) => Box::new(StaticPrompt(PromptAnswer::No)),
+        }
+    }
+
+    /// Who approves the plan.
+    ///
+    /// Under the full-screen UI the plan is approved as written, with a
+    /// notice, until the approval modal lands.
+    ///
+    /// # Arguments
+    ///
+    /// * `yes` - Whether the run is unattended, which approves every plan.
+    ///
+    /// # Returns
+    ///
+    /// The gate.
+    pub fn gate(&self, yes: bool) -> Box<dyn PlanGate> {
+        if yes {
+            return Box::new(AutoApprove);
+        }
+        match self {
+            Frontend::Plain(_) => Box::new(TerminalGate),
+            Frontend::Tui(tui) => Box::new(NoticeGate { ui: tui.ui.clone() }),
+        }
+    }
+
+    /// Makes every tool result reach the UI, keeping the hook that was
+    /// already installed running behind it.
+    ///
+    /// # Arguments
+    ///
+    /// * `registry` - The session's tools.
+    /// * `inner` - The hook the registry had, if any.
+    pub fn install_tool_hook(&self, registry: &mut ToolRegistry, inner: Option<Arc<dyn ToolHook>>) {
+        if let Frontend::Tui(tui) = self {
+            registry.set_hook(Arc::new(ResultTee::new(inner, tui.ui.clone())));
         }
     }
 
@@ -192,7 +238,7 @@ impl Frontend {
     /// for the UI, restores the terminal.
     ///
     /// The loop event sender must be dropped before this is awaited, or
-    /// the plain renderer never ends.
+    /// the renderer never ends.
     ///
     /// # Arguments
     ///
@@ -210,7 +256,7 @@ impl Frontend {
             Frontend::Tui(tui) => {
                 tui.ui.send(UiMsg::Shutdown { wait_for_key });
                 match tui.task.await {
-                    Ok(Ok(_)) => Ok(()),
+                    Ok(Ok(())) => Ok(()),
                     Ok(Err(error)) => Err(error).context("the full-screen UI failed"),
                     Err(join) => {
                         crate::tui::runner::TerminalGuard::restore();
@@ -219,6 +265,22 @@ impl Frontend {
                 }
             }
         }
+    }
+}
+
+/// Approves every plan and says so in the transcript; the stand-in until
+/// the approval modal exists.
+struct NoticeGate {
+    ui: UiHandle,
+}
+
+impl PlanGate for NoticeGate {
+    fn review(&self, _plan: &str) -> PlanDecision {
+        self.ui.notice(
+            "plan approved as written; the approval prompt is not available yet",
+            Level::Warn,
+        );
+        PlanDecision::Approve
     }
 }
 
@@ -262,6 +324,7 @@ pub fn session_info(
     );
     SessionInfo {
         kind,
+        cwd: wiring.cwd.clone(),
         model: model_label(wiring, coder),
         context_window: wiring.context_window(),
         price: provider.and_then(|provider| provider.price_per_mtoken),

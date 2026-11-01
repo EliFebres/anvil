@@ -4,8 +4,11 @@
 use std::path::Path;
 use std::time::Instant;
 
+use std::sync::Arc;
+
 use anvil_core::agent::{AgentLoop, LoopResult, State};
 use anvil_core::context;
+use anvil_core::tools::ToolHook;
 use anvil_telemetry::SessionMode;
 use anyhow::{Context, bail};
 use tokio::task::JoinHandle;
@@ -24,6 +27,7 @@ use anvil_types::LoadedConfig;
 /// * `wiring` - Providers and paths.
 /// * `task` - The task.
 /// * `yes` - Skip plan approval.
+/// * `ui` - Which front end to use.
 ///
 /// # Returns
 ///
@@ -31,14 +35,24 @@ use anvil_types::LoadedConfig;
 ///
 /// # Errors
 ///
-/// When providers or permissions cannot be set up.
-pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Result<i32> {
+/// When providers, permissions or the front end cannot be set up.
+pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> anyhow::Result<i32> {
     let (session_dir, id) = wiring.new_session_dir();
     eprintln!("session {id}");
     let wiring = wiring.with_session(&id, &session_dir);
     let telemetry = SessionTelemetry::start(&wiring, &id, SessionMode::Run);
     let task = wiring.expand_slash(&task).unwrap_or(task);
-    let registry = wiring.registry(telemetry.prompt(yes))?;
+    let (frontend, events) = Frontend::start(
+        ui,
+        session_info(&wiring, SessionKind::Run, yes, State::Plan),
+    );
+    let mut registry = wiring.registry(telemetry.recording(frontend.prompt(yes)))?;
+    frontend.install_tool_hook(
+        &mut registry,
+        wiring
+            .hook_runner()
+            .map(|runner| runner as Arc<dyn ToolHook>),
+    );
     telemetry.record_skill_requires(&wiring, &registry);
     let mut config = wiring.loop_config(task, session_dir, &registry)?;
     let hooks = wiring.hook_runner();
@@ -49,17 +63,13 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool) -> anyhow::Resul
                 hooks.session_start().await,
             ));
     }
-    let (frontend, events) = Frontend::start(
-        UiKind::Plain,
-        session_info(&wiring, SessionKind::Run, yes, State::Plan),
-    );
     let (sink, tee) = telemetry.sink(Some(events));
     let mut agent = AgentLoop::new(
         config,
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
-        Wiring::gate(yes),
+        frontend.gate(yes),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
@@ -99,6 +109,7 @@ async fn run_stop_hooks(hooks: Option<&anvil_compat::HookRunner>, result: &LoopR
 /// * `wiring` - Providers and paths.
 /// * `id` - The session id.
 /// * `yes` - Skip plan approval if planning resumes.
+/// * `ui` - Which front end to use.
 ///
 /// # Returns
 ///
@@ -106,13 +117,24 @@ async fn run_stop_hooks(hooks: Option<&anvil_compat::HookRunner>, result: &LoopR
 ///
 /// # Errors
 ///
-/// When the session cannot be loaded or providers cannot be built.
-pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32> {
+/// When the session cannot be loaded or providers or the front end cannot
+/// be built.
+pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow::Result<i32> {
     let snapshot = context::load_session(&wiring.cwd, id).context("loading the session")?;
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
     let wiring = wiring.with_session(id, &snapshot.dir);
     let telemetry = SessionTelemetry::start(&wiring, id, SessionMode::Resume);
-    let registry = wiring.registry(telemetry.prompt(yes))?;
+    let (frontend, events) = Frontend::start(
+        ui,
+        session_info(&wiring, SessionKind::Run, yes, State::Plan),
+    );
+    let mut registry = wiring.registry(telemetry.recording(frontend.prompt(yes)))?;
+    frontend.install_tool_hook(
+        &mut registry,
+        wiring
+            .hook_runner()
+            .map(|runner| runner as Arc<dyn ToolHook>),
+    );
     telemetry.record_skill_requires(&wiring, &registry);
     let mut config =
         wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry)?;
@@ -124,10 +146,6 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
                 hooks.session_start().await,
             ));
     }
-    let (frontend, events) = Frontend::start(
-        UiKind::Plain,
-        session_info(&wiring, SessionKind::Run, yes, State::Plan),
-    );
     let (sink, tee) = telemetry.sink(Some(events));
     let mut agent = AgentLoop::resume(
         snapshot,
@@ -135,7 +153,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool) -> anyhow::Result<i32>
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
-        Wiring::gate(yes),
+        frontend.gate(yes),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
@@ -156,7 +174,7 @@ async fn drive(
 ) -> anyhow::Result<LoopResult> {
     let result = agent.run().await;
     let _ = tee.await;
-    frontend.shutdown(false).await?;
+    frontend.shutdown(true).await?;
     Ok(result)
 }
 

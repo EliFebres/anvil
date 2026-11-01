@@ -11,20 +11,23 @@ pub mod app;
 pub mod bridge;
 pub mod editor;
 pub mod keys;
+pub mod markdown;
 pub mod runner;
 pub mod status;
 pub mod theme;
 pub mod transcript;
 pub mod wrap;
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anvil_core::agent::{LoopEvent, State};
 use anvil_types::Price;
 use crossterm::event::{KeyEvent, MouseEvent};
+use tokio::sync::mpsc;
 
 pub use app::App;
-pub use bridge::UiHandle;
+pub use bridge::{ResultTee, UiHandle};
 pub use theme::Theme;
 
 /// What a session tells the UI about itself when it starts.
@@ -32,6 +35,9 @@ pub use theme::Theme;
 pub struct SessionInfo {
     /// Whether the input takes free text (chat) or only slash commands (run).
     pub kind: SessionKind,
+    /// The project root: paths under it are shown relative to it, and the
+    /// paths tools write resolve against it.
+    pub cwd: PathBuf,
     /// The coder's name and model, shown in the status line.
     pub model: String,
     /// The coder's context window, for the context percentage.
@@ -71,6 +77,22 @@ pub enum Level {
 pub enum UiMsg {
     /// An event from the agent loop or the chat turn.
     Loop(LoopEvent),
+    /// A tool call's full result, from the tool hook.
+    ToolResult {
+        /// The call.
+        call_id: String,
+        /// The result as the model saw it, already capped.
+        text: String,
+        /// Whether the tool failed.
+        is_error: bool,
+    },
+    /// The plan file was written or edited.
+    Plan {
+        /// The file.
+        path: PathBuf,
+        /// Its contents.
+        text: String,
+    },
     /// The chat mode changed (`/plan`, `/build`, `/review`).
     Mode(State),
     /// The coder changed (`/model`).
@@ -111,6 +133,10 @@ pub enum Input {
 /// How the UI task ended.
 #[derive(Debug)]
 pub enum UiExit {
-    /// The terminal is restored and the session is over.
-    Quit,
+    /// The terminal is restored. The receiver still holds any events the
+    /// UI did not show, and more may arrive while the session winds down.
+    Quit {
+        /// The loop events the UI was consuming.
+        events: mpsc::UnboundedReceiver<LoopEvent>,
+    },
 }

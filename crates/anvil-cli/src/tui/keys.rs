@@ -7,7 +7,7 @@ use super::editor::EditKey;
 /// What a key asks the UI to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAction {
-    /// Send the input.
+    /// Send the input, or toggle the selected tool call when it is empty.
     Submit,
     /// Insert a line break in the input.
     Newline,
@@ -23,9 +23,13 @@ pub enum KeyAction {
     Up,
     /// Move down in the input, or forward through history on its last line.
     Down,
+    /// Ctrl+Up: select the previous tool call.
+    SelectPrev,
+    /// Ctrl+Down: select the next tool call.
+    SelectNext,
     /// Tab: complete a slash command.
     Complete,
-    /// Esc: close a prompt with its safe answer.
+    /// Esc: close a prompt with its safe answer, or drop the selection.
     Escape,
     /// `?` on an empty input: show the key help.
     Help,
@@ -65,6 +69,8 @@ pub fn map(key: KeyEvent, editor_empty: bool) -> KeyAction {
         KeyCode::Char('e' | 'E') if ctrl => KeyAction::Edit(EditKey::End),
         KeyCode::PageUp => KeyAction::PageUp,
         KeyCode::PageDown => KeyAction::PageDown,
+        KeyCode::Up if ctrl => KeyAction::SelectPrev,
+        KeyCode::Down if ctrl => KeyAction::SelectNext,
         KeyCode::Up => KeyAction::Up,
         KeyCode::Down => KeyAction::Down,
         KeyCode::Tab => KeyAction::Complete,
@@ -83,17 +89,28 @@ pub fn map(key: KeyEvent, editor_empty: bool) -> KeyAction {
 
 /// The key help, as key and meaning pairs.
 pub const HELP: &[(&str, &str)] = &[
-    ("Enter", "send"),
+    (
+        "Enter",
+        "send; on an empty input, expand or collapse a tool call",
+    ),
     ("Shift+Enter, Alt+Enter, Ctrl+J", "new line"),
     ("Up, Down", "history (on the first or last line)"),
+    (
+        "Ctrl+Up, Ctrl+Down",
+        "select the previous or next tool call",
+    ),
     ("Tab", "complete a slash command"),
     (
         "PageUp, PageDown, wheel",
         "scroll the transcript; typing jumps back down",
     ),
+    ("click", "expand or collapse the tool call under the mouse"),
     ("Ctrl+L", "clear the view (the session keeps everything)"),
     ("Ctrl+C", "cancel the turn; twice within 2 s quits"),
-    ("Esc", "close a prompt with its safe answer"),
+    (
+        "Esc",
+        "close a prompt with its safe answer; drop the selection",
+    ),
     ("?", "this help, when the input is empty"),
 ];
 
@@ -122,6 +139,22 @@ mod tests {
         assert_eq!(
             map(key(KeyCode::Char('j'), KeyModifiers::CONTROL), true),
             KeyAction::Newline
+        );
+    }
+
+    #[test]
+    fn ctrl_arrows_select_and_plain_arrows_move() {
+        assert_eq!(
+            map(key(KeyCode::Up, KeyModifiers::CONTROL), true),
+            KeyAction::SelectPrev
+        );
+        assert_eq!(
+            map(key(KeyCode::Down, KeyModifiers::CONTROL), true),
+            KeyAction::SelectNext
+        );
+        assert_eq!(
+            map(key(KeyCode::Up, KeyModifiers::NONE), true),
+            KeyAction::Up
         );
     }
 

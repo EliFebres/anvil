@@ -16,7 +16,7 @@ use anvil_core::agent::turn::complete_turn;
 use anvil_core::agent::{EventSink, LoopEvent, State};
 use anvil_core::context::{Conversation, discover_instructions};
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
-use anvil_core::tools::{Access, ToolContext, ToolRegistry};
+use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
 use anvil_telemetry::{RecordKind, SessionMode, SessionOutcome};
 use anyhow::Context;
 
@@ -75,7 +75,13 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
     let info = session_info(wiring, SessionKind::Chat, false, State::Build);
     let (mut frontend, events_tx) = Frontend::start(ui, info);
     let (events, tee) = telemetry.sink(Some(events_tx));
-    let registry = wiring.registry(telemetry.recording(frontend.prompt(false)))?;
+    let mut registry = wiring.registry(telemetry.recording(frontend.prompt(false)))?;
+    frontend.install_tool_hook(
+        &mut registry,
+        wiring
+            .hook_runner()
+            .map(|runner| runner as Arc<dyn ToolHook>),
+    );
     telemetry.record_skill_requires(wiring, &registry);
     let mut session = ChatSession {
         wiring,

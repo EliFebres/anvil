@@ -20,6 +20,7 @@ anvil-memory.workspace = true
 anvil-telemetry.workspace = true
 anvil-types.workspace = true
 futures-util.workspace = true
+pulldown-cmark.workspace = true
 ratatui.workspace = true
 regex.workspace = true
 reqwest.workspace = true

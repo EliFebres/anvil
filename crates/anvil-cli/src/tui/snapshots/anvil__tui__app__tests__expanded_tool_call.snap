@@ -1,0 +1,28 @@
+---
+source: crates/anvil-cli/src/tui/app.rs
+expression: terminal.backend()
+---
+"$ shell cargo test --all  ok 1.2s  running 3 tests                                                  "
+"    args:                                                                                           "
+"      {                                                                                             "
+"        "command": "cargo test --all",                                                              "
+"        "timeout_s": 120                                                                            "
+"      }                                                                                             "
+"    result:                                                                                         "
+"      running 3 tests                                                                               "
+"      test a ... ok                                                                                 "
+"      test b ... ok                                                                                 "
+"      test c ... ok                                                                                 "
+"                                                                                                    "
+"      test result: ok. 3 passed                                                                     "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+"                                                                                                    "
+" BUILD · main (test-model)                  mode ask                   in 0 · out 0 · ctx 0% · 0:01 "
+"build >                                                                                             "
