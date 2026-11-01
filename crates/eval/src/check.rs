@@ -196,10 +196,10 @@ pub fn find_on_path(name: &str) -> Option<PathBuf> {
 
 /// Whether a `bash.exe` is Windows' WSL launcher.
 fn is_wsl_launcher(path: &Path) -> bool {
-    path.components().any(|part| {
-        part.as_os_str()
-            .to_str()
-            .is_some_and(|s| s.eq_ignore_ascii_case("system32"))
+    // Split on both separators: on Linux a Windows path is a single component.
+    path.to_str().is_some_and(|s| {
+        s.split(['\\', '/'])
+            .any(|part| part.eq_ignore_ascii_case("system32"))
     })
 }
 
