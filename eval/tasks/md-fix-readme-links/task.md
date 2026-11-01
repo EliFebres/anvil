@@ -1,0 +1,1 @@
+The documentation files under `docs/` were renamed, and every relative link in `README.md` now points at a file that does not exist. Fix each link so it points at the matching file that does exist. Keep the link text and the rest of the README as it is, and keep exactly five links.

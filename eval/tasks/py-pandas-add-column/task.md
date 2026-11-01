@@ -1,0 +1,1 @@
+Write `enrich.py`. Running `python enrich.py` must read `sales.csv` with pandas, add a `total` column equal to `qty * unit_price`, and write the result to `sales_total.csv` with every original column kept and in the same row order.

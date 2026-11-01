@@ -5,7 +5,28 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Eval harness: scores a model or a build against a fixed task set."
 
+[lib]
+name = "eval"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eval"
+path = "src/main.rs"
+
 [dependencies]
+anvil-types.workspace = true
+chrono.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
 
 [lints]
 workspace = true

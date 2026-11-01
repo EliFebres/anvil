@@ -1,0 +1,11 @@
+---
+source: crates/anvil-memory/src/rules/mod.rs
+assertion_line: 699
+expression: "seed.review_section().expect(\"section\")"
+---
+The change must also follow these standing rules. When it violates one, request a change whose item starts with the rule id in square brackets, for example `[google-docstrings] src/api.py: add a docstring to parse_config`.
+
+1. [google-docstrings] (python, rust) Every public function and class gets a Google-style docstring (Python) or a Google-shaped doc comment (Rust): a one-line summary, then Args, Returns and Raises or Errors where they apply.
+2. [assert-boundaries] (all languages) Validate inputs at class and function boundaries with assertions and descriptive errors.
+3. [minimal-comments] (all languages) Write no inline comment that restates the code; a comment explains why, never what.
+4. [readable-first] (all languages) An intermediate programmer must be able to follow any function without opening another file: YAGNI, DRY, orthogonality.

@@ -1,0 +1,3 @@
+tags = ["python", "pandas"]
+timeout_s = 300
+max_tokens = 300000

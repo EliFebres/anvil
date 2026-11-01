@@ -1,0 +1,1 @@
+Wire a new `remove <number>` subcommand into the `notes` CLI in `src/main.rs` using clap derive. It deletes the note with that 1-based number from `notes.txt`. A number that does not exist must print an error to stderr and exit with a non-zero status without changing the file.

@@ -1,0 +1,15 @@
+# The home the eval tests seed each run from. The provider never answers;
+# the fake anvil only reads this file and writes telemetry naming it.
+[providers.fake]
+protocol = "openai"
+base_url = "http://127.0.0.1:9/v1"
+api_key_env = "FAKE_API_KEY"
+model = "fake-1"
+context_window = 10000
+supports_tools = true
+supports_reasoning = false
+price_per_mtoken = { input = 1.0, output = 2.0 }
+
+[roles]
+coder = "fake"
+summarizer = "fake"

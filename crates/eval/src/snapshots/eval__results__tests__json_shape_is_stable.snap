@@ -1,0 +1,140 @@
+---
+source: crates/eval/src/results.rs
+expression: result
+---
+{
+  "schema": 1,
+  "started_at": "2026-10-30T10:00:00Z",
+  "finished_at": "2026-10-30T10:02:05Z",
+  "git_sha": "fe92bc2",
+  "provider": "fast",
+  "model": "m1",
+  "runner": "anvil",
+  "repeat": 2,
+  "parallel": 2,
+  "tags": [],
+  "tasks": [
+    {
+      "name": "a",
+      "tags": [
+        "py"
+      ],
+      "attempts": [
+        {
+          "index": 1,
+          "passed": true,
+          "status": {
+            "kind": "done"
+          },
+          "check_exit": 0,
+          "session": "01ARZ3NDEKTSV4RRFFQ69G5FA1",
+          "provider": "fast",
+          "model": "m1",
+          "tokens": {
+            "input": 1000,
+            "output": 100,
+            "cached": 50
+          },
+          "cost_usd": 0.01,
+          "anvil_ms": 1500,
+          "check_ms": 200,
+          "wall_ms": 1800,
+          "stderr_tail": "done",
+          "check_tail": ""
+        },
+        {
+          "index": 2,
+          "passed": false,
+          "status": {
+            "kind": "incomplete",
+            "reason": "turn_budget"
+          },
+          "check_exit": 1,
+          "session": "01ARZ3NDEKTSV4RRFFQ69G5FA2",
+          "provider": "fast",
+          "model": "m1",
+          "tokens": {
+            "input": 1000,
+            "output": 100,
+            "cached": 50
+          },
+          "cost_usd": 0.01,
+          "anvil_ms": 1500,
+          "check_ms": 200,
+          "wall_ms": 1800,
+          "stderr_tail": "done",
+          "check_tail": ""
+        }
+      ]
+    },
+    {
+      "name": "b",
+      "tags": [
+        "py"
+      ],
+      "attempts": [
+        {
+          "index": 1,
+          "passed": true,
+          "status": {
+            "kind": "done"
+          },
+          "check_exit": 0,
+          "session": "01ARZ3NDEKTSV4RRFFQ69G5FA1",
+          "provider": "fast",
+          "model": "m1",
+          "tokens": {
+            "input": 1000,
+            "output": 100,
+            "cached": 50
+          },
+          "cost_usd": 0.01,
+          "anvil_ms": 1500,
+          "check_ms": 200,
+          "wall_ms": 1800,
+          "stderr_tail": "done",
+          "check_tail": ""
+        },
+        {
+          "index": 2,
+          "passed": true,
+          "status": {
+            "kind": "done"
+          },
+          "check_exit": 0,
+          "session": "01ARZ3NDEKTSV4RRFFQ69G5FA2",
+          "provider": "fast",
+          "model": "m1",
+          "tokens": {
+            "input": 1000,
+            "output": 100,
+            "cached": 50
+          },
+          "cost_usd": 0.01,
+          "anvil_ms": 1500,
+          "check_ms": 200,
+          "wall_ms": 1800,
+          "stderr_tail": "done",
+          "check_tail": ""
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "tasks": 2,
+    "attempts": 4,
+    "passed_attempts": 3,
+    "tasks_passing": 1,
+    "pass_rate": 0.75,
+    "pass_rate_min": 0.5,
+    "pass_rate_max": 1.0,
+    "tokens": {
+      "input": 4000,
+      "output": 400,
+      "cached": 200
+    },
+    "cost_usd": 0.04,
+    "cost_per_passed_task": 0.04,
+    "wall_ms": 125000
+  }
+}

@@ -1,0 +1,1 @@
+Wire a new `done <number>` subcommand into `todo.py` that marks the item with that 1-based number as done, so `list` shows it as `[x]`. An unknown number must print an error to stderr and exit with status 1 without changing the store.

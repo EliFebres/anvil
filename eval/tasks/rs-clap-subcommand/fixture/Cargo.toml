@@ -1,0 +1,9 @@
+[package]
+name = "notes"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }

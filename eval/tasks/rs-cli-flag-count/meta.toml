@@ -1,0 +1,3 @@
+tags = ["rust", "cli-flag"]
+timeout_s = 600
+max_tokens = 400000

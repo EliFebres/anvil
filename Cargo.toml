@@ -9,11 +9,11 @@ rust-version = "1.86"
 
 [workspace.dependencies]
 # Workspace crates
-forge-types = { path = "crates/forge-types" }
-forge-core = { path = "crates/forge-core" }
-forge-compat = { path = "crates/forge-compat" }
-forge-memory = { path = "crates/forge-memory" }
-forge-telemetry = { path = "crates/forge-telemetry" }
+anvil-types = { path = "crates/anvil-types" }
+anvil-core = { path = "crates/anvil-core" }
+anvil-compat = { path = "crates/anvil-compat" }
+anvil-memory = { path = "crates/anvil-memory" }
+anvil-telemetry = { path = "crates/anvil-telemetry" }
 factory-core = { path = "crates/factory-core" }
 factory-review = { path = "crates/factory-review" }
 eval = { path = "crates/eval" }

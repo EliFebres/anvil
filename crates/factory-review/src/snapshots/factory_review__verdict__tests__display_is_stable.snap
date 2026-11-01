@@ -1,0 +1,15 @@
+---
+source: crates/factory-review/src/verdict.rs
+expression: "Verdict::aggregate(raw).to_string()"
+---
+verdict: changes (reviewer(s) failed: google/safety)
+findings:
+  blocker openai/correctness       src/lib.rs:12  returns Ok on failure
+           fix: propagate the error with ?
+minor findings:
+  minor openai/correctness       src/lib.rs:4  rename x to count
+  minor google/style             -  rule google-docstrings: add # Errors
+reviewers:
+  openai/correctness       openai-model     changes 2 finding(s)  1.2k in / 300 out  $0.0123
+  google/style             google-model     approve 1 finding(s)  1.2k in / 300 out  $0.0123
+  google/safety            google-model     failed: provider `google` returned HTTP 500: boom  0 in / 0 out  cost n/a

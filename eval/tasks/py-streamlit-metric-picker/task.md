@@ -1,0 +1,1 @@
+Update the Streamlit page `app/pages/2_metrics.py`: add a sidebar `selectbox` that lets the user pick one metric name from `app/metrics.py`, and show that metric's latest value with `st.metric`. Keep `app/metrics.py` free of Streamlit imports.

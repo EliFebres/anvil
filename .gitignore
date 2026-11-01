@@ -23,21 +23,25 @@ rustc-ice-*.txt
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# forge
-.forge/telemetry/
-.forge/sessions/
-.forge/logs/
+# anvil
+.anvil/telemetry/
+.anvil/sessions/
+.anvil/logs/
 
 # secrets: keys live in .env files, never in the repository
 .env
-.forge/.env
+.anvil/.env
 .factory/env
 deploy/nuc/env
 *.local.toml
 
 # insta pending snapshots
 *.snap.new
-.forge/mcp-cache/
+.anvil/mcp-cache/
 
-# forge ticket drafts are per machine; only tickets/open/ is committed
+# anvil ticket drafts are per machine; only tickets/open/ is committed
 tickets/draft/
+
+# eval fixtures run in temp copies, but a hand run in place leaves these behind
+__pycache__/
+.pytest_cache/

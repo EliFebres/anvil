@@ -4,8 +4,8 @@
 #   ssh nuc 'bash -s' < deploy/nuc/bootstrap.sh
 #
 # Installs rustup, git, just and podman; clones the monorepo to ~/factory-repo;
-# seeds ~/.factory/env and ~/.forge/config.toml only when absent; builds forge
-# and factory in release mode into ~/.local/bin; runs forge doctor.
+# seeds ~/.factory/env and ~/.anvil/config.toml only when absent; builds anvil
+# and factory in release mode into ~/.local/bin; runs anvil doctor.
 set -euo pipefail
 
 REPO_URL="${FACTORY_REPO_URL:-https://github.com/EliFebres/anvil.git}"
@@ -68,19 +68,19 @@ seed_env() {
 }
 
 build_binaries() {
-    log "build: forge and factory (release)"
-    (cd "$REPO_DIR" && cargo build --release -p forge-cli -p factory-cli)
+    log "build: anvil and factory (release)"
+    (cd "$REPO_DIR" && cargo build --release -p anvil-cli -p factory-cli)
     mkdir -p "$BIN_DIR"
-    ln -sf "$REPO_DIR/target/release/forge" "$BIN_DIR/forge"
+    ln -sf "$REPO_DIR/target/release/anvil" "$BIN_DIR/anvil"
     ln -sf "$REPO_DIR/target/release/factory" "$BIN_DIR/factory"
 }
 
 seed_config() {
-    # `forge setup` writes ~/.forge/config.toml with the same provider entries
+    # `anvil setup` writes ~/.anvil/config.toml with the same provider entries
     # only when it is absent, and never overwrites a filled-in value. It exits
     # 2 while placeholders remain, which is expected on a fresh machine.
-    log "config: forge setup"
-    (cd "$REPO_DIR" && forge setup) || true
+    log "config: anvil setup"
+    (cd "$REPO_DIR" && anvil setup) || true
 }
 
 install_packages
@@ -91,7 +91,7 @@ build_binaries
 seed_config
 
 log "doctor"
-(cd "$REPO_DIR" && forge doctor) || true
+(cd "$REPO_DIR" && anvil doctor) || true
 
 echo
-echo "Open $FACTORY_ENV, paste the keys, then run: cd $REPO_DIR && forge doctor"
+echo "Open $FACTORY_ENV, paste the keys, then run: cd $REPO_DIR && anvil doctor"

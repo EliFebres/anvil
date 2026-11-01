@@ -1,0 +1,1 @@
+Write `summary.py`. Running `python summary.py` must read `orders.csv` with pandas, derive a `month` column in `YYYY-MM` form from `date`, and write `monthly.csv` with exactly two columns, `month` and `total`, one row per month sorted by month, where `total` is the sum of `amount` for that month.

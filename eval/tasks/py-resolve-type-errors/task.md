@@ -1,0 +1,1 @@
+`TYPE_ERRORS.md` lists four mypy errors in `inventory.py`. Fix all four without changing what the program does: `main()` must still restock the bolts by 3 and print the stock value (`3.75`), and the existing tests must pass. Handle the `None` case from `find` explicitly rather than silencing it.
