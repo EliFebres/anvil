@@ -57,10 +57,64 @@ pub enum TicketStatus {
     Claimed,
     /// A pull request exists and is under review.
     InReview,
+    /// Parked for a human: a protected path, or a kind the factory cannot work yet.
+    Waiting,
     /// Merged to trunk.
     Merged,
     /// Closed without merging.
     Rejected,
+}
+
+/// Where tickets live in the repository, one folder per state, on the
+/// [`dirs::STATE_BRANCH`] branch.
+pub mod dirs {
+    use super::TicketStatus;
+
+    /// The branch that carries ticket state. Code never goes here; ticket
+    /// files never go to `main`.
+    pub const STATE_BRANCH: &str = "factory/state";
+
+    /// The folder that holds every state folder.
+    pub const TICKETS_DIR: &str = "tickets";
+
+    /// Submitted tickets waiting for the factory.
+    pub const OPEN_DIR: &str = "tickets/open";
+
+    /// Tickets a worker has taken, including those with an open pull request.
+    pub const CLAIMED_DIR: &str = "tickets/claimed";
+
+    /// Tickets parked for a human.
+    pub const WAITING_DIR: &str = "tickets/waiting";
+
+    /// Tickets whose pull request merged.
+    pub const MERGED_DIR: &str = "tickets/merged";
+
+    /// Tickets the factory gave up on; `<id>.notes.md` sits next to each.
+    pub const REJECTED_DIR: &str = "tickets/rejected";
+
+    /// Every committed state folder.
+    pub const ALL: [&str; 5] = [OPEN_DIR, CLAIMED_DIR, WAITING_DIR, MERGED_DIR, REJECTED_DIR];
+
+    /// The folder a ticket in `status` lives in.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The ticket status.
+    ///
+    /// # Returns
+    ///
+    /// The repository-relative folder, or `None` for drafts, which are never
+    /// committed.
+    pub fn dir_for(status: TicketStatus) -> Option<&'static str> {
+        match status {
+            TicketStatus::Draft => None,
+            TicketStatus::Open => Some(OPEN_DIR),
+            TicketStatus::Claimed | TicketStatus::InReview => Some(CLAIMED_DIR),
+            TicketStatus::Waiting => Some(WAITING_DIR),
+            TicketStatus::Merged => Some(MERGED_DIR),
+            TicketStatus::Rejected => Some(REJECTED_DIR),
+        }
+    }
 }
 
 /// Who created the ticket.
@@ -118,6 +172,18 @@ pub struct Ticket {
     pub status: TicketStatus,
     /// Who created it.
     pub origin: TicketOrigin,
+    /// When a factory worker claimed it. Set from `claimed` on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// The hostname of the worker that claimed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
+    /// The pull request number, once one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<u64>,
+    /// Why the ticket is where it is: the reason it waits for a human or was rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl Ticket {
@@ -127,13 +193,16 @@ impl Ticket {
     ///
     /// `Ok(())` when the title is 1 to [`MAX_TITLE_CHARS`] characters, the
     /// symptom and spec are non-empty, there is at least one acceptance check,
-    /// and neither `spec` nor `repro` names a path outside the monorepo or
-    /// holds more than [`boundary::MAX_CODE_LINES`] lines of code.
+    /// neither `spec` nor `repro` names a path outside the monorepo or holds
+    /// more than [`boundary::MAX_CODE_LINES`] lines of code, and the fields
+    /// the status implies are present: `claimed_at` and `claimed_by` from
+    /// `claimed` on, `pr` when merged, `note` when waiting or rejected.
     ///
     /// # Errors
     ///
     /// The first [`ValidationError`] found, in field order.
     pub fn validate(&self) -> Result<(), ValidationError> {
+        self.check_status_fields()?;
         let title_len = self.title.chars().count();
         if title_len == 0 {
             return Err(ValidationError::EmptyField { field: "title" });
@@ -159,6 +228,44 @@ impl Ticket {
         }
         Ok(())
     }
+
+    /// Fails when a field the status implies is missing.
+    fn check_status_fields(&self) -> Result<(), ValidationError> {
+        let missing = |field: &'static str| ValidationError::MissingForStatus {
+            field,
+            status: self.status,
+        };
+        let claimed = matches!(
+            self.status,
+            TicketStatus::Claimed
+                | TicketStatus::InReview
+                | TicketStatus::Waiting
+                | TicketStatus::Merged
+                | TicketStatus::Rejected
+        );
+        if claimed && self.status != TicketStatus::Waiting {
+            if self.claimed_at.is_none() {
+                return Err(missing("claimed_at"));
+            }
+            if self.claimed_by.as_deref().is_none_or(str::is_empty) {
+                return Err(missing("claimed_by"));
+            }
+        }
+        match self.status {
+            TicketStatus::InReview | TicketStatus::Merged if self.pr.is_none() => {
+                Err(missing("pr"))
+            }
+            TicketStatus::Waiting | TicketStatus::Rejected
+                if self
+                    .note
+                    .as_deref()
+                    .is_none_or(|note| note.trim().is_empty()) =>
+            {
+                Err(missing("note"))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -181,12 +288,86 @@ mod tests {
             priority: Priority::P1,
             status: TicketStatus::Open,
             origin: TicketOrigin::Cli,
+            claimed_at: None,
+            claimed_by: None,
+            pr: None,
+            note: None,
         }
     }
 
     #[test]
     fn sample_is_valid() {
         sample().validate().expect("sample ticket validates");
+    }
+
+    #[test]
+    fn status_implies_fields() {
+        let mut ticket = sample();
+        ticket.status = TicketStatus::Claimed;
+        assert_eq!(
+            ticket.validate(),
+            Err(ValidationError::MissingForStatus {
+                field: "claimed_at",
+                status: TicketStatus::Claimed
+            })
+        );
+        ticket.claimed_at = Some(ticket.created_at);
+        ticket.claimed_by = Some("nuc".to_owned());
+        ticket.validate().expect("claimed with both fields");
+        ticket.status = TicketStatus::Merged;
+        assert!(matches!(
+            ticket.validate(),
+            Err(ValidationError::MissingForStatus { field: "pr", .. })
+        ));
+        ticket.pr = Some(12);
+        ticket.validate().expect("merged with a pr");
+        ticket.status = TicketStatus::Rejected;
+        assert!(matches!(
+            ticket.validate(),
+            Err(ValidationError::MissingForStatus { field: "note", .. })
+        ));
+        ticket.note = Some("gate A failed twice".to_owned());
+        ticket.validate().expect("rejected with a note");
+        let mut waiting = sample();
+        waiting.status = TicketStatus::Waiting;
+        waiting.note = Some("model tickets wait for `anvil serve`".to_owned());
+        waiting.validate().expect("waiting needs only a note");
+    }
+
+    #[test]
+    fn folders_follow_the_status() {
+        assert_eq!(dirs::dir_for(TicketStatus::Draft), None);
+        assert_eq!(dirs::dir_for(TicketStatus::Open), Some("tickets/open"));
+        assert_eq!(
+            dirs::dir_for(TicketStatus::Claimed),
+            Some("tickets/claimed")
+        );
+        assert_eq!(
+            dirs::dir_for(TicketStatus::InReview),
+            Some("tickets/claimed")
+        );
+        assert_eq!(
+            dirs::dir_for(TicketStatus::Waiting),
+            Some("tickets/waiting")
+        );
+        assert_eq!(dirs::dir_for(TicketStatus::Merged), Some("tickets/merged"));
+        assert_eq!(
+            dirs::dir_for(TicketStatus::Rejected),
+            Some("tickets/rejected")
+        );
+        assert!(dirs::ALL.iter().all(|dir| dir.starts_with("tickets/")));
+    }
+
+    #[test]
+    fn optional_fields_are_omitted_when_unset() {
+        let text = toml::to_string(&sample()).expect("serializes");
+        for field in ["claimed_at", "claimed_by", "pr", "note"] {
+            let key = format!(
+                "
+{field} = "
+            );
+            assert!(!text.contains(&key), "{field} in {text}");
+        }
     }
 
     #[test]

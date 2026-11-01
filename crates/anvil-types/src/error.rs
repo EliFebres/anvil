@@ -134,6 +134,35 @@ pub enum ValidationError {
         field: &'static str,
     },
 
+    /// A ticket in some status lacks a field that status implies.
+    #[error("a ticket with status `{status:?}` needs `{field}`")]
+    MissingForStatus {
+        /// Name of the missing field.
+        field: &'static str,
+        /// The status that requires it.
+        status: crate::ticket::TicketStatus,
+    },
+
+    /// A glob in a list of rules does not compile.
+    #[error("field `{field}` has an invalid glob `{glob}`: {detail}")]
+    InvalidGlob {
+        /// Name of the field holding the list.
+        field: &'static str,
+        /// The glob as written.
+        glob: String,
+        /// Why it does not compile.
+        detail: String,
+    },
+
+    /// A time of day is not `HH:MM`.
+    #[error("field `{field}` must be a time of day as HH:MM, not `{value}`")]
+    InvalidTime {
+        /// Name of the field.
+        field: &'static str,
+        /// The value as written.
+        value: String,
+    },
+
     /// A skill name is not kebab-case or is too long.
     #[error(
         "skill name `{name}` must be kebab-case (a-z, 0-9, single hyphens) and at most {max} characters"
@@ -182,6 +211,13 @@ pub enum ConfigError {
         /// The TOML error.
         #[source]
         source: toml::de::Error,
+    },
+
+    /// The profile named on the command line has no file.
+    #[error("profile not found: {path} does not exist")]
+    ProfileNotFound {
+        /// Where the profile was looked for.
+        path: PathBuf,
     },
 
     /// The merged configuration failed validation.

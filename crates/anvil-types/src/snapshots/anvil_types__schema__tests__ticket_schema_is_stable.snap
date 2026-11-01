@@ -15,6 +15,21 @@ expression: ticket_schema()
         "type": "string"
       }
     },
+    "claimed_at": {
+      "description": "When a factory worker claimed it. Set from `claimed` on.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "claimed_by": {
+      "description": "The hostname of the worker that claimed it.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "created_at": {
       "description": "When the ticket was created, RFC 3339.",
       "type": "string",
@@ -36,9 +51,25 @@ expression: ticket_schema()
       "description": "What kind of improvement is wanted.",
       "$ref": "#/$defs/TicketKind"
     },
+    "note": {
+      "description": "Why the ticket is where it is: the reason it waits for a human or was rejected.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "origin": {
       "description": "Who created it.",
       "$ref": "#/$defs/TicketOrigin"
+    },
+    "pr": {
+      "description": "The pull request number, once one exists.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
     },
     "priority": {
       "description": "How urgent the ticket is.",
@@ -188,6 +219,11 @@ expression: ticket_schema()
           "description": "A pull request exists and is under review.",
           "type": "string",
           "const": "in_review"
+        },
+        {
+          "description": "Parked for a human: a protected path, or a kind the factory cannot work yet.",
+          "type": "string",
+          "const": "waiting"
         },
         {
           "description": "Merged to trunk.",

@@ -10,6 +10,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub yes: bool,
 
+    /// A named profile, `~/.anvil/profiles/<name>.toml`, layered over the global and
+    /// project configuration; its `[permissions]` table replaces `.anvil/permissions.toml`.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub profile: Option<String>,
+
     /// What to do.
     #[command(subcommand)]
     pub command: Option<Command>,
