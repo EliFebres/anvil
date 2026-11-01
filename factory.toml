@@ -1,26 +1,28 @@
-# factory configuration, written by `forge setup` and committed.
-# Provider names refer to [providers.<name>] entries in ~/.forge/config.toml.
+# factory configuration, written by `anvil setup` and committed.
+# Provider names refer to [providers.<name>] entries in ~/.anvil/config.toml.
 
 [roles]
 coder = "anthropic"
 
-# Each reviewer reads the pull request with one focus. Reviewers must sit on
-# different base URLs from the coder, so no model reviews its own work.
+# Each reviewer reads the pull request with one stance: correctness, safety,
+# style or simplicity. Reviewers must sit on different base URLs from the
+# coder, so no model reviews its own work, and on at least two base URLs
+# between them, so no single model's blind spots decide a review.
 [[reviewers]]
 provider = "openai"
-focus = "correctness"
+stance = "correctness"
 
 [[reviewers]]
 provider = "google"
-focus = "safety"
+stance = "safety"
 
 [[reviewers]]
 provider = "openai"
-focus = "style"
+stance = "style"
 
 [[reviewers]]
 provider = "google"
-focus = "simplicity"
+stance = "simplicity"
 
 [github]
 repo = "EliFebres/anvil"

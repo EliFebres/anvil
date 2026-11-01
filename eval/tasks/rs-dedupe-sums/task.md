@@ -1,0 +1,1 @@
+`sum_even`, `sum_odd` and `sum_all` in `src/lib.rs` repeat the same accumulation loop. Refactor so the loop exists once (for example a helper that takes a predicate), keeping the three public functions and their behavior. The tests must pass unchanged.
