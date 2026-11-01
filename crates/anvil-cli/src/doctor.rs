@@ -1012,14 +1012,23 @@ fn manual_steps(repo: &str) -> String {
     )
 }
 
+/// A `gh` command that authenticates with the gh login only.
+///
+/// gh prefers `GITHUB_TOKEN` or `GH_TOKEN` in its environment over its own
+/// login, and the fine-grained token doctor loads from `~/.anvil/.env` cannot
+/// administer branches: its answers were 404s. The token rows keep using that
+/// token through [`GitHub`]; only gh is cut off from it.
+fn gh_command(args: &[&str]) -> Command {
+    let mut command = Command::new("gh");
+    command.args(args);
+    command.env_remove("GITHUB_TOKEN").env_remove("GH_TOKEN");
+    command
+}
+
 /// Whether `gh` is installed and logged in.
 async fn gh_authenticated() -> bool {
-    let mut command = Command::new("gh");
-    command.args(["auth", "status"]);
-    // Same as gh_api: judge the login, not a token loaded from ~/.anvil/.env.
-    command.env_remove("GITHUB_TOKEN").env_remove("GH_TOKEN");
     matches!(
-        tokio::time::timeout(SHORT_TIMEOUT, command.output()).await,
+        tokio::time::timeout(SHORT_TIMEOUT, gh_command(&["auth", "status"]).output()).await,
         Ok(Ok(out)) if out.status.success()
     )
 }
@@ -1028,12 +1037,7 @@ async fn gh_authenticated() -> bool {
 async fn gh_api(method: &str, path: &str, body: Option<&Value>) -> anyhow::Result<Value> {
     use tokio::io::AsyncWriteExt;
 
-    let mut command = Command::new("gh");
-    command.args(["api", "-X", method, path]);
-    // gh prefers a token in the environment over its own login, and the
-    // fine-grained GITHUB_TOKEN loaded from ~/.anvil/.env cannot administer
-    // branches: its answers were 404s.
-    command.env_remove("GITHUB_TOKEN").env_remove("GH_TOKEN");
+    let mut command = gh_command(&["api", "-X", method, path]);
     if body.is_some() {
         command.args(["--input", "-"]);
         command.stdin(std::process::Stdio::piped());
@@ -1363,6 +1367,20 @@ fn head(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gh_commands_drop_the_token_variables_so_the_login_decides() {
+        let command = gh_command(&["auth", "status"]);
+        let std = command.as_std();
+        let args: Vec<_> = std.get_args().collect();
+        assert_eq!(args, ["auth", "status"]);
+        let removed: Vec<_> = std
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(removed, ["GH_TOKEN", "GITHUB_TOKEN"], "{removed:?}");
+    }
 
     #[test]
     fn report_renders_aligned_rows_with_fixes_under_failures() {
