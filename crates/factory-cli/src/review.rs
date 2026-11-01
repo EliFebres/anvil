@@ -5,18 +5,17 @@
 //! body otherwise. Blocker and major findings are printed only, so a human
 //! decides what to do with them.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anvil_types::factory_config::FACTORY_FILE;
-use anvil_types::{FactoryConfig, config};
+use anvil_types::config;
 use anyhow::Context;
+use factory_core::{GitHub, InlineComment};
 use factory_review::{
     AttributedFinding, Decision, DiffLines, ModelReviewer, ReviewRequest, TicketSummary, Verdict,
     load_rules,
 };
-use tokio::process::Command;
 
-use crate::github::{GitHub, InlineComment};
+use factory_cli::wiring::{read_factory, repo_root};
 
 /// Exit code when the swarm asks for changes.
 pub const CHANGES_REQUESTED: i32 = 2;
@@ -95,34 +94,6 @@ pub async fn run(options: Options) -> anyhow::Result<i32> {
         Decision::Approve => 0,
         Decision::Changes => CHANGES_REQUESTED,
     })
-}
-
-/// The git toplevel of `cwd`, or `cwd` itself outside a repository.
-async fn repo_root(cwd: &Path) -> PathBuf {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .output()
-        .await;
-    match output {
-        Ok(output) if output.status.success() => {
-            PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
-        }
-        _ => cwd.to_path_buf(),
-    }
-}
-
-/// Reads and validates `<root>/factory.toml`.
-fn read_factory(root: &Path) -> anyhow::Result<FactoryConfig> {
-    let path = root.join(FACTORY_FILE);
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}; run `anvil setup` first", path.display()))?;
-    let factory: FactoryConfig =
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-    factory
-        .validate()
-        .with_context(|| format!("validating {}", path.display()))?;
-    Ok(factory)
 }
 
 /// Splits the minors into inline comments on lines the diff shows and a

@@ -713,20 +713,42 @@ version = "0.1.0"
 dependencies = [
  "anvil-types",
  "anyhow",
+ "chrono",
  "clap",
+ "eval",
+ "factory-core",
  "factory-review",
- "octocrab",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
  "wiremock",
 ]
 
 [[package]]
 name = "factory-core"
 version = "0.1.0"
+dependencies = [
+ "anvil-types",
+ "chrono",
+ "globset",
+ "insta",
+ "octocrab",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "ulid",
+ "wiremock",
+]
 
 [[package]]
 name = "factory-review"
