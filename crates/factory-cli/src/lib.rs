@@ -5,6 +5,7 @@
 //! the environment; `main.rs` only parses arguments and calls in here, and
 //! the tests build the same service with fakes.
 
+pub mod adapters;
 pub mod install;
 pub mod logging;
 pub mod wiring;

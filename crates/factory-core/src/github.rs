@@ -1,16 +1,16 @@
 //! GitHub through octocrab: the only module that knows the REST routes.
 //!
 //! One token, one repository. `factory review` reads pull requests and posts
-//! comments with it; the service reads the CI status of `main` through the
-//! [`CodeHost`] port.
+//! comments with it; the worker opens, labels, merges and closes pull
+//! requests through the [`CodeHost`] port.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use octocrab::Octocrab;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FactoryError, Result};
-use crate::ports::{BoxFuture, CiStatus, CodeHost};
+use crate::ports::{BoxFuture, CiStatus, CodeHost, InlineComment, PullRequest};
 
 /// The environment variable that holds the factory's own token.
 pub const TOKEN_ENV: &str = "FACTORY_GITHUB_TOKEN";
@@ -25,6 +25,9 @@ pub const API_ENV: &str = "FACTORY_GITHUB_API";
 /// The workflow whose run on `main` decides whether the base is green.
 pub const CI_WORKFLOW: &str = "ci.yml";
 
+/// The check run the merge waits for.
+pub const CI_CHECK: &str = "ci";
+
 /// Where the real API lives.
 const DEFAULT_API: &str = "https://api.github.com";
 
@@ -34,11 +37,15 @@ const FILES_PER_PAGE: usize = 100;
 /// Wall clock for one request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How often the CI of a pull request is polled.
+const CI_POLL: Duration = Duration::from_secs(60);
+
 /// One repository on GitHub, reached with one token.
 pub struct GitHub {
     octocrab: Octocrab,
     owner: String,
     repo: String,
+    ci_poll: Duration,
 }
 
 /// What a review needs to know about a pull request.
@@ -56,17 +63,13 @@ pub struct Pull {
     pub url: String,
 }
 
-/// One inline comment on the right side of the diff.
+/// One inline comment as the review API wants it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct InlineComment {
-    /// Repository-relative path.
-    pub path: String,
-    /// Line in the new version of the file.
-    pub line: u32,
-    /// The comment text.
-    pub body: String,
-    /// Always `RIGHT`: comments go on the new version.
-    pub side: &'static str,
+struct CommentJson<'a> {
+    path: &'a str,
+    line: u32,
+    body: &'a str,
+    side: &'static str,
 }
 
 /// The fields of `GET /repos/{owner}/{repo}/pulls/{n}` a review reads.
@@ -104,6 +107,21 @@ struct RunJson {
     status: Option<String>,
     conclusion: Option<String>,
     html_url: String,
+}
+
+/// `GET /repos/{owner}/{repo}/commits/{sha}/check-runs`.
+#[derive(Deserialize)]
+struct CheckRunsJson {
+    check_runs: Vec<CheckRunJson>,
+}
+
+#[derive(Deserialize)]
+struct CheckRunJson {
+    name: String,
+    status: Option<String>,
+    conclusion: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
 }
 
 impl GitHub {
@@ -175,7 +193,18 @@ impl GitHub {
             octocrab,
             owner: owner.to_owned(),
             repo: name.to_owned(),
+            ci_poll: CI_POLL,
         })
+    }
+
+    /// Changes how often a pull request's CI is polled; tests shorten it.
+    ///
+    /// # Arguments
+    ///
+    /// * `interval` - The new interval.
+    pub fn with_ci_poll(mut self, interval: Duration) -> Self {
+        self.ci_poll = interval;
+        self
     }
 
     /// The repository as `owner/repo`.
@@ -287,6 +316,15 @@ impl GitHub {
         body: &str,
         comments: &[InlineComment],
     ) -> Result<()> {
+        let comments: Vec<CommentJson<'_>> = comments
+            .iter()
+            .map(|c| CommentJson {
+                path: &c.path,
+                line: c.line,
+                body: &c.body,
+                side: "RIGHT",
+            })
+            .collect();
         let payload = serde_json::json!({
             "commit_id": head_sha,
             "event": "COMMENT",
@@ -320,8 +358,7 @@ impl GitHub {
             return Ok(CiStatus::Unknown);
         };
         Ok(match (run.status.as_deref(), run.conclusion.as_deref()) {
-            (Some("completed"), Some("success")) => CiStatus::Green,
-            (Some("completed"), Some("skipped" | "neutral")) => CiStatus::Green,
+            (Some("completed"), Some("success" | "skipped" | "neutral")) => CiStatus::Green,
             (Some("completed"), Some(_)) => CiStatus::Red {
                 sha: run.head_sha,
                 url: run.html_url,
@@ -331,15 +368,199 @@ impl GitHub {
         })
     }
 
+    /// The `ci` check run of a commit right now.
+    async fn ci_of_commit(&self, sha: &str) -> Result<CiStatus> {
+        let route = format!(
+            "/repos/{}/{}/commits/{sha}/check-runs",
+            self.owner, self.repo
+        );
+        let runs: CheckRunsJson = self
+            .octocrab
+            .get(route, Some(&[("check_name", CI_CHECK), ("per_page", "20")]))
+            .await
+            .map_err(host_error)?;
+        let Some(run) = runs.check_runs.into_iter().find(|run| run.name == CI_CHECK) else {
+            return Ok(CiStatus::Unknown);
+        };
+        Ok(match (run.status.as_deref(), run.conclusion.as_deref()) {
+            (Some("completed"), Some("success" | "skipped" | "neutral")) => CiStatus::Green,
+            (Some("completed"), Some(_)) => CiStatus::Red {
+                sha: sha.to_owned(),
+                url: run.html_url.unwrap_or_default(),
+            },
+            _ => CiStatus::Pending,
+        })
+    }
+
+    /// Creates the label when the repository lacks it.
+    async fn ensure_label(&self, label: &str) -> Result<()> {
+        let route = format!("/repos/{}/{}/labels", self.owner, self.repo);
+        let payload = serde_json::json!({
+            "name": label,
+            "color": "d93f0b",
+            "description": "a factory pull request that touches a protected path",
+        });
+        match self
+            .octocrab
+            .post::<_, serde_json::Value>(route, Some(&payload))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) if status_of(&error) == Some(422) => Ok(()),
+            Err(error) => Err(host_error(error)),
+        }
+    }
+
     /// `/repos/{owner}/{repo}/pulls/{number}{suffix}`.
     fn pulls_route(&self, number: u64, suffix: &str) -> String {
         format!("/repos/{}/{}/pulls/{number}{suffix}", self.owner, self.repo)
+    }
+
+    /// `/repos/{owner}/{repo}/issues/{number}{suffix}`.
+    fn issues_route(&self, number: u64, suffix: &str) -> String {
+        format!(
+            "/repos/{}/{}/issues/{number}{suffix}",
+            self.owner, self.repo
+        )
     }
 }
 
 impl CodeHost for GitHub {
     fn main_ci(&self) -> BoxFuture<'_, Result<CiStatus>> {
         Box::pin(self.ci_of_main())
+    }
+
+    fn open_pull<'a>(
+        &'a self,
+        head_branch: &'a str,
+        title: &'a str,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<PullRequest>> {
+        Box::pin(async move {
+            let payload = serde_json::json!({
+                "title": title,
+                "head": head_branch,
+                "base": "main",
+                "body": body,
+            });
+            let json: PullJson = self
+                .octocrab
+                .post(
+                    format!("/repos/{}/{}/pulls", self.owner, self.repo),
+                    Some(&payload),
+                )
+                .await
+                .map_err(host_error)?;
+            Ok(PullRequest {
+                number: json.number.ok_or_else(|| FactoryError::Host {
+                    status: 0,
+                    message: "the new pull request has no number".to_owned(),
+                })?,
+                url: json.html_url.unwrap_or_default(),
+                head_sha: json.head.sha,
+            })
+        })
+    }
+
+    fn post_review<'a>(
+        &'a self,
+        number: u64,
+        head_sha: &'a str,
+        body: &'a str,
+        comments: &'a [InlineComment],
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(GitHub::post_review(self, number, head_sha, body, comments))
+    }
+
+    fn add_label<'a>(&'a self, number: u64, label: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.ensure_label(label).await?;
+            let payload = serde_json::json!({ "labels": [label] });
+            let _: serde_json::Value = self
+                .octocrab
+                .post(self.issues_route(number, "/labels"), Some(&payload))
+                .await
+                .map_err(host_error)?;
+            Ok(())
+        })
+    }
+
+    fn wait_for_ci<'a>(
+        &'a self,
+        head_sha: &'a str,
+        deadline: Instant,
+    ) -> BoxFuture<'a, Result<CiStatus>> {
+        Box::pin(async move {
+            loop {
+                let status = self.ci_of_commit(head_sha).await?;
+                if matches!(status, CiStatus::Green | CiStatus::Red { .. }) {
+                    return Ok(status);
+                }
+                if Instant::now() >= deadline {
+                    return Ok(status);
+                }
+                tokio::time::sleep(self.ci_poll).await;
+            }
+        })
+    }
+
+    fn squash_merge<'a>(&'a self, number: u64, title: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let payload = serde_json::json!({
+                "merge_method": "squash",
+                "commit_title": title,
+            });
+            let _: serde_json::Value = self
+                .octocrab
+                .put(self.pulls_route(number, "/merge"), Some(&payload))
+                .await
+                .map_err(host_error)?;
+            Ok(())
+        })
+    }
+
+    fn delete_branch<'a>(&'a self, branch: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let route = format!(
+                "/repos/{}/{}/git/refs/heads/{branch}",
+                self.owner, self.repo
+            );
+            let response = self
+                .octocrab
+                ._delete(route, None::<&()>)
+                .await
+                .map_err(host_error)?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(FactoryError::Host {
+                    status: status.as_u16(),
+                    message: format!("deleting branch {branch}"),
+                });
+            }
+            Ok(())
+        })
+    }
+
+    fn close_pull<'a>(&'a self, number: u64, comment: &'a str) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let _: serde_json::Value = self
+                .octocrab
+                .post(
+                    self.issues_route(number, "/comments"),
+                    Some(&serde_json::json!({ "body": comment })),
+                )
+                .await
+                .map_err(host_error)?;
+            let _: serde_json::Value = self
+                .octocrab
+                .patch(
+                    self.pulls_route(number, ""),
+                    Some(&serde_json::json!({ "state": "closed" })),
+                )
+                .await
+                .map_err(host_error)?;
+            Ok(())
+        })
     }
 }
 
@@ -367,11 +588,13 @@ fn host_error(error: octocrab::Error) -> FactoryError {
 mod tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{body_partial_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn client(server: &MockServer) -> GitHub {
-        GitHub::new("owner/repo", "t0ken", &server.uri()).expect("client")
+        GitHub::new("owner/repo", "t0ken", &server.uri())
+            .expect("client")
+            .with_ci_poll(Duration::from_millis(10))
     }
 
     #[tokio::test]
@@ -449,6 +672,151 @@ mod tests {
         assert!(
             matches!(&error, FactoryError::Host { status: 403, message } if message == "Forbidden"),
             "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn opens_labels_merges_and_closes_pull_requests() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/pulls"))
+            .and(body_partial_json(
+                json!({ "head": "factory/T1", "base": "main", "title": "Fix it" }),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "number": 12, "title": "Fix it", "body": "b", "head": { "sha": "feed" },
+                "html_url": "https://github.com/owner/repo/pull/12"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/labels"))
+            .respond_with(
+                ResponseTemplate::new(422).set_body_json(json!({ "message": "Validation Failed" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/issues/12/labels"))
+            .and(body_partial_json(json!({ "labels": ["needs-human"] })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!([{ "name": "needs-human" }])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/repos/owner/repo/pulls/12/merge"))
+            .and(body_partial_json(
+                json!({ "merge_method": "squash", "commit_title": "Fix it" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "merged": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/repos/owner/repo/git/refs/heads/factory/T1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/owner/repo/issues/12/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 1 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/owner/repo/pulls/12"))
+            .and(body_partial_json(json!({ "state": "closed" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "state": "closed" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let github = client(&server).await;
+        let pull = github
+            .open_pull("factory/T1", "Fix it", "b")
+            .await
+            .expect("opened");
+        assert_eq!(
+            pull,
+            PullRequest {
+                number: 12,
+                url: "https://github.com/owner/repo/pull/12".to_owned(),
+                head_sha: "feed".to_owned()
+            }
+        );
+        github.add_label(12, "needs-human").await.expect("labelled");
+        github.squash_merge(12, "Fix it").await.expect("merged");
+        github.delete_branch("factory/T1").await.expect("deleted");
+        github.close_pull(12, "CI failed").await.expect("closed");
+    }
+
+    #[tokio::test]
+    async fn waits_for_the_ci_check_until_it_completes_or_the_deadline_passes() {
+        let server = MockServer::start().await;
+        let route = "/repos/owner/repo/commits/feed/check-runs";
+        let runs = |status: &str, conclusion: Option<&str>| {
+            json!({ "check_runs": [
+                { "name": "check (ubuntu-latest)", "status": "completed", "conclusion": "success" },
+                { "name": "ci", "status": status, "conclusion": conclusion, "html_url": "https://ci/1" }
+            ]})
+        };
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(runs("completed", Some("success"))),
+            )
+            .mount(&server)
+            .await;
+        let github = client(&server).await;
+        let far = Instant::now() + Duration::from_secs(60);
+        assert_eq!(
+            github.wait_for_ci("feed", far).await.expect("ci"),
+            CiStatus::Green
+        );
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(runs("completed", Some("failure"))),
+            )
+            .mount(&server)
+            .await;
+        assert_eq!(
+            github.wait_for_ci("feed", far).await.expect("ci"),
+            CiStatus::Red {
+                sha: "feed".to_owned(),
+                url: "https://ci/1".to_owned()
+            }
+        );
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(runs("in_progress", None)))
+            .mount(&server)
+            .await;
+        let soon = Instant::now() + Duration::from_millis(50);
+        assert_eq!(
+            github.wait_for_ci("feed", soon).await.expect("ci"),
+            CiStatus::Pending
+        );
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "check_runs": [] })))
+            .mount(&server)
+            .await;
+        let soon = Instant::now() + Duration::from_millis(50);
+        assert_eq!(
+            github.wait_for_ci("feed", soon).await.expect("ci"),
+            CiStatus::Unknown
         );
     }
 }

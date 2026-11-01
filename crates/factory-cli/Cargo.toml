@@ -33,6 +33,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+ulid.workspace = true
 wiremock.workspace = true
 
 [lints]

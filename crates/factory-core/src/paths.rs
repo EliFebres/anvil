@@ -97,6 +97,34 @@ impl FactoryHome {
     pub fn work_dir(&self, id: &str) -> PathBuf {
         self.work_root().join(id)
     }
+
+    /// The anvil home the sandbox mounts for one ticket, next to its worktree
+    /// so it is never part of the tree.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The ticket id.
+    pub fn ticket_home(&self, id: &str) -> PathBuf {
+        self.work_root().join(format!("{id}-home"))
+    }
+
+    /// The egress proxy's unix socket for one ticket.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The ticket id.
+    pub fn proxy_socket(&self, id: &str) -> PathBuf {
+        self.work_root().join(format!("{id}-proxy.sock"))
+    }
+
+    /// The eval wrapper script for one ticket.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The ticket id.
+    pub fn eval_wrapper(&self, id: &str) -> PathBuf {
+        self.work_root().join(format!("{id}-eval.sh"))
+    }
 }
 
 #[cfg(test)]
@@ -113,5 +141,14 @@ mod tests {
         assert_eq!(home.logs_dir(), Path::new("/h/.factory/logs"));
         assert_eq!(home.state_dir(), Path::new("/h/.factory/state"));
         assert_eq!(home.work_dir("X"), Path::new("/h/.factory/work/X"));
+        assert_eq!(home.ticket_home("X"), Path::new("/h/.factory/work/X-home"));
+        assert_eq!(
+            home.proxy_socket("X"),
+            Path::new("/h/.factory/work/X-proxy.sock")
+        );
+        assert_eq!(
+            home.eval_wrapper("X"),
+            Path::new("/h/.factory/work/X-eval.sh")
+        );
     }
 }

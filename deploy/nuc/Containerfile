@@ -1,0 +1,37 @@
+# The worker image: the Rust toolchain plus what `just check` and the eval
+# checks need. Built on the NUC by deploy/nuc/bootstrap.sh:
+#
+#   podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc
+#
+# The factory runs it with --network none; entrypoint.sh bridges the egress
+# proxy's unix socket (mounted at /run/factory/proxy.sock) to localhost:3128.
+# Tracks stable Rust like CI does; the workspace needs 1.88 or newer.
+FROM docker.io/library/rust:1-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git socat ca-certificates curl \
+        python3 python3-pytest python3-pandas \
+        ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add rustfmt clippy
+
+# just: the prebuilt binary, the same way bootstrap.sh installs it on the host.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+    | bash -s -- --to /usr/local/bin
+
+# The worktree is mounted at /work and owned by the host user; with
+# `podman run --userns=keep-id` that user maps to `worker` here.
+RUN useradd --uid 1000 --create-home worker \
+    && mkdir -p /work /run/factory \
+    && chown worker:worker /work /run/factory \
+    && chmod -R a+rwX /usr/local/cargo
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
+
+USER worker
+WORKDIR /work
+ENV CARGO_TERM_COLOR=never
+ENTRYPOINT ["/entrypoint.sh"]

@@ -25,6 +25,10 @@ no-old-name:
 no-old-name:
     rg -i 'f[o]rge' --hidden --glob '!.git' --glob '!target' --glob '!crates/anvil-cli/src/legacy.rs' --glob '!crates/anvil-cli/tests/legacy.rs' . ; if ($LASTEXITCODE -ne 1) { exit 1 }; exit 0
 
+# Build the factory's worker image (needs podman; the NUC does this in bootstrap.sh).
+image:
+    podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc
+
 # Print the Ticket JSON Schema.
 schema:
     cargo run -q -p anvil-types -- --schema

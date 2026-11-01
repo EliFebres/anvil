@@ -2,18 +2,31 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anvil_types::factory_config::FACTORY_FILE;
-use anvil_types::{AnvilConfig, FactoryConfig, Ticket, config};
+use anvil_types::{AnvilConfig, FactoryConfig, config};
 use anyhow::Context;
+use factory_core::github::{FALLBACK_TOKEN_ENV, TOKEN_ENV};
 use factory_core::{
-    BoxFuture, FactoryHome, Git, GitHub, LogNotifier, Notifier, Outcome, Progress, Service,
-    ServiceDeps, TicketQueue, WebhookNotifier, Worker, hostname, system_clock,
+    FactoryHome, Git, GitHub, LogNotifier, Notifier, Sandbox, SandboxConfig, Service, ServiceDeps,
+    TicketQueue, TicketWorker, WebhookNotifier, WorkerDeps, hostname, system_clock,
 };
+use factory_review::{ModelReviewer, load_rules};
 use tokio::process::Command;
+
+use crate::adapters::eval_gate::{HarnessGate, RunnerSource};
+use crate::adapters::review_swarm::Swarm;
 
 /// The remote the factory fetches from and pushes to.
 pub const REMOTE: &str = "origin";
+
+/// The profile the implementer runs with, read from `main` so a pull request
+/// cannot loosen its own permissions.
+pub const PROFILE_PATH: &str = "deploy/nuc/anvil-factory.toml";
+
+/// The eval task folders, relative to the repository root.
+pub const TASKS_DIR: &str = "eval/tasks";
 
 /// The repository and its two configuration files.
 pub struct Loaded {
@@ -106,7 +119,69 @@ pub fn notifier(factory: &FactoryConfig) -> anyhow::Result<Arc<dyn Notifier>> {
     }
 }
 
-/// Builds the service with the real GitHub, notifier and queue.
+/// Every secret value this process holds: provider keys, GitHub tokens and
+/// the webhook URL. The worker scans the worktree for them before any push.
+///
+/// # Arguments
+///
+/// * `loaded` - The configuration naming the variables.
+pub fn secret_values(loaded: &Loaded) -> Vec<String> {
+    let mut names: Vec<&str> = loaded
+        .anvil
+        .providers
+        .values()
+        .map(|provider| provider.api_key_env.as_str())
+        .collect();
+    names.push(TOKEN_ENV);
+    names.push(FALLBACK_TOKEN_ENV);
+    names.push(loaded.factory.notify.webhook_env.as_str());
+    names
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .filter(|value| !anvil_types::dotenv::is_placeholder(value))
+        .collect()
+}
+
+/// The `factory` profile text, from `main` when it is there and from the
+/// working copy otherwise (before the first merge that adds it).
+async fn profile_text(root: &Path) -> anyhow::Result<String> {
+    let repo = Git::new(root);
+    if let Ok(text) = repo.show(&format!("{REMOTE}/main"), PROFILE_PATH).await {
+        return Ok(text);
+    }
+    tracing::warn!("{PROFILE_PATH} is not on {REMOTE}/main yet; using the working copy");
+    std::fs::read_to_string(root.join(PROFILE_PATH))
+        .with_context(|| format!("reading {PROFILE_PATH}"))
+}
+
+/// Builds the sandbox for a configuration.
+///
+/// # Arguments
+///
+/// * `loaded` - The configuration.
+/// * `home` - `~/.factory`.
+///
+/// # Errors
+///
+/// When the profile cannot be read or the configuration cannot be serialized.
+pub async fn sandbox(loaded: &Loaded, home: &FactoryHome) -> anyhow::Result<Sandbox> {
+    let anvil_config =
+        toml::to_string_pretty(&loaded.anvil).context("serializing the anvil configuration")?;
+    Ok(Sandbox::new(SandboxConfig {
+        runtime: loaded.factory.worker.runtime,
+        image: loaded.factory.worker.image.clone(),
+        anvil_bin: loaded.factory.worker.anvil_bin.clone(),
+        just_bin: "just".to_owned(),
+        cargo_bin: "cargo".to_owned(),
+        egress_allow: loaded.factory.worker.egress_allow.clone(),
+        providers: loaded.anvil.providers.clone(),
+        anvil_config,
+        profile: profile_text(&loaded.root).await?,
+        home: home.clone(),
+    }))
+}
+
+/// Builds the service with the real GitHub, sandbox, harness, swarm and notifier.
 ///
 /// # Arguments
 ///
@@ -119,40 +194,48 @@ pub fn notifier(factory: &FactoryConfig) -> anyhow::Result<Arc<dyn Notifier>> {
 ///
 /// # Errors
 ///
-/// When the state branch is missing, GitHub cannot be reached, or the
-/// configuration refuses to run.
+/// When the state branch is missing, a token or key is unset, the reviewers
+/// are not independent, or the configuration refuses to run.
 pub async fn build_service(loaded: &Loaded, home: FactoryHome) -> anyhow::Result<Service> {
     let repo = Git::new(&loaded.root);
     let queue = TicketQueue::open(&repo, &home.state_dir(), REMOTE).await?;
     let host = Arc::new(GitHub::from_env(&loaded.factory.github.repo)?);
+    loaded
+        .factory
+        .check_independence(&loaded.anvil)
+        .context("the reviewers in factory.toml are not independent")?;
+    let rules = load_rules(loaded.home.as_deref())?;
+    let reviewers = ModelReviewer::from_config(&loaded.factory, &loaded.anvil, &rules)?;
+    let sandbox = Arc::new(sandbox(loaded, &home).await?);
+    let eval_gate = HarnessGate::new(
+        RunnerSource::Sandbox(Arc::clone(&sandbox)),
+        Git::new(&loaded.root),
+        REMOTE,
+        &loaded.root.join(TASKS_DIR),
+        loaded.factory.eval.parallel,
+        &loaded.factory.roles.coder,
+    );
+    let worker = TicketWorker::new(WorkerDeps {
+        repo: Git::new(&loaded.root),
+        remote: REMOTE.to_owned(),
+        home: home.clone(),
+        config: loaded.factory.clone(),
+        implementer: sandbox,
+        eval_gate: Arc::new(eval_gate),
+        review: Arc::new(Swarm::new(reviewers)),
+        host: Arc::clone(&host) as Arc<_>,
+        secrets: secret_values(loaded),
+        clock: Arc::new(Instant::now),
+    })?;
     let service = Service::new(ServiceDeps {
         home,
         config: loaded.factory.clone(),
         queue,
-        worker: Arc::new(PendingWorker),
+        worker: Arc::new(worker),
         host,
         notifier: notifier(&loaded.factory)?,
         hostname: hostname(),
         clock: system_clock(),
     })?;
     Ok(service)
-}
-
-/// The worker loop is not built yet; every claimed ticket is handed back
-/// and the service pauses, so no ticket is lost or half-worked.
-struct PendingWorker;
-
-impl Worker for PendingWorker {
-    fn work<'a>(
-        &'a self,
-        _ticket: &'a Ticket,
-        _queue: &'a TicketQueue,
-        _progress: Progress,
-    ) -> BoxFuture<'a, factory_core::Result<Outcome>> {
-        Box::pin(std::future::ready(Ok(Outcome::Paused {
-            reason:
-                "the worker loop is not built yet; this factory can queue tickets but not work them"
-                    .to_owned(),
-        })))
-    }
 }

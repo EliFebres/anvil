@@ -1,0 +1,41 @@
+---
+source: crates/factory-core/src/render.rs
+expression: text
+---
+# Add a `grep` tool with a max-results flag
+
+## Symptom
+
+The agent reads whole files to find one symbol.
+
+## Reproduction
+
+```
+anvil run "find callers of foo"
+```
+
+## Spec
+
+Tool `grep` with `pattern`, `path`, `max_results` (default 50) in anvil-core.
+
+## Acceptance
+
+- [ ] cargo test -p anvil-core passes
+- [ ] the tool schema snapshot is updated
+
+Add or update tests for every acceptance item; do not touch files outside the crates the spec names unless a shared type in anvil-types must change, and if so say why in the PR body.
+
+## Previous attempt failed `just check`
+
+Fix these before anything else; the same checks run again.
+
+```
+error[E0425]: cannot find value `x`
+ --> src/lib.rs:3:5
+```
+
+## Review findings to address
+
+The review swarm asked for changes. Address every finding below; the full gate sequence runs again.
+
+- **major** (openai/correctness) `src/lib.rs:3`: `max_results` is never applied

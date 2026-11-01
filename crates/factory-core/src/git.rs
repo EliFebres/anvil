@@ -152,6 +152,28 @@ impl Git {
         Ok(out.lines().map(str::to_owned).collect())
     }
 
+    /// The unified diff between two revisions.
+    pub async fn diff_text(&self, a: &str, b: &str) -> Result<String> {
+        let output = Command::new("git")
+            .args(IDENTITY)
+            .args(["diff", a, b])
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .map_err(|source| FactoryError::Spawn {
+                program: "git".to_owned(),
+                source,
+            })?;
+        if !output.status.success() {
+            return Err(FactoryError::Git {
+                command: format!("diff {a} {b}"),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     /// The content of a file at a revision.
     pub async fn show(&self, rev: &str, path: &str) -> Result<String> {
         let output = Command::new("git")
