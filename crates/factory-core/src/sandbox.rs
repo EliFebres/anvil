@@ -3,9 +3,10 @@
 //!
 //! The container sees the worktree, a per-ticket anvil home (configuration
 //! and the `factory` profile, never a key file), a read-only cargo registry
-//! cache and the egress proxy's socket. Its environment holds the provider
-//! API keys and nothing else from the factory's; the GitHub token and the
-//! webhook URL never enter it.
+//! cache, the egress proxy's socket and the host's anvil binary mounted
+//! read-only at `/usr/local/bin/anvil` (the image ships none). Its
+//! environment holds the provider API keys and nothing else from the
+//! factory's; the GitHub token and the webhook URL never enter it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,9 @@ const HOME_MOUNT: &str = "/anvil-home";
 
 /// Where the proxy socket is mounted; `entrypoint.sh` bridges it to port 3128.
 const PROXY_MOUNT: &str = "/run/factory/proxy.sock";
+
+/// Where the host's anvil binary is mounted and run from.
+pub const ANVIL_MOUNT: &str = "/usr/local/bin/anvil";
 
 /// The proxy URL inside the container.
 const PROXY_URL: &str = "http://127.0.0.1:3128";
@@ -70,8 +74,10 @@ pub struct SandboxConfig {
     pub runtime: ContainerRuntime,
     /// The image built from `deploy/nuc/Containerfile`.
     pub image: String,
-    /// The anvil binary inside the container, or a host path with `runtime = "none"`.
-    pub anvil_bin: String,
+    /// The anvil binary on the host, already resolved by [`resolve_anvil_bin`]:
+    /// mounted at [`ANVIL_MOUNT`] in the container, run directly with
+    /// `runtime = "none"`.
+    pub anvil_bin: PathBuf,
     /// `just` as invoked for Gate A.
     pub just_bin: String,
     /// `cargo` as invoked for the release build.
@@ -311,6 +317,7 @@ impl Sandbox {
     /// * `worktree` - The worktree, mounted at `/work`.
     /// * `home` - The per-ticket anvil home, mounted at `/anvil-home`.
     /// * `program` - The program and its arguments inside the container.
+    /// * `anvil` - A host anvil binary to mount read-only at [`ANVIL_MOUNT`].
     /// * `cache_writable` - Mount the registry cache read-write (prewarming only).
     ///
     /// # Returns
@@ -321,6 +328,7 @@ impl Sandbox {
         worktree: &Path,
         home: &Path,
         program: &[&str],
+        anvil: Option<&Path>,
         cache_writable: bool,
     ) -> Vec<String> {
         let id = Self::ticket_id(worktree);
@@ -370,6 +378,10 @@ impl Sandbox {
             args.push("-e".to_owned());
             args.push(name);
         }
+        if let Some(anvil) = anvil {
+            args.push("-v".to_owned());
+            args.push(format!("{}:{ANVIL_MOUNT}:ro", anvil.display()));
+        }
         args.push(self.config.image.clone());
         args.extend(program.iter().map(|s| (*s).to_owned()));
         args
@@ -382,6 +394,7 @@ impl Sandbox {
         worktree: &Path,
         home: &Path,
         program: &[&str],
+        anvil: Option<&Path>,
         cache_writable: bool,
     ) -> Invocation {
         let env = Some(self.environment(home));
@@ -406,7 +419,7 @@ impl Sandbox {
             }
             runtime => Invocation {
                 program: runtime_name(runtime).to_owned(),
-                args: self.run_args(worktree, home, program, cache_writable),
+                args: self.run_args(worktree, home, program, anvil, cache_writable),
                 env,
                 cwd: None,
             },
@@ -435,7 +448,7 @@ impl Sandbox {
     async fn prewarm(&self, worktree: &Path, home: &Path) -> Result<()> {
         ensure_cache_volume(self.runner.as_ref(), self.config.runtime).await?;
         let cargo = self.config.cargo_bin.clone();
-        let command = self.command(worktree, home, &[cargo.as_str(), "fetch"], true);
+        let command = self.command(worktree, home, &[cargo.as_str(), "fetch"], None, true);
         let exit = self
             .run_until(command, Instant::now() + Duration::from_secs(20 * 60))
             .await?;
@@ -475,21 +488,13 @@ impl Sandbox {
         }
         let id = Self::ticket_id(worktree);
         let wrapper = self.config.home.eval_wrapper(&id);
-        let mut args = self.run_args(
+        // The harness mounts its fixture copy, not the worktree; the binary comes from the worktree.
+        let args = self.run_args(
             Path::new("$PWD"),
             Path::new("$ANVIL_HOME"),
-            &["anvil"],
+            &[ANVIL_MOUNT],
+            Some(&binary),
             false,
-        );
-        // The harness mounts its fixture copy, not the worktree; the binary comes from the worktree.
-        let image_index = args
-            .iter()
-            .position(|arg| *arg == self.config.image)
-            .unwrap_or(args.len() - 1);
-        args.insert(image_index, "-v".to_owned());
-        args.insert(
-            image_index + 1,
-            format!("{}:/usr/local/bin/anvil:ro", binary.display()),
         );
         let quoted: Vec<String> = args.iter().map(|arg| shell_quote(arg)).collect();
         let keys: Vec<String> = self.key_names();
@@ -519,7 +524,7 @@ impl Sandbox {
         deadline: Instant,
     ) -> Result<CheckOutcome> {
         let home = self.ticket_home(worktree)?;
-        let command = self.command(worktree, &home, program, false);
+        let command = self.command(worktree, &home, program, None, false);
         let exit = self.run_until(command, deadline).await?;
         Ok(CheckOutcome {
             passed: exit.code == Some(0),
@@ -549,9 +554,17 @@ impl Implementer for Sandbox {
         Box::pin(async move {
             let home = self.ticket_home(worktree)?;
             usage::clear(worktree);
-            let anvil = self.config.anvil_bin.clone();
+            // The image ships no anvil: the host's binary is mounted and run from the mount.
+            let (anvil, mount) = if self.containerized() {
+                (
+                    ANVIL_MOUNT.to_owned(),
+                    Some(self.config.anvil_bin.as_path()),
+                )
+            } else {
+                (self.config.anvil_bin.to_string_lossy().into_owned(), None)
+            };
             let program = [anvil.as_str(), "--yes", "--profile", PROFILE, task];
-            let command = self.command(worktree, &home, &program, false);
+            let command = self.command(worktree, &home, &program, mount, false);
             let exit = self.run_until(command, deadline).await?;
             if let Some(reason) = infrastructure_failure(&exit) {
                 return Err(FactoryError::Sandbox(format!(
@@ -652,8 +665,9 @@ pub async fn ensure_cache_volume(
     )))
 }
 
-/// Checks that the runtime can run tickets: the worker image is built and
-/// the registry cache volume exists or can be created.
+/// Checks that the runtime can run tickets: the anvil binary resolves to an
+/// executable file on the host, the worker image is built and the registry
+/// cache volume exists or can be created.
 ///
 /// The service runs this before taking a ticket and `factory status`
 /// reports its result.
@@ -661,21 +675,29 @@ pub async fn ensure_cache_volume(
 /// # Arguments
 ///
 /// * `runner` - Runs the runtime's commands.
-/// * `runtime` - podman, docker or none; none always passes.
+/// * `runtime` - podman, docker or none; none skips the image and volume checks.
 /// * `image` - `[worker] image`.
+/// * `anvil_bin` - `[worker] anvil_bin`: a name on `PATH` or a path.
+///
+/// # Returns
+///
+/// The resolved anvil binary, as [`resolve_anvil_bin`] gives it.
 ///
 /// # Errors
 ///
 /// [`FactoryError::Spawn`] when the runtime cannot be started, and
-/// [`FactoryError::Sandbox`] naming the `build` command to run when the
-/// image is missing, or saying why the volume cannot be created.
+/// [`FactoryError::Sandbox`] when `anvil_bin` does not resolve to an
+/// executable, naming the `build` command to run when the image is missing,
+/// or saying why the volume cannot be created.
 pub async fn preflight(
     runner: &dyn CommandRunner,
     runtime: ContainerRuntime,
     image: &str,
-) -> Result<()> {
+    anvil_bin: &str,
+) -> Result<PathBuf> {
+    let anvil = resolve_anvil_bin(anvil_bin)?;
     if runtime == ContainerRuntime::None {
-        return Ok(());
+        return Ok(anvil);
     }
     let query: &[&str] = match runtime {
         ContainerRuntime::Podman => &["image", "exists", image],
@@ -688,7 +710,98 @@ pub async fn preflight(
             build_command(runtime, image)
         )));
     }
-    ensure_cache_volume(runner, runtime).await
+    ensure_cache_volume(runner, runtime).await?;
+    Ok(anvil)
+}
+
+/// Resolves `[worker] anvil_bin` to the file the sandbox mounts or runs.
+///
+/// A bare name is looked up on `PATH` (with `.exe` on Windows); a path is
+/// taken as given. The result is canonicalized, so the `~/.local/bin/anvil`
+/// link `bootstrap.sh` makes resolves to the real file under
+/// `target/release`, which is what a container mount needs.
+///
+/// # Arguments
+///
+/// * `configured` - The `[worker] anvil_bin` value.
+///
+/// # Returns
+///
+/// The canonical path of an existing, executable file.
+///
+/// # Errors
+///
+/// [`FactoryError::Sandbox`] naming `[worker] anvil_bin` when the name is
+/// not on `PATH`, the path does not exist, or the file is not executable.
+pub fn resolve_anvil_bin(configured: &str) -> Result<PathBuf> {
+    let setting = format!("[worker] anvil_bin = {configured:?}");
+    let is_bare = !configured.contains(['/', '\\']);
+    let candidate = if is_bare {
+        find_on_path(configured).ok_or_else(|| {
+            FactoryError::Sandbox(format!(
+                "{setting} is not on PATH; install anvil or set it to the binary's path"
+            ))
+        })?
+    } else {
+        PathBuf::from(configured)
+    };
+    let resolved = std::fs::canonicalize(&candidate).map_err(|error| {
+        FactoryError::Sandbox(format!(
+            "{setting}: {} does not exist ({error})",
+            candidate.display()
+        ))
+    })?;
+    let resolved = strip_verbatim_prefix(resolved);
+    if !resolved.is_file() {
+        return Err(FactoryError::Sandbox(format!(
+            "{setting}: {} is not a file",
+            resolved.display()
+        )));
+    }
+    if !is_executable(&resolved) {
+        return Err(FactoryError::Sandbox(format!(
+            "{setting}: {} is not executable",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// The first `name` (or `name.exe` on Windows) in `PATH`.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    let files: Vec<String> = if cfg!(windows) {
+        vec![format!("{name}.exe"), name.to_owned()]
+    } else {
+        vec![name.to_owned()]
+    };
+    dirs.iter()
+        .flat_map(|dir| files.iter().map(move |file| dir.join(file)))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Drops the `\\?\` prefix Windows' `canonicalize` adds, which bash and the
+/// container runtime do not accept; other paths pass through unchanged.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        Some(plain) if !plain.starts_with("UNC") => PathBuf::from(plain),
+        _ => path,
+    }
+}
+
+/// Whether the file may be executed: a mode bit on unix, any file elsewhere.
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 /// The command that builds the worker image, as `justfile` and `bootstrap.sh` run it.
@@ -975,7 +1088,7 @@ mod tests {
         SandboxConfig {
             runtime,
             image: "localhost/anvil-factory:latest".to_owned(),
-            anvil_bin: "anvil".to_owned(),
+            anvil_bin: PathBuf::from("/opt/anvil"),
             just_bin: "just".to_owned(),
             cargo_bin: "cargo".to_owned(),
             egress_allow: vec!["github.com".to_owned(), "index.crates.io".to_owned()],
@@ -993,6 +1106,7 @@ mod tests {
             Path::new("/h/.factory/work/T1"),
             Path::new("/h/.factory/work/T1-home"),
             &["anvil", "--yes", "--profile", "factory", "do it"],
+            None,
             false,
         );
         let text = args.join(" ");
@@ -1020,9 +1134,25 @@ mod tests {
         assert!(
             text.ends_with("localhost/anvil-factory:latest anvil --yes --profile factory do it")
         );
+        assert!(!text.contains(ANVIL_MOUNT), "no mount unless asked: {text}");
         for forbidden in ["FACTORY_GITHUB_TOKEN", "GITHUB_TOKEN", "WEBHOOK_URL"] {
             assert!(!text.contains(forbidden), "{forbidden} in {text}");
         }
+        let mounted = sandbox
+            .run_args(
+                Path::new("/w"),
+                Path::new("/w-home"),
+                &[ANVIL_MOUNT],
+                Some(Path::new("/opt/anvil")),
+                false,
+            )
+            .join(" ");
+        assert!(
+            mounted.ends_with(
+                "-v /opt/anvil:/usr/local/bin/anvil:ro localhost/anvil-factory:latest /usr/local/bin/anvil"
+            ),
+            "{mounted}"
+        );
         for (name, value) in sandbox.environment(Path::new("/h/.factory/work/T1-home")) {
             assert!(
                 !["FACTORY_GITHUB_TOKEN", "GITHUB_TOKEN", "WEBHOOK_URL"].contains(&name.as_str()),
@@ -1033,6 +1163,7 @@ mod tests {
             Path::new("/w"),
             Path::new("/w-home"),
             &["cargo", "fetch"],
+            None,
             true,
         );
         assert!(
@@ -1043,7 +1174,7 @@ mod tests {
         let docker = Sandbox::new(config(ContainerRuntime::Docker));
         assert!(
             docker
-                .run_args(Path::new("/w"), Path::new("/w-home"), &["x"], false)
+                .run_args(Path::new("/w"), Path::new("/w-home"), &["x"], None, false)
                 .join(" ")
                 .contains("--user ")
         );
@@ -1105,8 +1236,29 @@ mod tests {
         );
         assert!(script.contains("/usr/local/bin/anvil:ro"), "{script}");
         assert!(script.contains("--network none"), "{script}");
-        assert!(script.trim_end().ends_with("anvil \"$@\""), "{script}");
+        assert!(
+            script
+                .trim_end()
+                .ends_with("localhost/anvil-factory:latest /usr/local/bin/anvil \"$@\""),
+            "{script}"
+        );
         assert!(!script.contains("FACTORY_GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_dropped_and_other_paths_kept() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\anvil\target\release\anvil.exe")),
+            PathBuf::from(r"C:\anvil\target\release\anvil.exe")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\anvil")),
+            PathBuf::from(r"\\?\UNC\server\share\anvil")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from("/usr/bin/anvil")),
+            PathBuf::from("/usr/bin/anvil")
+        );
     }
 
     #[test]

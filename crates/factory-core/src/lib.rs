@@ -46,7 +46,7 @@ pub use ports::{
 pub use protected::{Held, ProtectedPaths, dependency_additions};
 pub use sandbox::{
     CommandRunner, Exit, Invocation, Sandbox, SandboxConfig, SystemRunner, build_command,
-    ensure_cache_volume, preflight,
+    ensure_cache_volume, preflight, resolve_anvil_bin,
 };
 pub use service::{Clock, ERRORS_BEFORE_PAUSE, Service, ServiceDeps, Tick, hostname, system_clock};
 pub use status::{InProgress, KEPT_OUTCOMES, OutcomeKind, OutcomeRecord, ServiceState};

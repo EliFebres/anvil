@@ -38,8 +38,11 @@ digest_at = "08:00"
 poll_minutes = 5
 
 # Where the implementer runs. `runtime` is "podman", "docker" or "none" (no
-# container; for tests and development only). `egress_allow` lists the hosts
-# the container may reach besides every provider's base URL.
+# container; for tests and development only). `anvil_bin` is the anvil binary
+# on this host, a name on PATH or a path (symlinks are followed); the container
+# gets it mounted read-only at /usr/local/bin/anvil, since the image ships
+# none. `egress_allow` lists the hosts the container may reach besides every
+# provider's base URL.
 [worker]
 runtime = "podman"
 image = "localhost/anvil-factory:latest"

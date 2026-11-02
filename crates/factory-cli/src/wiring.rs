@@ -181,17 +181,22 @@ async fn profile_text(root: &Path) -> anyhow::Result<String> {
 ///
 /// * `loaded` - The configuration.
 /// * `home` - `~/.factory`.
+/// * `anvil_bin` - The anvil binary on this host, as `preflight` resolved it.
 ///
 /// # Errors
 ///
 /// When the profile cannot be read or the configuration cannot be serialized.
-pub async fn sandbox(loaded: &Loaded, home: &FactoryHome) -> anyhow::Result<Sandbox> {
+pub async fn sandbox(
+    loaded: &Loaded,
+    home: &FactoryHome,
+    anvil_bin: PathBuf,
+) -> anyhow::Result<Sandbox> {
     let anvil_config =
         toml::to_string_pretty(&loaded.anvil).context("serializing the anvil configuration")?;
     Ok(Sandbox::new(SandboxConfig {
         runtime: loaded.factory.worker.runtime,
         image: loaded.factory.worker.image.clone(),
-        anvil_bin: loaded.factory.worker.anvil_bin.clone(),
+        anvil_bin,
         just_bin: "just".to_owned(),
         cargo_bin: "cargo".to_owned(),
         egress_allow: loaded.factory.worker.egress_allow.clone(),
@@ -215,24 +220,30 @@ pub async fn sandbox(loaded: &Loaded, home: &FactoryHome) -> anyhow::Result<Sand
 ///
 /// # Errors
 ///
-/// When the state branch is missing, a token or key is unset, the worker
-/// image is not built or its cache volume cannot be created, the reviewers
+/// When the state branch is missing, a token or key is unset, the anvil
+/// binary is not found, the worker image is not built or its cache volume
+/// cannot be created, the reviewers
 /// are not independent, or the configuration refuses to run.
 pub async fn build_service(loaded: &Loaded, home: FactoryHome) -> anyhow::Result<Service> {
     let repo = repo(&loaded.root);
     let queue = TicketQueue::open(&repo, &home.state_dir(), REMOTE).await?;
     let host = Arc::new(GitHub::from_env(&loaded.factory.github.repo)?);
     let worker = &loaded.factory.worker;
-    preflight(&SystemRunner, worker.runtime, &worker.image)
-        .await
-        .context("the worker sandbox is not ready")?;
+    let anvil_bin = preflight(
+        &SystemRunner,
+        worker.runtime,
+        &worker.image,
+        &worker.anvil_bin,
+    )
+    .await
+    .context("the worker sandbox is not ready")?;
     loaded
         .factory
         .check_independence(&loaded.anvil)
         .context("the reviewers in factory.toml are not independent")?;
     let rules = load_rules(loaded.home.as_deref())?;
     let reviewers = ModelReviewer::from_config(&loaded.factory, &loaded.anvil, &rules)?;
-    let sandbox = Arc::new(sandbox(loaded, &home).await?);
+    let sandbox = Arc::new(sandbox(loaded, &home, anvil_bin).await?);
     let eval_gate = HarnessGate::new(
         RunnerSource::Sandbox(Arc::clone(&sandbox)),
         repo.clone(),
