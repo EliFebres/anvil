@@ -98,7 +98,11 @@ pub fn from_config(
     limits: &LimitsConfig,
     budget: SharedBudget,
 ) -> Result<Box<dyn Provider>, ProviderError> {
-    let api_key = read_api_key(&cfg.api_key_env)?;
+    // A fake provider replays its script and has no key to read.
+    let api_key = match cfg.protocol {
+        Protocol::Fake => String::new(),
+        Protocol::Openai | Protocol::Anthropic => read_api_key(&cfg.api_key_env)?,
+    };
     build(name, cfg, api_key, limits, budget)
 }
 
@@ -127,6 +131,9 @@ pub(crate) fn build(
     let adapter: Box<dyn Provider> = match cfg.protocol {
         Protocol::Openai => Box::new(OpenAiProvider::new(name, cfg, api_key, limits, client)),
         Protocol::Anthropic => Box::new(AnthropicProvider::new(name, cfg, api_key, limits, client)),
+        Protocol::Fake => Box::new(fake::FakeProvider::from_script_file(std::path::Path::new(
+            cfg.script.as_deref().unwrap_or_default(),
+        ))?),
     };
     let with_tools: Box<dyn Provider> = if cfg.supports_tools {
         adapter
@@ -158,6 +165,7 @@ mod tests {
             supports_reasoning: false,
             max_output_tokens: None,
             price_per_mtoken: None,
+            script: None,
         }
     }
 

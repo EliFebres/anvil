@@ -14,7 +14,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anvil_types::{ContainerRuntime, ProviderConfig};
+use anvil_types::{ContainerRuntime, Protocol, ProviderConfig};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -78,8 +78,8 @@ pub struct SandboxConfig {
     /// mounted at [`ANVIL_MOUNT`] in the container, run directly with
     /// `runtime = "none"`.
     pub anvil_bin: PathBuf,
-    /// `just` as invoked for Gate A.
-    pub just_bin: String,
+    /// The Gate A command, the cache volume, prewarming and container labels.
+    pub options: SandboxOptions,
     /// `cargo` as invoked for the release build.
     pub cargo_bin: String,
     /// Hosts the container may reach besides every provider's base URL.
@@ -92,6 +92,31 @@ pub struct SandboxConfig {
     pub profile: String,
     /// `~/.factory`.
     pub home: FactoryHome,
+}
+
+/// The parts of the sandbox production fixes and the selftest varies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxOptions {
+    /// Gate A, as a program and its arguments: `just check` in production.
+    pub check_command: Vec<String>,
+    /// The named volume that caches the cargo registry.
+    pub cache_volume: String,
+    /// Whether `prepare` runs `cargo fetch` into the cache volume.
+    pub prewarm: bool,
+    /// `key=value` labels every container gets, so a caller can find and
+    /// remove the ones a crash left behind.
+    pub labels: Vec<String>,
+}
+
+impl Default for SandboxOptions {
+    fn default() -> Self {
+        Self {
+            check_command: vec!["just".to_owned(), "check".to_owned()],
+            cache_volume: CACHE_VOLUME.to_owned(),
+            prewarm: true,
+            labels: Vec::new(),
+        }
+    }
 }
 
 /// Looks a key variable up; the process environment, or a test's table.
@@ -266,6 +291,7 @@ impl Sandbox {
             .config
             .providers
             .values()
+            .filter(|provider| provider.protocol != Protocol::Fake)
             .filter_map(|provider| host_of(&provider.base_url));
         Allowlist::new(
             self.config
@@ -284,7 +310,7 @@ impl Sandbox {
             .providers
             .values()
             .map(|provider| provider.api_key_env.clone())
-            .filter(|name| (self.keys)(name).is_some())
+            .filter(|name| !name.is_empty() && (self.keys)(name).is_some())
             .collect();
         names.sort();
         names.dedup();
@@ -344,6 +370,10 @@ impl Sandbox {
             }
             ContainerRuntime::None => {}
         }
+        for label in &self.config.options.labels {
+            args.push("--label".to_owned());
+            args.push(label.clone());
+        }
         let cache_mode = if cache_writable { "" } else { ":ro" };
         args.extend([
             "-v".to_owned(),
@@ -355,7 +385,10 @@ impl Sandbox {
             "-e".to_owned(),
             format!("ANVIL_HOME={HOME_MOUNT}"),
             "-v".to_owned(),
-            format!("{CACHE_VOLUME}:{CACHE_MOUNT}{cache_mode}"),
+            format!(
+                "{}:{CACHE_MOUNT}{cache_mode}",
+                self.config.options.cache_volume
+            ),
             "-v".to_owned(),
             format!(
                 "{}:{PROXY_MOUNT}",
@@ -446,7 +479,12 @@ impl Sandbox {
 
     /// Warms the registry cache: `cargo fetch` with the cache mounted read-write.
     async fn prewarm(&self, worktree: &Path, home: &Path) -> Result<()> {
-        ensure_cache_volume(self.runner.as_ref(), self.config.runtime).await?;
+        ensure_volume(
+            self.runner.as_ref(),
+            self.config.runtime,
+            &self.config.options.cache_volume,
+        )
+        .await?;
         let cargo = self.config.cargo_bin.clone();
         let command = self.command(worktree, home, &[cargo.as_str(), "fetch"], None, true);
         let exit = self
@@ -539,7 +577,16 @@ impl Implementer for Sandbox {
             let home = self.ticket_home(worktree)?;
             if self.containerized() {
                 self.start_proxy(worktree)?;
-                self.prewarm(worktree, &home).await?;
+                if self.config.options.prewarm {
+                    self.prewarm(worktree, &home).await?;
+                } else {
+                    ensure_volume(
+                        self.runner.as_ref(),
+                        self.config.runtime,
+                        &self.config.options.cache_volume,
+                    )
+                    .await?;
+                }
             }
             Ok(())
         })
@@ -598,9 +645,14 @@ impl Implementer for Sandbox {
         deadline: Instant,
     ) -> BoxFuture<'a, Result<CheckOutcome>> {
         Box::pin(async move {
-            let just = self.config.just_bin.clone();
-            self.run_check(worktree, &[just.as_str(), "check"], deadline)
-                .await
+            let program: Vec<&str> = self
+                .config
+                .options
+                .check_command
+                .iter()
+                .map(String::as_str)
+                .collect();
+            self.run_check(worktree, &program, deadline).await
         })
     }
 
@@ -645,21 +697,41 @@ pub async fn ensure_cache_volume(
     runner: &dyn CommandRunner,
     runtime: ContainerRuntime,
 ) -> Result<()> {
+    ensure_volume(runner, runtime, CACHE_VOLUME).await
+}
+
+/// Makes sure a named volume exists, creating it when it does not; the
+/// worker of [`ensure_cache_volume`], for any volume name.
+///
+/// # Arguments
+///
+/// * `runner` - Runs the runtime's commands.
+/// * `runtime` - podman, docker or none; none needs no volume.
+/// * `volume` - The volume name.
+///
+/// # Errors
+///
+/// As for [`ensure_cache_volume`].
+pub async fn ensure_volume(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+    volume: &str,
+) -> Result<()> {
     if runtime == ContainerRuntime::None {
         return Ok(());
     }
     if runtime == ContainerRuntime::Podman {
-        let exists = housekeeping(runner, runtime, &["volume", "exists", CACHE_VOLUME]).await?;
+        let exists = housekeeping(runner, runtime, &["volume", "exists", volume]).await?;
         if exists.code == Some(0) {
             return Ok(());
         }
     }
-    let created = housekeeping(runner, runtime, &["volume", "create", CACHE_VOLUME]).await?;
+    let created = housekeeping(runner, runtime, &["volume", "create", volume]).await?;
     if created.code == Some(0) || created.output.contains("already exists") {
         return Ok(());
     }
     Err(FactoryError::Sandbox(format!(
-        "{} volume create {CACHE_VOLUME}: {}",
+        "{} volume create {volume}: {}",
         runtime_name(runtime),
         created.output.trim()
     )))
@@ -701,9 +773,32 @@ pub async fn preflight(
     if runtime == ContainerRuntime::None {
         return Ok(anvil);
     }
+    check_image(runner, runtime, image).await?;
+    ensure_cache_volume(runner, runtime).await?;
+    Ok(anvil)
+}
+
+/// Checks that the worker image is built.
+///
+/// # Arguments
+///
+/// * `runner` - Runs the runtime's commands.
+/// * `runtime` - podman, docker or none; none has no image and passes.
+/// * `image` - `[worker] image`.
+///
+/// # Errors
+///
+/// [`FactoryError::Spawn`] when the runtime cannot be started, and
+/// [`FactoryError::Sandbox`] naming the `build` command when the image is missing.
+pub async fn check_image(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+    image: &str,
+) -> Result<()> {
     let query: &[&str] = match runtime {
+        ContainerRuntime::None => return Ok(()),
         ContainerRuntime::Podman => &["image", "exists", image],
-        _ => &["image", "inspect", image],
+        ContainerRuntime::Docker => &["image", "inspect", image],
     };
     let found = housekeeping(runner, runtime, query).await?;
     if found.code != Some(0) {
@@ -712,8 +807,7 @@ pub async fn preflight(
             build_command(runtime, image)
         )));
     }
-    ensure_cache_volume(runner, runtime).await?;
-    Ok(anvil)
+    Ok(())
 }
 
 /// Resolves `[worker] anvil_bin` to the file the sandbox mounts or runs.
@@ -1099,7 +1193,7 @@ mod tests {
             runtime,
             image: "localhost/anvil-factory:latest".to_owned(),
             anvil_bin: PathBuf::from("/opt/anvil"),
-            just_bin: "just".to_owned(),
+            options: SandboxOptions::default(),
             cargo_bin: "cargo".to_owned(),
             egress_allow: vec!["github.com".to_owned(), "index.crates.io".to_owned()],
             providers: anvil.providers,

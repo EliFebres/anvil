@@ -8,5 +8,6 @@
 pub mod adapters;
 pub mod install;
 pub mod logging;
+pub mod selftest;
 pub mod update;
 pub mod wiring;

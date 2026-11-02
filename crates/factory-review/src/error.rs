@@ -14,6 +14,15 @@ pub enum ReviewError {
         provider: String,
     },
 
+    /// A reviewer names a provider whose protocol cannot review, such as `fake`.
+    #[error(
+        "reviewer provider `{provider}` uses protocol \"fake\", which cannot review a pull request"
+    )]
+    UnsupportedProtocol {
+        /// The provider name.
+        provider: String,
+    },
+
     /// The environment variable that holds a provider's key is not set.
     #[error("provider `{provider}` needs the API key in ${env}, which is not set")]
     MissingApiKey {

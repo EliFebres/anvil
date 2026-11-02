@@ -160,6 +160,9 @@ pub enum Protocol {
     Openai,
     /// Anthropic messages style API.
     Anthropic,
+    /// A scripted provider that replays `script` and calls no API: for the
+    /// factory selftest and other offline runs.
+    Fake,
 }
 
 /// What a provider charges, in USD per million tokens.
@@ -207,8 +210,12 @@ pub struct ProviderConfig {
     /// Which API shape to speak.
     pub protocol: Protocol,
     /// Base URL of the API, including any version prefix such as `/v1`.
+    /// Empty for `protocol = "fake"`.
+    #[serde(default)]
     pub base_url: String,
-    /// Name of the environment variable that holds the API key.
+    /// Name of the environment variable that holds the API key. Optional for
+    /// `protocol = "fake"`, which never reads it.
+    #[serde(default)]
     pub api_key_env: String,
     /// Model name exactly as the server expects it.
     pub model: String,
@@ -225,6 +232,10 @@ pub struct ProviderConfig {
     /// What the provider charges, for cost estimates. Unset means unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_per_mtoken: Option<Price>,
+    /// The JSON script a `protocol = "fake"` provider replays; a relative
+    /// path starts at the working directory. Only fake providers take one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
 }
 
 impl ProviderConfig {
@@ -238,6 +249,8 @@ impl ProviderConfig {
     ///
     /// `Ok(())` when `base_url` is http or https, `api_key_env` and `model`
     /// are non-empty, `context_window` is positive and no price is negative.
+    /// A fake provider needs a `script` instead of a base URL and a key; any
+    /// other provider must not have one.
     ///
     /// # Errors
     ///
@@ -247,6 +260,16 @@ impl ProviderConfig {
             return Err(ValidationError::NegativePrice {
                 name: name.to_owned(),
             });
+        }
+        let is_fake = self.protocol == Protocol::Fake;
+        let has_script = self.script.as_deref().is_some_and(|s| !s.trim().is_empty());
+        if is_fake != has_script {
+            return Err(ValidationError::FakeScript {
+                name: name.to_owned(),
+            });
+        }
+        if is_fake {
+            return self.validate_model(name);
         }
         let is_http = self.base_url.starts_with("http://") || self.base_url.starts_with("https://");
         if !is_http {
@@ -261,6 +284,11 @@ impl ProviderConfig {
                 field: "api_key_env",
             });
         }
+        self.validate_model(name)
+    }
+
+    /// Checks the fields every protocol needs: `model` and `context_window`.
+    fn validate_model(&self, name: &str) -> Result<(), ValidationError> {
         if self.model.trim().is_empty() {
             return Err(ValidationError::EmptyProviderField {
                 name: name.to_owned(),
@@ -353,6 +381,10 @@ pub struct ToolsConfig {
     /// means PowerShell on Windows and `sh` elsewhere.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+    /// The command the Verify state runs, such as `just check`. `None` means
+    /// detect it from the project files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
 }
 
 /// Lines above which provider statistics become tickets.
@@ -835,6 +867,33 @@ mod tests {
         );
         let parsed: Protocol = serde_json::from_str("\"openai\"").expect("parses");
         assert_eq!(parsed, Protocol::Openai);
+        let parsed: Protocol = serde_json::from_str("\"fake\"").expect("parses");
+        assert_eq!(parsed, Protocol::Fake);
+    }
+
+    #[test]
+    fn a_fake_provider_needs_a_script_and_nothing_else() {
+        let fake: ProviderConfig = toml::from_str(
+            "protocol = \"fake\"\nmodel = \"m\"\ncontext_window = 1000\nsupports_tools = true\nsupports_reasoning = false\nscript = \"s.json\"\n",
+        )
+        .expect("parses without base_url or api_key_env");
+        assert_eq!(fake.validate("fake"), Ok(()));
+        let mut scriptless = fake.clone();
+        scriptless.script = None;
+        assert!(matches!(
+            scriptless.validate("fake"),
+            Err(ValidationError::FakeScript { .. })
+        ));
+        let mut real = template()
+            .providers
+            .into_values()
+            .next()
+            .expect("a provider");
+        real.script = Some("s.json".to_owned());
+        assert!(matches!(
+            real.validate("real"),
+            Err(ValidationError::FakeScript { .. })
+        ));
     }
 
     #[test]

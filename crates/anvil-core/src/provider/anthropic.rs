@@ -641,6 +641,7 @@ mod tests {
             supports_reasoning: true,
             max_output_tokens: None,
             price_per_mtoken: None,
+            script: None,
         };
         let limits = LimitsConfig::default();
         let client = reqwest::Client::new();

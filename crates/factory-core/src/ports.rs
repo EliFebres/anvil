@@ -139,6 +139,12 @@ pub enum GateB {
 pub trait EvalGate: Send + Sync {
     /// Gate B on the worktree, whose release anvil binary is built.
     fn run<'a>(&'a self, worktree: &'a Path) -> BoxFuture<'a, Result<GateB>>;
+
+    /// Whether the worker builds the release anvil before [`EvalGate::run`];
+    /// only a gate that runs no eval (the selftest's) says no.
+    fn needs_release_build(&self) -> bool {
+        true
+    }
 }
 
 /// What the review swarm reads.

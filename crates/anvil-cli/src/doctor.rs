@@ -253,6 +253,7 @@ fn report_keys(report: &mut Report, config: &AnvilConfig) -> BTreeSet<String> {
     let names: BTreeSet<&str> = config
         .providers
         .values()
+        .filter(|provider| provider.protocol != Protocol::Fake)
         .map(|provider| provider.api_key_env.as_str())
         .collect();
     let mut bad = BTreeSet::new();
@@ -287,6 +288,17 @@ fn report_keys(report: &mut Report, config: &AnvilConfig) -> BTreeSet<String> {
 async fn report_providers(report: &mut Report, wiring: &Wiring, bad_keys: &BTreeSet<String>) {
     let mut pings = Vec::new();
     for (name, entry) in &wiring.config.providers {
+        if let Some(script) = entry
+            .script
+            .as_deref()
+            .filter(|_| entry.protocol == Protocol::Fake)
+        {
+            report.pass(
+                format!("provider:{name}"),
+                format!("fake: replays {script}"),
+            );
+            continue;
+        }
         if bad_keys.contains(&entry.api_key_env) {
             report.skip(
                 format!("provider:{name}"),
@@ -307,6 +319,7 @@ async fn report_providers(report: &mut Report, wiring: &Wiring, bad_keys: &BTree
                 format!("{}/chat/completions", entry.base_url.trim_end_matches('/'))
             }
             Protocol::Anthropic => format!("{}/messages", entry.base_url.trim_end_matches('/')),
+            Protocol::Fake => continue,
         };
         let fix = format!(
             "check {} and base_url {}: POST {endpoint} must accept model `{}`",
