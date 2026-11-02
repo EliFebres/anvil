@@ -7,10 +7,11 @@ use std::time::Instant;
 use anvil_types::factory_config::FACTORY_FILE;
 use anvil_types::{AnvilConfig, FactoryConfig, config};
 use anyhow::Context;
-use factory_core::github::{FALLBACK_TOKEN_ENV, TOKEN_ENV};
+use factory_core::github::{FALLBACK_TOKEN_ENV, TOKEN_ENV, token_from_env};
 use factory_core::{
     FactoryHome, Git, GitHub, LogNotifier, Notifier, Sandbox, SandboxConfig, Service, ServiceDeps,
-    TicketQueue, TicketWorker, WebhookNotifier, WorkerDeps, hostname, system_clock,
+    SystemRunner, TicketQueue, TicketWorker, WebhookNotifier, WorkerDeps, hostname, preflight,
+    system_clock,
 };
 use factory_review::{ModelReviewer, load_rules};
 use tokio::process::Command;
@@ -81,6 +82,26 @@ pub async fn repo_root(cwd: &Path) -> PathBuf {
     }
 }
 
+/// The repository handle the binary uses: with the GitHub token from the
+/// environment when one is set, so fetches and pushes over https work on a
+/// machine that stores no credential.
+///
+/// # Arguments
+///
+/// * `root` - The clone of the monorepo.
+///
+/// # Returns
+///
+/// The handle; `Git` itself adds the token to remote commands only.
+pub fn repo(root: &Path) -> Git {
+    match token_from_env() {
+        Some(token) if !anvil_types::dotenv::is_placeholder(&token) => {
+            Git::new(root).with_github_token(&token)
+        }
+        _ => Git::new(root),
+    }
+}
+
 /// Reads and validates `<root>/factory.toml`.
 pub fn read_factory(root: &Path) -> anyhow::Result<FactoryConfig> {
     let path = root.join(FACTORY_FILE);
@@ -145,7 +166,7 @@ pub fn secret_values(loaded: &Loaded) -> Vec<String> {
 /// The `factory` profile text, from `main` when it is there and from the
 /// working copy otherwise (before the first merge that adds it).
 async fn profile_text(root: &Path) -> anyhow::Result<String> {
-    let repo = Git::new(root);
+    let repo = repo(root);
     if let Ok(text) = repo.show(&format!("{REMOTE}/main"), PROFILE_PATH).await {
         return Ok(text);
     }
@@ -160,17 +181,22 @@ async fn profile_text(root: &Path) -> anyhow::Result<String> {
 ///
 /// * `loaded` - The configuration.
 /// * `home` - `~/.factory`.
+/// * `anvil_bin` - The anvil binary on this host, as `preflight` resolved it.
 ///
 /// # Errors
 ///
 /// When the profile cannot be read or the configuration cannot be serialized.
-pub async fn sandbox(loaded: &Loaded, home: &FactoryHome) -> anyhow::Result<Sandbox> {
+pub async fn sandbox(
+    loaded: &Loaded,
+    home: &FactoryHome,
+    anvil_bin: PathBuf,
+) -> anyhow::Result<Sandbox> {
     let anvil_config =
         toml::to_string_pretty(&loaded.anvil).context("serializing the anvil configuration")?;
     Ok(Sandbox::new(SandboxConfig {
         runtime: loaded.factory.worker.runtime,
         image: loaded.factory.worker.image.clone(),
-        anvil_bin: loaded.factory.worker.anvil_bin.clone(),
+        anvil_bin,
         just_bin: "just".to_owned(),
         cargo_bin: "cargo".to_owned(),
         egress_allow: loaded.factory.worker.egress_allow.clone(),
@@ -194,29 +220,41 @@ pub async fn sandbox(loaded: &Loaded, home: &FactoryHome) -> anyhow::Result<Sand
 ///
 /// # Errors
 ///
-/// When the state branch is missing, a token or key is unset, the reviewers
+/// When the state branch is missing, a token or key is unset, the anvil
+/// binary is not found, the worker image is not built or its cache volume
+/// cannot be created, the reviewers
 /// are not independent, or the configuration refuses to run.
 pub async fn build_service(loaded: &Loaded, home: FactoryHome) -> anyhow::Result<Service> {
-    let repo = Git::new(&loaded.root);
+    let repo = repo(&loaded.root);
     let queue = TicketQueue::open(&repo, &home.state_dir(), REMOTE).await?;
     let host = Arc::new(GitHub::from_env(&loaded.factory.github.repo)?);
+    let worker = &loaded.factory.worker;
+    let anvil_bin = preflight(
+        &SystemRunner,
+        worker.runtime,
+        &worker.image,
+        &worker.anvil_bin,
+        &loaded.root,
+    )
+    .await
+    .context("the worker sandbox is not ready")?;
     loaded
         .factory
         .check_independence(&loaded.anvil)
         .context("the reviewers in factory.toml are not independent")?;
     let rules = load_rules(loaded.home.as_deref())?;
     let reviewers = ModelReviewer::from_config(&loaded.factory, &loaded.anvil, &rules)?;
-    let sandbox = Arc::new(sandbox(loaded, &home).await?);
+    let sandbox = Arc::new(sandbox(loaded, &home, anvil_bin).await?);
     let eval_gate = HarnessGate::new(
         RunnerSource::Sandbox(Arc::clone(&sandbox)),
-        Git::new(&loaded.root),
+        repo.clone(),
         REMOTE,
         &loaded.root.join(TASKS_DIR),
         loaded.factory.eval.parallel,
         &loaded.factory.roles.coder,
     );
     let worker = TicketWorker::new(WorkerDeps {
-        repo: Git::new(&loaded.root),
+        repo: repo.clone(),
         remote: REMOTE.to_owned(),
         home: home.clone(),
         config: loaded.factory.clone(),

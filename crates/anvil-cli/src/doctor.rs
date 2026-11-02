@@ -537,7 +537,7 @@ async fn report_github(report: &mut Report, repo: Option<&str>, fix_github: bool
         ),
         Ok(token) => match GitHub::new(&token) {
             Ok(client) => {
-                report_factory_token(report, &client, repo).await;
+                report_factory_token(report, &client, &token, repo).await;
                 factory_client = Some(client);
             }
             Err(error) => report.fail("github:factory-token", format!("{error:#}"), "retry"),
@@ -841,73 +841,119 @@ async fn report_personal_token(report: &mut Report, client: &GitHub, repo: &str)
     }
 }
 
-/// The `github:factory-token` row: a throwaway branch can be pushed and a
-/// pull request opened from it.
+/// Wall clock allowed for one git command against GitHub.
+const GIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Runs one git command against GitHub with the token, the way the factory
+/// does: the token travels as the `-c` arguments from
+/// `anvil_types::github::git_auth_args`, never through a config file, and
+/// only the subcommand names the command in an error.
 ///
-/// Opening the pull request is answered with 422 (no commits between the
-/// branches) when the token may open pull requests, and 403 when it may not;
-/// this relies on GitHub checking permission before content. The branch is
-/// deleted on every path.
-async fn report_factory_token(report: &mut Report, client: &GitHub, repo: &str) {
+/// # Arguments
+///
+/// * `dir` - The repository the command runs in.
+/// * `token` - The GitHub token.
+/// * `args` - The arguments after `git`.
+///
+/// # Returns
+///
+/// Trimmed stdout.
+///
+/// # Errors
+///
+/// One line: git could not start, timed out, or exited non-zero with its
+/// first stderr line.
+async fn git_with_token(dir: &Path, token: &str, args: &[&str]) -> Result<String, String> {
+    let subcommand = args.first().copied().unwrap_or("git");
+    let mut command = Command::new("git");
+    command
+        .args(anvil_types::github::git_auth_args(token))
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null());
+    let output = match tokio::time::timeout(GIT_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return Err(format!("cannot run git: {error}")),
+        Err(_) => {
+            return Err(format!(
+                "git {subcommand} timed out after {}s",
+                GIT_TIMEOUT.as_secs()
+            ));
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let line = stderr
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("no output");
+        return Err(format!("git {subcommand}: {line}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// The `github:factory-token` row: `main` can be fetched, a throwaway branch
+/// pushed and deleted over https with the token, exactly as the factory does
+/// it, and a pull request opened from the branch.
+///
+/// Git runs in a fresh temporary repository, so neither the working clone
+/// nor any config file is touched. Opening the pull request is answered with
+/// 422 (no commits between the branches) when the token may open pull
+/// requests, and 403 when it may not; this relies on GitHub checking
+/// permission before content. The branch is deleted on every path once it
+/// was pushed.
+async fn report_factory_token(report: &mut Report, client: &GitHub, token: &str, repo: &str) {
     let row = "github:factory-token";
     let fix = format!(
         "the token must be scoped to {repo} with Contents read and write, Pull requests read and write, Workflows read"
     );
-    let (status, body) = match client
-        .get(&format!("/repos/{repo}/git/ref/heads/main"))
-        .await
-    {
-        Ok(answer) => answer,
+    let url = format!("https://github.com/{repo}.git");
+    let scratch = match tempfile::tempdir() {
+        Ok(dir) => dir,
         Err(error) => {
             report.fail(
                 row,
-                format!("{error:#}"),
-                "check the network and FACTORY_GITHUB_TOKEN",
+                format!("cannot create a temporary folder: {error}"),
+                "free space in the temp folder",
             );
             return;
         }
     };
-    let Some(sha) = body.pointer("/object/sha").and_then(Value::as_str) else {
+    let dir = scratch.path();
+    if let Err(error) = git_with_token(dir, token, &["init", "-q"]).await {
+        report.fail(row, error, "install git");
+        return;
+    }
+    let fetch = git_with_token(
+        dir,
+        token,
+        &["fetch", "--quiet", "--depth", "1", &url, "main"],
+    )
+    .await;
+    if let Err(error) = fetch {
         report.fail(
             row,
-            format!("cannot read main: {}", github_message(status, &body)),
-            fix,
+            format!("cannot fetch main over https: {error}"),
+            format!("{fix}; a network error means github.com is unreachable over https"),
         );
         return;
-    };
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let branch = format!("doctor/{stamp}");
-    let created = client
-        .send(
-            reqwest::Method::POST,
-            &format!("/repos/{repo}/git/refs"),
-            Some(json!({ "ref": format!("refs/heads/{branch}"), "sha": sha })),
-        )
-        .await;
-    match created {
-        Ok((201, _)) => {}
-        Ok((status, body)) => {
-            report.fail(
-                row,
-                format!(
-                    "cannot push branch {branch}: {}",
-                    github_message(status, &body)
-                ),
-                fix,
-            );
-            return;
-        }
-        Err(error) => {
-            report.fail(
-                row,
-                format!("{error:#}"),
-                "check the network and FACTORY_GITHUB_TOKEN",
-            );
-            return;
-        }
+    let refspec = format!("FETCH_HEAD:refs/heads/{branch}");
+    let push = git_with_token(dir, token, &["push", "--quiet", &url, &refspec]).await;
+    if let Err(error) = push {
+        report.fail(
+            row,
+            format!("cannot push branch {branch} over https: {error}"),
+            fix,
+        );
+        return;
     }
     let pull = client
         .send(
@@ -921,31 +967,23 @@ async fn report_factory_token(report: &mut Report, client: &GitHub, repo: &str) 
             })),
         )
         .await;
-    let deleted = client
-        .send(
-            reqwest::Method::DELETE,
-            &format!("/repos/{repo}/git/refs/heads/{branch}"),
-            None,
-        )
-        .await;
+    let deleted = git_with_token(dir, token, &["push", "--quiet", &url, "--delete", &branch]).await;
     let cleanup = match deleted {
-        Ok((204, _)) => String::new(),
-        Ok((status, body)) => format!(
-            "; branch {branch} was NOT deleted ({}), delete it by hand",
-            github_message(status, &body)
-        ),
-        Err(error) => format!("; branch {branch} may remain ({error:#}), check by hand"),
+        Ok(_) => String::new(),
+        Err(error) => format!("; branch {branch} was NOT deleted ({error}), delete it by hand"),
     };
     match pull {
         Ok((422, _)) => report.pass(
             row,
-            format!("pushed and deleted branch {branch}; may open pull requests{cleanup}"),
+            format!(
+                "pushed and deleted branch {branch} over https; may open pull requests{cleanup}"
+            ),
         ),
         Ok((201, body)) => {
             let number = body.get("number").and_then(Value::as_u64).unwrap_or(0);
             report.pass(
                 row,
-                format!("pushed and deleted branch {branch}; opened pull request #{number}, close it by hand{cleanup}"),
+                format!("pushed and deleted branch {branch} over https; opened pull request #{number}, close it by hand{cleanup}"),
             );
         }
         Ok((status, body)) => report.fail(

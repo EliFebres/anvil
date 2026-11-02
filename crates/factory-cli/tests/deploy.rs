@@ -90,6 +90,24 @@ fn the_container_files_are_consistent() {
     let bootstrap = read("deploy/nuc/bootstrap.sh");
     assert!(bootstrap.contains("podman build"));
     assert!(bootstrap.contains("factory install-service"));
+    // The container's anvil is a static musl build, proven so with ldd; the
+    // host build stays for anvil doctor and the eval harness.
+    for musl in [
+        "musl-tools",
+        "MUSL_TARGET=\"x86_64-unknown-linux-musl\"",
+        "rustup target add \"$MUSL_TARGET\"",
+        "--target \"$MUSL_TARGET\" -p anvil-cli",
+        "ldd",
+        "ln -sf \"$REPO_DIR/target/release/anvil\" \"$BIN_DIR/anvil\"",
+    ] {
+        assert!(bootstrap.contains(musl), "{musl} missing from bootstrap.sh");
+    }
+    let factory: FactoryConfig =
+        toml::from_str(&read("factory.toml")).expect("factory.toml parses");
+    assert_eq!(
+        factory.worker.anvil_bin, "target/x86_64-unknown-linux-musl/release/anvil",
+        "factory.toml mounts the musl build bootstrap.sh and factory update make"
+    );
     let unit = read("deploy/nuc/factory.service");
     assert!(unit.contains("ExecStart=%h/.local/bin/factory run"));
     assert!(

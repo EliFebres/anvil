@@ -126,7 +126,7 @@ impl TicketWorker {
         branch: &str,
     ) -> Result<Outcome> {
         let deps = &self.deps;
-        let wt = Git::new(worktree);
+        let wt = deps.repo.at(worktree);
         let main = self.main_ref();
         let mut run = Run::new(ticket, Budget::new((deps.clock)(), &deps.config.budget));
         let mut task = render::task(ticket);

@@ -69,12 +69,17 @@ digest_at = "08:00"
 poll_minutes = 5
 
 # Where the implementer runs. `runtime` is "podman", "docker" or "none" (no
-# container; for tests and development only). `egress_allow` lists the hosts
-# the container may reach besides every provider's base URL.
+# container; for tests and development only). `anvil_bin` is the anvil binary
+# on this host: a name on PATH, or a path (a relative one starts at the
+# repository root; symlinks are followed). The container gets it mounted
+# read-only at /usr/local/bin/anvil, since the image ships none, and it must be
+# the static musl build `factory update` makes: the image's glibc is older than
+# the host's. `egress_allow` lists the hosts the container may reach besides
+# every provider's base URL.
 [worker]
 runtime = "podman"
 image = "localhost/anvil-factory:latest"
-anvil_bin = "anvil"
+anvil_bin = "target/x86_64-unknown-linux-musl/release/anvil"
 egress_allow = ["github.com", "index.crates.io", "static.crates.io"]
 
 # Per-ticket limits. Exceeding one rejects the ticket with the reason.
@@ -122,6 +127,14 @@ pub const DEFAULT_IMAGE: &str = "localhost/anvil-factory:latest";
 
 /// Hosts the container may reach when `[worker] egress_allow` is not set.
 pub const DEFAULT_EGRESS_ALLOW: [&str; 3] = ["github.com", "index.crates.io", "static.crates.io"];
+
+/// The target the implementer's anvil is built for: a static binary, because
+/// the worker image's glibc is older than the factory host's.
+pub const IMPLEMENTER_TARGET: &str = "x86_64-unknown-linux-musl";
+
+/// The anvil binary when `[worker] anvil_bin` is not set: the
+/// [`IMPLEMENTER_TARGET`] release build, relative to the repository root.
+pub const DEFAULT_ANVIL_BIN: &str = "target/x86_64-unknown-linux-musl/release/anvil";
 
 /// Which provider writes the code.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -249,7 +262,11 @@ pub struct WorkerConfig {
     pub runtime: ContainerRuntime,
     /// The image built from `deploy/nuc/Containerfile`.
     pub image: String,
-    /// The anvil binary inside the container, or a host path with `runtime = "none"`.
+    /// The anvil binary on the factory host: a name looked up on `PATH` or a
+    /// path, a relative one from the repository root, symlinks followed. A
+    /// container gets it mounted read-only at `/usr/local/bin/anvil`, so it
+    /// must be the static [`IMPLEMENTER_TARGET`] build; with
+    /// `runtime = "none"` the host runs it.
     pub anvil_bin: String,
     /// Hosts the container may reach, besides every provider's base URL.
     pub egress_allow: Vec<String>,
@@ -260,7 +277,7 @@ impl Default for WorkerConfig {
         Self {
             runtime: ContainerRuntime::Podman,
             image: DEFAULT_IMAGE.to_owned(),
-            anvil_bin: "anvil".to_owned(),
+            anvil_bin: DEFAULT_ANVIL_BIN.to_owned(),
             egress_allow: DEFAULT_EGRESS_ALLOW
                 .iter()
                 .map(|host| (*host).to_owned())
@@ -547,6 +564,11 @@ mod tests {
         config.validate().expect("validates");
         assert_eq!(config.service.poll_minutes, DEFAULT_POLL_MINUTES);
         assert_eq!(config.worker.runtime, ContainerRuntime::Podman);
+        assert_eq!(config.worker.anvil_bin, DEFAULT_ANVIL_BIN);
+        assert_eq!(
+            DEFAULT_ANVIL_BIN,
+            format!("target/{IMPLEMENTER_TARGET}/release/anvil")
+        );
         assert_eq!(config.budget.tokens, DEFAULT_TOKEN_BUDGET);
         assert!(config.protected.paths.is_empty());
         assert!(!config.protected.cargo_dependencies);

@@ -72,7 +72,7 @@ How a ticket moves:
 4. Three gates: `just check` (one retry with the failure appended), the eval harness against the newest result on `main`, and the review swarm (several models, each with one stance: correctness, safety, style, simplicity; none may share a base URL with the coder).
 5. A pull request opens with the gate output, the eval table and every verdict. Green CI squash-merges it. A change to a protected path or a new dependency is labelled `needs-human` and the ticket waits.
 
-`factory run` is the loop (`--once` for a single pass), `factory status` shows the queue and the last ten outcomes, `factory pause` and `factory resume` toggle the flag it checks between tickets, `factory review <pr>` runs the swarm by hand, and `factory env <NAME>` says where a secret came from without printing it. Per-ticket budgets (wall clock, tokens) and the protected paths live in `factory.toml`.
+`factory run` is the loop (`--once` for a single pass), `factory status` shows the queue and the last ten outcomes, `factory pause` and `factory resume` toggle the flag it checks between tickets, `factory review <pr>` runs the swarm by hand, `factory env <NAME>` says where a secret came from without printing it, and `factory update` waits for the ticket in progress, stops the service, pulls `main`, rebuilds the binaries and the worker image, and starts it again (`--now` skips the wait). Per-ticket budgets (wall clock, tokens) and the protected paths live in `factory.toml`.
 
 ### The eval harness
 

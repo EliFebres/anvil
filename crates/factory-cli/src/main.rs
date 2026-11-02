@@ -3,13 +3,16 @@
 mod review;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anvil_types::dotenv;
+use anvil_types::factory_config::FACTORY_FILE;
+use anvil_types::{ContainerRuntime, dotenv};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use factory_cli::install::{InstallOptions, config_home, install};
+use factory_cli::update::{UpdateOptions, update};
 use factory_cli::{logging, wiring};
-use factory_core::{FactoryHome, ServiceState, Tick, service};
+use factory_core::{FactoryHome, ServiceState, SystemRunner, Tick, preflight, service};
 
 /// The Dark Factory: works tickets from `tickets/open/` into reviewed pull requests.
 #[derive(Debug, Parser)]
@@ -44,6 +47,18 @@ enum Command {
     Resume,
     /// Install deploy/nuc/factory.service as a systemd user unit and start it (Linux only).
     InstallService,
+    /// Stop the service, pull main, rebuild the binaries and the worker image, and start it again (Linux only).
+    ///
+    /// Builds anvil twice: for the host, and as a static musl binary that the
+    /// worker container mounts (checked with ldd). A ticket in progress
+    /// finishes first: the pause flag stops the loop from claiming another
+    /// one and the update waits until the worker is idle. Runs in the
+    /// repository that holds the current folder, else ~/factory-repo.
+    Update {
+        /// Stop at once; a ticket in progress stays claimed on factory/state.
+        #[arg(long)]
+        now: bool,
+    },
     /// Say whether an environment variable is set after the env files load, and where it came from.
     ///
     /// The value is never printed. Files load in this order, first definition
@@ -151,6 +166,38 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             }
             Ok(0)
         }
+        Command::Update { now } => {
+            if !cfg!(target_os = "linux") {
+                anyhow::bail!("update needs systemd; run it on the NUC");
+            }
+            let factory_home = factory_home.context("no home directory; set FACTORY_HOME")?;
+            let home = home.context("no home directory")?;
+            let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
+            let repo_root = runtime.block_on(update_root(&cwd, &home));
+            println!("== repository: {}", repo_root.display());
+            update(&UpdateOptions {
+                repo_root,
+                home: factory_home,
+                config_home: config_home(&home),
+                now,
+                poll: UPDATE_POLL,
+            })?;
+            Ok(0)
+        }
+    }
+}
+
+/// How often `factory update` re-reads the state file while a ticket finishes.
+const UPDATE_POLL: Duration = Duration::from_secs(30);
+
+/// The repository `factory update` works in: the one around `cwd` when it
+/// holds a `factory.toml`, otherwise `~/factory-repo`, where bootstrap put it.
+async fn update_root(cwd: &Path, home: &Path) -> PathBuf {
+    let root = wiring::repo_root(cwd).await;
+    if root.join(FACTORY_FILE).is_file() {
+        root
+    } else {
+        home.join("factory-repo")
     }
 }
 
@@ -183,7 +230,7 @@ async fn status(cwd: &Path, factory_home: FactoryHome) -> anyhow::Result<i32> {
     let state = ServiceState::load(&factory_home.state_file())?;
     let paused = service::pause_reason(&factory_home);
     let queue = factory_core::TicketQueue::open(
-        &factory_core::Git::new(&root),
+        &wiring::repo(&root),
         &factory_home.state_dir(),
         wiring::REMOTE,
     )
@@ -193,7 +240,56 @@ async fn status(cwd: &Path, factory_home: FactoryHome) -> anyhow::Result<i32> {
     for (path, problem) in open.unusable {
         println!("unusable: {}: {problem}", path.display());
     }
+    println!("\n{}", sandbox_line(&root).await);
     Ok(0)
+}
+
+/// The `sandbox:` line of `factory status`: whether the runtime could run a
+/// ticket right now. A problem is reported, never fatal.
+async fn sandbox_line(root: &Path) -> String {
+    let factory = match wiring::read_factory(root) {
+        Ok(factory) => factory,
+        Err(error) => return format!("sandbox: {error:#}"),
+    };
+    let worker = &factory.worker;
+    let checked = preflight(
+        &SystemRunner,
+        worker.runtime,
+        &worker.image,
+        &worker.anvil_bin,
+        root,
+    )
+    .await;
+    describe_sandbox(worker.runtime, &worker.image, checked)
+}
+
+/// One line for a preflight result: the runtime, the image and the resolved
+/// anvil binary, or the problem.
+fn describe_sandbox(
+    runtime: ContainerRuntime,
+    image: &str,
+    checked: factory_core::Result<PathBuf>,
+) -> String {
+    match checked {
+        Ok(anvil) => match runtime {
+            ContainerRuntime::Podman => {
+                format!("sandbox: ready (podman {image}; anvil {})", anvil.display())
+            }
+            ContainerRuntime::Docker => {
+                format!("sandbox: ready (docker {image}; anvil {})", anvil.display())
+            }
+            ContainerRuntime::None => format!(
+                "sandbox: the host (runtime = \"none\"; anvil {})",
+                anvil.display()
+            ),
+        },
+        Err(error) => {
+            // The error already says `sandbox:`; keep the line's prefix single.
+            let detail = error.to_string();
+            let detail = detail.strip_prefix("sandbox: ").unwrap_or(&detail);
+            format!("sandbox: {detail}")
+        }
+    }
 }
 
 /// One line for `factory run --once`.
@@ -279,5 +375,25 @@ mod tests {
     fn ticks_read_as_one_line() {
         assert_eq!(describe_tick(&Tick::Idle), "idle: no open tickets");
         assert_eq!(describe_tick(&Tick::Paused("x".to_owned())), "paused: x");
+    }
+
+    #[test]
+    fn the_sandbox_line_names_the_runtime_or_the_problem() {
+        let image = "localhost/anvil-factory:latest";
+        let anvil =
+            PathBuf::from("/home/eli/factory-repo/target/x86_64-unknown-linux-musl/release/anvil");
+        assert_eq!(
+            describe_sandbox(ContainerRuntime::Podman, image, Ok(anvil.clone())),
+            "sandbox: ready (podman localhost/anvil-factory:latest; anvil /home/eli/factory-repo/target/x86_64-unknown-linux-musl/release/anvil)"
+        );
+        assert_eq!(
+            describe_sandbox(ContainerRuntime::None, image, Ok(anvil)),
+            "sandbox: the host (runtime = \"none\"; anvil /home/eli/factory-repo/target/x86_64-unknown-linux-musl/release/anvil)"
+        );
+        let missing = factory_core::FactoryError::Sandbox("worker image x is not built".to_owned());
+        assert_eq!(
+            describe_sandbox(ContainerRuntime::Podman, image, Err(missing)),
+            "sandbox: worker image x is not built"
+        );
     }
 }

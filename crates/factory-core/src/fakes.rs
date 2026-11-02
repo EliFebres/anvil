@@ -19,6 +19,7 @@ use crate::ports::{
     ImplementerOutcome, ImplementerStatus, InlineComment, Outcome, Progress, PullRequest,
     ReviewInput, ReviewReport, ReviewSwarm, Tokens, Worker,
 };
+use crate::sandbox::{CommandRunner, Exit, Invocation};
 use crate::tickets::TicketQueue;
 
 /// Locks a mutex, recovering from a poisoned one.
@@ -539,6 +540,69 @@ impl Implementer for ScriptedImplementer {
 
     fn denied_hosts(&self) -> Vec<String> {
         self.denied.clone()
+    }
+}
+
+/// A container runtime that answers from a script and runs nothing.
+///
+/// Each answer is matched against the arguments of a call: the first answer
+/// whose words appear in a row anywhere in them wins, so a test scripts
+/// `["volume", "exists"]`, `["image", "exists"]` or `["anvil", "--yes"]`
+/// without spelling out the whole `run` command line. An unmatched call
+/// exits 0 with no output.
+#[derive(Debug, Default)]
+pub struct FakeRuntime {
+    answers: Vec<(Vec<String>, Exit)>,
+    calls: Mutex<Vec<Invocation>>,
+}
+
+impl FakeRuntime {
+    /// Adds an answer for every call whose arguments hold `words` in a row.
+    ///
+    /// # Arguments
+    ///
+    /// * `words` - Consecutive arguments to look for.
+    /// * `exit` - What the call reports.
+    pub fn with_answer(mut self, words: &[&str], exit: Exit) -> Self {
+        self.answers
+            .push((words.iter().map(|w| (*w).to_owned()).collect(), exit));
+        self
+    }
+
+    /// Every call received, oldest first.
+    pub fn calls(&self) -> Vec<Invocation> {
+        lock(&self.calls).clone()
+    }
+
+    /// How many calls held `words` in a row among their arguments.
+    pub fn calls_matching(&self, words: &[&str]) -> usize {
+        let words: Vec<String> = words.iter().map(|w| (*w).to_owned()).collect();
+        lock(&self.calls)
+            .iter()
+            .filter(|call| has_window(&call.args, &words))
+            .count()
+    }
+}
+
+/// Whether `words` appear consecutively in `args`.
+fn has_window(args: &[String], words: &[String]) -> bool {
+    words.is_empty() || args.windows(words.len()).any(|window| window == words)
+}
+
+impl CommandRunner for FakeRuntime {
+    fn run<'a>(
+        &'a self,
+        invocation: Invocation,
+        _deadline: Instant,
+    ) -> BoxFuture<'a, Result<Exit>> {
+        let exit = self
+            .answers
+            .iter()
+            .find(|(words, _)| has_window(&invocation.args, words))
+            .map(|(_, exit)| exit.clone())
+            .unwrap_or_else(|| Exit::of(0, ""));
+        lock(&self.calls).push(invocation);
+        Box::pin(std::future::ready(Ok(exit)))
     }
 }
 

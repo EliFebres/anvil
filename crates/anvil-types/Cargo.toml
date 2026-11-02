@@ -14,6 +14,7 @@ name = "anvil-types"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 dotenvy.workspace = true
 schemars.workspace = true

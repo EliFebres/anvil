@@ -38,12 +38,17 @@ digest_at = "08:00"
 poll_minutes = 5
 
 # Where the implementer runs. `runtime` is "podman", "docker" or "none" (no
-# container; for tests and development only). `egress_allow` lists the hosts
-# the container may reach besides every provider's base URL.
+# container; for tests and development only). `anvil_bin` is the anvil binary
+# on this host: a name on PATH, or a path (a relative one starts at the
+# repository root; symlinks are followed). The container gets it mounted
+# read-only at /usr/local/bin/anvil, since the image ships none, and it must be
+# the static musl build `factory update` makes: the image's glibc is older than
+# the host's. `egress_allow` lists the hosts the container may reach besides
+# every provider's base URL.
 [worker]
 runtime = "podman"
 image = "localhost/anvil-factory:latest"
-anvil_bin = "anvil"
+anvil_bin = "target/x86_64-unknown-linux-musl/release/anvil"
 egress_allow = ["github.com", "index.crates.io", "static.crates.io"]
 
 # Per-ticket limits. Exceeding one rejects the ticket with the reason.

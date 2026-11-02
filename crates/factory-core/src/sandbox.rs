@@ -3,9 +3,10 @@
 //!
 //! The container sees the worktree, a per-ticket anvil home (configuration
 //! and the `factory` profile, never a key file), a read-only cargo registry
-//! cache and the egress proxy's socket. Its environment holds the provider
-//! API keys and nothing else from the factory's; the GitHub token and the
-//! webhook URL never enter it.
+//! cache, the egress proxy's socket and the host's anvil binary mounted
+//! read-only at `/usr/local/bin/anvil` (the image ships none). Its
+//! environment holds the provider API keys and nothing else from the
+//! factory's; the GitHub token and the webhook URL never enter it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,9 @@ const HOME_MOUNT: &str = "/anvil-home";
 
 /// Where the proxy socket is mounted; `entrypoint.sh` bridges it to port 3128.
 const PROXY_MOUNT: &str = "/run/factory/proxy.sock";
+
+/// Where the host's anvil binary is mounted and run from.
+pub const ANVIL_MOUNT: &str = "/usr/local/bin/anvil";
 
 /// The proxy URL inside the container.
 const PROXY_URL: &str = "http://127.0.0.1:3128";
@@ -70,8 +74,10 @@ pub struct SandboxConfig {
     pub runtime: ContainerRuntime,
     /// The image built from `deploy/nuc/Containerfile`.
     pub image: String,
-    /// The anvil binary inside the container, or a host path with `runtime = "none"`.
-    pub anvil_bin: String,
+    /// The anvil binary on the host, already resolved by [`resolve_anvil_bin`]:
+    /// mounted at [`ANVIL_MOUNT`] in the container, run directly with
+    /// `runtime = "none"`.
+    pub anvil_bin: PathBuf,
     /// `just` as invoked for Gate A.
     pub just_bin: String,
     /// `cargo` as invoked for the release build.
@@ -91,10 +97,78 @@ pub struct SandboxConfig {
 /// Looks a key variable up; the process environment, or a test's table.
 pub type KeyLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// One process the sandbox wants run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    /// The executable: the container runtime, or the program itself with `runtime = "none"`.
+    pub program: String,
+    /// Its arguments.
+    pub args: Vec<String>,
+    /// The environment: `None` inherits the factory's (runtime housekeeping),
+    /// `Some` replaces it entirely (sandbox commands).
+    pub env: Option<Vec<(String, String)>>,
+    /// The working directory, when it matters.
+    pub cwd: Option<PathBuf>,
+}
+
+/// How a sandbox command ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exit {
+    /// The exit code, `None` when killed by a signal or the deadline.
+    pub code: Option<i32>,
+    /// Whether the deadline passed and the command was killed.
+    pub timed_out: bool,
+    /// stdout then stderr, as text.
+    pub output: String,
+}
+
+impl Exit {
+    /// An exit with a code and its output, as a finished command reports.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The exit code.
+    /// * `output` - stdout then stderr.
+    pub fn of(code: i32, output: &str) -> Self {
+        Self {
+            code: Some(code),
+            timed_out: false,
+            output: output.to_owned(),
+        }
+    }
+}
+
+/// Runs the processes the sandbox asks for: the container runtime on the
+/// factory host, or a fake in tests.
+pub trait CommandRunner: Send + Sync {
+    /// Runs the process until it exits or the deadline passes, collecting its output.
+    ///
+    /// # Arguments
+    ///
+    /// * `invocation` - What to run.
+    /// * `deadline` - When to kill it.
+    ///
+    /// # Errors
+    ///
+    /// [`FactoryError::Spawn`] when the program cannot be started.
+    fn run<'a>(&'a self, invocation: Invocation, deadline: Instant) -> BoxFuture<'a, Result<Exit>>;
+}
+
+/// The runner the factory uses: real processes on this machine.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemRunner;
+
+impl CommandRunner for SystemRunner {
+    fn run<'a>(&'a self, invocation: Invocation, deadline: Instant) -> BoxFuture<'a, Result<Exit>> {
+        Box::pin(run_process(invocation, deadline))
+    }
+}
+
 /// Runs the implementer and the build tools for one factory.
 pub struct Sandbox {
     config: SandboxConfig,
     keys: KeyLookup,
+    runner: Arc<dyn CommandRunner>,
     denied: Denied,
     proxy: Mutex<Option<proxy::ProxyHandle>>,
 }
@@ -119,9 +193,26 @@ impl Sandbox {
     /// * `config` - What to run and how.
     /// * `keys` - Returns the value of a key variable, or `None` when unset.
     pub fn with_key_lookup(config: SandboxConfig, keys: KeyLookup) -> Self {
+        Self::with_runner(config, keys, Arc::new(SystemRunner))
+    }
+
+    /// Builds the sandbox over its own process runner, so tests can script
+    /// what the container runtime answers.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - What to run and how.
+    /// * `keys` - Returns the value of a key variable, or `None` when unset.
+    /// * `runner` - Runs every process the sandbox asks for.
+    pub fn with_runner(
+        config: SandboxConfig,
+        keys: KeyLookup,
+        runner: Arc<dyn CommandRunner>,
+    ) -> Self {
         Self {
             config,
             keys,
+            runner,
             denied: Arc::new(Mutex::new(BTreeSet::new())),
             proxy: Mutex::new(None),
         }
@@ -226,6 +317,7 @@ impl Sandbox {
     /// * `worktree` - The worktree, mounted at `/work`.
     /// * `home` - The per-ticket anvil home, mounted at `/anvil-home`.
     /// * `program` - The program and its arguments inside the container.
+    /// * `anvil` - A host anvil binary to mount read-only at [`ANVIL_MOUNT`].
     /// * `cache_writable` - Mount the registry cache read-write (prewarming only).
     ///
     /// # Returns
@@ -236,6 +328,7 @@ impl Sandbox {
         worktree: &Path,
         home: &Path,
         program: &[&str],
+        anvil: Option<&Path>,
         cache_writable: bool,
     ) -> Vec<String> {
         let id = Self::ticket_id(worktree);
@@ -285,94 +378,57 @@ impl Sandbox {
             args.push("-e".to_owned());
             args.push(name);
         }
+        if let Some(anvil) = anvil {
+            args.push("-v".to_owned());
+            args.push(format!("{}:{ANVIL_MOUNT}:ro", anvil.display()));
+        }
         args.push(self.config.image.clone());
         args.extend(program.iter().map(|s| (*s).to_owned()));
         args
     }
 
-    /// The command for a program in the worktree, on the host or in the container.
+    /// The invocation for a program in the worktree, on the host or in the
+    /// container, with the sandbox environment and nothing else.
     fn command(
         &self,
         worktree: &Path,
         home: &Path,
         program: &[&str],
+        anvil: Option<&Path>,
         cache_writable: bool,
-    ) -> Command {
-        let mut command = match self.config.runtime {
+    ) -> Invocation {
+        let env = Some(self.environment(home));
+        match self.config.runtime {
             ContainerRuntime::None => {
                 let (bin, rest) = program.split_first().unwrap_or((&"true", &[]));
-                let mut command = if bin.ends_with(".sh") {
-                    let mut c = Command::new(bash_program());
-                    c.arg(bin);
-                    c
+                let (program, mut args) = if bin.ends_with(".sh") {
+                    (
+                        bash_program().to_string_lossy().into_owned(),
+                        vec![(*bin).to_owned()],
+                    )
                 } else {
-                    Command::new(bin)
+                    ((*bin).to_owned(), Vec::new())
                 };
-                command.args(rest);
-                command.current_dir(worktree);
-                command
+                args.extend(rest.iter().map(|s| (*s).to_owned()));
+                Invocation {
+                    program,
+                    args,
+                    env,
+                    cwd: Some(worktree.to_path_buf()),
+                }
             }
-            runtime => {
-                let mut command = Command::new(runtime_name(runtime));
-                command.args(self.run_args(worktree, home, program, cache_writable));
-                command
-            }
-        };
-        command.env_clear();
-        command.envs(self.environment(home));
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
-        command.kill_on_drop(true);
-        command
+            runtime => Invocation {
+                program: runtime_name(runtime).to_owned(),
+                args: self.run_args(worktree, home, program, anvil, cache_writable),
+                env,
+                cwd: None,
+            },
+        }
     }
 
-    /// Runs a command until it exits or the deadline passes.
-    async fn run_until(&self, mut command: Command, deadline: Instant) -> Result<Exit> {
-        let program = format!("{:?}", command.as_std().get_program());
-        let mut child = command
-            .spawn()
-            .map_err(|source| FactoryError::Spawn { program, source })?;
-        let mut stdout = child.stdout.take();
-        let mut stderr = child.stderr.take();
-        let reader = async {
-            let mut out = Vec::new();
-            let mut err = Vec::new();
-            if let Some(stdout) = stdout.as_mut() {
-                let _ = stdout.take(OUTPUT_CAP as u64).read_to_end(&mut out).await;
-            }
-            if let Some(stderr) = stderr.as_mut() {
-                let _ = stderr.take(OUTPUT_CAP as u64).read_to_end(&mut err).await;
-            }
-            (out, err)
-        };
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let waited = tokio::time::timeout(remaining, async {
-            let (output, status) = tokio::join!(reader, child.wait());
-            (output, status)
-        })
-        .await;
-        match waited {
-            Ok(((out, err), status)) => {
-                let status = status.map_err(|source| FactoryError::Spawn {
-                    program: "sandbox command".to_owned(),
-                    source,
-                })?;
-                Ok(Exit {
-                    code: status.code(),
-                    timed_out: false,
-                    output: combine(&out, &err),
-                })
-            }
-            Err(_) => {
-                let _ = child.kill().await;
-                Ok(Exit {
-                    code: None,
-                    timed_out: true,
-                    output: "(killed: deadline passed)".to_owned(),
-                })
-            }
-        }
+    /// Runs an invocation until it exits or the deadline passes.
+    async fn run_until(&self, invocation: Invocation, deadline: Instant) -> Result<Exit> {
+        self.runner.run(invocation, deadline).await
     }
 
     /// Starts the egress proxy for a ticket, replacing a previous one.
@@ -390,24 +446,9 @@ impl Sandbox {
 
     /// Warms the registry cache: `cargo fetch` with the cache mounted read-write.
     async fn prewarm(&self, worktree: &Path, home: &Path) -> Result<()> {
-        let runtime = runtime_name(self.config.runtime);
-        let created = Command::new(runtime)
-            .args(["volume", "create", CACHE_VOLUME])
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|source| FactoryError::Spawn {
-                program: runtime.to_owned(),
-                source,
-            })?;
-        if !created.status.success() {
-            return Err(FactoryError::Sandbox(format!(
-                "{runtime} volume create {CACHE_VOLUME}: {}",
-                String::from_utf8_lossy(&created.stderr).trim()
-            )));
-        }
+        ensure_cache_volume(self.runner.as_ref(), self.config.runtime).await?;
         let cargo = self.config.cargo_bin.clone();
-        let command = self.command(worktree, home, &[cargo.as_str(), "fetch"], true);
+        let command = self.command(worktree, home, &[cargo.as_str(), "fetch"], None, true);
         let exit = self
             .run_until(command, Instant::now() + Duration::from_secs(20 * 60))
             .await?;
@@ -447,21 +488,13 @@ impl Sandbox {
         }
         let id = Self::ticket_id(worktree);
         let wrapper = self.config.home.eval_wrapper(&id);
-        let mut args = self.run_args(
+        // The harness mounts its fixture copy, not the worktree; the binary comes from the worktree.
+        let args = self.run_args(
             Path::new("$PWD"),
             Path::new("$ANVIL_HOME"),
-            &["anvil"],
+            &[ANVIL_MOUNT],
+            Some(&binary),
             false,
-        );
-        // The harness mounts its fixture copy, not the worktree; the binary comes from the worktree.
-        let image_index = args
-            .iter()
-            .position(|arg| *arg == self.config.image)
-            .unwrap_or(args.len() - 1);
-        args.insert(image_index, "-v".to_owned());
-        args.insert(
-            image_index + 1,
-            format!("{}:/usr/local/bin/anvil:ro", binary.display()),
         );
         let quoted: Vec<String> = args.iter().map(|arg| shell_quote(arg)).collect();
         let keys: Vec<String> = self.key_names();
@@ -491,7 +524,7 @@ impl Sandbox {
         deadline: Instant,
     ) -> Result<CheckOutcome> {
         let home = self.ticket_home(worktree)?;
-        let command = self.command(worktree, &home, program, false);
+        let command = self.command(worktree, &home, program, None, false);
         let exit = self.run_until(command, deadline).await?;
         Ok(CheckOutcome {
             passed: exit.code == Some(0),
@@ -521,10 +554,25 @@ impl Implementer for Sandbox {
         Box::pin(async move {
             let home = self.ticket_home(worktree)?;
             usage::clear(worktree);
-            let anvil = self.config.anvil_bin.clone();
+            // The image ships no anvil: the host's binary is mounted and run from the mount.
+            let (anvil, mount) = if self.containerized() {
+                (
+                    ANVIL_MOUNT.to_owned(),
+                    Some(self.config.anvil_bin.as_path()),
+                )
+            } else {
+                (self.config.anvil_bin.to_string_lossy().into_owned(), None)
+            };
             let program = [anvil.as_str(), "--yes", "--profile", PROFILE, task];
-            let command = self.command(worktree, &home, &program, false);
+            let command = self.command(worktree, &home, &program, mount, false);
             let exit = self.run_until(command, deadline).await?;
+            if let Some(reason) = infrastructure_failure(&exit) {
+                return Err(FactoryError::Sandbox(format!(
+                    "{} could not start the implementer ({reason}): {}",
+                    runtime_word(self.config.runtime),
+                    last_line(&exit.output)
+                )));
+            }
             let used = usage::read(worktree, &self.config.providers);
             let status = if exit.timed_out {
                 ImplementerStatus::Timeout
@@ -577,11 +625,329 @@ impl Implementer for Sandbox {
     }
 }
 
-/// How a sandbox command ended.
-struct Exit {
-    code: Option<i32>,
-    timed_out: bool,
-    output: String,
+/// Makes sure the registry cache volume exists, creating it when it does not.
+///
+/// Every ticket and the start-up preflight call this, so it must succeed
+/// when the volume is already there: podman's `volume create` refuses a
+/// name that exists, so podman is asked `volume exists` first, and an
+/// "already exists" refusal is treated as success for any runtime.
+///
+/// # Arguments
+///
+/// * `runner` - Runs the runtime's commands.
+/// * `runtime` - podman, docker or none; none needs no volume.
+///
+/// # Errors
+///
+/// [`FactoryError::Spawn`] when the runtime cannot be started and
+/// [`FactoryError::Sandbox`] when it refuses to create the volume.
+pub async fn ensure_cache_volume(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+) -> Result<()> {
+    if runtime == ContainerRuntime::None {
+        return Ok(());
+    }
+    if runtime == ContainerRuntime::Podman {
+        let exists = housekeeping(runner, runtime, &["volume", "exists", CACHE_VOLUME]).await?;
+        if exists.code == Some(0) {
+            return Ok(());
+        }
+    }
+    let created = housekeeping(runner, runtime, &["volume", "create", CACHE_VOLUME]).await?;
+    if created.code == Some(0) || created.output.contains("already exists") {
+        return Ok(());
+    }
+    Err(FactoryError::Sandbox(format!(
+        "{} volume create {CACHE_VOLUME}: {}",
+        runtime_name(runtime),
+        created.output.trim()
+    )))
+}
+
+/// Checks that the runtime can run tickets: the anvil binary resolves to an
+/// executable file on the host, the worker image is built and the registry
+/// cache volume exists or can be created.
+///
+/// The service runs this before taking a ticket and `factory status`
+/// reports its result.
+///
+/// # Arguments
+///
+/// * `runner` - Runs the runtime's commands.
+/// * `runtime` - podman, docker or none; none skips the image and volume checks.
+/// * `image` - `[worker] image`.
+/// * `anvil_bin` - `[worker] anvil_bin`: a name on `PATH` or a path.
+/// * `root` - The repository root a relative `anvil_bin` starts from.
+///
+/// # Returns
+///
+/// The resolved anvil binary, as [`resolve_anvil_bin`] gives it.
+///
+/// # Errors
+///
+/// [`FactoryError::Spawn`] when the runtime cannot be started, and
+/// [`FactoryError::Sandbox`] when `anvil_bin` does not resolve to an
+/// executable, naming the `build` command to run when the image is missing,
+/// or saying why the volume cannot be created.
+pub async fn preflight(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+    image: &str,
+    anvil_bin: &str,
+    root: &Path,
+) -> Result<PathBuf> {
+    let anvil = resolve_anvil_bin(anvil_bin, root)?;
+    if runtime == ContainerRuntime::None {
+        return Ok(anvil);
+    }
+    let query: &[&str] = match runtime {
+        ContainerRuntime::Podman => &["image", "exists", image],
+        _ => &["image", "inspect", image],
+    };
+    let found = housekeeping(runner, runtime, query).await?;
+    if found.code != Some(0) {
+        return Err(FactoryError::Sandbox(format!(
+            "worker image {image} is not built; run `{}` in the repository (or `just image`)",
+            build_command(runtime, image)
+        )));
+    }
+    ensure_cache_volume(runner, runtime).await?;
+    Ok(anvil)
+}
+
+/// Resolves `[worker] anvil_bin` to the file the sandbox mounts or runs.
+///
+/// A bare name is looked up on `PATH` (with `.exe` on Windows); a path is
+/// taken as given, a relative one from the repository root, so the default
+/// names the static build `factory update` makes under `target/`. The result
+/// is canonicalized, so a link such as `~/.local/bin/anvil` resolves to the
+/// real file, which is what a container mount needs.
+///
+/// # Arguments
+///
+/// * `configured` - The `[worker] anvil_bin` value.
+/// * `root` - The repository root a relative path starts from.
+///
+/// # Returns
+///
+/// The canonical path of an existing, executable file.
+///
+/// # Errors
+///
+/// [`FactoryError::Sandbox`] naming `[worker] anvil_bin` when the name is
+/// not on `PATH`, the path does not exist, or the file is not executable.
+pub fn resolve_anvil_bin(configured: &str, root: &Path) -> Result<PathBuf> {
+    let setting = format!("[worker] anvil_bin = {configured:?}");
+    let is_bare = !configured.contains(['/', '\\']);
+    let candidate = if is_bare {
+        find_on_path(configured).ok_or_else(|| {
+            FactoryError::Sandbox(format!(
+                "{setting} is not on PATH; install anvil or set it to the binary's path"
+            ))
+        })?
+    } else {
+        root.join(configured)
+    };
+    let resolved = std::fs::canonicalize(&candidate).map_err(|error| {
+        // A relative path names a build artifact, so say what builds it.
+        let hint = if is_bare || Path::new(configured).is_absolute() {
+            ""
+        } else {
+            "; `factory update` builds it"
+        };
+        FactoryError::Sandbox(format!(
+            "{setting}: {} does not exist ({error}){hint}",
+            candidate.display()
+        ))
+    })?;
+    let resolved = strip_verbatim_prefix(resolved);
+    if !resolved.is_file() {
+        return Err(FactoryError::Sandbox(format!(
+            "{setting}: {} is not a file",
+            resolved.display()
+        )));
+    }
+    if !is_executable(&resolved) {
+        return Err(FactoryError::Sandbox(format!(
+            "{setting}: {} is not executable",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+/// The first `name` (or `name.exe` on Windows) in `PATH`.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    let files: Vec<String> = if cfg!(windows) {
+        vec![format!("{name}.exe"), name.to_owned()]
+    } else {
+        vec![name.to_owned()]
+    };
+    dirs.iter()
+        .flat_map(|dir| files.iter().map(move |file| dir.join(file)))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Drops the `\\?\` prefix Windows' `canonicalize` adds, which bash and the
+/// container runtime do not accept; other paths pass through unchanged.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+        Some(plain) if !plain.starts_with("UNC") => PathBuf::from(plain),
+        _ => path,
+    }
+}
+
+/// Whether the file may be executed: a mode bit on unix, any file elsewhere.
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// The command that builds the worker image, as `justfile` and `bootstrap.sh` run it.
+///
+/// # Arguments
+///
+/// * `runtime` - podman or docker.
+/// * `image` - The tag to build.
+pub fn build_command(runtime: ContainerRuntime, image: &str) -> String {
+    format!(
+        "{} build -t {image} -f deploy/nuc/Containerfile deploy/nuc",
+        runtime_name(runtime)
+    )
+}
+
+/// Runs a short runtime command (`volume exists`, `image exists`) with the
+/// factory's own environment, which rootless podman needs.
+async fn housekeeping(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+    args: &[&str],
+) -> Result<Exit> {
+    let invocation = Invocation {
+        program: runtime_name(runtime).to_owned(),
+        args: args.iter().map(|s| (*s).to_owned()).collect(),
+        env: None,
+        cwd: None,
+    };
+    runner
+        .run(invocation, Instant::now() + HOUSEKEEPING_TIMEOUT)
+        .await
+}
+
+/// How long a housekeeping command may take.
+const HOUSEKEEPING_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Why an implementer exit is the factory's failure rather than anvil's,
+/// or `None` when anvil itself ran.
+///
+/// The runtime exits 125 when it cannot start the container, 126 and 127
+/// when the program inside cannot run; and anvil prints `session <id>` as
+/// its first line, so a failure without that line happened before anvil
+/// started. A clean exit without the line is still anvil's (stand-ins in
+/// tests print nothing), and a timeout has no output to judge.
+fn infrastructure_failure(exit: &Exit) -> Option<String> {
+    if exit.timed_out {
+        return None;
+    }
+    match exit.code {
+        Some(code @ 125..=127) => Some(format!("exit {code}")),
+        Some(0) => None,
+        _ if started(&exit.output) => None,
+        Some(code) => Some(format!("exit {code} before anvil's session line")),
+        None => Some("killed before anvil's session line".to_owned()),
+    }
+}
+
+/// Whether anvil printed its `session <id>` line.
+fn started(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.trim()
+            .strip_prefix("session ")
+            .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
+    })
+}
+
+/// The last non-empty line of output, or `(no output)`.
+fn last_line(output: &str) -> String {
+    output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(no output)")
+        .to_owned()
+}
+
+/// Spawns the invocation and waits for it, killing it at the deadline.
+async fn run_process(invocation: Invocation, deadline: Instant) -> Result<Exit> {
+    let mut command = Command::new(&invocation.program);
+    command.args(&invocation.args);
+    if let Some(env) = &invocation.env {
+        command.env_clear();
+        command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
+    if let Some(cwd) = &invocation.cwd {
+        command.current_dir(cwd);
+    }
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command.kill_on_drop(true);
+    let mut child = command.spawn().map_err(|source| FactoryError::Spawn {
+        program: invocation.program.clone(),
+        source,
+    })?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let reader = async {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        if let Some(stdout) = stdout.as_mut() {
+            let _ = stdout.take(OUTPUT_CAP as u64).read_to_end(&mut out).await;
+        }
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.take(OUTPUT_CAP as u64).read_to_end(&mut err).await;
+        }
+        (out, err)
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let waited = tokio::time::timeout(remaining, async {
+        let (output, status) = tokio::join!(reader, child.wait());
+        (output, status)
+    })
+    .await;
+    match waited {
+        Ok(((out, err), status)) => {
+            let status = status.map_err(|source| FactoryError::Spawn {
+                program: invocation.program.clone(),
+                source,
+            })?;
+            Ok(Exit {
+                code: status.code(),
+                timed_out: false,
+                output: combine(&out, &err),
+            })
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            Ok(Exit {
+                code: None,
+                timed_out: true,
+                output: "(killed: deadline passed)".to_owned(),
+            })
+        }
+    }
 }
 
 /// The runtime's executable name.
@@ -590,6 +956,14 @@ fn runtime_name(runtime: ContainerRuntime) -> &'static str {
         ContainerRuntime::Podman => "podman",
         ContainerRuntime::Docker => "docker",
         ContainerRuntime::None => "",
+    }
+}
+
+/// The runtime as it reads in a message: its name, or `the host`.
+fn runtime_word(runtime: ContainerRuntime) -> &'static str {
+    match runtime {
+        ContainerRuntime::None => "the host",
+        other => runtime_name(other),
     }
 }
 
@@ -724,7 +1098,7 @@ mod tests {
         SandboxConfig {
             runtime,
             image: "localhost/anvil-factory:latest".to_owned(),
-            anvil_bin: "anvil".to_owned(),
+            anvil_bin: PathBuf::from("/opt/anvil"),
             just_bin: "just".to_owned(),
             cargo_bin: "cargo".to_owned(),
             egress_allow: vec!["github.com".to_owned(), "index.crates.io".to_owned()],
@@ -742,6 +1116,7 @@ mod tests {
             Path::new("/h/.factory/work/T1"),
             Path::new("/h/.factory/work/T1-home"),
             &["anvil", "--yes", "--profile", "factory", "do it"],
+            None,
             false,
         );
         let text = args.join(" ");
@@ -769,9 +1144,25 @@ mod tests {
         assert!(
             text.ends_with("localhost/anvil-factory:latest anvil --yes --profile factory do it")
         );
+        assert!(!text.contains(ANVIL_MOUNT), "no mount unless asked: {text}");
         for forbidden in ["FACTORY_GITHUB_TOKEN", "GITHUB_TOKEN", "WEBHOOK_URL"] {
             assert!(!text.contains(forbidden), "{forbidden} in {text}");
         }
+        let mounted = sandbox
+            .run_args(
+                Path::new("/w"),
+                Path::new("/w-home"),
+                &[ANVIL_MOUNT],
+                Some(Path::new("/opt/anvil")),
+                false,
+            )
+            .join(" ");
+        assert!(
+            mounted.ends_with(
+                "-v /opt/anvil:/usr/local/bin/anvil:ro localhost/anvil-factory:latest /usr/local/bin/anvil"
+            ),
+            "{mounted}"
+        );
         for (name, value) in sandbox.environment(Path::new("/h/.factory/work/T1-home")) {
             assert!(
                 !["FACTORY_GITHUB_TOKEN", "GITHUB_TOKEN", "WEBHOOK_URL"].contains(&name.as_str()),
@@ -782,6 +1173,7 @@ mod tests {
             Path::new("/w"),
             Path::new("/w-home"),
             &["cargo", "fetch"],
+            None,
             true,
         );
         assert!(
@@ -792,7 +1184,7 @@ mod tests {
         let docker = Sandbox::new(config(ContainerRuntime::Docker));
         assert!(
             docker
-                .run_args(Path::new("/w"), Path::new("/w-home"), &["x"], false)
+                .run_args(Path::new("/w"), Path::new("/w-home"), &["x"], None, false)
                 .join(" ")
                 .contains("--user ")
         );
@@ -854,8 +1246,29 @@ mod tests {
         );
         assert!(script.contains("/usr/local/bin/anvil:ro"), "{script}");
         assert!(script.contains("--network none"), "{script}");
-        assert!(script.trim_end().ends_with("anvil \"$@\""), "{script}");
+        assert!(
+            script
+                .trim_end()
+                .ends_with("localhost/anvil-factory:latest /usr/local/bin/anvil \"$@\""),
+            "{script}"
+        );
         assert!(!script.contains("FACTORY_GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn verbatim_prefixes_are_dropped_and_other_paths_kept() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\anvil\target\release\anvil.exe")),
+            PathBuf::from(r"C:\anvil\target\release\anvil.exe")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\anvil")),
+            PathBuf::from(r"\\?\UNC\server\share\anvil")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from("/usr/bin/anvil")),
+            PathBuf::from("/usr/bin/anvil")
+        );
     }
 
     #[test]
@@ -872,5 +1285,50 @@ mod tests {
         let long: String = (0..100).map(|i| format!("{i}\n")).collect();
         assert!(!tail(&long).contains("39\n"));
         assert!(tail(&long).starts_with("40\n"));
+        assert_eq!(last_line("a\nError: gone\n\n"), "Error: gone");
+        assert_eq!(last_line(""), "(no output)");
+    }
+
+    #[test]
+    fn the_session_line_separates_anvil_failures_from_runtime_failures() {
+        assert!(started("session 01ARZ3NDEKTSV4RRFFQ69G5FAV\nworking\n"));
+        assert!(started("noise\n  session abc\n"));
+        assert!(!started("session \n"));
+        assert!(!started(
+            "Trying to pull localhost/anvil-factory:latest...\n"
+        ));
+
+        let exit = |code: Option<i32>, output: &str| Exit {
+            code,
+            timed_out: false,
+            output: output.to_owned(),
+        };
+        assert_eq!(
+            infrastructure_failure(&exit(Some(125), "session x\n")),
+            Some("exit 125".to_owned())
+        );
+        assert_eq!(
+            infrastructure_failure(&exit(Some(1), "Error: image not known\n")),
+            Some("exit 1 before anvil's session line".to_owned())
+        );
+        assert_eq!(
+            infrastructure_failure(&exit(Some(1), "session x\nboom\n")),
+            None
+        );
+        assert_eq!(infrastructure_failure(&exit(Some(0), "")), None);
+        assert_eq!(
+            infrastructure_failure(&exit(None, "")),
+            Some("killed before anvil's session line".to_owned())
+        );
+        let timed_out = Exit {
+            code: None,
+            timed_out: true,
+            output: "(killed: deadline passed)".to_owned(),
+        };
+        assert_eq!(infrastructure_failure(&timed_out), None);
+        assert_eq!(
+            build_command(ContainerRuntime::Podman, "localhost/anvil-factory:latest"),
+            "podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc"
+        );
     }
 }
