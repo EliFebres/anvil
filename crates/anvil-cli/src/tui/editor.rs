@@ -5,7 +5,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::theme::Theme;
+use super::theme::{Shade, Theme};
 use super::wrap::segments;
 
 /// The most visible lines the editor takes.
@@ -306,6 +306,7 @@ impl Editor {
     /// * `width` - The input area width.
     /// * `prefix` - The prompt prefix for the first row.
     /// * `theme` - Styles.
+    /// * `prefix_shade` - The prefix's role: the accent, or faint while paused.
     ///
     /// # Returns
     ///
@@ -315,6 +316,7 @@ impl Editor {
         width: u16,
         prefix: &str,
         theme: &Theme,
+        prefix_shade: Shade,
     ) -> (Vec<Line<'static>>, (u16, u16)) {
         let prefix_width = prefix.width();
         let avail = usize::from(width).saturating_sub(prefix_width).max(1);
@@ -342,11 +344,11 @@ impl Editor {
             .take(shown)
             .map(|(index, text)| {
                 let lead = if index == 0 {
-                    Span::styled(prefix.to_owned(), theme.prompt)
+                    Span::styled(prefix.to_owned(), theme.bold(prefix_shade))
                 } else {
                     Span::styled(" ".repeat(prefix_width), Style::default())
                 };
-                Line::from(vec![lead, Span::raw(text)])
+                Line::from(vec![lead, Span::styled(text, theme.fg(Shade::Text))])
             })
             .collect();
         let cursor_row = cursor.1.saturating_sub(first);
@@ -462,10 +464,10 @@ mod tests {
     #[test]
     fn render_follows_the_cursor_past_six_rows() {
         let editor = typed("1\n2\n3\n4\n5\n6\n7\n8");
-        let (lines, cursor) = editor.render(40, "> ", &Theme::mono());
+        let (lines, cursor) = editor.render(40, "> ", &Theme::mono(), Shade::Accent);
         assert_eq!(lines.len(), 6);
         assert_eq!(cursor, (3, 5));
-        let (lines, cursor) = typed("héllo").render(40, "> ", &Theme::mono());
+        let (lines, cursor) = typed("héllo").render(40, "> ", &Theme::mono(), Shade::Accent);
         assert_eq!(lines.len(), 1);
         assert_eq!(cursor, (7, 0));
     }

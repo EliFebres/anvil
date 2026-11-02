@@ -14,9 +14,9 @@ use super::editor::{EditKey, Editor};
 use super::keys::{self, KeyAction};
 use super::modal::{Answer, Modal};
 use super::status::StatusBar;
-use super::theme::Theme;
+use super::theme::{Shade, Theme};
 use super::transcript::{Entry, Transcript};
-use super::{Level, SessionInfo, SessionKind, UiMsg, UiRequest};
+use super::{Level, PermissionMode, SessionInfo, SessionKind, UiMsg, UiRequest};
 
 /// How soon a second Ctrl+C must follow the first to quit.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
@@ -26,6 +26,8 @@ pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 pub enum Action {
     /// Hand this line to the session.
     Submit(String),
+    /// The user cycled the permission mode.
+    SetMode(PermissionMode),
     /// Stop the running turn.
     CancelTurn,
     /// Close the UI and end the session.
@@ -128,6 +130,10 @@ impl App {
                 self.set_state(state);
                 None
             }
+            UiMsg::PermissionMode(mode) => {
+                self.status.set_mode(mode);
+                None
+            }
             UiMsg::Model(model) => {
                 self.status.set_model(&model);
                 None
@@ -188,13 +194,22 @@ impl App {
             Constraint::Length(input_height),
         ])
         .areas(area);
+        let dimmed = self.modal.is_some();
+        let theme = if dimmed {
+            self.theme.dimmed()
+        } else {
+            self.theme
+        };
         self.transcript
-            .draw(frame, transcript_area, &self.theme, self.tick);
+            .draw(frame, transcript_area, &theme, self.tick, dimmed);
         frame.render_widget(
-            self.status.line(status_area.width, self.now, &self.theme),
+            self.status.line(status_area.width, self.now, &theme),
             status_area,
         );
-        let (lines, (column, row)) = self.editor.render(input_area.width, &prefix, &self.theme);
+        let prefix_shade = if dimmed { Shade::Faint } else { Shade::Accent };
+        let (lines, (column, row)) =
+            self.editor
+                .render(input_area.width, &prefix, &theme, prefix_shade);
         frame.render_widget(Paragraph::new(lines), input_area);
         if let Some(modal) = &mut self.modal {
             modal.draw(frame, area, &self.theme);
@@ -368,6 +383,11 @@ impl App {
                 self.editor.complete(&self.info.slash_commands);
                 None
             }
+            KeyAction::CycleMode => {
+                let mode = self.status.mode().next();
+                self.status.set_mode(mode);
+                Some(Action::SetMode(mode))
+            }
             KeyAction::Escape => {
                 self.transcript.clear_selection();
                 None
@@ -511,7 +531,7 @@ mod tests {
             model: "main (test-model)".to_owned(),
             context_window: 100_000,
             price: None,
-            permission_mode: "ask".to_owned(),
+            permission_mode: PermissionMode::Ask,
             initial_state: State::Build,
             slash_commands: vec!["/plan".to_owned(), "/plain".to_owned()],
         }
@@ -745,7 +765,12 @@ mod tests {
         terminal.draw(|frame| app.draw(frame)).expect("draw");
         let collapsed = rows(&terminal);
         assert!(
-            collapsed[0].starts_with("$ shell cargo test --all  ok 1.2s  running 3 tests"),
+            collapsed[0].starts_with("ok     shell  cargo test --all"),
+            "{:?}",
+            collapsed[0]
+        );
+        assert!(
+            collapsed[0].trim_end().ends_with("1.2s"),
             "{:?}",
             collapsed[0]
         );
@@ -917,6 +942,78 @@ mod tests {
         assert!(!app.has_modal());
         assert!(app.editor().is_empty());
         assert!(app.transcript().plain_text().is_empty());
+    }
+
+    #[test]
+    fn shift_tab_cycles_the_mode() {
+        let (mut app, _) = new_app();
+        let shift_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(
+            app.handle(UiMsg::Key(shift_tab)),
+            Some(Action::SetMode(PermissionMode::AcceptEdits))
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 10)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let row = &rows(&terminal)[8];
+        assert!(row.contains("mode: accept-edits"), "{row:?}");
+        for expected in [
+            PermissionMode::Plan,
+            PermissionMode::Bypass,
+            PermissionMode::Ask,
+        ] {
+            assert_eq!(
+                app.handle(UiMsg::Key(shift_tab)),
+                Some(Action::SetMode(expected))
+            );
+        }
+        app.handle(UiMsg::PermissionMode(PermissionMode::Plan));
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        assert!(rows(&terminal)[8].contains("mode: plan"));
+    }
+
+    #[test]
+    fn tab_completes_slash_commands() {
+        let (mut app, _) = new_app();
+        type_line(&mut app, "/pl");
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.editor().text(), "/plain");
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.editor().text(), "/plan");
+    }
+
+    #[test]
+    fn shift_alt_ctrlj_enter_insert_newline() {
+        let (mut app, _) = new_app();
+        type_line(&mut app, "a");
+        app.handle(UiMsg::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        )));
+        type_line(&mut app, "b");
+        app.handle(UiMsg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)));
+        type_line(&mut app, "c");
+        app.handle(UiMsg::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL,
+        )));
+        type_line(&mut app, "d");
+        assert_eq!(
+            app.editor().text(),
+            "a
+b
+c
+d"
+        );
+        assert_eq!(
+            key(&mut app, KeyCode::Enter),
+            Some(Action::Submit(
+                "a
+b
+c
+d"
+                .to_owned()
+            ))
+        );
     }
 
     #[test]

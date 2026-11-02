@@ -22,10 +22,10 @@ use anyhow::Context;
 use tokio::sync::watch;
 
 use crate::console::Console;
-use crate::frontend::{Frontend, UiKind, model_label, session_info};
+use crate::frontend::{Frontend, UiKind, model_id, session_info};
 use crate::memory;
 use crate::telemetry::SessionTelemetry;
-use crate::tui::{Input, SessionKind, UiMsg, wait_cancel};
+use crate::tui::{Input, PermissionMode, SessionKind, UiMsg, wait_cancel};
 use crate::wiring::Wiring;
 
 /// Lines of help printed by `/help`.
@@ -37,7 +37,7 @@ rule: <text>     save a standing rule to ~/.anvil/rules.toml
 /compact         summarize older turns with the summarizer
 /model <name>    switch the coder to a provider from [providers]
 /cost            tokens used so far
-/mode <mode>     permission mode: ask, accept-edits, plan or bypass (not available yet)
+/mode [mode]     show or set the permission mode label: ask, accept-edits, plan, bypass
 /expand          expand every tool call (full-screen UI only)
 /plain           drop to the line renderer for the rest of the session
 /ticket <text>   flag something about anvil for a ticket; `anvil ticket draft` writes it
@@ -104,6 +104,11 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
         telemetry: telemetry.clone(),
         console: frontend.console(),
         cancel: frontend.cancel_watch(),
+        permission_mode: if yes {
+            PermissionMode::Bypass
+        } else {
+            PermissionMode::Ask
+        },
     };
     loop {
         let line = match frontend
@@ -111,6 +116,10 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
             .await?
         {
             Input::Line(line) => line,
+            Input::Mode(mode) => {
+                session.permission_mode = mode;
+                continue;
+            }
             Input::Quit => break,
         };
         let line = line.trim();
@@ -176,6 +185,9 @@ struct ChatSession<'a> {
     console: Console,
     /// Bumped by the UI when the user cancels a turn; `None` in plain mode.
     cancel: Option<watch::Receiver<u64>>,
+    /// The permission mode label, cycled by Shift+Tab or set by `/mode`.
+    // TODO(permission-modes): feed the mode into the registry's permissions.
+    permission_mode: PermissionMode,
 }
 
 /// How a turn ended.
@@ -201,7 +213,7 @@ impl ChatSession<'_> {
                     self.coder_name = name.to_owned();
                     self.telemetry.set_coder(name);
                     self.console.notice(format!("coder is now `{name}`"));
-                    self.send_ui(UiMsg::Model(model_label(self.wiring, name)));
+                    self.send_ui(UiMsg::Model(model_id(self.wiring, name)));
                 }
                 Err(error) => self.console.error(format!("error: {error:#}")),
             },
@@ -221,7 +233,23 @@ impl ChatSession<'_> {
                     self.tokens_used
                 ));
             }
-            ("mode", _) => self.console.warn("permission modes are not available yet"),
+            ("mode", Some(name)) => match PermissionMode::parse(name) {
+                Some(mode) => {
+                    self.permission_mode = mode;
+                    self.send_ui(UiMsg::PermissionMode(mode));
+                    self.console.notice(format!(
+                        "mode: {} (label only; permission modes are not enforced yet)",
+                        mode.label()
+                    ));
+                }
+                None => self
+                    .console
+                    .warn("usage: /mode <ask|accept-edits|plan|bypass>"),
+            },
+            ("mode", None) => self.console.notice(format!(
+                "mode: {} (label only; permission modes are not enforced yet)",
+                self.permission_mode.label()
+            )),
             ("expand" | "plain", _) => self
                 .console
                 .warn(format!("/{command} works only in the full-screen UI")),

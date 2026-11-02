@@ -29,6 +29,8 @@ pub enum KeyAction {
     SelectNext,
     /// Tab: complete a slash command.
     Complete,
+    /// Shift+Tab: cycle the permission mode.
+    CycleMode,
     /// Esc: close a prompt with its safe answer, or drop the selection.
     Escape,
     /// `?` on an empty input: show the key help.
@@ -74,6 +76,7 @@ pub fn map(key: KeyEvent, editor_empty: bool) -> KeyAction {
         KeyCode::Up => KeyAction::Up,
         KeyCode::Down => KeyAction::Down,
         KeyCode::Tab => KeyAction::Complete,
+        KeyCode::BackTab => KeyAction::CycleMode,
         KeyCode::Esc => KeyAction::Escape,
         KeyCode::Char('?') if editor_empty && !ctrl && !alt => KeyAction::Help,
         KeyCode::Left => KeyAction::Edit(EditKey::Left),
@@ -100,6 +103,7 @@ pub const HELP: &[(&str, &str)] = &[
         "select the previous or next tool call",
     ),
     ("Tab", "complete a slash command"),
+    ("Shift+Tab", "cycle the permission mode"),
     (
         "PageUp, PageDown, wheel",
         "scroll the transcript; typing jumps back down",
@@ -142,6 +146,18 @@ mod tests {
         assert_eq!(
             map(key(KeyCode::Char('j'), KeyModifiers::CONTROL), true),
             KeyAction::Newline
+        );
+    }
+
+    #[test]
+    fn shift_tab_cycles_the_mode_and_tab_completes() {
+        assert_eq!(
+            map(key(KeyCode::BackTab, KeyModifiers::SHIFT), true),
+            KeyAction::CycleMode
+        );
+        assert_eq!(
+            map(key(KeyCode::Tab, KeyModifiers::NONE), false),
+            KeyAction::Complete
         );
     }
 

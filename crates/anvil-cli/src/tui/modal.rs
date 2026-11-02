@@ -15,7 +15,7 @@ use unicode_width::UnicodeWidthStr;
 use super::editor::{EditKey, Editor};
 use super::keys;
 use super::markdown::MarkdownDoc;
-use super::theme::Theme;
+use super::theme::{Shade, Theme};
 use super::wrap::{segments, wrap};
 use super::{MemoryAnswer, UiRequest};
 
@@ -330,10 +330,10 @@ impl Modal {
         frame.render_widget(Clear, rect);
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme.modal_border)
+            .border_style(theme.fg(Shade::Accent))
             .title(Span::styled(
                 format!(" {} ", self.title()),
-                theme.modal_border,
+                theme.bold(Shade::Accent),
             ));
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
@@ -356,7 +356,8 @@ impl Modal {
             ..
         } = self
         {
-            let (lines, (column, row)) = editor.render(editor_area.width, REVISE_PREFIX, theme);
+            let (lines, (column, row)) =
+                editor.render(editor_area.width, REVISE_PREFIX, theme, Shade::Accent);
             frame.render_widget(Paragraph::new(lines), editor_area);
             let x = editor_area
                 .x
@@ -369,7 +370,7 @@ impl Modal {
             frame.set_cursor_position((x, y));
         }
         frame.render_widget(
-            Paragraph::new(Line::styled(self.footer(), theme.dim)),
+            Paragraph::new(Line::styled(self.footer(), theme.fg(Shade::Muted))),
             footer_area,
         );
     }
@@ -403,7 +404,7 @@ impl Modal {
         match self {
             Modal::Permission { request, .. } => {
                 let mut lines = vec![Line::from(vec![
-                    Span::styled(request.tool.clone(), theme.heading),
+                    Span::styled(request.tool.clone(), theme.bold(Shade::Text)),
                     Span::raw(" "),
                     Span::raw(target_text(request)),
                 ])];
@@ -413,7 +414,7 @@ impl Modal {
                     lines.push(Line::default());
                     for line in args.lines() {
                         for (_, segment) in segments(line, width) {
-                            lines.push(Line::styled(segment, theme.dim));
+                            lines.push(Line::styled(segment, theme.fg(Shade::Muted)));
                         }
                     }
                 }
@@ -421,7 +422,7 @@ impl Modal {
             }
             Modal::Plan { doc, .. } => doc.lines(u16::try_from(width).unwrap_or(u16::MAX), theme),
             Modal::Memory { topic, fact, .. } => {
-                let mut lines = vec![Line::styled(format!("[{topic}]"), theme.dim)];
+                let mut lines = vec![Line::styled(format!("[{topic}]"), theme.fg(Shade::Muted))];
                 lines.extend(wrap(fact, width).into_iter().map(Line::from));
                 lines
             }
@@ -435,7 +436,7 @@ impl Modal {
                     .iter()
                     .map(|(key, meaning)| {
                         Line::from(vec![
-                            Span::styled(format!("{key:<key_width$}"), theme.heading),
+                            Span::styled(format!("{key:<key_width$}"), theme.bold(Shade::Text)),
                             Span::raw(format!("  {meaning}")),
                         ])
                     })

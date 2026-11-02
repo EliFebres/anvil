@@ -15,18 +15,24 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use super::Level;
-use super::markdown::MarkdownDoc;
-use super::theme::Theme;
+use super::markdown::{MarkdownDoc, inline_lines};
+use super::theme::{Shade, Theme};
 use super::wrap::{segments, wrap};
 
 /// Lines a mouse wheel notch scrolls.
 pub const WHEEL_LINES: usize = 3;
 
-/// Spinner frames for running tools and checks, advanced by the tick.
-const FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
-
 /// Columns the expanded argument and result text are indented by.
 const DETAIL_INDENT: usize = 6;
+
+/// Columns the status token of a tool line is padded to.
+const STATUS_WIDTH: usize = 6;
+
+/// The label before the user's own messages.
+const YOU: &str = "you";
+
+/// The cursor drawn after streaming model text.
+const CURSOR: &str = "█";
 
 /// One thing that happened.
 #[derive(Debug)]
@@ -51,6 +57,10 @@ pub enum Entry {
         state: State,
         /// Which visit, from one.
         visit: u32,
+        /// When the state began.
+        started: Instant,
+        /// How long it ran, once the next state began.
+        ended: Option<Duration>,
     },
     /// The plan with its checkboxes, updated as the model ticks them.
     Plan(PlanBlock),
@@ -126,12 +136,18 @@ pub enum ToolStatus {
 pub struct PlanBlock {
     /// Where the plan lives.
     pub path: PathBuf,
+    /// The path as shown: relative to the project when inside it.
+    pub shown_path: String,
     /// The heading, if the plan has one.
     pub title: Option<String>,
     /// The checkbox items in order.
     pub items: Vec<PlanItem>,
     /// Lines that are neither heading nor item.
     pub notes: Vec<String>,
+    /// Distinct files the plan names in backticks.
+    pub files: usize,
+    /// Lines in the file.
+    pub lines: usize,
 }
 
 /// One checkbox line of the plan.
@@ -157,11 +173,11 @@ pub enum CheckStatus {
     },
 }
 
-/// An entry with its rendered lines cached for one width.
+/// An entry with its rendered lines cached for one width and dimming.
 #[derive(Debug)]
 struct Slot {
     entry: Entry,
-    cache: Option<(u16, Vec<Line<'static>>)>,
+    cache: Option<((u16, bool), Vec<Line<'static>>)>,
 }
 
 /// The entries and the view over them.
@@ -290,9 +306,12 @@ impl Transcript {
             LoopEvent::TurnFinished { .. } => self.close_model(),
             LoopEvent::StateEntered { state, visit } => {
                 self.close_model();
+                self.end_banner(now);
                 self.push(Entry::Banner {
                     state: *state,
                     visit: *visit,
+                    started: now,
+                    ended: None,
                 });
             }
             LoopEvent::ToolStarted { call } => {
@@ -314,6 +333,9 @@ impl Transcript {
             } => {
                 let index = self.ensure_tool(call_id, name, now);
                 if let Entry::Tool(tool) = &mut self.slots[index].entry {
+                    if tool.summary.is_empty() && tool.call.arguments_json == "{}" {
+                        tool.call.name = name.clone();
+                    }
                     let started = match tool.status {
                         ToolStatus::Running { started } => started,
                         ToolStatus::Finished { .. } | ToolStatus::Cancelled { .. } => now,
@@ -388,6 +410,7 @@ impl Transcript {
                 summary_path,
             } => {
                 self.close_model();
+                self.end_banner(now);
                 let text = format!("{status}\nsummary at {}", self.display_path(summary_path));
                 self.notice(text, Level::Warn);
             }
@@ -418,7 +441,8 @@ impl Transcript {
     /// * `path` - The plan file.
     /// * `text` - Its contents.
     pub fn set_plan(&mut self, path: PathBuf, text: &str) {
-        let block = parse_plan(path, text);
+        let shown_path = self.display_path(&path);
+        let block = parse_plan(path, shown_path, text);
         let existing = self
             .slots
             .iter()
@@ -572,7 +596,7 @@ impl Transcript {
                 Entry::User { text } => format!("> {text}"),
                 Entry::Model { doc, .. } => doc.text().to_owned(),
                 Entry::Tool(tool) => format!("{} {}", tool.call.name, tool.summary),
-                Entry::Banner { state, visit } => banner_title(*state, *visit),
+                Entry::Banner { state, visit, .. } => banner_title(*state, *visit),
                 Entry::Plan(plan) => plan
                     .items
                     .iter()
@@ -639,10 +663,11 @@ impl Transcript {
     ///
     /// * `frame` - The frame.
     /// * `area` - Where to draw.
-    /// * `theme` - Styles.
+    /// * `theme` - Styles, already dimmed when a prompt is open.
     /// * `tick` - The spinner frame counter.
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, tick: u64) {
-        let lines = self.lines(area.width, theme, tick);
+    /// * `dimmed` - Whether `theme` is the dimmed one, for the cache.
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, tick: u64, dimmed: bool) {
+        let lines = self.lines(area.width, theme, tick, dimmed);
         let height = usize::from(area.height);
         self.viewport = height;
         self.total = lines.len();
@@ -654,6 +679,21 @@ impl Transcript {
         };
         let visible: Vec<Line<'static>> = lines.into_iter().skip(self.top).take(height).collect();
         frame.render_widget(Paragraph::new(visible), area);
+    }
+
+    /// Marks the open banner as ended.
+    fn end_banner(&mut self, now: Instant) {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .rev()
+            .find(|slot| matches!(slot.entry, Entry::Banner { .. }))
+            && let Entry::Banner { started, ended, .. } = &mut slot.entry
+            && ended.is_none()
+        {
+            *ended = Some(now.saturating_duration_since(*started));
+            slot.cache = None;
+        }
     }
 
     /// Scrolls down, resuming following at the bottom.
@@ -731,16 +771,17 @@ impl Transcript {
 
     /// Every visible entry's lines, rendered or taken from the cache, with
     /// the selection highlighted and the layout recorded for clicks.
-    fn lines(&mut self, width: u16, theme: &Theme, tick: u64) -> Vec<Line<'static>> {
+    fn lines(&mut self, width: u16, theme: &Theme, tick: u64, dimmed: bool) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         let mut layout = Vec::new();
         let hidden_before = self.hidden_before;
         let selected = self.selected;
+        let key = (width, dimmed);
         for (index, slot) in self.slots.iter_mut().enumerate().skip(hidden_before) {
             let live = is_live(&slot.entry);
-            if live || slot.cache.as_ref().is_none_or(|(w, _)| *w != width) {
+            if live || slot.cache.as_ref().is_none_or(|(k, _)| *k != key) {
                 let lines = render_entry(&mut slot.entry, width, theme, tick);
-                slot.cache = Some((width, lines));
+                slot.cache = Some((key, lines));
             }
             let Some((_, lines)) = &slot.cache else {
                 continue;
@@ -779,30 +820,46 @@ fn is_live(entry: &Entry) -> bool {
 fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<Line<'static>> {
     let columns = usize::from(width).max(1);
     let mut lines = match entry {
-        Entry::User { text } => wrap(text, columns.saturating_sub(2).max(1))
-            .into_iter()
-            .enumerate()
-            .map(|(index, line)| {
-                let lead = if index == 0 { "> " } else { "  " };
-                Line::from(vec![
-                    Span::styled(lead, theme.user),
-                    Span::styled(line, theme.user),
-                ])
-            })
-            .collect::<Vec<_>>(),
-        Entry::Model { doc, .. } => doc.lines(width, theme),
-        Entry::Tool(tool) => render_tool(tool, columns, theme, tick),
-        Entry::Banner { state, visit } => {
-            let title = format!("── {} ", banner_title(*state, *visit));
-            let rule = "─".repeat(columns.saturating_sub(title.chars().count()));
-            vec![Line::styled(format!("{title}{rule}"), theme.state)]
+        Entry::User { text } => {
+            let lead_width = YOU.width() + 2;
+            wrap(text, columns.saturating_sub(lead_width).max(1))
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    let lead = if index == 0 {
+                        Span::styled(format!("{YOU}  "), theme.bold(Shade::Accent2))
+                    } else {
+                        Span::raw(" ".repeat(lead_width))
+                    };
+                    Line::from(vec![lead, Span::styled(line, theme.fg(Shade::Text))])
+                })
+                .collect::<Vec<_>>()
         }
+        Entry::Model { doc, open } => {
+            let mut lines = doc.lines(width, theme);
+            if *open {
+                append_cursor(&mut lines, columns, theme);
+            }
+            lines
+        }
+        Entry::Tool(tool) => render_tool(tool, columns, theme, tick),
+        Entry::Banner {
+            state,
+            visit,
+            ended,
+            ..
+        } => vec![render_banner(*state, *visit, *ended, columns, theme)],
         Entry::Plan(plan) => render_plan(plan, columns, theme),
         Entry::Check { command, status } => render_check(command, status, columns, theme, tick),
         Entry::Review { verdict } => match verdict {
-            ReviewVerdict::Approve => vec![Line::styled("review: approved", theme.dim)],
+            ReviewVerdict::Approve => {
+                vec![Line::styled("review: approved", theme.fg(Shade::Muted))]
+            }
             ReviewVerdict::Changes { items } => {
-                let mut lines = vec![Line::from("review: changes requested")];
+                let mut lines = vec![Line::styled(
+                    "review: changes requested",
+                    theme.fg(Shade::Secondary),
+                )];
                 for item in items {
                     lines.extend(
                         wrap(item, columns.saturating_sub(4).max(1))
@@ -810,7 +867,7 @@ fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<
                             .enumerate()
                             .map(|(index, line)| {
                                 let lead = if index == 0 { "  - " } else { "    " };
-                                Line::from(format!("{lead}{line}"))
+                                Line::styled(format!("{lead}{line}"), theme.fg(Shade::Text))
                             }),
                     );
                 }
@@ -819,9 +876,9 @@ fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<
         },
         Entry::Notice { text, level } => {
             let style = match level {
-                Level::Info => theme.dim,
-                Level::Warn => Style::default(),
-                Level::Error => theme.failure,
+                Level::Info => theme.fg(Shade::Muted),
+                Level::Warn => theme.fg(Shade::Secondary),
+                Level::Error => theme.fg(Shade::Danger),
             };
             wrap(text, columns)
                 .into_iter()
@@ -834,13 +891,13 @@ fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<
                 .enumerate()
                 .map(|(index, line)| {
                     let lead = if index == 0 { "? " } else { "  " };
-                    Line::styled(format!("{lead}{line}"), theme.dim)
+                    Line::styled(format!("{lead}{line}"), theme.fg(Shade::Muted))
                 })
                 .collect();
             lines.extend(
                 wrap(answer, columns.saturating_sub(2).max(1))
                     .into_iter()
-                    .map(|line| Line::styled(format!("  {line}"), theme.user)),
+                    .map(|line| Line::styled(format!("  {line}"), theme.fg(Shade::Secondary))),
             );
             lines
         }
@@ -849,55 +906,79 @@ fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<
     lines
 }
 
+/// Adds the block cursor after the last line of streaming text.
+fn append_cursor(lines: &mut Vec<Line<'static>>, columns: usize, theme: &Theme) {
+    let cursor = Span::styled(CURSOR, theme.fg(Shade::Text));
+    match lines.last_mut() {
+        Some(last) if last.width() < columns => last.spans.push(cursor),
+        _ => lines.push(Line::from(cursor)),
+    }
+}
+
+/// A state banner: the name, a rule to the edge and, once the state
+/// ended, how long it took.
+fn render_banner(
+    state: State,
+    visit: u32,
+    ended: Option<Duration>,
+    columns: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let title = format!("{} ", banner_title(state, visit));
+    let done = ended.map(|duration| format!(" done in {}", seconds_label(duration)));
+    let tail_width = done.as_ref().map_or(0, |done| done.width());
+    let rule = "─".repeat(columns.saturating_sub(title.width() + tail_width));
+    let mut spans = vec![
+        Span::styled(title, theme.bold(Shade::Accent)),
+        Span::styled(rule, theme.border()),
+    ];
+    if let Some(done) = done {
+        spans.push(Span::styled(done, theme.fg(Shade::Muted)));
+    }
+    Line::from(spans)
+}
+
 /// The collapsed tool line, plus the arguments and result when expanded.
 fn render_tool(tool: &ToolEntry, width: usize, theme: &Theme, tick: u64) -> Vec<Line<'static>> {
-    let spinner = FRAMES[usize::try_from(tick % 4).unwrap_or(0)];
-    let (status, status_style, duration, preview) = match &tool.status {
-        ToolStatus::Running { .. } => (spinner.to_owned(), theme.dim, String::new(), String::new()),
+    let _ = tick;
+    let (status, status_style, duration) = match &tool.status {
+        ToolStatus::Running { .. } => ("..".to_owned(), theme.fg(Shade::Accent), String::new()),
         ToolStatus::Finished {
-            outcome,
-            duration,
-            preview,
+            outcome, duration, ..
         } => {
             let style = if *outcome == ToolOutcome::Completed {
-                theme.dim
+                theme.fg(Shade::Success)
             } else {
-                theme.failure
+                theme.fg(Shade::Danger)
             };
             (
                 outcome_mark(*outcome).to_owned(),
                 style,
                 duration_label(*duration),
-                preview.clone(),
             )
         }
         ToolStatus::Cancelled { duration } => (
             "cancelled".to_owned(),
-            theme.dim,
+            theme.fg(Shade::Muted),
             duration_label(*duration),
-            String::new(),
         ),
     };
-    let head = format!("{} {}", tool_icon(&tool.call.name), tool.call.name);
-    let mut spans = vec![Span::raw(head.clone()), Span::raw(" ")];
-    let mut used = head.width() + 1;
+    let status_text = format!("{status:<STATUS_WIDTH$} ");
+    let name = format!("{}  ", tool.call.name);
+    let used = status_text.width() + name.width();
     let summary = fit_text(
         &tool.summary,
-        width.saturating_sub(used + status.width() + 4),
+        width.saturating_sub(used + duration.width() + 2),
     );
-    used += summary.width();
-    spans.push(Span::styled(summary, theme.dim));
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(status.clone(), status_style));
-    used += 2 + status.width();
+    let gap = width.saturating_sub(used + summary.width() + duration.width());
+    let mut spans = vec![
+        Span::styled(status_text, status_style),
+        Span::styled(name, theme.fg(Shade::Secondary)),
+        Span::styled(summary, theme.fg(Shade::Muted)),
+    ];
     if !duration.is_empty() {
-        spans.push(Span::styled(format!(" {duration}"), theme.dim));
-        used += 1 + duration.width();
-    }
-    let remaining = width.saturating_sub(used + 2);
-    if !preview.is_empty() && remaining >= 4 {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(fit_text(&preview, remaining), theme.dim));
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(duration, theme.fg(Shade::Muted)));
     }
     let mut lines = vec![Line::from(spans)];
     if !tool.expanded {
@@ -905,64 +986,153 @@ fn render_tool(tool: &ToolEntry, width: usize, theme: &Theme, tick: u64) -> Vec<
     }
     let indent = " ".repeat(DETAIL_INDENT);
     let inner = width.saturating_sub(DETAIL_INDENT).max(1);
-    lines.push(Line::styled("    args:", theme.dim));
+    lines.push(Line::styled("    args:", theme.fg(Shade::Muted)));
     let args = serde_json::from_str::<serde_json::Value>(&tool.call.arguments_json)
         .and_then(|value| serde_json::to_string_pretty(&value))
         .unwrap_or_else(|_| tool.call.arguments_json.clone());
     for line in args.lines() {
         for (_, segment) in segments(line, inner) {
-            lines.push(Line::from(format!("{indent}{segment}")));
+            lines.push(Line::styled(
+                format!("{indent}{segment}"),
+                theme.fg(Shade::Text),
+            ));
         }
     }
     match &tool.result {
         Some((text, is_error)) => {
             let (title, style) = if *is_error {
-                ("    result (error):", theme.failure)
+                ("    result (error):", theme.fg(Shade::Danger))
             } else {
-                ("    result:", theme.dim)
+                ("    result:", theme.fg(Shade::Muted))
             };
             lines.push(Line::styled(title, style));
             for line in text.lines() {
                 for (_, segment) in segments(line, inner) {
-                    lines.push(Line::from(format!("{indent}{segment}")));
+                    lines.push(Line::styled(
+                        format!("{indent}{segment}"),
+                        theme.fg(Shade::Text),
+                    ));
                 }
             }
         }
-        None => lines.push(Line::styled("    result: (not yet)", theme.dim)),
+        None => {
+            let preview = match &tool.status {
+                ToolStatus::Finished { preview, .. } if !preview.is_empty() => preview.as_str(),
+                _ => "(not yet)",
+            };
+            lines.push(Line::styled("    result:", theme.fg(Shade::Muted)));
+            for (_, segment) in segments(preview, inner) {
+                lines.push(Line::styled(
+                    format!("{indent}{segment}"),
+                    theme.fg(Shade::Text),
+                ));
+            }
+        }
     }
     lines
 }
 
-/// The plan: its title, the checkbox items and any notes.
+/// The plan in a bordered box: title, assumptions, numbered steps with
+/// their marks, and a summary line.
 fn render_plan(plan: &PlanBlock, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::styled(
+    let inner = width.saturating_sub(4).max(1);
+    let mut body = vec![Line::styled(
         plan.title.clone().unwrap_or_else(|| "Plan".to_owned()),
-        theme.heading,
+        theme.bold(Shade::Text),
     )];
-    for item in &plan.items {
-        let (lead, style) = if item.done {
-            ("  [x] ", theme.dim)
-        } else {
-            ("  [ ] ", Style::default())
-        };
-        lines.extend(
-            wrap(&item.text, width.saturating_sub(lead.len()).max(1))
-                .into_iter()
-                .enumerate()
-                .map(|(index, line)| {
-                    let prefix = if index == 0 { lead } else { "      " };
-                    Line::styled(format!("{prefix}{line}"), style)
-                }),
-        );
-    }
     for note in &plan.notes {
-        lines.extend(
-            wrap(note, width.saturating_sub(2).max(1))
-                .into_iter()
-                .map(|line| Line::styled(format!("  {line}"), theme.dim)),
-        );
+        body.extend(render_note(note, inner, theme));
     }
-    lines
+    let current = plan.items.iter().position(|item| !item.done);
+    for (index, item) in plan.items.iter().enumerate() {
+        let number = format!("{}. ", index + 1);
+        let (mark, mark_style) = if item.done {
+            ("[x]", theme.fg(Shade::Success))
+        } else if current == Some(index) {
+            ("[>]", theme.fg(Shade::Accent))
+        } else {
+            ("[ ]", theme.fg(Shade::Faint))
+        };
+        let lead_width = number.width() + mark.width() + 1;
+        let text = inline_lines(&item.text, inner.saturating_sub(lead_width).max(1), theme);
+        for (line_index, line) in text.into_iter().enumerate() {
+            let mut spans = if line_index == 0 {
+                vec![
+                    Span::styled(number.clone(), theme.fg(Shade::Faint)),
+                    Span::styled(mark, mark_style),
+                    Span::raw(" "),
+                ]
+            } else {
+                vec![Span::raw(" ".repeat(lead_width))]
+            };
+            spans.extend(line.spans);
+            body.push(Line::from(spans));
+        }
+    }
+    body.push(Line::styled(
+        format!(
+            "{} · {} · {}",
+            count_label(plan.files, "file"),
+            count_label(plan.lines, "line"),
+            plan.shown_path
+        ),
+        theme.fg(Shade::Faint),
+    ));
+    boxed(body, width, theme)
+}
+
+/// A plan note; an `Assumption:` line shows its label muted.
+fn render_note(note: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let lower = note.to_ascii_lowercase();
+    if lower.starts_with("assumption")
+        && let Some(colon) = note.find(':')
+    {
+        let (label, rest) = note.split_at(colon + 1);
+        let label = format!("{label} ");
+        return inline_lines(
+            rest.trim(),
+            width.saturating_sub(label.width()).max(1),
+            theme,
+        )
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let lead = if index == 0 {
+                Span::styled(label.clone(), theme.fg(Shade::Muted))
+            } else {
+                Span::raw(" ".repeat(label.width()))
+            };
+            let mut spans = vec![lead];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect();
+    }
+    wrap(note, width)
+        .into_iter()
+        .map(|line| Line::styled(line, theme.fg(Shade::Muted)))
+        .collect()
+}
+
+/// Wraps lines in a rounded border, padding each to the inner width.
+fn boxed(body: Vec<Line<'static>>, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(4).max(1);
+    let mut out = vec![Line::styled(
+        format!("╭{}╮", "─".repeat(width.saturating_sub(2))),
+        theme.border(),
+    )];
+    for line in body {
+        let pad = " ".repeat(inner.saturating_sub(line.width()));
+        let mut spans = vec![Span::styled("│ ", theme.border())];
+        spans.extend(line.spans);
+        spans.push(Span::styled(format!("{pad} │"), theme.border()));
+        out.push(Line::from(spans));
+    }
+    out.push(Line::styled(
+        format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
+        theme.border(),
+    ));
+    out
 }
 
 /// A project check: running, passed, or failed with its output tail.
@@ -973,20 +1143,33 @@ fn render_check(
     theme: &Theme,
     tick: u64,
 ) -> Vec<Line<'static>> {
+    let _ = tick;
     match status {
-        CheckStatus::Running => {
-            let spinner = FRAMES[usize::try_from(tick % 4).unwrap_or(0)];
-            vec![Line::styled(
-                format!("{spinner} running `{command}`"),
-                theme.dim,
-            )]
-        }
-        CheckStatus::Passed => vec![Line::styled(format!("ok `{command}`"), theme.dim)],
+        CheckStatus::Running => vec![Line::from(vec![
+            Span::styled(format!("{:<STATUS_WIDTH$} ", ".."), theme.fg(Shade::Accent)),
+            Span::styled(format!("check  {command}"), theme.fg(Shade::Secondary)),
+        ])],
+        CheckStatus::Passed => vec![Line::from(vec![
+            Span::styled(
+                format!("{:<STATUS_WIDTH$} ", "ok"),
+                theme.fg(Shade::Success),
+            ),
+            Span::styled(format!("check  {command}"), theme.fg(Shade::Secondary)),
+        ])],
         CheckStatus::Failed { tail } => {
-            let mut lines = vec![Line::styled(format!("failed `{command}`:"), theme.failure)];
+            let mut lines = vec![Line::from(vec![
+                Span::styled(
+                    format!("{:<STATUS_WIDTH$} ", "failed"),
+                    theme.fg(Shade::Danger),
+                ),
+                Span::styled(format!("check  {command}"), theme.fg(Shade::Secondary)),
+            ])];
             for line in tail.lines() {
                 for (_, segment) in segments(line, width.saturating_sub(4).max(1)) {
-                    lines.push(Line::styled(format!("    {segment}"), theme.dim));
+                    lines.push(Line::styled(
+                        format!("    {segment}"),
+                        theme.fg(Shade::Muted),
+                    ));
                 }
             }
             lines
@@ -994,13 +1177,16 @@ fn render_check(
     }
 }
 
-/// Parses `plan.md` into its title, checkbox items and notes.
-fn parse_plan(path: PathBuf, text: &str) -> PlanBlock {
+/// Parses `plan.md` into its title, checkbox items, notes and counts.
+fn parse_plan(path: PathBuf, shown_path: String, text: &str) -> PlanBlock {
     let mut block = PlanBlock {
         path,
+        shown_path,
         title: None,
         items: Vec::new(),
         notes: Vec::new(),
+        files: count_files(text),
+        lines: text.lines().count(),
     };
     for raw in text.lines() {
         let line = raw.trim();
@@ -1050,6 +1236,31 @@ fn parse_plan_item(line: &str) -> Option<PlanItem> {
     })
 }
 
+/// How many distinct backticked tokens look like file paths.
+fn count_files(text: &str) -> usize {
+    let mut files: Vec<&str> = Vec::new();
+    for (index, part) in text.split('`').enumerate() {
+        let inside = index % 2 == 1;
+        if inside
+            && !part.contains(char::is_whitespace)
+            && (part.contains('/') || part.contains('.'))
+            && !files.contains(&part)
+        {
+            files.push(part);
+        }
+    }
+    files.len()
+}
+
+/// `1 file` or `3 files`.
+fn count_label(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
 /// Cuts text to `width` columns with an ellipsis.
 fn fit_text(text: &str, width: usize) -> String {
     if text.width() <= width {
@@ -1072,17 +1283,6 @@ fn fit_text(text: &str, width: usize) -> String {
     out
 }
 
-/// A glyph for the tool kind; ASCII so every console font has it.
-fn tool_icon(name: &str) -> &'static str {
-    match name {
-        "shell" => "$",
-        "read_file" => "<",
-        "write_file" | "edit_file" => ">",
-        "glob" | "grep" => "/",
-        _ => "*",
-    }
-}
-
 /// `340ms`, `1.2s` or `2m05s`.
 fn duration_label(duration: Duration) -> String {
     let millis = duration.as_millis();
@@ -1092,6 +1292,16 @@ fn duration_label(duration: Duration) -> String {
         format!("{:.1}s", duration.as_secs_f64())
     } else {
         let secs = duration.as_secs();
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
+/// `41s` or `2m05s`, for how long a state ran.
+fn seconds_label(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
         format!("{}m{:02}s", secs / 60, secs % 60)
     }
 }
@@ -1111,11 +1321,11 @@ fn outcome_mark(outcome: ToolOutcome) -> &'static str {
     match outcome {
         ToolOutcome::Completed => "ok",
         ToolOutcome::Failed => "failed",
-        ToolOutcome::DeniedByRule => "denied by rule",
+        ToolOutcome::DeniedByRule => "denied",
         ToolOutcome::DeclinedByUser => "declined",
         ToolOutcome::Blocked => "blocked",
-        ToolOutcome::UnknownTool => "unknown tool",
-        ToolOutcome::InvalidArguments => "bad arguments",
+        ToolOutcome::UnknownTool => "unknown",
+        ToolOutcome::InvalidArguments => "bad args",
     }
 }
 
@@ -1183,7 +1393,7 @@ mod tests {
 
     fn joined(transcript: &mut Transcript, width: u16) -> String {
         transcript
-            .lines(width, &Theme::mono(), 0)
+            .lines(width, &Theme::mono(), 0, false)
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
@@ -1195,10 +1405,22 @@ mod tests {
         let mut transcript = fresh();
         transcript.append_text("hel");
         transcript.append_text("lo");
+        assert!(joined(&mut transcript, 40).starts_with("hello█"));
         transcript.close_model();
         transcript.append_text("again");
         assert_eq!(transcript.entries().len(), 2);
         assert_eq!(transcript.plain_text(), "hello\nagain");
+        assert!(joined(&mut transcript, 40).starts_with("hello\n"));
+    }
+
+    #[test]
+    fn user_lines_carry_the_you_label() {
+        let mut transcript = fresh();
+        transcript.push(Entry::User {
+            text: "run the tests please".to_owned(),
+        });
+        let text = joined(&mut transcript, 20);
+        assert_eq!(text, "you  run the tests\n     please\n");
     }
 
     #[test]
@@ -1224,9 +1446,9 @@ mod tests {
                 transcript.set_tool_result("c1", "a\nb".to_owned(), false, now);
             }
             assert_eq!(transcript.entries().len(), 1);
-            let collapsed = joined(&mut transcript, 60);
-            assert!(
-                collapsed.starts_with("$ shell ls  ok 340ms  a"),
+            let collapsed = joined(&mut transcript, 40);
+            assert_eq!(
+                collapsed, "ok     shell  ls                   340ms\n",
                 "{collapsed:?}"
             );
             assert!(!collapsed.contains("args:"));
@@ -1250,13 +1472,14 @@ mod tests {
         assert_eq!(transcript.entries().len(), 1);
         transcript.expand_all();
         let text = joined(&mut transcript, 60);
+        assert!(text.starts_with("failed shell"), "{text:?}");
         assert!(text.contains("result (error):"), "{text:?}");
     }
 
     #[test]
     fn plan_ticks_update_in_place() {
         let mut transcript = fresh();
-        let path = PathBuf::from("plan.md");
+        let path = PathBuf::from("/project/plan.md");
         transcript.set_plan(
             path.clone(),
             "# Plan\n\n1. [ ] first\n2. [ ] second\nnote\n",
@@ -1267,8 +1490,96 @@ mod tests {
         assert!(matches!(transcript.entries()[0], Entry::Plan(_)));
         let text = joined(&mut transcript, 40);
         assert!(
-            text.starts_with("Plan\n  [x] first\n  [ ] second\n  note"),
-            "{text:?}"
+            text.starts_with(
+                "╭──────────────────────────────────────╮\n\
+                 │ Plan                                 │\n\
+                 │ note                                 │\n\
+                 │ 1. [x] first                         │\n\
+                 │ 2. [>] second                        │\n\
+                 │ 0 files · 5 lines · plan.md          │\n\
+                 ╰──────────────────────────────────────╯"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn plan_marks_the_current_step() {
+        let theme = Theme::truecolor();
+        let mut transcript = fresh();
+        transcript.set_plan(
+            PathBuf::from("/project/plan.md"),
+            "# Plan\n\nAssumption: `src/main.rs` is the entry point.\n\n\
+             1. [x] Read `src/main.rs`\n2. [ ] Edit `src/lib.rs`\n3. [ ] Run `cargo test`\n",
+        );
+        let lines = transcript.lines(60, &theme, 0, false);
+        let marks: Vec<(String, Option<ratatui::style::Color>)> = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .filter(|span| span.content.starts_with('['))
+            .map(|span| (span.content.to_string(), span.style.fg))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![
+                ("[x]".to_owned(), Some(theme.success)),
+                ("[>]".to_owned(), Some(theme.accent)),
+                ("[ ]".to_owned(), Some(theme.faint)),
+            ]
+        );
+        let code = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .find(|span| span.content == "src/lib.rs")
+            .expect("inline code span");
+        assert_eq!(code.style.fg, Some(theme.accent2));
+        let text = lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("│ Assumption: src/main.rs is the entry point."),
+            "{text}"
+        );
+        assert!(text.contains("2 files · 7 lines · plan.md"), "{text}");
+    }
+
+    #[test]
+    fn banner_shows_done_in_when_the_state_ends() {
+        let now = Instant::now();
+        let theme = Theme::truecolor();
+        let mut transcript = fresh();
+        transcript.apply(
+            &LoopEvent::StateEntered {
+                state: State::Plan,
+                visit: 1,
+            },
+            now,
+        );
+        let open = transcript.lines(40, &theme, 0, false);
+        assert_eq!(
+            open[0].to_string(),
+            "PLAN ───────────────────────────────────"
+        );
+        assert_eq!(open[0].spans[0].style.fg, Some(theme.accent));
+        assert_eq!(open[0].spans[1].style.fg, Some(theme.border));
+        transcript.apply(
+            &LoopEvent::StateEntered {
+                state: State::Build,
+                visit: 1,
+            },
+            now + Duration::from_secs(41),
+        );
+        let lines = transcript.lines(40, &theme, 0, false);
+        assert_eq!(
+            lines[0].to_string(),
+            "PLAN ─────────────────────── done in 41s"
+        );
+        assert_eq!(lines[0].spans[2].style.fg, Some(theme.muted));
+        assert_eq!(
+            lines[2].to_string(),
+            "BUILD ──────────────────────────────────"
         );
     }
 
@@ -1291,7 +1602,7 @@ mod tests {
         );
         assert_eq!(transcript.entries().len(), 1);
         let text = joined(&mut transcript, 40);
-        assert_eq!(text, "failed `cargo test`:\n    boom\n");
+        assert_eq!(text, "failed check  cargo test\n    boom\n");
     }
 
     #[test]
@@ -1348,12 +1659,10 @@ mod tests {
         transcript.append_text("later");
         assert_eq!(transcript.entries().len(), 4);
         let text = joined(&mut transcript, 60);
+        assert!(text.contains("cancelled shell  sleep 9"), "{text:?}");
+        assert!(text.contains("340ms"), "{text:?}");
         assert!(
-            text.contains("$ shell sleep 9  cancelled 340ms"),
-            "{text:?}"
-        );
-        assert!(
-            text.contains("failed `cargo test`:\n    cancelled"),
+            text.contains("failed check  cargo test\n    cancelled"),
             "{text:?}"
         );
         assert!(
@@ -1370,6 +1679,19 @@ mod tests {
         transcript.notice("two", Level::Info);
         assert_eq!(transcript.entries().len(), 2);
         assert_eq!(joined(&mut transcript, 40), "two\n");
+    }
+
+    #[test]
+    fn dimmed_lines_are_cached_apart_from_bright_ones() {
+        let theme = Theme::truecolor();
+        let mut transcript = fresh();
+        transcript.notice("hello", Level::Error);
+        let bright = transcript.lines(40, &theme, 0, false);
+        let dim = transcript.lines(40, &theme.dimmed(), 0, true);
+        let bright_again = transcript.lines(40, &theme, 0, false);
+        assert_eq!(bright[0].style.fg, Some(theme.danger));
+        assert_eq!(dim[0].style.fg, Some(theme.muted));
+        assert_eq!(bright_again[0].style.fg, Some(theme.danger));
     }
 
     #[test]
@@ -1399,7 +1721,13 @@ mod tests {
         assert_eq!(duration_label(Duration::from_millis(340)), "340ms");
         assert_eq!(duration_label(Duration::from_millis(1_250)), "1.2s");
         assert_eq!(duration_label(Duration::from_secs(125)), "2m05s");
+        assert_eq!(seconds_label(Duration::from_millis(41_900)), "41s");
+        assert_eq!(seconds_label(Duration::from_secs(125)), "2m05s");
         assert_eq!(fit_text("abcdef", 4), "abc…");
         assert_eq!(fit_text("abc", 4), "abc");
+        assert_eq!(
+            count_files("see `a/b.rs`, `a/b.rs` and `c.txt` but not `cargo test`"),
+            2
+        );
     }
 }

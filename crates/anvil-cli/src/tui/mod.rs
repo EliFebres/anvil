@@ -32,6 +32,69 @@ pub use app::App;
 pub use bridge::{ResultTee, TuiGate, TuiPrompt, UiHandle, block_on_reply, wait_cancel};
 pub use theme::Theme;
 
+/// The permission mode shown in the status bar and cycled with Shift+Tab.
+///
+/// Only the label exists so far; the registry still runs in `ask` mode.
+// TODO(permission-modes): feed the chosen mode into anvil-core's permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionMode {
+    /// Ask before every call that is not allowed by a rule.
+    Ask,
+    /// Allow file edits without asking.
+    AcceptEdits,
+    /// Read-only tools only.
+    Plan,
+    /// Allow everything, as `--yes` does.
+    Bypass,
+}
+
+impl PermissionMode {
+    /// Every mode, in Shift+Tab order.
+    pub const ALL: [PermissionMode; 4] = [
+        PermissionMode::Ask,
+        PermissionMode::AcceptEdits,
+        PermissionMode::Plan,
+        PermissionMode::Bypass,
+    ];
+
+    /// The mode's name as `/mode` takes it.
+    ///
+    /// # Returns
+    ///
+    /// `ask`, `accept-edits`, `plan` or `bypass`.
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionMode::Ask => "ask",
+            PermissionMode::AcceptEdits => "accept-edits",
+            PermissionMode::Plan => "plan",
+            PermissionMode::Bypass => "bypass",
+        }
+    }
+
+    /// The mode after this one, wrapping around.
+    ///
+    /// # Returns
+    ///
+    /// The next mode.
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    /// Parses a mode name.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name, as `label` gives it.
+    ///
+    /// # Returns
+    ///
+    /// The mode, or `None` for any other text.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.label() == name)
+    }
+}
+
 /// What a session tells the UI about itself when it starts.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
@@ -40,14 +103,14 @@ pub struct SessionInfo {
     /// The project root: paths under it are shown relative to it, and the
     /// paths tools write resolve against it.
     pub cwd: PathBuf,
-    /// The coder's name and model, shown in the status line.
+    /// The coder's model id, shown in the status line.
     pub model: String,
     /// The coder's context window, for the context percentage.
     pub context_window: u32,
     /// The coder's price, for the cost estimate; `None` hides it.
     pub price: Option<Price>,
-    /// The permission mode label shown in the status line.
-    pub permission_mode: String,
+    /// The permission mode shown in the status line.
+    pub permission_mode: PermissionMode,
     /// The state shown in the prompt before the first event.
     pub initial_state: State,
     /// Every slash command Tab may complete, each starting with `/`.
@@ -137,6 +200,8 @@ pub enum UiMsg {
     },
     /// The chat mode changed (`/plan`, `/build`, `/review`).
     Mode(State),
+    /// The permission mode changed (`/mode`).
+    PermissionMode(PermissionMode),
     /// The coder changed (`/model`).
     Model(String),
     /// Whether a turn is running.
@@ -168,6 +233,8 @@ pub enum UiMsg {
 pub enum Input {
     /// A submitted line, trimmed, never empty.
     Line(String),
+    /// The user cycled the permission mode with Shift+Tab.
+    Mode(PermissionMode),
     /// The user left (`/quit`, Ctrl+C twice, or the UI closed).
     Quit,
 }

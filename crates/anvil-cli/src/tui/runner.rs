@@ -239,6 +239,9 @@ pub async fn run_ui(mut app: App, mut channels: UiChannels) -> io::Result<UiExit
                 Action::Submit(line) => {
                     let _ = channels.input.send(Input::Line(line));
                 }
+                Action::SetMode(mode) => {
+                    let _ = channels.input.send(Input::Mode(mode));
+                }
                 Action::CancelTurn => channels.cancel.send_modify(|n| *n = n.wrapping_add(1)),
                 Action::Quit => quit = true,
             }

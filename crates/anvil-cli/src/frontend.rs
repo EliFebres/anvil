@@ -21,8 +21,8 @@ use crate::render;
 use crate::terminal::{TerminalGate, TerminalPrompt};
 use crate::tui::runner::{UiChannels, run_ui};
 use crate::tui::{
-    App, Input, ResultTee, SessionInfo, SessionKind, Theme, TuiGate, TuiPrompt, UiExit, UiHandle,
-    UiMsg,
+    App, Input, PermissionMode, ResultTee, SessionInfo, SessionKind, Theme, TuiGate, TuiPrompt,
+    UiExit, UiHandle, UiMsg,
 };
 use crate::wiring::Wiring;
 
@@ -344,16 +344,20 @@ pub fn session_info(
     SessionInfo {
         kind,
         cwd: wiring.cwd.clone(),
-        model: model_label(wiring, coder),
+        model: model_id(wiring, coder),
         context_window: wiring.context_window(),
         price: provider.and_then(|provider| provider.price_per_mtoken),
-        permission_mode: if yes { "bypass" } else { "ask" }.to_owned(),
+        permission_mode: if yes {
+            PermissionMode::Bypass
+        } else {
+            PermissionMode::Ask
+        },
         initial_state,
         slash_commands,
     }
 }
 
-/// A provider's name with its model, as the status line shows it.
+/// A provider's model id, as the status line shows it.
 ///
 /// # Arguments
 ///
@@ -362,10 +366,10 @@ pub fn session_info(
 ///
 /// # Returns
 ///
-/// `name (model)`, or just the name when it is not configured.
-pub fn model_label(wiring: &Wiring, name: &str) -> String {
+/// The model id, or the name when the provider is not configured.
+pub fn model_id(wiring: &Wiring, name: &str) -> String {
     match wiring.config.providers.get(name) {
-        Some(provider) => format!("{name} ({})", provider.model),
+        Some(provider) => provider.model.clone(),
         None => name.to_owned(),
     }
 }

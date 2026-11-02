@@ -11,7 +11,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::theme::Theme;
+use super::theme::{Shade, Theme};
 use super::wrap::segments;
 
 /// A block of rendered markdown.
@@ -509,6 +509,37 @@ fn push_inline(inlines: &mut Vec<Inline>, text: &str, style: InlineStyle) {
     }
 }
 
+/// Renders one line of markdown inline text (code, strong, emphasis)
+/// wrapped at a width, for plan steps and the like.
+///
+/// # Arguments
+///
+/// * `text` - The text, one paragraph.
+/// * `width` - Columns.
+/// * `theme` - Styles.
+///
+/// # Returns
+///
+/// The lines, at least one.
+pub fn inline_lines(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let inlines = parse_blocks(text)
+        .into_iter()
+        .find_map(|block| match block {
+            Block::Paragraph { inlines }
+            | Block::Heading { inlines, .. }
+            | Block::Item { inlines, .. }
+            | Block::Quote { inlines } => Some(inlines),
+            Block::Code { .. } | Block::Rule => None,
+        })
+        .unwrap_or_else(|| {
+            vec![Inline {
+                text: text.to_owned(),
+                style: InlineStyle::Plain,
+            }]
+        });
+    wrap_inlines(&inlines, width, theme, false)
+}
+
 /// Renders one block at a width.
 ///
 /// # Arguments
@@ -526,7 +557,7 @@ pub fn render_block(block: &Block, width: u16, theme: &Theme) -> Vec<Line<'stati
         Block::Heading { level, inlines } => {
             let prefix = format!("{} ", "#".repeat(usize::from(*level)));
             let body = wrap_inlines(inlines, width.saturating_sub(prefix.len()), theme, true);
-            with_prefix(body, Span::styled(prefix, theme.dim))
+            with_prefix(body, Span::styled(prefix, theme.border()))
         }
         Block::Paragraph { inlines } => wrap_inlines(inlines, width, theme, false),
         Block::Item {
@@ -567,9 +598,9 @@ pub fn render_block(block: &Block, width: u16, theme: &Theme) -> Vec<Line<'stati
         } => render_code(lang, lines, *closed, width, theme),
         Block::Quote { inlines } => {
             let body = wrap_inlines(inlines, width.saturating_sub(2), theme, false);
-            with_prefix(body, Span::styled("│ ", theme.dim))
+            with_prefix(body, Span::styled("│ ", theme.border()))
         }
-        Block::Rule => vec![Line::styled("─".repeat(width), theme.dim)],
+        Block::Rule => vec![Line::styled("─".repeat(width), theme.border())],
     }
 }
 
@@ -591,21 +622,21 @@ fn render_code(
         "{title}{}╮",
         "─".repeat(width.saturating_sub(title.width() + 1))
     );
-    let mut out = vec![Line::styled(top, theme.dim)];
+    let mut out = vec![Line::styled(top, theme.border())];
     for line in lines {
         for (_, segment) in segments(line, inner) {
             let pad = " ".repeat(inner.saturating_sub(segment.width()));
             out.push(Line::from(vec![
-                Span::styled("│ ", theme.dim),
-                Span::styled(segment, theme.code),
-                Span::styled(format!("{pad} │"), theme.dim),
+                Span::styled("│ ", theme.border()),
+                Span::styled(segment, theme.fg(Shade::Accent2)),
+                Span::styled(format!("{pad} │"), theme.border()),
             ]));
         }
     }
     if closed {
         out.push(Line::styled(
             format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
-            theme.dim,
+            theme.border(),
         ));
     }
     out
@@ -638,16 +669,16 @@ fn wrap_inlines(
 ) -> Vec<Line<'static>> {
     let width = width.max(1);
     let base = if heading {
-        theme.heading
+        theme.bold(Shade::Text)
     } else {
-        Style::default()
+        theme.fg(Shade::Text)
     };
     let chars: Vec<(char, Style)> = inlines
         .iter()
         .flat_map(|inline| {
             let style = match inline.style {
                 InlineStyle::Plain => base,
-                InlineStyle::Code => base.patch(theme.code),
+                InlineStyle::Code => base.patch(theme.fg(Shade::Accent2)),
                 InlineStyle::Strong => base.add_modifier(Modifier::BOLD),
                 InlineStyle::Emphasis => base.add_modifier(Modifier::ITALIC),
             };

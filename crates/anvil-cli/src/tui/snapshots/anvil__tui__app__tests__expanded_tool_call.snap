@@ -2,7 +2,7 @@
 source: crates/anvil-cli/src/tui/app.rs
 expression: terminal.backend()
 ---
-"$ shell cargo test --all  ok 1.2s  running 3 tests                                                  "
+"ok     shell  cargo test --all                                                                  1.2s"
 "    args:                                                                                           "
 "      {                                                                                             "
 "        "command": "cargo test --all",                                                              "
@@ -24,5 +24,5 @@ expression: terminal.backend()
 "                                                                                                    "
 "                                                                                                    "
 "                                                                                                    "
-" BUILD · main (test-model)                  mode ask                   in 0 · out 0 · ctx 0% · 0:01 "
+" BUILD · main (test-model)       mode: ask  shift+tab to cycle        ctx 0% · in 0 · out 0 · 00:01 "
 "build >                                                                                             "
