@@ -95,6 +95,7 @@ dependencies = [
  "anvil-core",
  "anvil-memory",
  "anvil-telemetry",
+ "anvil-tui",
  "anvil-types",
  "anyhow",
  "chrono",
@@ -195,6 +196,15 @@ dependencies = [
  "toml",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "anvil-tui"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "ratatui",
+ "unicode-width",
 ]
 
 [[package]]

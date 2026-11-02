@@ -5,8 +5,8 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::theme::{Shade, Theme};
-use super::wrap::segments;
+use anvil_tui::wrap::segments;
+use anvil_tui::{Shade, Theme};
 
 /// The most visible lines the editor takes.
 pub const MAX_HEIGHT: u16 = 6;

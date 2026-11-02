@@ -17,18 +17,17 @@ use unicode_width::UnicodeWidthStr;
 use super::Level;
 use super::diff::{Diff, RowKind, diff};
 use super::markdown::{MarkdownDoc, inline_lines};
-use super::theme::{Shade, Theme};
 use super::welcome::Welcome;
-use super::wrap::{segments, wrap};
+use anvil_tui::layout::{count_label, duration_label, fit_text};
+use anvil_tui::widgets::STATUS_WIDTH;
+use anvil_tui::wrap::{segments, wrap};
+use anvil_tui::{Shade, Theme};
 
 /// Lines a mouse wheel notch scrolls.
 pub const WHEEL_LINES: usize = 3;
 
 /// Columns the expanded argument and result text are indented by.
 const DETAIL_INDENT: usize = 6;
-
-/// Columns the status token of a tool line is padded to.
-const STATUS_WIDTH: usize = 6;
 
 /// The label before the user's own messages.
 const YOU: &str = "you";
@@ -1424,50 +1423,6 @@ fn count_files(text: &str) -> usize {
         }
     }
     files.len()
-}
-
-/// `1 file` or `3 files`.
-fn count_label(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{n} {noun}s")
-    }
-}
-
-/// Cuts text to `width` columns with an ellipsis.
-fn fit_text(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-    if width < 2 {
-        return String::new();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > width - 1 {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push('…');
-    out
-}
-
-/// `340ms`, `1.2s` or `2m05s`.
-fn duration_label(duration: Duration) -> String {
-    let millis = duration.as_millis();
-    if millis < 1_000 {
-        format!("{millis}ms")
-    } else if millis < 60_000 {
-        format!("{:.1}s", duration.as_secs_f64())
-    } else {
-        let secs = duration.as_secs();
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    }
 }
 
 /// `41s` or `2m05s`, for how long a state ran.

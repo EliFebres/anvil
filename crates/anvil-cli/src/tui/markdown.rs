@@ -11,8 +11,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::theme::{Shade, Theme};
-use super::wrap::segments;
+use anvil_tui::wrap::segments;
+use anvil_tui::{Shade, Theme};
 
 /// A block of rendered markdown.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-//! Word wrapping by display width, shared by the transcript entries.
+//! Word wrapping by display width.
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 

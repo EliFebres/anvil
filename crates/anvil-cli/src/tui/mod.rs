@@ -16,10 +16,8 @@ pub mod markdown;
 pub mod modal;
 pub mod runner;
 pub mod status;
-pub mod theme;
 pub mod transcript;
 pub mod welcome;
-pub mod wrap;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -30,9 +28,9 @@ use anvil_types::Price;
 use crossterm::event::{KeyEvent, MouseEvent};
 use tokio::sync::{mpsc, oneshot};
 
+pub use anvil_tui::Theme;
 pub use app::App;
 pub use bridge::{ResultTee, TuiGate, TuiPrompt, UiHandle, block_on_reply, wait_cancel};
-pub use theme::Theme;
 
 /// The permission mode shown in the status bar and cycled with Shift+Tab.
 ///
