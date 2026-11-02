@@ -775,9 +775,12 @@ fn contains_any(haystack: &[u8], needles: &[String]) -> bool {
 /// Commits the working tree, untracked files included and ignored files not,
 /// without touching the real index, `HEAD` or any branch.
 ///
+/// The commit has no parent: a shallow clone (CI's checkout) cannot push its
+/// truncated history to another repository, and the selftest needs none.
+///
 /// # Returns
 ///
-/// The commit id: `HEAD` itself when the tree is clean.
+/// The commit id.
 async fn snapshot(repo_root: &Path, index: &Path) -> anyhow::Result<String> {
     let with_index = |args: &[&str]| {
         let mut command = Command::new("git");
@@ -797,15 +800,12 @@ async fn snapshot(repo_root: &Path, index: &Path) -> anyhow::Result<String> {
     run_git(with_index(&["add", "-A"])).await?;
     let tree = run_git(with_index(&["write-tree"])).await?;
     let head_tree = run_git(with_index(&["rev-parse", "HEAD^{tree}"])).await?;
-    if tree == head_tree {
-        return run_git(with_index(&["rev-parse", "HEAD"])).await;
+    if tree != head_tree {
+        println!("     | testing HEAD plus the working tree's uncommitted changes");
     }
-    println!("     | testing HEAD plus the working tree's uncommitted changes");
     run_git(with_index(&[
         "commit-tree",
         &tree,
-        "-p",
-        "HEAD",
         "-m",
         "selftest: the working tree",
     ]))
