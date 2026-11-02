@@ -19,8 +19,8 @@ pub mod skill;
 pub mod ticket;
 
 pub use config::{
-    AnvilConfig, LimitsConfig, LoadedConfig, PermissionRules, Price, Protocol, ProviderConfig,
-    Roles, StateBudget, TelemetryConfig, TicketsConfig, ToolsConfig, Unmatched,
+    AnvilConfig, LimitsConfig, LoadedConfig, PermissionRules, Price, PromptConfig, Protocol,
+    ProviderConfig, Roles, StateBudget, TelemetryConfig, TicketsConfig, ToolsConfig, Unmatched,
 };
 pub use error::{ConfigError, DotenvError, ValidationError};
 pub use factory_config::{

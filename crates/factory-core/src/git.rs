@@ -318,27 +318,63 @@ impl Git {
             .await
     }
 
-    /// Adds a worktree on a new branch, replacing a stale one of the same name.
+    /// Clones this repository into `path` on a new branch, replacing a stale
+    /// clone there.
+    ///
+    /// A clone, not a worktree: a worktree's `.git` is a file pointing back
+    /// into this repository by absolute path, which a container that mounts
+    /// only `path` cannot follow. `--local` hardlinks the objects, so the
+    /// clone is cheap and complete on its own. Its `remote` keeps this
+    /// repository's URL and remote-tracking branches, so pushing and diffing
+    /// against `<remote>/main` behave as they do here.
     ///
     /// # Arguments
     ///
-    /// * `path` - Where the worktree goes.
-    /// * `branch` - The branch to create.
-    /// * `start` - The revision it starts from.
-    pub async fn worktree_add(&self, path: &Path, branch: &str, start: &str) -> Result<()> {
-        self.run(&["worktree", "prune"]).await?;
-        if path.exists() {
-            self.worktree_remove(path).await?;
-        }
-        if self.try_rev_parse(branch).await.is_some() {
-            self.run(&["branch", "-D", "--quiet", branch]).await?;
-        }
-        let path_text = path.to_string_lossy().into_owned();
+    /// * `path` - Where the clone goes.
+    /// * `remote` - The remote whose URL and branches the clone takes over.
+    /// * `branch` - The branch to create and check out.
+    /// * `start` - The revision it starts from, e.g. `origin/main`.
+    ///
+    /// # Returns
+    ///
+    /// A handle on the clone.
+    ///
+    /// # Errors
+    ///
+    /// [`FactoryError::Io`] when a stale clone cannot be removed,
+    /// [`FactoryError::Git`] when any git step fails.
+    pub async fn clone_for_ticket(
+        &self,
+        path: &Path,
+        remote: &str,
+        branch: &str,
+        start: &str,
+    ) -> Result<Self> {
+        remove_clone(path)?;
+        let source = self.dir.to_string_lossy().into_owned();
+        let dest = path.to_string_lossy().into_owned();
         self.run(&[
-            "worktree", "add", "--quiet", "-b", branch, &path_text, start,
+            "clone",
+            "--local",
+            "--no-checkout",
+            "--quiet",
+            "--origin",
+            remote,
+            &source,
+            &dest,
         ])
         .await?;
-        Ok(())
+        let url = self.run(&["remote", "get-url", remote]).await?;
+        let clone = self.at(path);
+        clone.run(&["remote", "set-url", remote, &url]).await?;
+        let tracking = format!("+refs/remotes/{remote}/*:refs/remotes/{remote}/*");
+        clone
+            .run(&["fetch", "--quiet", "--no-tags", &source, &tracking])
+            .await?;
+        clone
+            .run(&["checkout", "--quiet", "-b", branch, start])
+            .await?;
+        Ok(clone)
     }
 
     /// Adds a worktree that checks out an existing branch, tracking its remote.
@@ -365,21 +401,23 @@ impl Git {
             .await?;
         Ok(())
     }
+}
 
-    /// Removes a worktree and its folder.
-    pub async fn worktree_remove(&self, path: &Path) -> Result<()> {
-        let path_text = path.to_string_lossy().into_owned();
-        self.run(&["worktree", "remove", "--force", &path_text])
-            .await?;
-        Ok(())
-    }
-
-    /// Deletes a local branch, if it exists.
-    pub async fn delete_local_branch(&self, branch: &str) -> Result<()> {
-        if self.try_rev_parse(branch).await.is_some() {
-            self.run(&["branch", "-D", "--quiet", branch]).await?;
+/// Deletes a ticket's clone, if there is one.
+///
+/// # Arguments
+///
+/// * `path` - The clone's folder.
+///
+/// # Errors
+///
+/// [`FactoryError::Io`] when the folder exists but cannot be removed.
+pub fn remove_clone(path: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            Err(FactoryError::io("removing", path, error))
         }
-        Ok(())
+        _ => Ok(()),
     }
 }
 

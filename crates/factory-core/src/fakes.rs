@@ -409,6 +409,19 @@ impl ScriptedRun {
         }
     }
 
+    /// A run that stops early with `reason` and writes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `reason` - What anvil printed after `incomplete:`.
+    /// * `tokens` - Input tokens used.
+    pub fn incomplete(reason: &str, tokens: u64) -> Self {
+        let mut run = Self::done(&[], tokens);
+        run.outcome.status = ImplementerStatus::Incomplete(reason.to_owned());
+        run.outcome.output_tail = format!("incomplete: {reason}");
+        run
+    }
+
     /// A run that writes a skill file: the default happy path.
     pub fn default_edit() -> Self {
         Self::done(

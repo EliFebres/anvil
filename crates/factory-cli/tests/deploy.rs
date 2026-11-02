@@ -44,6 +44,29 @@ fn the_factory_profile_matches_factory_toml_and_locks_permissions() {
         anvil.providers[reviewer].base_url, anvil.providers[&anvil.roles.coder].base_url,
         "and sits on a different base URL"
     );
+    let budgets = [
+        ("plan", &anvil.limits.plan, 400_000),
+        ("build", &anvil.limits.build, 1_500_000),
+        ("review", &anvil.limits.review, 300_000),
+        ("optimize", &anvil.limits.optimize, 200_000),
+        ("verify", &anvil.limits.verify, 300_000),
+    ];
+    for (state, budget, tokens) in budgets {
+        assert_eq!(budget.max_tokens, tokens, "[limits.{state}] max_tokens");
+    }
+    let states: u64 = budgets.iter().map(|(_, budget, _)| budget.max_tokens).sum();
+    assert!(
+        states <= anvil.limits.session_tokens,
+        "the per-state budgets fit inside the session cap"
+    );
+    assert!(
+        anvil
+            .prompt
+            .notes
+            .iter()
+            .any(|note| note.contains("no pipes")),
+        "the profile tells the model its shell rules"
+    );
     let rules = anvil.permissions.expect("the profile sets permissions");
     assert_eq!(rules.unmatched, Some(Unmatched::Deny));
     for tool in [

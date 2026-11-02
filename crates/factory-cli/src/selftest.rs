@@ -158,6 +158,10 @@ async fn pipeline(
         world.configure(&factory, &anvil_bin, options).await,
     )?;
     steps.report(
+        "sandbox git: git status and git grep inside the container",
+        world.sandbox_git(&parts).await,
+    )?;
+    steps.report(
         "pipeline: claim, sandbox, gate A, gate B (skipped), gate C, push, merge",
         world.work(&parts, ticket.id).await,
     )?;
@@ -427,6 +431,48 @@ impl World {
             probe: Arc::new(factory_core::NoProbe),
         })?;
         Ok(Parts { service, sandbox })
+    }
+
+    /// Clones the repository the way the worker does and runs git inside the
+    /// sandbox: anvil's session diff, the reviewer's diff and `just check`
+    /// all need `/work` to be a complete repository.
+    async fn sandbox_git(&self, parts: &Parts) -> anyhow::Result<()> {
+        let name = "selftest-git";
+        let path = self.home().work_dir(name);
+        let repo = Git::new(&self.clone_dir());
+        repo.clone_for_ticket(
+            &path,
+            REMOTE,
+            &format!("factory/{name}"),
+            &format!("{REMOTE}/main"),
+        )
+        .await?;
+        let result = self.run_git_in_sandbox(parts, &path).await;
+        parts.sandbox.stop_proxy();
+        factory_core::git::remove_clone(&path)?;
+        let _ = std::fs::remove_dir_all(self.home().ticket_home(name));
+        result
+    }
+
+    /// `git status` and a `git grep` that must match, inside the sandbox.
+    async fn run_git_in_sandbox(&self, parts: &Parts, path: &Path) -> anyhow::Result<()> {
+        parts.sandbox.prepare(path).await?;
+        let programs: [&[&str]; 2] = [
+            &["git", "status", "--porcelain"],
+            &["git", "grep", "-n", "-I", "anvil", "--", "README.md"],
+        ];
+        for program in programs {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let outcome = parts.sandbox.run_check(path, program, deadline).await?;
+            if !outcome.passed {
+                bail!(
+                    "`{}` failed inside the sandbox:\n{}",
+                    program.join(" "),
+                    outcome.output_tail
+                );
+            }
+        }
+        Ok(())
     }
 
     /// One pass of the service; it must merge the selftest ticket.

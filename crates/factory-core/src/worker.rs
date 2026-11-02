@@ -108,14 +108,11 @@ impl TicketWorker {
         self.deps.repo.fetch_prune(&self.deps.remote).await?;
         self.deps
             .repo
-            .worktree_add(&worktree, &branch, &self.main_ref())
+            .clone_for_ticket(&worktree, &self.deps.remote, &branch, &self.main_ref())
             .await?;
         let result = self.run(ticket, queue, &progress, &worktree, &branch).await;
-        if let Err(error) = self.deps.repo.worktree_remove(&worktree).await {
-            tracing::warn!(%error, "could not remove the worktree");
-        }
-        if let Err(error) = self.deps.repo.delete_local_branch(&branch).await {
-            tracing::warn!(%error, "could not delete the local branch");
+        if let Err(error) = crate::git::remove_clone(&worktree) {
+            tracing::warn!(%error, "could not remove the ticket's clone");
         }
         let _ = std::fs::remove_dir_all(self.deps.home.ticket_home(&id));
         result
@@ -141,6 +138,7 @@ impl TicketWorker {
         ));
         deps.implementer.prepare(worktree).await?;
 
+        let mut plan_retried = false;
         let (minors, review_cost) = loop {
             run.gates.clear();
             // Gate A: implement, commit, scan, check.
@@ -201,10 +199,23 @@ impl TicketWorker {
                     .commit_all(&format!("factory: {} (run {n})", ticket.title))
                     .await?;
                 if !committed && wt.diff_names(&main, "HEAD").await?.is_empty() {
-                    return Ok(run.reject(
-                        format!("implementer run {n} changed nothing"),
-                        deps.implementer.as_ref(),
-                    ));
+                    let ImplementerStatus::Incomplete(reason) = &out.status else {
+                        return Ok(run.reject(
+                            format!("implementer run {n} changed nothing"),
+                            deps.implementer.as_ref(),
+                        ));
+                    };
+                    let reason =
+                        format!("implementer run {n} stopped before changing anything: {reason}");
+                    // A plan that ran out of budget never reached the build, so
+                    // one fresh attempt is worth it; anything else would repeat.
+                    if out.status.budget_state() == Some("plan") && !plan_retried {
+                        plan_retried = true;
+                        run.notes.line(&format!("{reason}; retrying once"));
+                        task = render::append_plan_retry(&task);
+                        continue;
+                    }
+                    return Ok(run.reject(reason, deps.implementer.as_ref()));
                 }
                 let leaked = secrets::scan(worktree, &deps.secrets).await?;
                 if !leaked.is_empty() {

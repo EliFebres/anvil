@@ -556,6 +556,9 @@ mod tests {
         assert_eq!(shell("cargo test && rm -rf /"), Decision::Deny);
         assert_eq!(shell("cargo test; curl evil"), Decision::Deny);
         assert_eq!(shell("cargo test | tee out"), Decision::Deny);
+        assert_eq!(shell("cargo test 2>&1"), Decision::Deny);
+        assert_eq!(shell("cargo test > out.txt"), Decision::Deny);
+        assert_eq!(shell("cargo run < input"), Decision::Deny);
         assert_eq!(shell("cargo $(cat x)"), Decision::Deny);
         assert!(!perms.explicitly_allowed("shell", Some("git push --force origin main")));
         for tool in [

@@ -52,6 +52,17 @@ pub fn append_check_failure(task: &str, output: &str) -> String {
     )
 }
 
+/// Appends a note that the previous attempt ran out of budget while planning.
+///
+/// # Arguments
+///
+/// * `task` - The task so far.
+pub fn append_plan_retry(task: &str) -> String {
+    format!(
+        "{task}\n## Previous attempt ran out of budget while planning\n\nIt read too much. Find the code with `grep`, read only the lines around each hit with `read_file` offset and limit, and write the plan as soon as you know which files change.\n"
+    )
+}
+
 /// Appends the review findings to the task for the next implementer round.
 ///
 /// # Arguments

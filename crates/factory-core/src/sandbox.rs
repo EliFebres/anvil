@@ -581,8 +581,23 @@ impl Sandbox {
         Ok((wrapper, home))
     }
 
-    /// Runs a program in the worktree and reports pass or fail with its output tail.
-    async fn run_check(
+    /// Runs a program in the worktree, inside the container when there is
+    /// one, and reports pass or fail with its output tail.
+    ///
+    /// # Arguments
+    ///
+    /// * `worktree` - The ticket's clone, mounted as `/work`.
+    /// * `program` - The program and its arguments.
+    /// * `deadline` - When to kill it.
+    ///
+    /// # Returns
+    ///
+    /// Passed when it exited 0, with the tail of its output.
+    ///
+    /// # Errors
+    ///
+    /// When the ticket home cannot be written or the program cannot start.
+    pub async fn run_check(
         &self,
         worktree: &Path,
         program: &[&str],
@@ -659,7 +674,8 @@ impl Implementer for Sandbox {
             } else {
                 match exit.code {
                     Some(0) => ImplementerStatus::Done,
-                    Some(2) => ImplementerStatus::Incomplete(incomplete_reason(&exit.output)),
+                    // 3 is "incomplete after a denied tool call": still a stop with a reason.
+                    Some(2 | 3) => ImplementerStatus::Incomplete(incomplete_reason(&exit.output)),
                     code => ImplementerStatus::Failed { code },
                 }
             };
@@ -1205,20 +1221,29 @@ fn combine(out: &[u8], err: &[u8]) -> String {
     text
 }
 
-/// The last lines of output.
+/// The last lines of output, with each tool call collapsed to one line.
 fn tail(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
+    let collapsed = crate::tail::collapse(text);
+    let lines: Vec<&str> = collapsed.lines().collect();
     let start = lines.len().saturating_sub(TAIL_LINES);
     lines[start..].join("\n")
 }
 
-/// The reason anvil printed on its last `incomplete:` line, or `unknown`.
+/// The reason anvil printed on its last `incomplete:` or
+/// `incomplete after a denied tool call:` line, or `unknown`.
 fn incomplete_reason(output: &str) -> String {
+    const DENIED: &str = "incomplete after a denied tool call:";
     output
         .lines()
         .rev()
-        .find_map(|line| line.trim().strip_prefix("incomplete:"))
-        .map(|reason| reason.trim().to_owned())
+        .find_map(|line| {
+            let line = line.trim();
+            if let Some(reason) = line.strip_prefix(DENIED) {
+                return Some(format!("{} (after a denied tool call)", reason.trim()));
+            }
+            line.strip_prefix("incomplete:")
+                .map(|reason| reason.trim().to_owned())
+        })
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
@@ -1518,6 +1543,12 @@ mod tests {
             "token budget"
         );
         assert_eq!(incomplete_reason("nothing"), "unknown");
+        assert_eq!(
+            incomplete_reason(
+                "x\nincomplete after a denied tool call: the build state used its token budget\n"
+            ),
+            "the build state used its token budget (after a denied tool call)"
+        );
         assert_eq!(combine(b"a", b"b"), "a\nb");
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("plain-arg:1"), "plain-arg:1");
