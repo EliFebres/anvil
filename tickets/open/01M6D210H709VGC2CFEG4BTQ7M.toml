@@ -1,0 +1,18 @@
+id = "01M6D210H709VGC2CFEG4BTQ7M"
+created_at = "2026-11-02T02:39:20.649741900Z"
+kind = "bug"
+title = "Permission friction on `edit_file`"
+symptom = "Anvil asked the user for permission to use the edit_file tool five times in a single session, which telemetry flagged as permission friction. The signal came with no supporting event records, so it is unclear whether these were separate first-time prompts or re-prompts after the user had already granted broader approval. Either way, the user had to answer the same question about the same tool repeatedly, interrupting the work. If a broader approval was already given and anvil asked again anyway, that is a bug in how approvals are remembered."
+repro = "Take a fresh repository with several small text files and ask anvil to make a one-line change in each of five files. At the first edit_file prompt, choose the broadest approval offered, then count how many more prompts appear."
+spec = "1) The edit_file permission prompt should offer three choices: 'allow once', 'allow edit_file for the rest of this session (within the current workspace root)', and 'deny'. The session-scoped approval is held in memory for the session and stops further edit_file prompts for targets inside the workspace root. Edits outside the root still prompt. 2) Add a CLI flag `--allow-tool <name>` that can be repeated, plus a matching config key `permissions.allow_tools` (a list of tool names), to pre-approve tools for a session. 3) Fix any path where a session-scoped approval is lost or ignored, for example after a sub-agent or tool retry, after a context compaction, or because the target path is normalized differently, so that the next edit_file call does not prompt again. 4) Emit a content-free telemetry event for each permission decision with the tool name, the scope chosen (once, session, or deny), and whether an existing approval covered the call. This lets future permission_friction signals separate expected prompts from re-prompt bugs."
+acceptance = [
+    "After the user picks 'allow for this session' on the first edit_file prompt, later edit_file calls inside the workspace root in that session complete without any further prompt.",
+    "An edit_file call that targets a location outside the workspace root still prompts, even after a session-scoped approval.",
+    "Starting anvil with `--allow-tool edit_file`, or with the equivalent config entry, produces zero edit_file prompts in that session.",
+    "A session-scoped approval still applies after a context compaction and after a retried tool call, which a regression test verifies.",
+    "Each permission decision emits a telemetry event with the tool name, the chosen scope, and whether an existing approval covered the call, and the event contains no paths or file contents.",
+]
+evidence = ["01M6D1YE3BHKQKQZ2KD6ZNW135"]
+priority = "p2"
+status = "open"
+origin = "cli"
