@@ -227,6 +227,7 @@ async fn a_ticket_goes_from_open_to_merged_against_a_bare_repository() {
                 .single()
                 .expect("valid time")
         }),
+        probe: Arc::new(factory_core::NoProbe),
     })
     .expect("service");
 

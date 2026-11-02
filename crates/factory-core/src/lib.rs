@@ -13,11 +13,13 @@
 //! ports in [`ports`]; `factory-cli` wires the real implementations and the
 //! tests use [`fakes`].
 
+pub mod board;
 pub mod budget;
 pub mod error;
 pub mod fakes;
 pub mod git;
 pub mod github;
+pub mod history;
 pub mod notify;
 pub mod paths;
 pub mod ports;
@@ -28,10 +30,12 @@ pub mod sandbox;
 pub mod secrets;
 pub mod service;
 pub mod status;
+pub mod tail;
 pub mod tickets;
 pub mod usage;
 pub mod worker;
 
+pub use board::{Board, Live, Stage, Status, StatusReader, write_atomic};
 pub use budget::{Budget, BudgetExceeded, MAX_GATE_A_ATTEMPTS, MAX_REVIEW_ROUNDS};
 pub use error::{FactoryError, Result};
 pub use git::Git;
@@ -40,13 +44,14 @@ pub use notify::{Event, LogNotifier, Notifier, WebhookNotifier};
 pub use paths::FactoryHome;
 pub use ports::{
     BoxFuture, CheckOutcome, CiStatus, CodeHost, EvalGate, EvalGateReport, GateB, Implementer,
-    ImplementerOutcome, ImplementerStatus, InlineComment, MinorFinding, NEEDS_HUMAN_LABEL, Outcome,
-    Progress, PullRequest, ReviewInput, ReviewReport, ReviewSwarm, Tokens, Worker,
+    ImplementerOutcome, ImplementerStatus, InlineComment, MinorFinding, NEEDS_HUMAN_LABEL, NoProbe,
+    Outcome, Probe, Progress, ProgressEvent, PullRequest, ReviewInput, ReviewReport, ReviewSwarm,
+    Tokens, Worker,
 };
 pub use protected::{Held, ProtectedPaths, dependency_additions};
 pub use sandbox::{
-    CommandRunner, Exit, Invocation, Sandbox, SandboxConfig, SystemRunner, build_command,
-    ensure_cache_volume, preflight, resolve_anvil_bin,
+    CommandRunner, Exit, Invocation, Sandbox, SandboxConfig, SandboxOptions, SystemRunner,
+    build_command, check_image, ensure_cache_volume, ensure_volume, preflight, resolve_anvil_bin,
 };
 pub use service::{Clock, ERRORS_BEFORE_PAUSE, Service, ServiceDeps, Tick, hostname, system_clock};
 pub use status::{InProgress, KEPT_OUTCOMES, OutcomeKind, OutcomeRecord, ServiceState};

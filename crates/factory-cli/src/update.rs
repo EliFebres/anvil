@@ -123,6 +123,11 @@ pub fn update(options: &UpdateOptions) -> anyhow::Result<()> {
         run(&step, root)?;
     }
     verify_static(root)?;
+    // The freshly built factory runs the selftest, so the code under test is
+    // the code the service will run; on a failure the unit is not started.
+    run(&selftest_step(), root).context(
+        "the selftest failed, so the service stays stopped; fix the failing step and run `factory update` again",
+    )?;
 
     println!("== service: install and start");
     for line in install(&InstallOptions {
@@ -196,6 +201,15 @@ pub fn rebuild_steps(factory: &FactoryConfig, have_musl_gcc: bool) -> Vec<Step> 
         ],
     ));
     steps
+}
+
+/// The selftest the update runs after the rebuild, with the new binary.
+pub fn selftest_step() -> Step {
+    Step::new(
+        "selftest: the worker pipeline against a local bare repository",
+        "target/release/factory",
+        &["selftest"],
+    )
 }
 
 /// Waits until the state file shows no ticket in progress.
@@ -283,9 +297,28 @@ fn run(step: &Step, dir: &Path) -> anyhow::Result<()> {
 /// When `ldd` cannot run, or the binary links shared libraries.
 pub fn verify_static(root: &Path) -> anyhow::Result<()> {
     println!("== verify: ldd {DEFAULT_ANVIL_BIN}");
-    let binary = root.join(DEFAULT_ANVIL_BIN);
+    let text = verify_static_binary(&root.join(DEFAULT_ANVIL_BIN))?;
+    print!("{text}");
+    Ok(())
+}
+
+/// Runs `ldd` on one binary and fails unless it is static; the check behind
+/// [`verify_static`], for any path.
+///
+/// # Arguments
+///
+/// * `binary` - The executable to check.
+///
+/// # Returns
+///
+/// `ldd`'s output.
+///
+/// # Errors
+///
+/// When `ldd` cannot run, or the binary links shared libraries.
+pub fn verify_static_binary(binary: &Path) -> anyhow::Result<String> {
     let out = Command::new("ldd")
-        .arg(&binary)
+        .arg(binary)
         .stdin(Stdio::null())
         .output()
         .context("running ldd")?;
@@ -294,8 +327,7 @@ pub fn verify_static(root: &Path) -> anyhow::Result<()> {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    print!("{text}");
-    static_verdict(&text).map_err(|libraries| {
+    static_verdict(&text).map(|()| text).map_err(|libraries| {
         anyhow::anyhow!(
             "{} is not static; it links {libraries}, which the worker image cannot provide",
             binary.display()

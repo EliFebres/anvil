@@ -26,6 +26,8 @@ pub struct Usage {
     pub tokens: Tokens,
     /// Cost in USD; `None` when a provider used has no price.
     pub cost_usd: Option<f64>,
+    /// Context tokens sent on each turn (input plus cached), oldest first.
+    pub context_per_turn: Vec<u64>,
 }
 
 /// The fields of a telemetry record this module reads.
@@ -61,11 +63,14 @@ struct RecordTokens {
 pub fn read(worktree: &Path, providers: &BTreeMap<String, ProviderConfig>) -> Usage {
     let dir = worktree.join(TELEMETRY_DIR);
     let mut per_provider: BTreeMap<String, Tokens> = BTreeMap::new();
+    let mut context_per_turn = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Usage::default();
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    // Files are named by date, so name order is time order.
+    let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+    for path in paths {
         let is_log = path.extension().is_some_and(|ext| ext == "jsonl")
             && path.file_name().is_some_and(|name| name != SIGNALS_FILE);
         if !is_log {
@@ -84,6 +89,9 @@ pub fn read(worktree: &Path, providers: &BTreeMap<String, ProviderConfig>) -> Us
             let Some(tokens) = record.tokens else {
                 continue;
             };
+            if record.event == "turn" {
+                context_per_turn.push(tokens.input + tokens.cached);
+            }
             let provider = record.provider.unwrap_or_else(|| "unknown".to_owned());
             per_provider.entry(provider).or_default().add(Tokens {
                 input: tokens.input,
@@ -95,6 +103,7 @@ pub fn read(worktree: &Path, providers: &BTreeMap<String, ProviderConfig>) -> Us
     let mut usage = Usage {
         tokens: Tokens::default(),
         cost_usd: Some(0.0),
+        context_per_turn,
     };
     for (provider, tokens) in &per_provider {
         usage.tokens.add(*tokens);
@@ -162,6 +171,7 @@ mod tests {
             (usage.cost_usd.expect("priced") - 24.0).abs() < 1e-9,
             "{usage:?}"
         );
+        assert_eq!(usage.context_per_turn, vec![1_000_000]);
 
         let unpriced = read(temp.path(), &BTreeMap::new());
         assert_eq!(unpriced.tokens.total(), 2_000_000);

@@ -135,6 +135,15 @@ impl Theme {
         Self::from_colors(Depth::Mono, |_| Color::Reset)
     }
 
+    /// How many colors this theme draws with.
+    ///
+    /// # Returns
+    ///
+    /// The depth; [`Depth::Mono`] means shapes must carry the meaning.
+    pub fn depth(&self) -> Depth {
+        self.depth
+    }
+
     /// The style for a foreground role.
     ///
     /// # Arguments

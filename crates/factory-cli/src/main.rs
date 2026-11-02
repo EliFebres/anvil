@@ -10,7 +10,9 @@ use anvil_types::{ContainerRuntime, dotenv};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use factory_cli::install::{InstallOptions, config_home, install};
+use factory_cli::selftest::{SelftestOptions, selftest};
 use factory_cli::update::{UpdateOptions, update};
+use factory_cli::watch::{WatchOptions, watch};
 use factory_cli::{logging, wiring};
 use factory_core::{FactoryHome, ServiceState, SystemRunner, Tick, preflight, service};
 
@@ -37,6 +39,20 @@ enum Command {
     },
     /// Print the queue, the ticket in progress and the last 10 outcomes.
     Status,
+    /// Show a full-screen dashboard of what the service is doing, refreshed every 2s.
+    ///
+    /// Reads ~/.factory/status.json, which the service writes, so it also
+    /// works over ssh. `p` pauses after the current ticket, `r` resumes, `q`
+    /// quits.
+    Watch {
+        /// Print the screen once as plain text and exit.
+        #[arg(long)]
+        once: bool,
+        /// Show this status file instead of the service's; the pause keys then
+        /// only change the screen.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+    },
     /// Stop taking tickets after the current one; `factory resume` undoes it.
     Pause {
         /// Why, shown by `factory status`.
@@ -58,6 +74,24 @@ enum Command {
         /// Stop at once; a ticket in progress stays claimed on factory/state.
         #[arg(long)]
         now: bool,
+    },
+    /// Run the whole worker pipeline once on this machine, against a local bare repository.
+    ///
+    /// Uses the real worker image, the resolved [worker] anvil_bin, the egress
+    /// proxy (empty allowlist), worktrees, Gate A, Gate C and the merge, with
+    /// a scripted provider instead of models and a bare repository instead of
+    /// GitHub. Prints PASS or FAIL per step; exits 1 at the first failure.
+    /// `factory update` runs it before starting the service again.
+    Selftest {
+        /// Gate A's command line.
+        #[arg(long, default_value = "true")]
+        check: String,
+        /// Keep the temp folder for inspection.
+        #[arg(long)]
+        keep: bool,
+        /// Run anvil and Gate A on the host instead of in the container (tests only).
+        #[arg(long, hide = true)]
+        no_container: bool,
     },
     /// Say whether an environment variable is set after the env files load, and where it came from.
     ///
@@ -117,12 +151,31 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
         check_env_mode(&factory_home.env_file())?;
     }
     dotenv::load(&env_files)?;
+    // The selftest keeps its log in its own temp home, away from the service's.
     let _log_guard = factory_home
         .as_ref()
+        .filter(|_| !matches!(cli.command, Command::Selftest { .. }))
         .and_then(|factory_home| logging::init(&factory_home.logs_dir()));
     match cli.command {
         Command::Env { name } => {
             println!("{}", describe_variable(&name, &env_files)?);
+            Ok(0)
+        }
+        Command::Selftest {
+            check,
+            keep,
+            no_container,
+        } => {
+            let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
+            let repo_root = runtime.block_on(wiring::repo_root(&cwd));
+            let options = SelftestOptions {
+                repo_root,
+                home,
+                check,
+                keep,
+                no_container,
+            };
+            runtime.block_on(selftest(&options))?;
             Ok(0)
         }
         Command::Review { number } => {
@@ -143,6 +196,11 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             let factory_home = factory_home.context("no home directory; set FACTORY_HOME")?;
             service::pause(&factory_home, &reason)?;
             println!("paused: {reason}");
+            Ok(0)
+        }
+        Command::Watch { once, file } => {
+            let home = factory_home.context("no home directory; set FACTORY_HOME")?;
+            watch(&WatchOptions { home, file, once })?;
             Ok(0)
         }
         Command::Resume => {

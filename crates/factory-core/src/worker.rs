@@ -20,13 +20,15 @@ use std::time::Instant;
 
 use anvil_types::{FactoryConfig, Ticket};
 
+use crate::board::Stage;
 use crate::budget::{Budget, BudgetExceeded};
 use crate::error::{FactoryError, Result};
 use crate::git::Git;
 use crate::paths::FactoryHome;
 use crate::ports::{
     BoxFuture, CiStatus, CodeHost, EvalGate, GateB, Implementer, ImplementerStatus, InlineComment,
-    MinorFinding, NEEDS_HUMAN_LABEL, Outcome, Progress, ReviewInput, ReviewSwarm, Worker,
+    MinorFinding, NEEDS_HUMAN_LABEL, Outcome, Progress, ProgressEvent, ReviewInput, ReviewSwarm,
+    Worker,
 };
 use crate::protected::ProtectedPaths;
 use crate::render::{self, GateRecord, Notes, PullBody};
@@ -99,7 +101,10 @@ impl TicketWorker {
         let id = ticket.id.to_string();
         let branch = format!("factory/{id}");
         let worktree = self.deps.home.work_dir(&id);
-        progress("preparing the worktree");
+        progress(ProgressEvent::stage(
+            Stage::Worktree,
+            "preparing the worktree",
+        ));
         self.deps.repo.fetch_prune(&self.deps.remote).await?;
         self.deps
             .repo
@@ -130,7 +135,10 @@ impl TicketWorker {
         let main = self.main_ref();
         let mut run = Run::new(ticket, Budget::new((deps.clock)(), &deps.config.budget));
         let mut task = render::task(ticket);
-        progress("preparing the sandbox");
+        progress(ProgressEvent::stage(
+            Stage::Worktree,
+            "preparing the sandbox",
+        ));
         deps.implementer.prepare(worktree).await?;
 
         let (minors, review_cost) = loop {
@@ -142,7 +150,14 @@ impl TicketWorker {
                 }
                 run.implementer_runs += 1;
                 let n = run.implementer_runs;
-                progress(&format!("implementer run {n}"));
+                progress(ProgressEvent::stage(
+                    Stage::Implement,
+                    format!("implementer run {n}"),
+                ));
+                progress(ProgressEvent::Counters {
+                    run: n,
+                    round: run.budget.review_rounds(),
+                });
                 let out = deps
                     .implementer
                     .run(worktree, &task, run.budget.deadline())
@@ -162,6 +177,10 @@ impl TicketWorker {
                         .unwrap_or_default()
                 ));
                 run.add_cost(out.cost_usd);
+                progress(ProgressEvent::RunUsage {
+                    tokens: out.tokens,
+                    cost_usd: out.cost_usd,
+                });
                 if let Err(exceeded) = run.budget.add_tokens(out.tokens.total()) {
                     return Ok(run.reject(exceeded.to_string(), deps.implementer.as_ref()));
                 }
@@ -201,7 +220,10 @@ impl TicketWorker {
                         deps.implementer.as_ref(),
                     ));
                 }
-                progress(&format!("gate A: just check (run {n})"));
+                progress(ProgressEvent::stage(
+                    Stage::GateA,
+                    format!("gate A: just check (run {n})"),
+                ));
                 let check = deps
                     .implementer
                     .check(worktree, run.budget.deadline())
@@ -230,22 +252,30 @@ impl TicketWorker {
             }
 
             // Gate B: the eval harness on the branch build.
-            progress("building the release binary");
-            let build = deps
-                .implementer
-                .build_release(worktree, run.budget.deadline())
-                .await?;
-            run.notes.section(
-                &format!("release build: {}", pass_word(build.passed)),
-                &build.output_tail,
-            );
-            if !build.passed {
-                return Ok(run.reject(
-                    "the release build of anvil failed after `just check` passed".to_owned(),
-                    deps.implementer.as_ref(),
+            if deps.eval_gate.needs_release_build() {
+                progress(ProgressEvent::stage(
+                    Stage::GateB,
+                    "building the release binary",
                 ));
+                let build = deps
+                    .implementer
+                    .build_release(worktree, run.budget.deadline())
+                    .await?;
+                run.notes.section(
+                    &format!("release build: {}", pass_word(build.passed)),
+                    &build.output_tail,
+                );
+                if !build.passed {
+                    return Ok(run.reject(
+                        "the release build of anvil failed after `just check` passed".to_owned(),
+                        deps.implementer.as_ref(),
+                    ));
+                }
             }
-            progress("gate B: eval against main");
+            progress(ProgressEvent::stage(
+                Stage::GateB,
+                "gate B: eval against main",
+            ));
             match deps.eval_gate.run(worktree).await? {
                 GateB::NoBaseline => {
                     return Ok(Outcome::Paused {
@@ -282,7 +312,7 @@ impl TicketWorker {
             }
 
             // Gate C: the review swarm.
-            progress("gate C: review swarm");
+            progress(ProgressEvent::stage(Stage::GateC, "gate C: review swarm"));
             let input = ReviewInput {
                 ticket: ticket.clone(),
                 diff: wt.diff_text(&main, "HEAD").await?,
@@ -329,7 +359,7 @@ impl TicketWorker {
         let _ = review_cost;
 
         // Publish.
-        progress("pushing the branch");
+        progress(ProgressEvent::stage(Stage::Pr, "pushing the branch"));
         wt.push(&deps.remote, branch).await?;
         let changed = wt.diff_names(&main, "HEAD").await?;
         let mut held: Vec<String> = self
@@ -357,8 +387,9 @@ impl TicketWorker {
             verdicts: &run.verdicts,
             held: &held,
         });
-        progress("opening the pull request");
+        progress(ProgressEvent::stage(Stage::Pr, "opening the pull request"));
         let pull = deps.host.open_pull(branch, &ticket.title, &body).await?;
+        progress(ProgressEvent::PullRequest(pull.number));
         queue
             .transition(ticket.id, Transition::InReview { pr: pull.number })
             .await?;
@@ -381,14 +412,14 @@ impl TicketWorker {
             });
         }
 
-        progress("waiting for CI");
+        progress(ProgressEvent::stage(Stage::Merge, "waiting for CI"));
         match deps
             .host
             .wait_for_ci(&pull.head_sha, run.budget.deadline())
             .await?
         {
             CiStatus::Green => {
-                progress("merging");
+                progress(ProgressEvent::stage(Stage::Merge, "merging"));
                 deps.host.squash_merge(pull.number, &ticket.title).await?;
                 deps.host.delete_branch(branch).await?;
                 Ok(Outcome::Merged {

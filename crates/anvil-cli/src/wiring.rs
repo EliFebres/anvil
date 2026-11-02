@@ -440,7 +440,12 @@ impl Wiring {
             cwd: self.cwd.clone(),
             session_dir,
             limits: self.config.limits.clone(),
-            check: CheckCommand::Detect,
+            check: self
+                .config
+                .tools
+                .check
+                .clone()
+                .map_or(CheckCommand::Detect, CheckCommand::Command),
             context_window: self.context_window(),
             home_dir: self.home.clone(),
             extra_instructions: self.extra_instructions(&registry.names()),

@@ -95,6 +95,7 @@ dependencies = [
  "anvil-core",
  "anvil-memory",
  "anvil-telemetry",
+ "anvil-tui",
  "anvil-types",
  "anyhow",
  "chrono",
@@ -195,6 +196,15 @@ dependencies = [
  "toml",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "anvil-tui"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "ratatui",
+ "unicode-width",
 ]
 
 [[package]]
@@ -935,6 +945,7 @@ dependencies = [
 name = "factory-cli"
 version = "0.1.0"
 dependencies = [
+ "anvil-tui",
  "anvil-types",
  "anyhow",
  "chrono",
@@ -942,6 +953,8 @@ dependencies = [
  "eval",
  "factory-core",
  "factory-review",
+ "insta",
+ "ratatui",
  "serde",
  "serde_json",
  "tempfile",
@@ -951,6 +964,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "ulid",
+ "unicode-width",
  "wiremock",
 ]
 

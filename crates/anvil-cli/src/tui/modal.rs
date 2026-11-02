@@ -15,9 +15,10 @@ use unicode_width::UnicodeWidthStr;
 use super::MemoryAnswer;
 use super::diff::Diff;
 use super::keys;
-use super::theme::{Shade, Theme};
 use super::transcript::diff_lines;
-use super::wrap::{segments, wrap};
+use anvil_tui::layout::centered;
+use anvil_tui::wrap::{segments, wrap};
+use anvil_tui::{Shade, Theme};
 
 /// The prompt's share of the screen width.
 const WIDTH_PERCENT: u16 = 60;
@@ -528,18 +529,6 @@ fn target_text(request: &PermissionRequest) -> String {
         .unwrap_or_else(|| request.arguments.to_string())
 }
 
-/// A rectangle of the given size in the middle of `area`.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -617,12 +606,5 @@ mod tests {
         assert!(text.ends_with("esc = deny"), "{text:?}");
         assert_eq!(line.spans[0].style.fg, Some(theme.success));
         assert_eq!(line.spans[3].style.fg, Some(theme.danger));
-    }
-
-    #[test]
-    fn centered_fits_inside_the_area() {
-        let area = Rect::new(0, 0, 100, 30);
-        assert_eq!(centered(area, 60, 10), Rect::new(20, 10, 60, 10));
-        assert_eq!(centered(area, 200, 50), area);
     }
 }

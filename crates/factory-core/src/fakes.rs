@@ -16,8 +16,8 @@ use crate::git::Git;
 use crate::notify::{Event, Notifier};
 use crate::ports::{
     BoxFuture, CheckOutcome, CiStatus, CodeHost, EvalGate, EvalGateReport, GateB, Implementer,
-    ImplementerOutcome, ImplementerStatus, InlineComment, Outcome, Progress, PullRequest,
-    ReviewInput, ReviewReport, ReviewSwarm, Tokens, Worker,
+    ImplementerOutcome, ImplementerStatus, InlineComment, Outcome, Progress, ProgressEvent,
+    PullRequest, ReviewInput, ReviewReport, ReviewSwarm, Tokens, Worker,
 };
 use crate::sandbox::{CommandRunner, Exit, Invocation};
 use crate::tickets::TicketQueue;
@@ -356,7 +356,10 @@ impl Worker for ScriptedWorker {
         progress: Progress,
     ) -> BoxFuture<'a, Result<Outcome>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        progress("scripted");
+        progress(ProgressEvent::stage(
+            crate::board::Stage::Implement,
+            "scripted",
+        ));
         lock(&self.stages).push("scripted".to_owned());
         let next = lock(&self.script).pop_front();
         let result = match next {

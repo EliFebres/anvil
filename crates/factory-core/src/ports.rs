@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use anvil_types::Ticket;
 
+use crate::board::{ContainerView, HealthView, NeedsHuman, ProviderLatency, Stage, UsageView};
 use crate::error::Result;
 use crate::tickets::TicketQueue;
 
@@ -139,6 +140,12 @@ pub enum GateB {
 pub trait EvalGate: Send + Sync {
     /// Gate B on the worktree, whose release anvil binary is built.
     fn run<'a>(&'a self, worktree: &'a Path) -> BoxFuture<'a, Result<GateB>>;
+
+    /// Whether the worker builds the release anvil before [`EvalGate::run`];
+    /// only a gate that runs no eval (the selftest's) says no.
+    fn needs_release_build(&self) -> bool {
+        true
+    }
 }
 
 /// What the review swarm reads.
@@ -249,6 +256,18 @@ pub trait CodeHost: Send + Sync {
     /// The CI status of the latest commit on `main`.
     fn main_ci(&self) -> BoxFuture<'_, Result<CiStatus>>;
 
+    /// The CI status of `main` with the commit it is for, when the host
+    /// says; by default the commit is unknown.
+    fn main_ci_with_sha(&self) -> BoxFuture<'_, Result<(CiStatus, Option<String>)>> {
+        Box::pin(async move { Ok((self.main_ci().await?, None)) })
+    }
+
+    /// Open pull requests labelled [`NEEDS_HUMAN_LABEL`], with the
+    /// top-level paths they change; none by default.
+    fn needs_human_prs(&self) -> BoxFuture<'_, Result<Vec<NeedsHuman>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     /// Opens a pull request from a pushed branch into `main`.
     fn open_pull<'a>(
         &'a self,
@@ -321,8 +340,96 @@ pub enum Outcome {
     },
 }
 
-/// Receives the worker's stage, for `factory status`.
-pub type Progress = Arc<dyn Fn(&str) + Send + Sync>;
+/// Something the worker reports while it works, for `factory status` and
+/// the dashboard.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProgressEvent {
+    /// A pipeline stage began.
+    Stage {
+        /// The stage.
+        stage: Stage,
+        /// What the worker is doing, in words, such as `gate A: just check (run 1)`.
+        text: String,
+    },
+    /// The implementer run or the review round changed.
+    Counters {
+        /// The implementer run, from 1.
+        run: u32,
+        /// Review rounds that asked for changes so far.
+        round: u32,
+    },
+    /// An implementer run ended with this usage.
+    RunUsage {
+        /// Its tokens.
+        tokens: Tokens,
+        /// Its cost, when known.
+        cost_usd: Option<f64>,
+    },
+    /// The pull request was opened.
+    PullRequest(u64),
+}
+
+impl ProgressEvent {
+    /// A stage event.
+    ///
+    /// # Arguments
+    ///
+    /// * `stage` - The stage that began.
+    /// * `text` - What the worker is doing, in words.
+    ///
+    /// # Returns
+    ///
+    /// The event.
+    pub fn stage(stage: Stage, text: impl Into<String>) -> Self {
+        Self::Stage {
+            stage,
+            text: text.into(),
+        }
+    }
+}
+
+/// Receives what the worker reports.
+pub type Progress = Arc<dyn Fn(ProgressEvent) + Send + Sync>;
+
+/// Looks at the machine for the dashboard: the worker image, disk, the
+/// container of a running step, live usage and provider latency. Every
+/// answer is best effort; what cannot be learned stays empty.
+pub trait Probe: Send + Sync {
+    /// The machine's health. `main_ci`, `errors_in_a_row` and the provider
+    /// fields are the service's and stay empty here.
+    fn health(&self) -> BoxFuture<'_, HealthView>;
+
+    /// One minimal request to every provider the factory uses.
+    fn ping_providers(&self) -> BoxFuture<'_, Vec<ProviderLatency>>;
+
+    /// The container running a step of a ticket, with its cpu and memory.
+    fn container<'a>(&'a self, ticket_id: &'a str) -> BoxFuture<'a, Option<ContainerView>>;
+
+    /// What the implementer run in a worktree has used so far.
+    fn usage(&self, worktree: &Path) -> Option<UsageView>;
+}
+
+/// A probe that learns nothing, for tests and machines without a sandbox.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoProbe;
+
+impl Probe for NoProbe {
+    fn health(&self) -> BoxFuture<'_, HealthView> {
+        Box::pin(async { HealthView::default() })
+    }
+
+    fn ping_providers(&self) -> BoxFuture<'_, Vec<ProviderLatency>> {
+        Box::pin(async { Vec::new() })
+    }
+
+    fn container<'a>(&'a self, _ticket_id: &'a str) -> BoxFuture<'a, Option<ContainerView>> {
+        Box::pin(async { None })
+    }
+
+    fn usage(&self, _worktree: &Path) -> Option<UsageView> {
+        None
+    }
+}
 
 /// Works one claimed ticket from worktree to outcome.
 pub trait Worker: Send + Sync {

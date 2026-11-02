@@ -9,14 +9,15 @@ use anvil_types::{AnvilConfig, FactoryConfig, config};
 use anyhow::Context;
 use factory_core::github::{FALLBACK_TOKEN_ENV, TOKEN_ENV, token_from_env};
 use factory_core::{
-    FactoryHome, Git, GitHub, LogNotifier, Notifier, Sandbox, SandboxConfig, Service, ServiceDeps,
-    SystemRunner, TicketQueue, TicketWorker, WebhookNotifier, WorkerDeps, hostname, preflight,
-    system_clock,
+    FactoryHome, Git, GitHub, LogNotifier, Notifier, Sandbox, SandboxConfig, SandboxOptions,
+    Service, ServiceDeps, SystemRunner, TicketQueue, TicketWorker, WebhookNotifier, WorkerDeps,
+    hostname, preflight, system_clock,
 };
 use factory_review::{ModelReviewer, load_rules};
 use tokio::process::Command;
 
 use crate::adapters::eval_gate::{HarnessGate, RunnerSource};
+use crate::adapters::probe::{MachineProbe, MachineProbeConfig};
 use crate::adapters::review_swarm::Swarm;
 
 /// The remote the factory fetches from and pushes to.
@@ -197,7 +198,7 @@ pub async fn sandbox(
         runtime: loaded.factory.worker.runtime,
         image: loaded.factory.worker.image.clone(),
         anvil_bin,
-        just_bin: "just".to_owned(),
+        options: SandboxOptions::default(),
         cargo_bin: "cargo".to_owned(),
         egress_allow: loaded.factory.worker.egress_allow.clone(),
         providers: loaded.anvil.providers.clone(),
@@ -244,6 +245,7 @@ pub async fn build_service(loaded: &Loaded, home: FactoryHome) -> anyhow::Result
         .context("the reviewers in factory.toml are not independent")?;
     let rules = load_rules(loaded.home.as_deref())?;
     let reviewers = ModelReviewer::from_config(&loaded.factory, &loaded.anvil, &rules)?;
+    let probe = machine_probe(loaded, &home, &anvil_bin, &repo);
     let sandbox = Arc::new(sandbox(loaded, &home, anvil_bin).await?);
     let eval_gate = HarnessGate::new(
         RunnerSource::Sandbox(Arc::clone(&sandbox)),
@@ -274,6 +276,44 @@ pub async fn build_service(loaded: &Loaded, home: FactoryHome) -> anyhow::Result
         notifier: notifier(&loaded.factory)?,
         hostname: hostname(),
         clock: system_clock(),
+        probe: Arc::new(probe),
     })?;
     Ok(service)
+}
+
+/// The probe the dashboard reads the machine through.
+///
+/// # Arguments
+///
+/// * `loaded` - The configuration.
+/// * `home` - `~/.factory`.
+/// * `anvil_bin` - The anvil binary the sandbox mounts.
+/// * `repo` - The factory's clone, for the eval baseline.
+///
+/// # Returns
+///
+/// The probe; it pings the coder's provider and every reviewer's.
+pub fn machine_probe(
+    loaded: &Loaded,
+    home: &FactoryHome,
+    anvil_bin: &Path,
+    repo: &factory_core::Git,
+) -> MachineProbe {
+    let mut ping = vec![loaded.factory.roles.coder.clone()];
+    for reviewer in &loaded.factory.reviewers {
+        if !ping.contains(&reviewer.provider) {
+            ping.push(reviewer.provider.clone());
+        }
+    }
+    MachineProbe::new(MachineProbeConfig {
+        runtime: loaded.factory.worker.runtime,
+        image: loaded.factory.worker.image.clone(),
+        anvil_bin: anvil_bin.to_path_buf(),
+        disk_path: home.root().to_path_buf(),
+        providers: loaded.anvil.providers.clone(),
+        ping,
+        coder: Some(loaded.factory.roles.coder.clone()),
+        repo: repo.clone(),
+        remote: REMOTE.to_owned(),
+    })
 }

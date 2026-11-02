@@ -17,10 +17,11 @@ use super::editor::{EditKey, Editor};
 use super::keys::{self, KeyAction};
 use super::modal::{Answer, Modal};
 use super::status::StatusBar;
-use super::theme::{Shade, Theme};
 use super::transcript::{Entry, Transcript};
 use super::welcome::Welcome;
 use super::{Level, PermissionMode, SessionInfo, SessionKind, UiMsg, UiRequest};
+use anvil_tui::layout::pad_between;
+use anvil_tui::{Shade, Theme};
 
 /// How soon a second Ctrl+C must follow the first to quit.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
@@ -672,7 +673,7 @@ impl App {
     /// The plan question bar: the question and its three keys.
     fn question_bar(&self, width: usize, theme: &Theme) -> Line<'static> {
         let right = "--yes skips this ";
-        let mut spans = vec![
+        let left = vec![
             Span::styled(" Build this plan?", theme.bold(Shade::Accent)),
             Span::raw("   "),
             Span::styled("y", theme.bold(Shade::Success)),
@@ -682,11 +683,11 @@ impl App {
             Span::styled("q", theme.bold(Shade::Danger)),
             Span::styled(" quit", theme.fg(Shade::Text)),
         ];
-        let used: usize = spans.iter().map(|span| span.content.width()).sum();
-        spans.push(Span::raw(
-            " ".repeat(width.saturating_sub(used + right.width())),
-        ));
-        spans.push(Span::styled(right, theme.fg(Shade::Faint)));
+        let spans = pad_between(
+            left,
+            vec![Span::styled(right, theme.fg(Shade::Faint))],
+            width,
+        );
         Line::from(spans).style(theme.on_surface(theme.fg(Shade::Text)))
     }
 }

@@ -6,10 +6,10 @@ use anvil_core::agent::State;
 use anvil_core::provider::Usage;
 use anvil_types::Price;
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
-use super::theme::{Shade, Theme};
 use super::{PermissionMode, SessionInfo};
+use anvil_tui::layout::{elapsed, fit_parts, short};
+use anvil_tui::{Shade, Theme};
 
 /// The hint next to the permission mode.
 const CYCLE_HINT: &str = "shift+tab to cycle";
@@ -168,84 +168,8 @@ impl StatusBar {
             format!("{} ", parts.join(" · ")),
             theme.fg(Shade::Muted),
         )];
-        let spans = fit(left, middle, right, width);
+        let spans = fit_parts(left, middle, right, width);
         Line::from(spans).style(theme.on_surface(theme.fg(Shade::Text)))
-    }
-}
-
-/// Lays the three parts out over `width` columns, dropping the middle and
-/// then trimming the left when they do not fit.
-fn fit(
-    left: Vec<Span<'static>>,
-    middle: Vec<Span<'static>>,
-    right: Vec<Span<'static>>,
-    width: usize,
-) -> Vec<Span<'static>> {
-    let (lw, mw, rw) = (
-        spans_width(&left),
-        spans_width(&middle),
-        spans_width(&right),
-    );
-    if lw + mw + rw + 2 <= width {
-        let spare = width - lw - mw - rw;
-        let gap1 = spare / 2;
-        let gap2 = spare - gap1;
-        let mut spans = left;
-        spans.push(Span::raw(" ".repeat(gap1)));
-        spans.extend(middle);
-        spans.push(Span::raw(" ".repeat(gap2)));
-        spans.extend(right);
-        return spans;
-    }
-    if lw + rw < width {
-        let mut spans = left;
-        spans.push(Span::raw(" ".repeat(width - lw - rw)));
-        spans.extend(right);
-        return spans;
-    }
-    let mut spans = Vec::new();
-    let mut used = 0;
-    for span in left.into_iter().chain([Span::raw(" ")]).chain(right) {
-        let mut text = String::new();
-        for ch in span.content.chars() {
-            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if used + w > width {
-                break;
-            }
-            text.push(ch);
-            used += w;
-        }
-        if !text.is_empty() {
-            spans.push(Span::styled(text, span.style));
-        }
-    }
-    spans.push(Span::raw(" ".repeat(width - used)));
-    spans
-}
-
-/// The columns a run of spans takes.
-fn spans_width(spans: &[Span<'_>]) -> usize {
-    spans.iter().map(|span| span.content.width()).sum()
-}
-
-/// A token count with a `k` or `M` suffix past three digits.
-fn short(n: u64) -> String {
-    if n < 1_000 {
-        n.to_string()
-    } else if n < 1_000_000 {
-        format!("{:.1}k", n as f64 / 1_000.0)
-    } else {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    }
-}
-
-/// Seconds as `mm:ss`, or `h:mm:ss` past an hour.
-fn elapsed(secs: u64) -> String {
-    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m:02}:{s:02}")
     }
 }
 
@@ -256,6 +180,8 @@ mod tests {
     use ratatui::style::Color;
 
     use super::*;
+    use unicode_width::UnicodeWidthStr;
+
     use crate::tui::SessionKind;
 
     fn info() -> SessionInfo {
@@ -339,16 +265,6 @@ mod tests {
         }
         let text = text_of(&bar.line(60, started, &Theme::mono()));
         assert!(!text.contains("mode:"), "{text:?}");
-    }
-
-    #[test]
-    fn short_and_elapsed() {
-        assert_eq!(short(999), "999");
-        assert_eq!(short(1_500), "1.5k");
-        assert_eq!(short(2_000_000), "2.0M");
-        assert_eq!(elapsed(59), "00:59");
-        assert_eq!(elapsed(201), "03:21");
-        assert_eq!(elapsed(3_661), "1:01:01");
     }
 
     #[test]

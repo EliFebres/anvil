@@ -1,0 +1,177 @@
+{
+  "v": 1,
+  "written_at": "2026-11-02T15:58:00Z",
+  "host": "minipc",
+  "repo": "EliFebres/anvil",
+  "service": {
+    "state": "idle",
+    "reason": null
+  },
+  "started_at": "2026-10-30T11:37:00Z",
+  "next_poll_at": "2026-11-02T16:02:02Z",
+  "last_poll": {
+    "at": "2026-11-02T15:55:00Z",
+    "secs": 0.8
+  },
+  "today": {
+    "merged": 2,
+    "rejected": 0,
+    "cost_usd": 5.9
+  },
+  "ticket": null,
+  "implementer_tail": [],
+  "usage": null,
+  "container": null,
+  "egress": null,
+  "queue": [],
+  "recent": [
+    {
+      "id": "01M6D210H709VGC2CFEG4BTQ7M",
+      "title": "permission friction on edit_file",
+      "kind": "merged",
+      "detail": "#14",
+      "finished_at": "2026-11-02T15:41:00Z",
+      "cost_usd": 2.1,
+      "pr": 14,
+      "started_at": "2026-11-02T15:26:00Z"
+    },
+    {
+      "id": "01M6CZ8Y1",
+      "title": "factory update command",
+      "kind": "merged",
+      "detail": "#11",
+      "finished_at": "2026-11-02T14:58:00Z",
+      "cost_usd": 1.4,
+      "pr": 11,
+      "started_at": "2026-11-02T14:21:00Z"
+    },
+    {
+      "id": "01M6D20KVA7TZJNN66ZFVCRWVD",
+      "title": "ticket submit pushes to wrong remote",
+      "kind": "rejected",
+      "detail": "gate C: two reviewers asked for changes twice",
+      "finished_at": "2026-11-01T20:33:00Z",
+      "cost_usd": 11.83,
+      "pr": null,
+      "started_at": null
+    },
+    {
+      "id": "01M6E1AB3QW9XK2D7HF5ZR8M4T",
+      "title": "edit_file CRLF handling",
+      "kind": "merged",
+      "detail": "#10",
+      "finished_at": "2026-11-01T13:10:00Z",
+      "cost_usd": 0.9,
+      "pr": 10,
+      "started_at": null
+    },
+    {
+      "id": "01M6B7TT2",
+      "title": "playwright skill and MCP config",
+      "kind": "merged",
+      "detail": "#8",
+      "finished_at": "2026-10-31T16:00:00Z",
+      "cost_usd": 3.3,
+      "pr": 8,
+      "started_at": null
+    }
+  ],
+  "waiting": [
+    {
+      "id": "01M6C9QX4T7G2Y0Z8WJ3K5N6PR",
+      "priority": "p1",
+      "title": "release.yml permissions"
+    }
+  ],
+  "needs_human": [
+    {
+      "pr": 13,
+      "title": "release.yml permissions",
+      "touches": [
+        ".github/"
+      ]
+    }
+  ],
+  "week": {
+    "days": [
+      {
+        "day": "2026-10-27",
+        "merged": 1,
+        "rejected": 0
+      },
+      {
+        "day": "2026-10-28",
+        "merged": 2,
+        "rejected": 0
+      },
+      {
+        "day": "2026-10-29",
+        "merged": 0,
+        "rejected": 1
+      },
+      {
+        "day": "2026-10-30",
+        "merged": 3,
+        "rejected": 0
+      },
+      {
+        "day": "2026-10-31",
+        "merged": 0,
+        "rejected": 1
+      },
+      {
+        "day": "2026-11-01",
+        "merged": 1,
+        "rejected": 0
+      },
+      {
+        "day": "2026-11-02",
+        "merged": 2,
+        "rejected": 1
+      }
+    ],
+    "totals": {
+      "merged": 9,
+      "rejected": 3,
+      "cost_usd": 31.2
+    },
+    "waiting": 1,
+    "median_secs": 2280
+  },
+  "health": {
+    "main_ci": {
+      "state": "green",
+      "sha": "b260133"
+    },
+    "baseline": {
+      "passed": 20,
+      "total": 20,
+      "model": "claude-opus-5-5"
+    },
+    "image": {
+      "name": "anvil-factory",
+      "id": "216f20d",
+      "created": "2026-10-31T15:00:00Z"
+    },
+    "binary_version": "anvil 2026.11.01-b260133",
+    "disk_free_bytes": 65498251264,
+    "cargo_cache_bytes": 2469606195,
+    "errors_in_a_row": 0,
+    "providers": [
+      {
+        "name": "anthropic",
+        "millis": 640
+      },
+      {
+        "name": "openai",
+        "millis": 1100
+      },
+      {
+        "name": "google",
+        "millis": 1900
+      }
+    ],
+    "pinged_at": "2026-11-02T15:30:00Z",
+    "sandbox_ready": true
+  }
+}

@@ -36,10 +36,17 @@ struct Turn {
     text: String,
 }
 
+/// The two HTTP shapes a reviewer can speak; a fake provider has none.
+#[derive(Debug, Clone, Copy)]
+enum Wire {
+    Openai,
+    Anthropic,
+}
+
 /// A reviewer that asks a model.
 pub struct ModelReviewer {
     id: ReviewerId,
-    protocol: Protocol,
+    wire: Wire,
     url: String,
     api_key: String,
     max_output_tokens: Option<u32>,
@@ -63,6 +70,11 @@ impl ModelReviewer {
     /// # Returns
     ///
     /// The reviewer.
+    ///
+    /// # Errors
+    ///
+    /// [`ReviewError::UnsupportedProtocol`] for a `protocol = "fake"` provider,
+    /// which replays a script and cannot read a pull request.
     pub fn new(
         provider_name: &str,
         stance: Stance,
@@ -70,26 +82,31 @@ impl ModelReviewer {
         api_key: String,
         rules: &[Rule],
         client: reqwest::Client,
-    ) -> Self {
+    ) -> Result<Self, ReviewError> {
         let base = provider.base_url.trim_end_matches('/');
-        let url = match provider.protocol {
-            Protocol::Openai => format!("{base}/chat/completions"),
-            Protocol::Anthropic => format!("{base}/messages"),
+        let (wire, url) = match provider.protocol {
+            Protocol::Openai => (Wire::Openai, format!("{base}/chat/completions")),
+            Protocol::Anthropic => (Wire::Anthropic, format!("{base}/messages")),
+            Protocol::Fake => {
+                return Err(ReviewError::UnsupportedProtocol {
+                    provider: provider_name.to_owned(),
+                });
+            }
         };
-        Self {
+        Ok(Self {
             id: ReviewerId {
                 provider: provider_name.to_owned(),
                 stance,
                 model: provider.model.clone(),
             },
-            protocol: provider.protocol,
+            wire,
             url,
             api_key,
             max_output_tokens: provider.max_output_tokens,
             price: provider.price_per_mtoken,
             system: system_prompt(stance, rules),
             client,
-        }
+        })
     }
 
     /// Builds every reviewer `factory.toml` lists, keys taken from the environment.
@@ -151,6 +168,11 @@ impl ModelReviewer {
                     .ok_or_else(|| ReviewError::UnknownProvider {
                         provider: name.to_owned(),
                     })?;
+            if provider.protocol == Protocol::Fake {
+                return Err(ReviewError::UnsupportedProtocol {
+                    provider: name.to_owned(),
+                });
+            }
             let api_key = key_lookup(&provider.api_key_env)
                 .filter(|key| !key.trim().is_empty())
                 .ok_or_else(|| ReviewError::MissingApiKey {
@@ -172,7 +194,7 @@ impl ModelReviewer {
                 api_key,
                 rules,
                 client,
-            )));
+            )?));
         }
         Ok(reviewers)
     }
@@ -221,14 +243,14 @@ impl ModelReviewer {
 
     /// One non-streaming completion: the reply text and its usage.
     async fn complete(&self, turns: &[Turn]) -> Result<(String, Usage), ReviewError> {
-        let body = match self.protocol {
-            Protocol::Openai => self.openai_body(turns),
-            Protocol::Anthropic => self.anthropic_body(turns),
+        let body = match self.wire {
+            Wire::Openai => self.openai_body(turns),
+            Wire::Anthropic => self.anthropic_body(turns),
         };
         let builder = self.client.post(&self.url).json(&body);
-        let builder = match self.protocol {
-            Protocol::Openai => builder.bearer_auth(&self.api_key),
-            Protocol::Anthropic => builder
+        let builder = match self.wire {
+            Wire::Openai => builder.bearer_auth(&self.api_key),
+            Wire::Anthropic => builder
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION),
         };
@@ -248,9 +270,9 @@ impl ModelReviewer {
             });
         }
         let value: Value = serde_json::from_str(&text).map_err(|error| self.shape(error))?;
-        match self.protocol {
-            Protocol::Openai => self.openai_reply(&value),
-            Protocol::Anthropic => self.anthropic_reply(&value),
+        match self.wire {
+            Wire::Openai => self.openai_reply(&value),
+            Wire::Anthropic => self.anthropic_reply(&value),
         }
     }
 
@@ -346,6 +368,83 @@ impl Reviewer for ModelReviewer {
     }
 }
 
+/// Sends one minimal request to a provider, as `anvil doctor` does, and
+/// times the round trip.
+///
+/// # Arguments
+///
+/// * `name` - The provider's name, for errors.
+/// * `provider` - The provider entry from the anvil configuration.
+/// * `api_key` - Its key.
+/// * `timeout` - How long to wait.
+///
+/// # Returns
+///
+/// The round trip in milliseconds.
+///
+/// # Errors
+///
+/// [`ReviewError::UnsupportedProtocol`] for a fake provider, a transport
+/// error, or [`ReviewError::Http`] for a refusal.
+pub async fn ping(
+    name: &str,
+    provider: &ProviderConfig,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<u64, ReviewError> {
+    let base = provider.base_url.trim_end_matches('/');
+    let client = build_client(timeout)?;
+    let messages = json!([{"role": "user", "content": "ping"}]);
+    let builder = match provider.protocol {
+        Protocol::Openai => client
+            .post(format!("{base}/chat/completions"))
+            .bearer_auth(api_key)
+            .json(&json!({
+                "model": provider.model,
+                "messages": messages,
+                "max_completion_tokens": 1,
+            })),
+        Protocol::Anthropic => client
+            .post(format!("{base}/messages"))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(&json!({
+                "model": provider.model,
+                "max_tokens": 1,
+                "messages": messages,
+            })),
+        Protocol::Fake => {
+            return Err(ReviewError::UnsupportedProtocol {
+                provider: name.to_owned(),
+            });
+        }
+    };
+    let started = std::time::Instant::now();
+    let response = builder
+        .send()
+        .await
+        .map_err(|source| ReviewError::Transport {
+            provider: name.to_owned(),
+            source,
+        })?;
+    let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        // A reasoning model cannot finish in one token and says so; the
+        // provider answered, which is all a ping asks.
+        if status.as_u16() == 400 && body.contains("max_tokens") {
+            return Ok(millis);
+        }
+        return Err(ReviewError::Http {
+            provider: name.to_owned(),
+            status: status.as_u16(),
+            body: head(&body),
+        });
+    }
+    Ok(millis)
+}
+
 /// A client with the configured timeout and a factory user agent.
 fn build_client(timeout: Duration) -> Result<reqwest::Client, ReviewError> {
     reqwest::Client::builder()
@@ -390,6 +489,7 @@ mod tests {
                 output: 10.0,
                 cached: Some(0.1),
             }),
+            script: None,
         }
     }
 
@@ -402,6 +502,49 @@ mod tests {
             &[],
             build_client(Duration::from_secs(5)).expect("client"),
         )
+        .expect("a real protocol")
+    }
+
+    #[tokio::test]
+    async fn ping_sends_a_one_token_request_and_reports_refusals() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .and(header("x-api-key", "sk-test"))
+            .and(body_partial_json(json!({"max_tokens": 1, "model": "m-1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_reply("OK")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer sk-reasoning"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":{"message":"Could not finish the message because max_tokens or model output limit was reached."}}"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad key"))
+            .mount(&server)
+            .await;
+        let timeout = Duration::from_secs(5);
+        let anthropic = provider(Protocol::Anthropic, &server.uri());
+        assert!(ping("a", &anthropic, "sk-test", timeout).await.is_ok());
+        let openai = provider(Protocol::Openai, &server.uri());
+        let error = ping("o", &openai, "sk-test", timeout)
+            .await
+            .expect_err("401");
+        assert!(
+            matches!(error, ReviewError::Http { status: 401, .. }),
+            "{error}"
+        );
+        assert!(
+            ping("o", &openai, "sk-reasoning", timeout).await.is_ok(),
+            "a model that needs more than one token still answered"
+        );
+        let fake = provider(Protocol::Fake, &server.uri());
+        assert!(ping("f", &fake, "k", timeout).await.is_err());
     }
 
     fn request() -> ReviewRequest {

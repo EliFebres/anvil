@@ -7,6 +7,7 @@ use anvil_types::Ticket;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::board::write_atomic;
 use crate::error::{FactoryError, Result};
 
 /// How many outcomes the state keeps.
@@ -54,6 +55,12 @@ pub struct OutcomeRecord {
     pub finished_at: DateTime<Utc>,
     /// What the ticket cost in model calls, when every price was known.
     pub cost_usd: Option<f64>,
+    /// The pull request, when one was opened.
+    #[serde(default)]
+    pub pr: Option<u64>,
+    /// When the ticket was claimed; missing in records older than the field.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
 }
 
 /// Counts since the last digest.
@@ -124,17 +131,11 @@ impl ServiceState {
     ///
     /// When the folder cannot be created or the file cannot be written.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|source| FactoryError::io("creating", dir, source))?;
-        }
-        let text = serde_json::to_string_pretty(self).map_err(|source| FactoryError::Json {
+        let text = serde_json::to_vec_pretty(self).map_err(|source| FactoryError::Json {
             path: path.to_path_buf(),
             source,
         })?;
-        let temp = path.with_extension("json.tmp");
-        std::fs::write(&temp, text).map_err(|source| FactoryError::io("writing", &temp, source))?;
-        std::fs::rename(&temp, path).map_err(|source| FactoryError::io("replacing", path, source))
+        write_atomic(path, &text)
     }
 
     /// Records an outcome: newest first, at most [`KEPT_OUTCOMES`] kept, and
@@ -257,6 +258,8 @@ mod tests {
             detail: "#1".to_owned(),
             finished_at: "2026-10-31T12:00:00Z".parse().expect("rfc3339"),
             cost_usd: cost,
+            pr: None,
+            started_at: None,
         }
     }
 

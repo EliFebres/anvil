@@ -14,18 +14,22 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anvil_types::{ContainerRuntime, ProviderConfig};
+use anvil_types::{ContainerRuntime, Protocol, ProviderConfig};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::error::{FactoryError, Result};
 use crate::paths::FactoryHome;
 use crate::ports::{BoxFuture, CheckOutcome, Implementer, ImplementerOutcome, ImplementerStatus};
-use crate::proxy::{self, Allowlist, Denied};
+use crate::proxy::{self, Allowlist, Denied, EgressCounter};
 use crate::usage;
 
 /// The named volume that caches the cargo registry across tickets.
 pub const CACHE_VOLUME: &str = "anvil-factory-cargo";
+
+/// The label every container gets, with the ticket id as its value, so the
+/// dashboard can find the container running a ticket's step.
+pub const TICKET_LABEL: &str = "factory.ticket";
 
 /// Where the registry cache is mounted in the image.
 const CACHE_MOUNT: &str = "/usr/local/cargo/registry";
@@ -38,6 +42,9 @@ const HOME_MOUNT: &str = "/anvil-home";
 
 /// Where the proxy socket is mounted; `entrypoint.sh` bridges it to port 3128.
 const PROXY_MOUNT: &str = "/run/factory/proxy.sock";
+
+/// The uid and gid of `worker` in `deploy/nuc/Containerfile`.
+pub const WORKER_UID: u32 = 1000;
 
 /// Where the host's anvil binary is mounted and run from.
 pub const ANVIL_MOUNT: &str = "/usr/local/bin/anvil";
@@ -78,8 +85,8 @@ pub struct SandboxConfig {
     /// mounted at [`ANVIL_MOUNT`] in the container, run directly with
     /// `runtime = "none"`.
     pub anvil_bin: PathBuf,
-    /// `just` as invoked for Gate A.
-    pub just_bin: String,
+    /// The Gate A command, the cache volume, prewarming and container labels.
+    pub options: SandboxOptions,
     /// `cargo` as invoked for the release build.
     pub cargo_bin: String,
     /// Hosts the container may reach besides every provider's base URL.
@@ -92,6 +99,31 @@ pub struct SandboxConfig {
     pub profile: String,
     /// `~/.factory`.
     pub home: FactoryHome,
+}
+
+/// The parts of the sandbox production fixes and the selftest varies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxOptions {
+    /// Gate A, as a program and its arguments: `just check` in production.
+    pub check_command: Vec<String>,
+    /// The named volume that caches the cargo registry.
+    pub cache_volume: String,
+    /// Whether `prepare` runs `cargo fetch` into the cache volume.
+    pub prewarm: bool,
+    /// `key=value` labels every container gets, so a caller can find and
+    /// remove the ones a crash left behind.
+    pub labels: Vec<String>,
+}
+
+impl Default for SandboxOptions {
+    fn default() -> Self {
+        Self {
+            check_command: vec!["just".to_owned(), "check".to_owned()],
+            cache_volume: CACHE_VOLUME.to_owned(),
+            prewarm: true,
+            labels: Vec::new(),
+        }
+    }
 }
 
 /// Looks a key variable up; the process environment, or a test's table.
@@ -109,6 +141,9 @@ pub struct Invocation {
     pub env: Option<Vec<(String, String)>>,
     /// The working directory, when it matters.
     pub cwd: Option<PathBuf>,
+    /// A file that gets every output line as it arrives, timestamped, so
+    /// the dashboard can follow a long run.
+    pub log: Option<PathBuf>,
 }
 
 /// How a sandbox command ended.
@@ -266,6 +301,7 @@ impl Sandbox {
             .config
             .providers
             .values()
+            .filter(|provider| provider.protocol != Protocol::Fake)
             .filter_map(|provider| host_of(&provider.base_url));
         Allowlist::new(
             self.config
@@ -284,7 +320,7 @@ impl Sandbox {
             .providers
             .values()
             .map(|provider| provider.api_key_env.clone())
-            .filter(|name| (self.keys)(name).is_some())
+            .filter(|name| !name.is_empty() && (self.keys)(name).is_some())
             .collect();
         names.sort();
         names.dedup();
@@ -337,13 +373,24 @@ impl Sandbox {
             .map(|s| (*s).to_owned())
             .collect();
         match self.config.runtime {
-            ContainerRuntime::Podman => args.push("--userns=keep-id".to_owned()),
+            // The host user becomes the image's `worker`, whatever its uid on
+            // the host, so the mounts it owns stay readable inside.
+            ContainerRuntime::Podman => args.push(format!(
+                "--userns=keep-id:uid={WORKER_UID},gid={WORKER_UID}"
+            )),
             ContainerRuntime::Docker => {
                 args.push("--user".to_owned());
                 args.push(current_uid_gid());
             }
             ContainerRuntime::None => {}
         }
+        for label in &self.config.options.labels {
+            args.push("--label".to_owned());
+            args.push(label.clone());
+        }
+        // The dashboard finds the ticket's container by this label.
+        args.push("--label".to_owned());
+        args.push(format!("{TICKET_LABEL}={id}"));
         let cache_mode = if cache_writable { "" } else { ":ro" };
         args.extend([
             "-v".to_owned(),
@@ -355,7 +402,10 @@ impl Sandbox {
             "-e".to_owned(),
             format!("ANVIL_HOME={HOME_MOUNT}"),
             "-v".to_owned(),
-            format!("{CACHE_VOLUME}:{CACHE_MOUNT}{cache_mode}"),
+            format!(
+                "{}:{CACHE_MOUNT}{cache_mode}",
+                self.config.options.cache_volume
+            ),
             "-v".to_owned(),
             format!(
                 "{}:{PROXY_MOUNT}",
@@ -415,6 +465,7 @@ impl Sandbox {
                     args,
                     env,
                     cwd: Some(worktree.to_path_buf()),
+                    log: None,
                 }
             }
             runtime => Invocation {
@@ -422,6 +473,7 @@ impl Sandbox {
                 args: self.run_args(worktree, home, program, anvil, cache_writable),
                 env,
                 cwd: None,
+                log: None,
             },
         }
     }
@@ -434,7 +486,15 @@ impl Sandbox {
     /// Starts the egress proxy for a ticket, replacing a previous one.
     fn start_proxy(&self, worktree: &Path) -> Result<()> {
         let socket = self.config.home.proxy_socket(&Self::ticket_id(worktree));
-        let handle = proxy::start(&socket, self.allowlist(), Arc::clone(&self.denied))?;
+        let egress_file = self.config.home.egress_file(&Self::ticket_id(worktree));
+        let _ = std::fs::remove_file(&egress_file);
+        let counter = EgressCounter::new(egress_file);
+        let handle = proxy::start(
+            &socket,
+            self.allowlist(),
+            Arc::clone(&self.denied),
+            Some(counter),
+        )?;
         *lock(&self.proxy) = Some(handle);
         Ok(())
     }
@@ -446,7 +506,12 @@ impl Sandbox {
 
     /// Warms the registry cache: `cargo fetch` with the cache mounted read-write.
     async fn prewarm(&self, worktree: &Path, home: &Path) -> Result<()> {
-        ensure_cache_volume(self.runner.as_ref(), self.config.runtime).await?;
+        ensure_volume(
+            self.runner.as_ref(),
+            self.config.runtime,
+            &self.config.options.cache_volume,
+        )
+        .await?;
         let cargo = self.config.cargo_bin.clone();
         let command = self.command(worktree, home, &[cargo.as_str(), "fetch"], None, true);
         let exit = self
@@ -539,7 +604,16 @@ impl Implementer for Sandbox {
             let home = self.ticket_home(worktree)?;
             if self.containerized() {
                 self.start_proxy(worktree)?;
-                self.prewarm(worktree, &home).await?;
+                if self.config.options.prewarm {
+                    self.prewarm(worktree, &home).await?;
+                } else {
+                    ensure_volume(
+                        self.runner.as_ref(),
+                        self.config.runtime,
+                        &self.config.options.cache_volume,
+                    )
+                    .await?;
+                }
             }
             Ok(())
         })
@@ -564,7 +638,13 @@ impl Implementer for Sandbox {
                 (self.config.anvil_bin.to_string_lossy().into_owned(), None)
             };
             let program = [anvil.as_str(), "--yes", "--profile", PROFILE, task];
-            let command = self.command(worktree, &home, &program, mount, false);
+            let mut command = self.command(worktree, &home, &program, mount, false);
+            let log = self.config.home.output_log(&Self::ticket_id(worktree));
+            if let Err(error) = start_log(&log) {
+                tracing::warn!(%error, "cannot start the implementer output log");
+            } else {
+                command.log = Some(log);
+            }
             let exit = self.run_until(command, deadline).await?;
             if let Some(reason) = infrastructure_failure(&exit) {
                 return Err(FactoryError::Sandbox(format!(
@@ -598,9 +678,14 @@ impl Implementer for Sandbox {
         deadline: Instant,
     ) -> BoxFuture<'a, Result<CheckOutcome>> {
         Box::pin(async move {
-            let just = self.config.just_bin.clone();
-            self.run_check(worktree, &[just.as_str(), "check"], deadline)
-                .await
+            let program: Vec<&str> = self
+                .config
+                .options
+                .check_command
+                .iter()
+                .map(String::as_str)
+                .collect();
+            self.run_check(worktree, &program, deadline).await
         })
     }
 
@@ -645,21 +730,41 @@ pub async fn ensure_cache_volume(
     runner: &dyn CommandRunner,
     runtime: ContainerRuntime,
 ) -> Result<()> {
+    ensure_volume(runner, runtime, CACHE_VOLUME).await
+}
+
+/// Makes sure a named volume exists, creating it when it does not; the
+/// worker of [`ensure_cache_volume`], for any volume name.
+///
+/// # Arguments
+///
+/// * `runner` - Runs the runtime's commands.
+/// * `runtime` - podman, docker or none; none needs no volume.
+/// * `volume` - The volume name.
+///
+/// # Errors
+///
+/// As for [`ensure_cache_volume`].
+pub async fn ensure_volume(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+    volume: &str,
+) -> Result<()> {
     if runtime == ContainerRuntime::None {
         return Ok(());
     }
     if runtime == ContainerRuntime::Podman {
-        let exists = housekeeping(runner, runtime, &["volume", "exists", CACHE_VOLUME]).await?;
+        let exists = housekeeping(runner, runtime, &["volume", "exists", volume]).await?;
         if exists.code == Some(0) {
             return Ok(());
         }
     }
-    let created = housekeeping(runner, runtime, &["volume", "create", CACHE_VOLUME]).await?;
+    let created = housekeeping(runner, runtime, &["volume", "create", volume]).await?;
     if created.code == Some(0) || created.output.contains("already exists") {
         return Ok(());
     }
     Err(FactoryError::Sandbox(format!(
-        "{} volume create {CACHE_VOLUME}: {}",
+        "{} volume create {volume}: {}",
         runtime_name(runtime),
         created.output.trim()
     )))
@@ -701,9 +806,32 @@ pub async fn preflight(
     if runtime == ContainerRuntime::None {
         return Ok(anvil);
     }
+    check_image(runner, runtime, image).await?;
+    ensure_cache_volume(runner, runtime).await?;
+    Ok(anvil)
+}
+
+/// Checks that the worker image is built.
+///
+/// # Arguments
+///
+/// * `runner` - Runs the runtime's commands.
+/// * `runtime` - podman, docker or none; none has no image and passes.
+/// * `image` - `[worker] image`.
+///
+/// # Errors
+///
+/// [`FactoryError::Spawn`] when the runtime cannot be started, and
+/// [`FactoryError::Sandbox`] naming the `build` command when the image is missing.
+pub async fn check_image(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+    image: &str,
+) -> Result<()> {
     let query: &[&str] = match runtime {
+        ContainerRuntime::None => return Ok(()),
         ContainerRuntime::Podman => &["image", "exists", image],
-        _ => &["image", "inspect", image],
+        ContainerRuntime::Docker => &["image", "inspect", image],
     };
     let found = housekeeping(runner, runtime, query).await?;
     if found.code != Some(0) {
@@ -712,8 +840,7 @@ pub async fn preflight(
             build_command(runtime, image)
         )));
     }
-    ensure_cache_volume(runner, runtime).await?;
-    Ok(anvil)
+    Ok(())
 }
 
 /// Resolves `[worker] anvil_bin` to the file the sandbox mounts or runs.
@@ -839,6 +966,7 @@ async fn housekeeping(
         args: args.iter().map(|s| (*s).to_owned()).collect(),
         env: None,
         cwd: None,
+        log: None,
     };
     runner
         .run(invocation, Instant::now() + HOUSEKEEPING_TIMEOUT)
@@ -908,18 +1036,23 @@ async fn run_process(invocation: Invocation, deadline: Instant) -> Result<Exit> 
         program: invocation.program.clone(),
         source,
     })?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let log = invocation.log.as_deref().and_then(|path| {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .map(|file| Arc::new(Mutex::new(file)))
+            .ok()
+    });
+    // Both pipes are drained at once, so a chatty stderr cannot block the
+    // child while stdout is still open.
     let reader = async {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        if let Some(stdout) = stdout.as_mut() {
-            let _ = stdout.take(OUTPUT_CAP as u64).read_to_end(&mut out).await;
-        }
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.take(OUTPUT_CAP as u64).read_to_end(&mut err).await;
-        }
-        (out, err)
+        tokio::join!(
+            pump(stdout, 'o', log.clone()),
+            pump(stderr, 'e', log.clone())
+        )
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
     let waited = tokio::time::timeout(remaining, async {
@@ -948,6 +1081,69 @@ async fn run_process(invocation: Invocation, deadline: Instant) -> Result<Exit> 
             })
         }
     }
+}
+
+/// Empties the implementer output log, creating its folder.
+fn start_log(path: &Path) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, b"")
+}
+
+/// Reads a pipe to its end, keeping the first [`OUTPUT_CAP`] bytes and
+/// appending every line to the log as `<unix ms>\t<o|e>\t<text>`.
+///
+/// A carriage return ends a log line too: anvil redraws its spinner with
+/// one, and the dashboard wants the running tool before its line ends.
+async fn pump<R: tokio::io::AsyncRead + Unpin>(
+    pipe: Option<R>,
+    stream: char,
+    log: Option<Arc<Mutex<std::fs::File>>>,
+) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let Some(mut pipe) = pipe else {
+        return kept;
+    };
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match pipe.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let chunk = &buf[..n];
+        let room = OUTPUT_CAP.saturating_sub(kept.len());
+        kept.extend_from_slice(&chunk[..room.min(n)]);
+        if let Some(log) = &log {
+            for &byte in chunk {
+                if byte == b'\n' || byte == b'\r' {
+                    write_log_line(log, stream, &pending);
+                    pending.clear();
+                } else {
+                    pending.push(byte);
+                }
+            }
+        }
+    }
+    if let Some(log) = &log {
+        write_log_line(log, stream, &pending);
+    }
+    kept
+}
+
+/// Appends one non-empty line to the output log.
+fn write_log_line(log: &Mutex<std::fs::File>, stream: char, line: &[u8]) {
+    use std::io::Write;
+    if line.is_empty() {
+        return;
+    }
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    let text = String::from_utf8_lossy(line);
+    let _ = writeln!(lock(log), "{millis}\t{stream}\t{text}");
 }
 
 /// The runtime's executable name.
@@ -1099,7 +1295,7 @@ mod tests {
             runtime,
             image: "localhost/anvil-factory:latest".to_owned(),
             anvil_bin: PathBuf::from("/opt/anvil"),
-            just_bin: "just".to_owned(),
+            options: SandboxOptions::default(),
             cargo_bin: "cargo".to_owned(),
             egress_allow: vec!["github.com".to_owned(), "index.crates.io".to_owned()],
             providers: anvil.providers,
@@ -1121,7 +1317,7 @@ mod tests {
         );
         let text = args.join(" ");
         assert!(
-            text.starts_with("run --rm --network none --init --userns=keep-id "),
+            text.starts_with("run --rm --network none --init --userns=keep-id:uid=1000,gid=1000 "),
             "{text}"
         );
         assert!(
@@ -1139,6 +1335,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("-e HTTPS_PROXY=http://127.0.0.1:3128"));
+        assert!(
+            text.contains("--label factory.ticket=T1"),
+            "the dashboard finds the container by its ticket: {text}"
+        );
         assert!(text.contains("-e https_proxy=http://127.0.0.1:3128"));
         assert!(text.contains("-e CARGO_HTTP_PROXY=http://127.0.0.1:3128"));
         assert!(
@@ -1269,6 +1469,46 @@ mod tests {
             strip_verbatim_prefix(PathBuf::from("/usr/bin/anvil")),
             PathBuf::from("/usr/bin/anvil")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_process_tees_every_line_and_still_captures_both_streams() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("out.log");
+        start_log(&log).expect("log");
+        let exit = run_process(
+            Invocation {
+                program: "sh".to_owned(),
+                args: vec![
+                    "-c".to_owned(),
+                    "printf '| grep x\\r  grep x .. ok: 1\\n' >&2; echo model text".to_owned(),
+                ],
+                env: None,
+                cwd: None,
+                log: Some(log.clone()),
+            },
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .expect("runs");
+        assert_eq!(exit.code, Some(0));
+        assert!(exit.output.contains("model text"), "{}", exit.output);
+        assert!(exit.output.contains("grep x .. ok"), "{}", exit.output);
+        let text = std::fs::read_to_string(&log).expect("log");
+        let entries: Vec<(&str, &str)> = text
+            .lines()
+            .map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                let _ms = fields.next();
+                (fields.next().unwrap_or(""), fields.next().unwrap_or(""))
+            })
+            .collect();
+        assert!(entries.contains(&("e", "| grep x")), "{text}");
+        assert!(entries.contains(&("e", "  grep x .. ok: 1")), "{text}");
+        assert!(entries.contains(&("o", "model text")), "{text}");
+        let tail = crate::tail::parse(&text);
+        assert_eq!(tail.lines.len(), 2, "{tail:?}");
     }
 
     #[test]
