@@ -26,7 +26,7 @@ use anyhow::{Context, anyhow, bail};
 use chrono::Utc;
 use factory_core::fakes::LocalHost;
 use factory_core::github::{FALLBACK_TOKEN_ENV, TOKEN_ENV};
-use factory_core::ports::{BoxFuture, EvalGate, EvalGateReport, GateB, Implementer};
+use factory_core::ports::{BoxFuture, CheckOutcome, EvalGate, EvalGateReport, GateB, Implementer};
 use factory_core::sandbox::KeyLookup;
 use factory_core::{
     FactoryHome, Git, LogNotifier, OutcomeKind, Sandbox, SandboxConfig, SandboxOptions, Service,
@@ -158,7 +158,7 @@ async fn pipeline(
         world.configure(&factory, &anvil_bin, options).await,
     )?;
     steps.report(
-        "sandbox git: git status and git grep inside the container",
+        "sandbox git: git status and just no-old-name inside the container",
         world.sandbox_git(&parts).await,
     )?;
     steps.report(
@@ -454,16 +454,34 @@ impl World {
         result
     }
 
-    /// `git status` and a `git grep` that must match, inside the sandbox.
+    /// `git status`, `just no-old-name` and a positive control, inside the sandbox.
+    ///
+    /// `just no-old-name` passes when `git grep` finds nothing, so on its own a
+    /// grep that silently searched nothing would pass too. A planted untracked
+    /// file must therefore make it fail, and the recipe's flags and pathspecs
+    /// must find a word that is in the repository.
     async fn run_git_in_sandbox(&self, parts: &Parts, path: &Path) -> anyhow::Result<()> {
         parts.sandbox.prepare(path).await?;
-        let programs: [&[&str]; 2] = [
+        let must_pass: [&[&str]; 3] = [
             &["git", "status", "--porcelain"],
-            &["git", "grep", "-n", "-I", "anvil", "--", "README.md"],
+            &["just", "no-old-name"],
+            &[
+                "git",
+                "grep",
+                "-q",
+                "-i",
+                "-I",
+                "-E",
+                "--untracked",
+                "anvil",
+                "--",
+                ".",
+                ":!crates/anvil-cli/src/legacy.rs",
+                ":!crates/anvil-cli/tests/legacy.rs",
+            ],
         ];
-        for program in programs {
-            let deadline = Instant::now() + Duration::from_secs(60);
-            let outcome = parts.sandbox.run_check(path, program, deadline).await?;
+        for program in must_pass {
+            let outcome = self.sandbox_run(parts, path, program).await?;
             if !outcome.passed {
                 bail!(
                     "`{}` failed inside the sandbox:\n{}",
@@ -472,7 +490,33 @@ impl World {
                 );
             }
         }
+        // Built at runtime so this file does not trip the recipe itself.
+        let old_name = format!("f{}rge", "o");
+        let planted = path.join("selftest-old-name.txt");
+        std::fs::write(&planted, format!("{old_name}\n"))
+            .with_context(|| format!("writing {}", planted.display()))?;
+        let control = self
+            .sandbox_run(parts, path, &["just", "no-old-name"])
+            .await;
+        std::fs::remove_file(&planted)
+            .with_context(|| format!("removing {}", planted.display()))?;
+        if control?.passed {
+            bail!(
+                "`just no-old-name` passed inside the sandbox with the old name in an untracked file"
+            );
+        }
         Ok(())
+    }
+
+    /// Runs one program in the ticket's clone inside the sandbox.
+    async fn sandbox_run(
+        &self,
+        parts: &Parts,
+        path: &Path,
+        program: &[&str],
+    ) -> anyhow::Result<CheckOutcome> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        Ok(parts.sandbox.run_check(path, program, deadline).await?)
     }
 
     /// One pass of the service; it must merge the selftest ticket.

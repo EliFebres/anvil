@@ -10,16 +10,18 @@ coder = "anthropic"
 reviewer = "openai"
 summarizer = "anthropic"
 
-# Sized for a 40k-line repository. The per-state budgets sum to 2.7M, inside
-# the session cap, so one runaway state cannot starve the rest.
+# Sized for a 40k-line repository. Budgets count weighted tokens: input plus
+# output plus cached input at a tenth, which is roughly what is paid. The
+# per-state budgets sum to 4.2M, inside the session cap, so one runaway state
+# cannot starve the rest.
 [limits]
-session_tokens = 3000000
+session_tokens = 4500000
 
 [limits.plan]
 max_tokens = 400000
 
 [limits.build]
-max_tokens = 1500000
+max_tokens = 3000000
 
 [limits.review]
 max_tokens = 300000

@@ -142,6 +142,21 @@ impl Usage {
             .saturating_add(self.output)
             .saturating_add(self.cached)
     }
+
+    /// Tokens weighted by what they cost, which every token budget counts.
+    ///
+    /// Cache reads are billed at about a tenth of uncached input, so a
+    /// mostly-cached session would otherwise hit its budget at a fraction of
+    /// what it was meant to spend.
+    ///
+    /// # Returns
+    ///
+    /// `input + output + cached / 10`, saturating.
+    pub fn weighted(&self) -> u64 {
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cached / 10)
+    }
 }
 
 /// One item of a completion stream.
@@ -193,6 +208,22 @@ impl Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_weighted_counts_cached_at_a_tenth() {
+        let usage = Usage {
+            input: 151_527,
+            output: 25_794,
+            cached: 1_767_875,
+        };
+        assert_eq!(usage.weighted(), 151_527 + 25_794 + 176_787);
+        let max = Usage {
+            input: u64::MAX,
+            output: 1,
+            cached: 0,
+        };
+        assert_eq!(max.weighted(), u64::MAX);
+    }
 
     #[test]
     fn usage_total_saturates() {

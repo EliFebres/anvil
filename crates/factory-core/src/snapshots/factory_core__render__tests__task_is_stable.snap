@@ -24,3 +24,5 @@ Tool `grep` with `pattern`, `path`, `max_results` (default 50) in anvil-core.
 - [ ] the tool schema snapshot is updated
 
 Add or update tests for every acceptance item; do not touch files outside the crates the spec names unless a shared type in anvil-types must change, and if so say why in the PR body.
+
+Before finishing, run `just check` and fix anything it reports; the factory rejects a branch that fails it.

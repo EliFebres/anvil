@@ -773,7 +773,7 @@ impl AgentLoop {
         spend.turns += 1;
         spend.tokens = spend
             .tokens
-            .saturating_add(turn.usage.map(|usage| usage.total()).unwrap_or(0));
+            .saturating_add(turn.usage.map(|usage| usage.weighted()).unwrap_or(0));
         self.events.emit(LoopEvent::TurnFinished {
             state,
             stop_reason: turn.stop_reason.clone(),
@@ -791,7 +791,11 @@ impl AgentLoop {
             return Some(IncompleteReason::TurnBudget { state });
         }
         if spend.tokens >= budget.max_tokens {
-            return Some(IncompleteReason::TokenBudget { state });
+            return Some(IncompleteReason::TokenBudget {
+                state,
+                used: spend.tokens,
+                limit: budget.max_tokens,
+            });
         }
         None
     }
@@ -799,8 +803,8 @@ impl AgentLoop {
     /// Maps a provider error to the outcome that ends the run.
     fn provider_failure(&self, error: ProviderError) -> StateOutcome {
         match error {
-            ProviderError::BudgetExceeded { .. } => {
-                StateOutcome::Stop(IncompleteReason::SessionBudget)
+            ProviderError::BudgetExceeded { used, limit } => {
+                StateOutcome::Stop(IncompleteReason::SessionBudget { used, limit })
             }
             error => StateOutcome::ProviderFailed(error),
         }
@@ -1283,11 +1287,19 @@ mod tests {
         let gate = ScriptedGate::new(vec![PlanDecision::Revise("shorter".to_owned())]);
         let agent = h.agent(config, coder, "", Box::new(gate));
         let result = agent.run().await;
-        assert_eq!(
-            result.status,
-            Status::Incomplete {
-                reason: IncompleteReason::TokenBudget { state: State::Plan }
-            }
+        assert!(
+            matches!(
+                result.status,
+                Status::Incomplete {
+                    reason: IncompleteReason::TokenBudget {
+                        state: State::Plan,
+                        used,
+                        limit: 10,
+                    }
+                } if used >= 10
+            ),
+            "{:?}",
+            result.status
         );
     }
 
@@ -1361,11 +1373,15 @@ mod tests {
         let config = h.config(CheckCommand::None);
         let agent = h.agent(config, coder, "", Box::new(AutoApprove));
         let result = agent.run().await;
-        assert_eq!(
-            result.status,
-            Status::Incomplete {
-                reason: IncompleteReason::SessionBudget
-            }
+        assert!(
+            matches!(
+                result.status,
+                Status::Incomplete {
+                    reason: IncompleteReason::SessionBudget { used, limit: 1 }
+                } if used >= 1
+            ),
+            "{:?}",
+            result.status
         );
         assert_eq!(h.states(), vec![State::Plan, State::Build]);
     }

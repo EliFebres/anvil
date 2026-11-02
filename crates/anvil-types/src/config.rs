@@ -57,8 +57,10 @@ summarizer = "runpod"
 # max_retries = 4              # on HTTP 429 and 5xx, with exponential backoff
 # session_tokens = 2000000     # abort the session once this many tokens are used
 #
-# Per-state budgets (plan, build, review, optimize, verify), summed over every
-# visit to the state. Exceeding one ends the session as incomplete.
+# Token budgets count input plus output plus cached input at a tenth, which is
+# roughly what is paid. Per-state budgets (plan, build, review, optimize,
+# verify) are summed over every visit to the state. Exceeding one ends the
+# session as incomplete.
 # [limits.build]
 # max_turns = 100
 # max_tokens = 1000000
@@ -141,8 +143,10 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # max_retries = 4              # on HTTP 429 and 5xx, with exponential backoff
 # session_tokens = 2000000     # abort the session once this many tokens are used
 #
-# Per-state budgets (plan, build, review, optimize, verify), summed over every
-# visit to the state. Exceeding one ends the session as incomplete.
+# Token budgets count input plus output plus cached input at a tenth, which is
+# roughly what is paid. Per-state budgets (plan, build, review, optimize,
+# verify) are summed over every visit to the state. Exceeding one ends the
+# session as incomplete.
 # [limits.build]
 # max_turns = 100
 # max_tokens = 1000000
@@ -328,7 +332,8 @@ pub struct Roles {
 pub struct StateBudget {
     /// Model completions allowed in the state, summed over every visit.
     pub max_turns: u32,
-    /// Tokens (input, output and cached) allowed in the state, summed over every visit.
+    /// Weighted tokens (input, output and a tenth of cached input) allowed in
+    /// the state, summed over every visit.
     pub max_tokens: u64,
 }
 
@@ -349,7 +354,8 @@ pub struct LimitsConfig {
     pub request_timeout_s: u64,
     /// How many times a request is retried on HTTP 429 or 5xx before giving up.
     pub max_retries: u32,
-    /// Tokens (input, output and cached) a session may consume before it aborts.
+    /// Weighted tokens (input, output and a tenth of cached input) a session
+    /// may consume before it aborts.
     pub session_tokens: u64,
     /// Budget of the Plan state.
     pub plan: StateBudget,

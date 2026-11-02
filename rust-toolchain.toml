@@ -1,0 +1,9 @@
+# One toolchain everywhere: the host, the factory's worker image
+# (deploy/nuc/Containerfile) and CI, so `cargo fmt` formats identically on all
+# three. Tests in anvil-types and factory-cli fail when the workflows or the
+# Containerfile name another version. The musl target is for the static anvil
+# that `factory update` and the CI selftest mount into the worker container.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-musl"]

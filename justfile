@@ -8,11 +8,18 @@ fmt:
     cargo fmt --all
 
 # fmt (check only), clippy with warnings denied, all tests, no API key in a tracked file, no old name.
-check: no-old-name
+check: no-old-name factory-fmt
     cargo fmt --all --check
     cargo clippy --all-targets -- -D warnings
     cargo test --all
     cargo run -q -p anvil-cli -- scan-keys
+
+# Inside the factory's sandbox (ANVIL_PROFILE=factory) format first, so a
+# formatting-only difference never rejects a ticket; the factory commits the
+# result. Everywhere else `check` only checks.
+[private]
+factory-fmt:
+    {{ if env_var_or_default("ANVIL_PROFILE", "") == "factory" { "cargo fmt --all" } else { "" } }}
 
 # The program used to have another name. It may survive only in the legacy
 # migration module and its test; `f[o]rge` keeps this recipe from matching itself.
