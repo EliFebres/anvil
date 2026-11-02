@@ -183,7 +183,7 @@ async fn status(cwd: &Path, factory_home: FactoryHome) -> anyhow::Result<i32> {
     let state = ServiceState::load(&factory_home.state_file())?;
     let paused = service::pause_reason(&factory_home);
     let queue = factory_core::TicketQueue::open(
-        &factory_core::Git::new(&root),
+        &wiring::repo(&root),
         &factory_home.state_dir(),
         wiring::REMOTE,
     )

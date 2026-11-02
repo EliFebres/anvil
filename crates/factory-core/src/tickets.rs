@@ -122,7 +122,7 @@ impl TicketQueue {
                 .await?;
         }
         Ok(Self {
-            git: Git::new(state_dir),
+            git: repo.at(state_dir),
             remote: remote.to_owned(),
         })
     }

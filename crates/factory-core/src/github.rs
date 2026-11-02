@@ -124,6 +124,18 @@ struct CheckRunJson {
     html_url: Option<String>,
 }
 
+/// The token in the environment: `FACTORY_GITHUB_TOKEN`, else `GITHUB_TOKEN`.
+///
+/// # Returns
+///
+/// The first of the two that is set and not blank, or `None`.
+pub fn token_from_env() -> Option<String> {
+    [TOKEN_ENV, FALLBACK_TOKEN_ENV]
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .filter(|token| !token.trim().is_empty())
+}
+
 impl GitHub {
     /// Builds a client from `FACTORY_GITHUB_TOKEN` (else `GITHUB_TOKEN`) and,
     /// when set, `FACTORY_GITHUB_API`.
@@ -141,15 +153,11 @@ impl GitHub {
     /// [`FactoryError::Config`] when no token is set, the repository is not
     /// `owner/repo`, or the API URL does not parse.
     pub fn from_env(repo: &str) -> Result<Self> {
-        let token = [TOKEN_ENV, FALLBACK_TOKEN_ENV]
-            .iter()
-            .find_map(|name| std::env::var(name).ok())
-            .filter(|token| !token.trim().is_empty())
-            .ok_or_else(|| {
-                FactoryError::Config(format!(
-                    "neither {TOKEN_ENV} nor {FALLBACK_TOKEN_ENV} is set; a token with pull request access is needed"
-                ))
-            })?;
+        let token = token_from_env().ok_or_else(|| {
+            FactoryError::Config(format!(
+                "neither {TOKEN_ENV} nor {FALLBACK_TOKEN_ENV} is set; a token with pull request access is needed"
+            ))
+        })?;
         let api = std::env::var(API_ENV).unwrap_or_else(|_| DEFAULT_API.to_owned());
         Self::new(repo, &token, &api)
     }
