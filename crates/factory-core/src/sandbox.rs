@@ -678,6 +678,7 @@ pub async fn ensure_cache_volume(
 /// * `runtime` - podman, docker or none; none skips the image and volume checks.
 /// * `image` - `[worker] image`.
 /// * `anvil_bin` - `[worker] anvil_bin`: a name on `PATH` or a path.
+/// * `root` - The repository root a relative `anvil_bin` starts from.
 ///
 /// # Returns
 ///
@@ -694,8 +695,9 @@ pub async fn preflight(
     runtime: ContainerRuntime,
     image: &str,
     anvil_bin: &str,
+    root: &Path,
 ) -> Result<PathBuf> {
-    let anvil = resolve_anvil_bin(anvil_bin)?;
+    let anvil = resolve_anvil_bin(anvil_bin, root)?;
     if runtime == ContainerRuntime::None {
         return Ok(anvil);
     }
@@ -717,13 +719,15 @@ pub async fn preflight(
 /// Resolves `[worker] anvil_bin` to the file the sandbox mounts or runs.
 ///
 /// A bare name is looked up on `PATH` (with `.exe` on Windows); a path is
-/// taken as given. The result is canonicalized, so the `~/.local/bin/anvil`
-/// link `bootstrap.sh` makes resolves to the real file under
-/// `target/release`, which is what a container mount needs.
+/// taken as given, a relative one from the repository root, so the default
+/// names the static build `factory update` makes under `target/`. The result
+/// is canonicalized, so a link such as `~/.local/bin/anvil` resolves to the
+/// real file, which is what a container mount needs.
 ///
 /// # Arguments
 ///
 /// * `configured` - The `[worker] anvil_bin` value.
+/// * `root` - The repository root a relative path starts from.
 ///
 /// # Returns
 ///
@@ -733,7 +737,7 @@ pub async fn preflight(
 ///
 /// [`FactoryError::Sandbox`] naming `[worker] anvil_bin` when the name is
 /// not on `PATH`, the path does not exist, or the file is not executable.
-pub fn resolve_anvil_bin(configured: &str) -> Result<PathBuf> {
+pub fn resolve_anvil_bin(configured: &str, root: &Path) -> Result<PathBuf> {
     let setting = format!("[worker] anvil_bin = {configured:?}");
     let is_bare = !configured.contains(['/', '\\']);
     let candidate = if is_bare {
@@ -743,11 +747,17 @@ pub fn resolve_anvil_bin(configured: &str) -> Result<PathBuf> {
             ))
         })?
     } else {
-        PathBuf::from(configured)
+        root.join(configured)
     };
     let resolved = std::fs::canonicalize(&candidate).map_err(|error| {
+        // A relative path names a build artifact, so say what builds it.
+        let hint = if is_bare || Path::new(configured).is_absolute() {
+            ""
+        } else {
+            "; `factory update` builds it"
+        };
         FactoryError::Sandbox(format!(
-            "{setting}: {} does not exist ({error})",
+            "{setting}: {} does not exist ({error}){hint}",
             candidate.display()
         ))
     })?;

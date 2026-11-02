@@ -5,11 +5,17 @@
 //! command to type on the NUC. A ticket in progress is allowed to finish
 //! first: the pause flag keeps the loop from claiming another one, and the
 //! state file says when the worker is idle.
+//!
+//! anvil is built twice: for the host, where `anvil doctor` and the eval
+//! harness run it, and as a static musl binary for the worker container,
+//! whose glibc is older than the host's. `ldd` proves the second one static
+//! before the service starts again.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use anvil_types::factory_config::{DEFAULT_ANVIL_BIN, IMPLEMENTER_TARGET};
 use anvil_types::{ContainerRuntime, FactoryConfig};
 use anyhow::Context;
 use factory_core::{FactoryHome, InProgress, ServiceState, service};
@@ -24,6 +30,10 @@ const IMAGE_DIR: &str = "deploy/nuc";
 
 /// The image recipe.
 const CONTAINERFILE: &str = "deploy/nuc/Containerfile";
+
+/// The apt package that provides `musl-gcc`, which the C parts of the TLS
+/// stack need for the musl target.
+const MUSL_PACKAGE: &str = "musl-tools";
 
 /// What the update needs.
 pub struct UpdateOptions {
@@ -109,9 +119,10 @@ pub fn update(options: &UpdateOptions) -> anyhow::Result<()> {
     }
 
     let factory = crate::wiring::read_factory(root)?;
-    for step in rebuild_steps(&factory) {
+    for step in rebuild_steps(&factory, musl_gcc_present()) {
         run(&step, root)?;
     }
+    verify_static(root)?;
 
     println!("== service: install and start");
     for line in install(&InstallOptions {
@@ -124,22 +135,48 @@ pub fn update(options: &UpdateOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The build commands, in order: the binaries, then the worker image unless
-/// the worker runs on the host.
+/// The build commands, in order: the host binaries, the musl toolchain and
+/// the static anvil for the container, then the worker image unless the
+/// worker runs on the host.
 ///
 /// # Arguments
 ///
 /// * `factory` - `factory.toml`, which names the runtime and the image tag.
+/// * `have_musl_gcc` - Whether `musl-gcc` is installed; when not, apt installs it.
 ///
 /// # Returns
 ///
 /// The steps; `cargo build` first.
-pub fn rebuild_steps(factory: &FactoryConfig) -> Vec<Step> {
+pub fn rebuild_steps(factory: &FactoryConfig, have_musl_gcc: bool) -> Vec<Step> {
     let mut steps = vec![Step::new(
         "build: anvil and factory (release)",
         "cargo",
         &["build", "--release", "-p", "anvil-cli", "-p", "factory-cli"],
     )];
+    if !have_musl_gcc {
+        steps.push(Step::new(
+            &format!("toolchain: {MUSL_PACKAGE}"),
+            "sudo",
+            &["apt-get", "install", "-y", "-qq", MUSL_PACKAGE],
+        ));
+    }
+    steps.push(Step::new(
+        &format!("toolchain: rustup target {IMPLEMENTER_TARGET}"),
+        "rustup",
+        &["target", "add", IMPLEMENTER_TARGET],
+    ));
+    steps.push(Step::new(
+        &format!("build: anvil for the implementer ({IMPLEMENTER_TARGET}, release)"),
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "--target",
+            IMPLEMENTER_TARGET,
+            "-p",
+            "anvil-cli",
+        ],
+    ));
     let runtime = match factory.worker.runtime {
         ContainerRuntime::Podman => "podman",
         ContainerRuntime::Docker => "docker",
@@ -229,6 +266,80 @@ fn run(step: &Step, dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Proves the implementer's anvil is static: prints what `ldd` says about
+/// it and fails when any shared library is listed.
+///
+/// `ldd` is run for its text, not its status: glibc's `ldd` exits 1 with
+/// "not a dynamic executable" for a plain static binary and 0 with
+/// "statically linked" for a static-pie one, which is what the musl target
+/// produces.
+///
+/// # Arguments
+///
+/// * `root` - The repository, under which `target/` holds the build.
+///
+/// # Errors
+///
+/// When `ldd` cannot run, or the binary links shared libraries.
+pub fn verify_static(root: &Path) -> anyhow::Result<()> {
+    println!("== verify: ldd {DEFAULT_ANVIL_BIN}");
+    let binary = root.join(DEFAULT_ANVIL_BIN);
+    let out = Command::new("ldd")
+        .arg(&binary)
+        .stdin(Stdio::null())
+        .output()
+        .context("running ldd")?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    print!("{text}");
+    static_verdict(&text).map_err(|libraries| {
+        anyhow::anyhow!(
+            "{} is not static; it links {libraries}, which the worker image cannot provide",
+            binary.display()
+        )
+    })
+}
+
+/// Judges `ldd`'s output: `Ok` for a static binary, else the shared
+/// libraries it names, comma-separated.
+///
+/// # Arguments
+///
+/// * `ldd_output` - stdout and stderr of `ldd <binary>`.
+///
+/// # Errors
+///
+/// The lines that name a shared library, when `ldd` did not call the
+/// binary static.
+pub fn static_verdict(ldd_output: &str) -> Result<(), String> {
+    if ldd_output.contains("statically linked") || ldd_output.contains("not a dynamic executable") {
+        return Ok(());
+    }
+    let libraries: Vec<&str> = ldd_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("=>") || line.contains(".so"))
+        .collect();
+    if libraries.is_empty() {
+        return Err(format!("(ldd said: {})", ldd_output.trim()));
+    }
+    Err(libraries.join(", "))
+}
+
+/// Whether `musl-gcc` runs; `false` when it is not installed.
+fn musl_gcc_present() -> bool {
+    Command::new("musl-gcc")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Whether a `systemctl` query exits 0; `false` when systemctl is missing.
 fn systemctl_ok(args: &[&str]) -> bool {
     Command::new("systemctl")
@@ -266,13 +377,30 @@ mod tests {
 
     #[test]
     fn the_rebuild_builds_the_binaries_then_the_image_for_the_configured_runtime() {
-        let steps = rebuild_steps(&config(ContainerRuntime::Podman));
-        assert_eq!(steps.len(), 2);
+        let steps = rebuild_steps(&config(ContainerRuntime::Podman), true);
+        assert_eq!(steps.len(), 4);
         assert_eq!(steps[0].program, "cargo");
         assert_eq!(steps[0].args[..3], ["build", "--release", "-p"]);
-        assert_eq!(steps[1].program, "podman");
+        assert_eq!(steps[1].program, "rustup");
         assert_eq!(
             steps[1].args,
+            ["target", "add", "x86_64-unknown-linux-musl"]
+        );
+        assert_eq!(steps[2].program, "cargo");
+        assert_eq!(
+            steps[2].args,
+            [
+                "build",
+                "--release",
+                "--target",
+                "x86_64-unknown-linux-musl",
+                "-p",
+                "anvil-cli"
+            ]
+        );
+        assert_eq!(steps[3].program, "podman");
+        assert_eq!(
+            steps[3].args,
             [
                 "build",
                 "-q",
@@ -284,10 +412,47 @@ mod tests {
             ]
         );
         assert_eq!(
-            rebuild_steps(&config(ContainerRuntime::Docker))[1].program,
+            rebuild_steps(&config(ContainerRuntime::Docker), true)[3].program,
             "docker"
         );
-        assert_eq!(rebuild_steps(&config(ContainerRuntime::None)).len(), 1);
+        let on_host = rebuild_steps(&config(ContainerRuntime::None), true);
+        assert_eq!(on_host.len(), 3);
+        assert_eq!(
+            on_host[2].args[2..4],
+            ["--target", "x86_64-unknown-linux-musl"]
+        );
+    }
+
+    #[test]
+    fn a_missing_musl_gcc_is_installed_before_the_target_is_added() {
+        let steps = rebuild_steps(&config(ContainerRuntime::Podman), false);
+        assert_eq!(steps.len(), 5);
+        assert_eq!(steps[1].program, "sudo");
+        assert_eq!(
+            steps[1].args,
+            ["apt-get", "install", "-y", "-qq", "musl-tools"]
+        );
+        assert_eq!(steps[2].program, "rustup");
+        assert_eq!(
+            steps[3].args[2..4],
+            ["--target", "x86_64-unknown-linux-musl"]
+        );
+        assert_eq!(steps[4].program, "podman");
+    }
+
+    #[test]
+    fn ldd_output_is_judged_static_or_names_the_libraries() {
+        assert_eq!(static_verdict("\tstatically linked\n"), Ok(()));
+        assert_eq!(static_verdict("\tnot a dynamic executable\n"), Ok(()));
+        let dynamic = "\tlinux-vdso.so.1 (0x00007ffd)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007f)\n";
+        let error = static_verdict(dynamic).expect_err("dynamic");
+        assert!(
+            error.contains("libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6"),
+            "{error}"
+        );
+        assert!(error.contains("libgcc_s.so.1"), "{error}");
+        let error = static_verdict("ldd: no such file\n").expect_err("ldd failed");
+        assert!(error.contains("ldd said: ldd: no such file"), "{error}");
     }
 
     fn in_progress(stage: &str) -> ServiceState {

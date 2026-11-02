@@ -5,31 +5,38 @@
 #
 #   ssh nuc 'bash -s' < deploy/nuc/bootstrap.sh
 #
-# Installs rustup, git, just, podman and the eval check tools; clones the
-# monorepo to ~/factory-repo; seeds ~/.factory/env and ~/.anvil/config.toml
-# only when absent; builds anvil and factory in release mode into
-# ~/.local/bin; builds the worker image; installs the systemd user service;
-# runs anvil doctor.
+# Installs rustup, git, just, podman, musl-tools and the eval check tools;
+# clones the monorepo to ~/factory-repo; seeds ~/.factory/env and
+# ~/.anvil/config.toml only when absent; builds anvil and factory in release
+# mode into ~/.local/bin, and anvil once more as a static musl binary that
+# the worker container mounts (the image's glibc is older than the host's;
+# ldd proves it static); builds the worker image; installs the systemd user
+# service; runs anvil doctor.
 set -euo pipefail
 
 REPO_URL="${FACTORY_REPO_URL:-https://github.com/EliFebres/anvil.git}"
 REPO_DIR="$HOME/factory-repo"
 BIN_DIR="$HOME/.local/bin"
 FACTORY_ENV="$HOME/.factory/env"
+# The target the container's anvil is built for; [worker] anvil_bin in
+# factory.toml points at its release build.
+MUSL_TARGET="x86_64-unknown-linux-musl"
 export PATH="$HOME/.cargo/bin:$BIN_DIR:$PATH"
 
 log() { printf '\n== %s\n' "$*"; }
 
 install_packages() {
-    log "packages: git curl just podman socat python3 pytest pandas"
+    log "packages: git curl just podman musl-tools socat python3 pytest pandas"
     if command -v apt-get >/dev/null; then
         sudo apt-get update -qq
-        sudo apt-get install -y -qq git curl build-essential pkg-config podman socat             python3 python3-pytest python3-pandas
+        sudo apt-get install -y -qq git curl build-essential pkg-config musl-tools podman socat \
+            python3 python3-pytest python3-pandas
         sudo apt-get install -y -qq just || true
     elif command -v dnf >/dev/null; then
-        sudo dnf install -y git curl gcc make podman socat python3 python3-pytest python3-pandas just
+        sudo dnf install -y git curl gcc make musl-gcc podman socat python3 python3-pytest python3-pandas just
     elif command -v pacman >/dev/null; then
-        sudo pacman -Sy --noconfirm --needed git curl base-devel podman socat             python python-pytest python-pandas just
+        sudo pacman -Sy --noconfirm --needed git curl base-devel musl podman socat \
+            python python-pytest python-pandas just
     else
         echo "no supported package manager (apt-get, dnf, pacman); install git, curl, just and podman by hand" >&2
         exit 1
@@ -44,10 +51,12 @@ install_packages() {
 install_rust() {
     if [ -x "$HOME/.cargo/bin/cargo" ]; then
         log "rust: already installed ($("$HOME/.cargo/bin/cargo" --version))"
-        return
+    else
+        log "rust: rustup"
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
     fi
-    log "rust: rustup"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+    log "rust: target $MUSL_TARGET"
+    rustup target add "$MUSL_TARGET"
 }
 
 clone_repo() {
@@ -74,9 +83,27 @@ seed_env() {
 build_binaries() {
     log "build: anvil and factory (release)"
     (cd "$REPO_DIR" && cargo build --release -p anvil-cli -p factory-cli)
+    # The host build stays on PATH for anvil doctor and the eval harness.
     mkdir -p "$BIN_DIR"
     ln -sf "$REPO_DIR/target/release/anvil" "$BIN_DIR/anvil"
     ln -sf "$REPO_DIR/target/release/factory" "$BIN_DIR/factory"
+
+    log "build: anvil for the implementer ($MUSL_TARGET, release)"
+    (cd "$REPO_DIR" && cargo build --release --target "$MUSL_TARGET" -p anvil-cli)
+    verify_static "$REPO_DIR/target/$MUSL_TARGET/release/anvil"
+}
+
+# ldd is run for its text: it exits 1 with "not a dynamic executable" for a
+# plain static binary and 0 with "statically linked" for a static-pie one.
+verify_static() {
+    log "verify: ldd $1"
+    local out
+    out="$(ldd "$1" 2>&1 || true)"
+    printf '%s\n' "$out"
+    case "$out" in
+        *"statically linked"*|*"not a dynamic executable"*) ;;
+        *) echo "error: $1 is not static; the worker image cannot run it" >&2; exit 1 ;;
+    esac
 }
 
 build_image() {

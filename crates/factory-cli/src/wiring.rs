@@ -234,6 +234,7 @@ pub async fn build_service(loaded: &Loaded, home: FactoryHome) -> anyhow::Result
         worker.runtime,
         &worker.image,
         &worker.anvil_bin,
+        &loaded.root,
     )
     .await
     .context("the worker sandbox is not ready")?;

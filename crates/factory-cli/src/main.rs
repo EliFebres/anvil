@@ -49,9 +49,11 @@ enum Command {
     InstallService,
     /// Stop the service, pull main, rebuild the binaries and the worker image, and start it again (Linux only).
     ///
-    /// A ticket in progress finishes first: the pause flag stops the loop from
-    /// claiming another one and the update waits until the worker is idle.
-    /// Runs in the repository that holds the current folder, else ~/factory-repo.
+    /// Builds anvil twice: for the host, and as a static musl binary that the
+    /// worker container mounts (checked with ldd). A ticket in progress
+    /// finishes first: the pause flag stops the loop from claiming another
+    /// one and the update waits until the worker is idle. Runs in the
+    /// repository that holds the current folder, else ~/factory-repo.
     Update {
         /// Stop at once; a ticket in progress stays claimed on factory/state.
         #[arg(long)]
@@ -255,6 +257,7 @@ async fn sandbox_line(root: &Path) -> String {
         worker.runtime,
         &worker.image,
         &worker.anvil_bin,
+        root,
     )
     .await;
     describe_sandbox(worker.runtime, &worker.image, checked)
@@ -377,14 +380,15 @@ mod tests {
     #[test]
     fn the_sandbox_line_names_the_runtime_or_the_problem() {
         let image = "localhost/anvil-factory:latest";
-        let anvil = PathBuf::from("/home/eli/factory-repo/target/release/anvil");
+        let anvil =
+            PathBuf::from("/home/eli/factory-repo/target/x86_64-unknown-linux-musl/release/anvil");
         assert_eq!(
             describe_sandbox(ContainerRuntime::Podman, image, Ok(anvil.clone())),
-            "sandbox: ready (podman localhost/anvil-factory:latest; anvil /home/eli/factory-repo/target/release/anvil)"
+            "sandbox: ready (podman localhost/anvil-factory:latest; anvil /home/eli/factory-repo/target/x86_64-unknown-linux-musl/release/anvil)"
         );
         assert_eq!(
             describe_sandbox(ContainerRuntime::None, image, Ok(anvil)),
-            "sandbox: the host (runtime = \"none\"; anvil /home/eli/factory-repo/target/release/anvil)"
+            "sandbox: the host (runtime = \"none\"; anvil /home/eli/factory-repo/target/x86_64-unknown-linux-musl/release/anvil)"
         );
         let missing = factory_core::FactoryError::Sandbox("worker image x is not built".to_owned());
         assert_eq!(
