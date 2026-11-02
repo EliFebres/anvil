@@ -1,0 +1,11 @@
+---
+source: crates/anvil-cli/src/tui/markdown.rs
+expression: "joined(&mut doc, 32)"
+---
+Before
+╭─ rust ───────────────────────╮
+│ fn main() {}                 │
+│ let long_line = "this line i │
+│ s wider than the box";       │
+╰──────────────────────────────╯
+After

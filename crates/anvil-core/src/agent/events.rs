@@ -96,6 +96,16 @@ pub enum LoopEvent {
     },
     /// Something non-fatal worth telling the user.
     Warning(String),
+    /// What an `edit_file` or `write_file` call is about to do, emitted
+    /// before the call runs so the change can be shown and judged.
+    ProposedEdit {
+        /// The file.
+        path: PathBuf,
+        /// The file before the call; empty when it does not exist yet.
+        old: String,
+        /// The file after the call.
+        new: String,
+    },
     /// The run ended.
     Finished {
         /// How.

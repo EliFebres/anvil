@@ -110,6 +110,23 @@ impl Conversation {
         self.messages.push(message);
     }
 
+    /// Drops every message past `len`, as when a turn is cancelled and its
+    /// partial messages must not reach the next request. A measurement
+    /// that counted dropped messages is forgotten with them.
+    ///
+    /// # Arguments
+    ///
+    /// * `len` - How many messages to keep; more than there are keeps all.
+    pub fn truncate(&mut self, len: usize) {
+        self.messages.truncate(len);
+        if self
+            .measured
+            .is_some_and(|measurement| measurement.at_len > len)
+        {
+            self.measured = None;
+        }
+    }
+
     /// Records what the provider measured for a request.
     ///
     /// # Arguments
@@ -436,6 +453,30 @@ mod tests {
         }
         conversation.push(assistant("done"));
         conversation
+    }
+
+    #[test]
+    fn truncate_drops_the_tail_and_a_measurement_past_it() {
+        let mut conversation = seven_turns();
+        let usage = Usage {
+            input: 900,
+            output: 5,
+            cached: 0,
+        };
+        conversation.record_usage(13, usage);
+        conversation.truncate(13);
+        assert_eq!(conversation.messages().len(), 13);
+        assert_eq!(conversation.estimated_tokens(""), 900);
+        conversation.truncate(100);
+        assert_eq!(conversation.messages().len(), 13);
+        conversation.truncate(3);
+        assert_eq!(conversation.messages().len(), 3);
+        assert!(
+            conversation.estimated_tokens("") < 900,
+            "measurement forgotten"
+        );
+        conversation.truncate(0);
+        assert!(conversation.is_empty());
     }
 
     #[test]

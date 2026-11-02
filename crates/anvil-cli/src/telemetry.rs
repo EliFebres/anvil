@@ -15,8 +15,7 @@ use anvil_core::provider::{
     CompletionRequest, Event, EventStream, Provider, ProviderError, StopReason,
 };
 use anvil_core::tools::{
-    PermissionPrompt, PermissionRequest, PromptAnswer, StaticPrompt, ToolOutcome, ToolRegistry,
-    permissions,
+    PermissionPrompt, PermissionRequest, PromptAnswer, ToolOutcome, ToolRegistry, permissions,
 };
 use anvil_telemetry::paths::signals_file;
 use anvil_telemetry::{
@@ -29,8 +28,6 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::render;
-use crate::terminal::TerminalPrompt;
 use crate::wiring::Wiring;
 
 /// How far back the cross-session history reaches.
@@ -160,49 +157,41 @@ impl SessionTelemetry {
         });
     }
 
-    /// The permission prompt, with every answer recorded.
+    /// Wraps a prompt so every answer is recorded.
     ///
     /// # Arguments
     ///
-    /// * `yes` - Whether the run is unattended; then every call is approved
-    ///   without asking (the built-in block list still applies).
+    /// * `inner` - Who actually answers.
     ///
     /// # Returns
     ///
-    /// The prompt.
-    pub fn prompt(&self, yes: bool) -> Box<dyn PermissionPrompt> {
-        let inner: Box<dyn PermissionPrompt> = if yes {
-            Box::new(StaticPrompt(PromptAnswer::Yes))
-        } else {
-            Box::new(TerminalPrompt)
-        };
+    /// The recording prompt.
+    pub fn recording(&self, inner: Box<dyn PermissionPrompt>) -> Box<dyn PermissionPrompt> {
         Box::new(RecordingPrompt {
             inner,
             telemetry: self.clone(),
         })
     }
 
-    /// A sink that records every event and, when asked, renders it too.
+    /// A sink that records every event and forwards it downstream.
     ///
     /// The returned task ends once the sink is dropped and every event has
-    /// been recorded and rendered; await it before classifying.
+    /// been recorded and forwarded; await it before classifying.
     ///
     /// # Arguments
     ///
-    /// * `render` - Whether to print events as well.
+    /// * `downstream` - Where to forward events, such as a renderer.
     ///
     /// # Returns
     ///
     /// The sink and the task.
-    pub fn sink(&self, render: bool) -> (EventSink, JoinHandle<()>) {
+    pub fn sink(
+        &self,
+        downstream: Option<mpsc::UnboundedSender<LoopEvent>>,
+    ) -> (EventSink, JoinHandle<()>) {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let downstream = render.then(|| {
-            let (render_tx, render_rx) = mpsc::unbounded_channel();
-            (render_tx, tokio::spawn(render::render(render_rx, false)))
-        });
         let this = self.clone();
         let task = tokio::spawn(async move {
-            let (downstream, renderer) = downstream.unzip();
             while let Some(event) = rx.recv().await {
                 if let Some(kind) = this.translate(&event) {
                     this.record(kind);
@@ -210,10 +199,6 @@ impl SessionTelemetry {
                 if let Some(downstream) = &downstream {
                     let _ = downstream.send(event);
                 }
-            }
-            drop(downstream);
-            if let Some(renderer) = renderer {
-                let _ = renderer.await;
             }
         });
         (EventSink::new(tx), task)
@@ -383,6 +368,7 @@ impl SessionTelemetry {
             | LoopEvent::ReasoningDelta(_)
             | LoopEvent::PlanWritten { .. }
             | LoopEvent::CheckStarted { .. }
+            | LoopEvent::ProposedEdit { .. }
             | LoopEvent::Finished { .. } => return None,
         })
     }
@@ -612,7 +598,8 @@ mod tests {
             target: Some("notes.txt".to_owned()),
             arguments: serde_json::json!({"path": "notes.txt"}),
         };
-        assert_eq!(telemetry.prompt(true).ask(&request), PromptAnswer::Yes);
+        let prompt = telemetry.recording(Box::new(StaticPrompt(PromptAnswer::Yes)));
+        assert_eq!(prompt.ask(&request), PromptAnswer::Yes);
         let records = load_records(&telemetry.project_dir(), None).expect("records");
         assert!(records.iter().any(|r| matches!(
             &r.kind,
@@ -678,7 +665,7 @@ mod tests {
             inner: Box::new(StaticPrompt(PromptAnswer::Yes)),
             telemetry: telemetry.clone(),
         };
-        let (sink, task) = telemetry.sink(false);
+        let (sink, task) = telemetry.sink(None);
         let agent = AgentLoop::new(
             config,
             LoopProviders {

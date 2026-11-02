@@ -1,0 +1,28 @@
+---
+source: crates/anvil-cli/src/tui/app.rs
+expression: terminal.backend()
+---
+"  docstrings  Every public item gets a doc comment.                                                 "
+"  no-unwrap   No unwrap outside tests.                                                              "
+"                                                                                                    "
+"recent sessions                                                                                     "
+"  01K9ABCDEFGHJKMNPQRSTVWXYZ  done  add a --dry-run flag  2026-11-01 09:30                          "
+"  01K9ABCDEFGHJKMNPQRSTVWXY0  incomplete  rename the config module  2026-10-31 18:02                "
+"                                                                                                    "
+"ok     shell  cargo test --all                                                                  1.2s"
+"    args:                                                                                           "
+"      {                                                                                             "
+"        "command": "cargo test --all",                                                              "
+"        "timeout_s": 120                                                                            "
+"      }                                                                                             "
+"    result:                                                                                         "
+"      running 3 tests                                                                               "
+"      test a ... ok                                                                                 "
+"      test b ... ok                                                                                 "
+"      test c ... ok                                                                                 "
+"                                                                                                    "
+"      test result: ok. 3 passed                                                                     "
+" BUILD · main (test-model)       mode: ask  shift+tab to cycle        ctx 0% · in 0 · out 0 · 00:01 "
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮"
+"│build >                                                                                           │"
+"╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"

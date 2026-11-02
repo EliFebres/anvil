@@ -23,19 +23,23 @@ pub const FILTER_ENV: &str = "ANVIL_LOG";
 /// # Arguments
 ///
 /// * `cwd` - The project root.
+/// * `console` - Whether to print warnings to stderr. The full-screen UI
+///   turns this off, since stderr is the screen; the file still gets them.
 ///
 /// # Returns
 ///
 /// A guard that flushes the file on drop; keep it alive for the process.
-pub fn init(cwd: &Path) -> Option<WorkerGuard> {
+pub fn init(cwd: &Path, console: bool) -> Option<WorkerGuard> {
     let filter = EnvFilter::try_from_env(FILTER_ENV).unwrap_or_else(|_| EnvFilter::new("info"));
     let log_dir = cwd.join(LOG_DIR);
     if std::fs::create_dir_all(&log_dir).is_err() {
-        let console = fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_target(false)
-            .without_time()
-            .with_filter(LevelFilter::WARN);
+        let console = console.then(|| {
+            fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_target(false)
+                .without_time()
+                .with_filter(LevelFilter::WARN)
+        });
         let _ = tracing_subscriber::registry()
             .with(filter)
             .with(console)
@@ -45,11 +49,13 @@ pub fn init(cwd: &Path) -> Option<WorkerGuard> {
     let file = tracing_appender::rolling::never(&log_dir, "anvil.jsonl");
     let (writer, guard) = tracing_appender::non_blocking(file);
     let json = fmt::layer().json().with_writer(writer);
-    let console = fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .without_time()
-        .with_filter(LevelFilter::WARN);
+    let console = console.then(|| {
+        fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_target(false)
+            .without_time()
+            .with_filter(LevelFilter::WARN)
+    });
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(json)

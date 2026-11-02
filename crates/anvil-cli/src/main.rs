@@ -4,7 +4,9 @@ mod chat;
 mod cli;
 mod commands;
 mod config_init;
+mod console;
 mod doctor;
+mod frontend;
 mod legacy;
 mod logging;
 mod memory;
@@ -17,6 +19,7 @@ mod stats;
 mod telemetry;
 mod terminal;
 mod ticket;
+mod tui;
 mod update;
 mod wiring;
 
@@ -27,6 +30,7 @@ use anvil_types::dotenv;
 use clap::Parser;
 
 use crate::cli::{Cli, Command, CompatCommand, ConfigCommand};
+use crate::frontend::UiKind;
 use crate::wiring::{Wiring, home_dir};
 
 /// Exit code for configuration and setup errors.
@@ -56,13 +60,15 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Moves old-name directories aside, loads the `.env` files, then starts
-/// the runtime and runs the command.
+/// Moves old-name directories aside, loads the `.env` files, picks the
+/// front end, then starts the runtime and runs the command.
 ///
 /// The migration runs before anything creates `.anvil/`, so an old
 /// directory is moved rather than reported as a duplicate. The files are loaded before any thread exists: filling the environment
 /// is only sound while the process is single-threaded, and the log filter
-/// (`ANVIL_LOG`) may come from a `.env` file.
+/// (`ANVIL_LOG`) may come from a `.env` file. The front end is chosen
+/// before logging starts, because the full-screen UI must not share
+/// stderr with the console log.
 fn start(cli: Cli) -> anyhow::Result<i32> {
     let cwd = std::env::current_dir()?;
     let home = home_dir();
@@ -75,7 +81,12 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
     }
     let env_files = dotenv::env_files(home.as_deref(), &cwd, false);
     let loaded_env = dotenv::load(&env_files)?;
-    let _log_guard = logging::init(&cwd);
+    let interactive = matches!(
+        cli.command,
+        Some(Command::Chat | Command::Run { .. } | Command::Resume { .. })
+    ) || (cli.command.is_none() && !cli.task.is_empty());
+    let ui = UiKind::choose(cli.plain, cli.yes, interactive);
+    let _log_guard = logging::init(&cwd, ui == UiKind::Plain);
     let env = Env {
         cwd,
         home,
@@ -83,11 +94,11 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
         loaded_env,
     };
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(dispatch(cli, env))
+    runtime.block_on(dispatch(cli, env, ui))
 }
 
 /// Runs the chosen command and returns its exit code.
-async fn dispatch(cli: Cli, env: Env) -> anyhow::Result<i32> {
+async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
     let cwd = &env.cwd;
     let home = env.home.as_deref();
     let profile = cli.profile.as_deref();
@@ -146,15 +157,15 @@ async fn dispatch(cli: Cli, env: Env) -> anyhow::Result<i32> {
         Some(Command::Chat) => {
             let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
             wiring.load_mcp().await;
-            chat::chat(&wiring, cli.yes).await
+            chat::chat(&wiring, cli.yes, ui).await
         }
         Some(Command::Resume { id }) => {
             let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
             wiring.load_mcp().await;
-            commands::resume(&wiring, &id, cli.yes).await
+            commands::resume(&wiring, &id, cli.yes, ui).await
         }
-        Some(Command::Run { task }) => run(home, cwd, profile, task, cli.yes).await,
-        None if !cli.task.is_empty() => run(home, cwd, profile, cli.task, cli.yes).await,
+        Some(Command::Run { task }) => run(home, cwd, profile, task, cli.yes, ui).await,
+        None if !cli.task.is_empty() => run(home, cwd, profile, cli.task, cli.yes, ui).await,
         None => anyhow::bail!("nothing to do; pass a task or a subcommand (see --help)"),
     }
 }
@@ -166,9 +177,10 @@ async fn run(
     profile: Option<&str>,
     words: Vec<String>,
     yes: bool,
+    ui: UiKind,
 ) -> anyhow::Result<i32> {
     let task = words.join(" ");
     let mut wiring = Wiring::new(load_profile(home, cwd, profile)?.config)?;
     wiring.load_mcp().await;
-    commands::run_task(&wiring, task, yes).await
+    commands::run_task(&wiring, task, yes, ui).await
 }

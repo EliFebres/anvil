@@ -18,9 +18,12 @@ use anvil_memory::{
     Decision, FactStore, MEMORY_TOKEN_CAP, Proposal, Rule, RuleSet, load_memory, paths, run_checks,
 };
 use anyhow::Context;
+use tokio::sync::oneshot;
 
+use crate::console::Console;
 use crate::telemetry::SessionTelemetry;
 use crate::terminal::read_line;
+use crate::tui::{MemoryAnswer, UiHandle, UiMsg, UiRequest, block_on_reply};
 use crate::wiring::Wiring;
 
 /// Heading of the rules section in every system prompt.
@@ -179,6 +182,19 @@ pub fn add_rule_from_message(line: &str, home: Option<&Path>) -> anyhow::Result<
     Ok(set.get(&id).cloned())
 }
 
+/// Where a session ran, as the extraction needs it.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionPlace<'a> {
+    /// The home directory; without one nothing is extracted.
+    pub home: Option<&'a Path>,
+    /// The project root, which names the project's facts file.
+    pub cwd: &'a Path,
+    /// The session, for the `proposed.md` header.
+    pub session_id: &'a str,
+    /// The coder's window, which caps the transcript sent to the summarizer.
+    pub context_window: u32,
+}
+
 /// Asks the summarizer for facts worth keeping and reviews them.
 ///
 /// Nothing happens when there is no home directory or the session had no
@@ -190,11 +206,9 @@ pub fn add_rule_from_message(line: &str, home: Option<&Path>) -> anyhow::Result<
 ///
 /// * `summarizer` - The `summarizer` role's provider.
 /// * `messages` - The session's conversation.
-/// * `home` - The home directory.
-/// * `cwd` - The project root.
-/// * `session_id` - For the `proposed.md` header.
-/// * `context_window` - The coder's window, which caps the transcript.
+/// * `place` - Where the session ran.
 /// * `decide` - Called once per proposal, in order.
+/// * `console` - Where progress lines go.
 ///
 /// # Errors
 ///
@@ -202,12 +216,16 @@ pub fn add_rule_from_message(line: &str, home: Option<&Path>) -> anyhow::Result<
 pub async fn extract_after_session(
     summarizer: &dyn Provider,
     messages: &[Message],
-    home: Option<&Path>,
-    cwd: &Path,
-    session_id: &str,
-    context_window: u32,
+    place: SessionPlace<'_>,
     decide: &mut dyn FnMut(&Proposal) -> Decision,
+    console: &Console,
 ) -> anyhow::Result<()> {
+    let SessionPlace {
+        home,
+        cwd,
+        session_id,
+        context_window,
+    } = place;
     let Some(home) = home else {
         return Ok(());
     };
@@ -234,52 +252,47 @@ pub async fn extract_after_session(
         tools: Vec::new(),
         max_output_tokens: None,
     };
-    eprintln!("memory: asking the summarizer for facts worth keeping");
+    console.notice("memory: asking the summarizer for facts worth keeping");
     let (reply, _) = collect_text(summarizer, request)
         .await
         .context("memory-extract completion")?;
     let (proposals, restated) = filter_new(&store, parse_proposals(&reply, &repo));
     if restated > 0 {
-        eprintln!("memory: {restated} proposal(s) restate what is already known");
+        console.notice(format!(
+            "memory: {restated} proposal(s) restate what is already known"
+        ));
     }
     if proposals.is_empty() {
-        eprintln!("memory: no new facts proposed");
+        console.notice("memory: no new facts proposed");
         return Ok(());
     }
     let path = write_proposed(&store, &proposals, session_id)?;
-    eprintln!(
+    console.notice(format!(
         "memory: {} proposed fact(s), written to {}",
         proposals.len(),
         path.display()
-    );
+    ));
     let kept = review(&store, &proposals, decide)?;
     store.remove_proposed()?;
     if kept.is_empty() {
-        eprintln!("memory: nothing kept");
+        console.notice("memory: nothing kept");
     } else {
-        eprintln!(
+        console.notice(format!(
             "memory: kept {} fact(s) under {}",
             kept.len(),
             store.root().display()
-        );
+        ));
     }
     Ok(())
 }
 
-/// The keep/drop decider for a terminal session.
-///
-/// # Arguments
-///
-/// * `yes` - Whether `--yes` was given, which keeps everything.
+/// The keep/drop decider for a plain terminal session.
 ///
 /// # Returns
 ///
-/// A decider. Without `--yes` it prints each proposal and asks; Enter
-/// keeps, and once input ends every remaining proposal is dropped.
-pub fn terminal_decider(yes: bool) -> Box<dyn FnMut(&Proposal) -> Decision> {
-    if yes {
-        return Box::new(|_| Decision::Keep);
-    }
+/// A decider that prints each proposal and asks on stdin; Enter keeps,
+/// and once input ends every remaining proposal is dropped.
+pub fn terminal_decider() -> Box<dyn FnMut(&Proposal) -> Decision> {
     let mut input_ended = false;
     Box::new(move |proposal| {
         if input_ended {
@@ -303,6 +316,31 @@ pub fn terminal_decider(yes: bool) -> Box<dyn FnMut(&Proposal) -> Decision> {
     })
 }
 
+/// The keep/drop decider for a full-screen session: each proposal opens
+/// the keep/drop prompt. A closed UI drops.
+///
+/// # Arguments
+///
+/// * `ui` - The UI.
+///
+/// # Returns
+///
+/// A decider.
+pub fn tui_decider(ui: UiHandle) -> Box<dyn FnMut(&Proposal) -> Decision> {
+    Box::new(move |proposal| {
+        let (reply, answer) = oneshot::channel();
+        ui.send(UiMsg::Request(UiRequest::Memory {
+            topic: proposal.topic.to_string(),
+            fact: proposal.fact.clone(),
+            reply,
+        }));
+        match block_on_reply(answer) {
+            Some(MemoryAnswer::Keep) => Decision::Keep,
+            Some(MemoryAnswer::Drop) | None => Decision::Drop,
+        }
+    })
+}
+
 /// Runs the end-of-session extraction for a finished run or chat and
 /// reports, rather than fails, when it cannot.
 ///
@@ -311,13 +349,15 @@ pub fn terminal_decider(yes: bool) -> Box<dyn FnMut(&Proposal) -> Decision> {
 /// * `wiring` - Providers and paths.
 /// * `session_id` - The session.
 /// * `messages` - The session's conversation.
-/// * `yes` - Whether `--yes` was given.
+/// * `decide` - Called once per proposed fact.
+/// * `console` - Where progress lines go.
 /// * `telemetry` - Where the summarizer's completions are recorded, if anywhere.
 pub async fn finish_session(
     wiring: &Wiring,
     session_id: &str,
     messages: &[Message],
-    yes: bool,
+    mut decide: Box<dyn FnMut(&Proposal) -> Decision>,
+    console: &Console,
     telemetry: Option<&SessionTelemetry>,
 ) {
     let outcome = async {
@@ -326,21 +366,23 @@ pub async fn finish_session(
         if let Some(telemetry) = telemetry {
             summarizer = telemetry.recorded(name, summarizer, "memory");
         }
-        let mut decide = terminal_decider(yes);
         extract_after_session(
             &*summarizer,
             messages,
-            wiring.home.as_deref(),
-            &wiring.cwd,
-            session_id,
-            wiring.context_window(),
+            SessionPlace {
+                home: wiring.home.as_deref(),
+                cwd: &wiring.cwd,
+                session_id,
+                context_window: wiring.context_window(),
+            },
             &mut *decide,
+            console,
         )
         .await
     }
     .await;
     if let Err(error) = outcome {
-        eprintln!("warning: memory extraction skipped: {error:#}");
+        console.warn(format!("warning: memory extraction skipped: {error:#}"));
     }
 }
 
@@ -463,11 +505,14 @@ mod tests {
         extract_after_session(
             &summarizer,
             &messages,
-            Some(home.path()),
-            cwd.path(),
-            "t1",
-            100_000,
+            SessionPlace {
+                home: Some(home.path()),
+                cwd: cwd.path(),
+                session_id: "t1",
+                context_window: 100_000,
+            },
             &mut decide,
+            &Console::Stderr,
         )
         .await
         .expect("extracts");
@@ -506,11 +551,14 @@ mod tests {
         extract_after_session(
             &summarizer,
             &[Message::user("hi")],
-            Some(cwd.path()),
-            cwd.path(),
-            "t",
-            1000,
+            SessionPlace {
+                home: Some(cwd.path()),
+                cwd: cwd.path(),
+                session_id: "t",
+                context_window: 1000,
+            },
             &mut decide,
+            &Console::Stderr,
         )
         .await
         .expect("skips");

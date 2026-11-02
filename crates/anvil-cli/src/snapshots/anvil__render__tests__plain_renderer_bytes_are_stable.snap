@@ -1,0 +1,27 @@
+---
+source: crates/anvil-cli/src/render.rs
+expression: "format!(\"--- stdout\\n{out}\\n--- stderr\\n{err}\")"
+---
+--- stdout
+# Plan
+
+1. [ ] add the flag
+2. [ ] wire it
+All green.
+
+--- stderr
+== PLAN
+plan written to plan.md
+== BUILD
+<CR>| shell cargo test<CR>  shell cargo test .. ok: test result: ok
+running `cargo test`
+`cargo test` failed:
+boom
+review: changes requested
+  - fix it
+== BUILD (round 2)
+compacted 3 messages; summary at summary.md
+warning: careful
+
+done
+summary at summary.md
