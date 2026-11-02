@@ -8,6 +8,7 @@ use anvil_types::{FactoryConfig, TicketKind};
 use chrono::{DateTime, Local, NaiveTime, Utc};
 use ulid::Ulid;
 
+use crate::board::write_atomic;
 use crate::error::{FactoryError, Result};
 use crate::notify::{Event, Notifier};
 use crate::paths::FactoryHome;
@@ -429,6 +430,8 @@ impl Service {
             detail: detail.to_owned(),
             finished_at: Utc::now(),
             cost_usd,
+            pr: None,
+            started_at: None,
         });
         self.save_state()
     }
@@ -449,12 +452,7 @@ impl Service {
 ///
 /// When the file cannot be written.
 pub fn pause(home: &FactoryHome, reason: &str) -> Result<()> {
-    let path = home.pause_file();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|source| FactoryError::io("creating", dir, source))?;
-    }
-    std::fs::write(&path, format!("{reason}\n"))
-        .map_err(|source| FactoryError::io("writing", &path, source))
+    write_atomic(&home.pause_file(), format!("{reason}\n").as_bytes())
 }
 
 /// Removes the pause flag; fine when it is already gone.

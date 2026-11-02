@@ -74,6 +74,16 @@ impl FactoryHome {
         self.root.join("state.json")
     }
 
+    /// The dashboard snapshot `factory watch` reads.
+    pub fn status_file(&self) -> PathBuf {
+        self.root.join("status.json")
+    }
+
+    /// Every outcome ever recorded, one JSON object per line.
+    pub fn outcomes_file(&self) -> PathBuf {
+        self.root.join("outcomes.jsonl")
+    }
+
     /// The log folder.
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
@@ -138,6 +148,7 @@ mod tests {
         assert_eq!(home.env_file(), Path::new("/h/.factory/env"));
         assert_eq!(home.pause_file(), Path::new("/h/.factory/pause"));
         assert_eq!(home.state_file(), Path::new("/h/.factory/state.json"));
+        assert_eq!(home.status_file(), Path::new("/h/.factory/status.json"));
         assert_eq!(home.logs_dir(), Path::new("/h/.factory/logs"));
         assert_eq!(home.state_dir(), Path::new("/h/.factory/state"));
         assert_eq!(home.work_dir("X"), Path::new("/h/.factory/work/X"));

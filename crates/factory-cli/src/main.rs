@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 use factory_cli::install::{InstallOptions, config_home, install};
 use factory_cli::selftest::{SelftestOptions, selftest};
 use factory_cli::update::{UpdateOptions, update};
+use factory_cli::watch::{WatchOptions, watch};
 use factory_cli::{logging, wiring};
 use factory_core::{FactoryHome, ServiceState, SystemRunner, Tick, preflight, service};
 
@@ -38,6 +39,20 @@ enum Command {
     },
     /// Print the queue, the ticket in progress and the last 10 outcomes.
     Status,
+    /// Show a full-screen dashboard of what the service is doing, refreshed every 2s.
+    ///
+    /// Reads ~/.factory/status.json, which the service writes, so it also
+    /// works over ssh. `p` pauses after the current ticket, `r` resumes, `q`
+    /// quits.
+    Watch {
+        /// Print the screen once as plain text and exit.
+        #[arg(long)]
+        once: bool,
+        /// Show this status file instead of the service's; the pause keys then
+        /// only change the screen.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+    },
     /// Stop taking tickets after the current one; `factory resume` undoes it.
     Pause {
         /// Why, shown by `factory status`.
@@ -181,6 +196,11 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             let factory_home = factory_home.context("no home directory; set FACTORY_HOME")?;
             service::pause(&factory_home, &reason)?;
             println!("paused: {reason}");
+            Ok(0)
+        }
+        Command::Watch { once, file } => {
+            let home = factory_home.context("no home directory; set FACTORY_HOME")?;
+            watch(&WatchOptions { home, file, once })?;
             Ok(0)
         }
         Command::Resume => {

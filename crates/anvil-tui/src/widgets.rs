@@ -21,13 +21,16 @@ pub const STATUS_WIDTH: usize = 6;
 ///
 /// The block; callers render content into its `inner` area.
 pub fn panel(title: Vec<Span<'static>>, theme: &Theme) -> Block<'static> {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(theme.border());
+    if title.is_empty() {
+        return block;
+    }
     let mut spans = vec![Span::raw(" ")];
     spans.extend(title);
     spans.push(Span::raw(" "));
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(theme.border())
-        .title(Line::from(spans).style(theme.fg(Shade::Muted)))
+    block.title(Line::from(spans).style(theme.fg(Shade::Muted)))
 }
 
 /// A label on the left and its value against the right edge.
@@ -56,8 +59,8 @@ pub fn kv_row(
     Line::from(pad_between(left, value, width))
 }
 
-/// A horizontal bar: `ratio` of `width` filled in `shade`, the rest in the
-/// border color.
+/// A horizontal bar: `ratio` of `width` filled with `█` in `shade`, the
+/// rest a `░` track in the border color, so it reads without color too.
 ///
 /// # Arguments
 ///
@@ -78,7 +81,7 @@ pub fn progress_bar(ratio: f64, width: usize, shade: Shade, theme: &Theme) -> Ve
     let filled = ((ratio * width as f64).round() as usize).min(width);
     vec![
         Span::styled("█".repeat(filled), theme.fg(shade)),
-        Span::styled("█".repeat(width - filled), theme.border()),
+        Span::styled("░".repeat(width - filled), theme.border()),
     ]
 }
 

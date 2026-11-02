@@ -13,6 +13,7 @@
 //! ports in [`ports`]; `factory-cli` wires the real implementations and the
 //! tests use [`fakes`].
 
+pub mod board;
 pub mod budget;
 pub mod error;
 pub mod fakes;
@@ -32,6 +33,7 @@ pub mod tickets;
 pub mod usage;
 pub mod worker;
 
+pub use board::{Stage, Status, StatusReader, write_atomic};
 pub use budget::{Budget, BudgetExceeded, MAX_GATE_A_ATTEMPTS, MAX_REVIEW_ROUNDS};
 pub use error::{FactoryError, Result};
 pub use git::Git;
