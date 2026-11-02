@@ -10,7 +10,8 @@ use anyhow::Context;
 use factory_core::github::{FALLBACK_TOKEN_ENV, TOKEN_ENV, token_from_env};
 use factory_core::{
     FactoryHome, Git, GitHub, LogNotifier, Notifier, Sandbox, SandboxConfig, Service, ServiceDeps,
-    TicketQueue, TicketWorker, WebhookNotifier, WorkerDeps, hostname, system_clock,
+    SystemRunner, TicketQueue, TicketWorker, WebhookNotifier, WorkerDeps, hostname, preflight,
+    system_clock,
 };
 use factory_review::{ModelReviewer, load_rules};
 use tokio::process::Command;
@@ -214,12 +215,17 @@ pub async fn sandbox(loaded: &Loaded, home: &FactoryHome) -> anyhow::Result<Sand
 ///
 /// # Errors
 ///
-/// When the state branch is missing, a token or key is unset, the reviewers
+/// When the state branch is missing, a token or key is unset, the worker
+/// image is not built or its cache volume cannot be created, the reviewers
 /// are not independent, or the configuration refuses to run.
 pub async fn build_service(loaded: &Loaded, home: FactoryHome) -> anyhow::Result<Service> {
     let repo = repo(&loaded.root);
     let queue = TicketQueue::open(&repo, &home.state_dir(), REMOTE).await?;
     let host = Arc::new(GitHub::from_env(&loaded.factory.github.repo)?);
+    let worker = &loaded.factory.worker;
+    preflight(&SystemRunner, worker.runtime, &worker.image)
+        .await
+        .context("the worker sandbox is not ready")?;
     loaded
         .factory
         .check_independence(&loaded.anvil)

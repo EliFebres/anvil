@@ -127,6 +127,9 @@ fn status_shows_the_queue_and_pause_resume_toggle_the_flag() {
     assert!(text.contains("Something to fix"), "{text}");
     assert!(text.contains("in progress:\n  (none)"), "{text}");
     assert!(text.contains("last 10 outcomes:\n  (none yet)"), "{text}");
+    // The template picks podman; whether it is installed or the image is
+    // built, the line reports instead of failing the command.
+    assert!(text.contains("\nsandbox: "), "{text}");
     assert!(
         world.home.join(".factory/state").join(".git").exists(),
         "the state worktree was created"

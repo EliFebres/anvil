@@ -44,7 +44,10 @@ pub use ports::{
     Progress, PullRequest, ReviewInput, ReviewReport, ReviewSwarm, Tokens, Worker,
 };
 pub use protected::{Held, ProtectedPaths, dependency_additions};
-pub use sandbox::{Sandbox, SandboxConfig};
+pub use sandbox::{
+    CommandRunner, Exit, Invocation, Sandbox, SandboxConfig, SystemRunner, build_command,
+    ensure_cache_volume, preflight,
+};
 pub use service::{Clock, ERRORS_BEFORE_PAUSE, Service, ServiceDeps, Tick, hostname, system_clock};
 pub use status::{InProgress, KEPT_OUTCOMES, OutcomeKind, OutcomeRecord, ServiceState};
 pub use tickets::{

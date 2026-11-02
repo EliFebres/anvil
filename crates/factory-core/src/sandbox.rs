@@ -91,10 +91,78 @@ pub struct SandboxConfig {
 /// Looks a key variable up; the process environment, or a test's table.
 pub type KeyLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// One process the sandbox wants run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    /// The executable: the container runtime, or the program itself with `runtime = "none"`.
+    pub program: String,
+    /// Its arguments.
+    pub args: Vec<String>,
+    /// The environment: `None` inherits the factory's (runtime housekeeping),
+    /// `Some` replaces it entirely (sandbox commands).
+    pub env: Option<Vec<(String, String)>>,
+    /// The working directory, when it matters.
+    pub cwd: Option<PathBuf>,
+}
+
+/// How a sandbox command ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exit {
+    /// The exit code, `None` when killed by a signal or the deadline.
+    pub code: Option<i32>,
+    /// Whether the deadline passed and the command was killed.
+    pub timed_out: bool,
+    /// stdout then stderr, as text.
+    pub output: String,
+}
+
+impl Exit {
+    /// An exit with a code and its output, as a finished command reports.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The exit code.
+    /// * `output` - stdout then stderr.
+    pub fn of(code: i32, output: &str) -> Self {
+        Self {
+            code: Some(code),
+            timed_out: false,
+            output: output.to_owned(),
+        }
+    }
+}
+
+/// Runs the processes the sandbox asks for: the container runtime on the
+/// factory host, or a fake in tests.
+pub trait CommandRunner: Send + Sync {
+    /// Runs the process until it exits or the deadline passes, collecting its output.
+    ///
+    /// # Arguments
+    ///
+    /// * `invocation` - What to run.
+    /// * `deadline` - When to kill it.
+    ///
+    /// # Errors
+    ///
+    /// [`FactoryError::Spawn`] when the program cannot be started.
+    fn run<'a>(&'a self, invocation: Invocation, deadline: Instant) -> BoxFuture<'a, Result<Exit>>;
+}
+
+/// The runner the factory uses: real processes on this machine.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemRunner;
+
+impl CommandRunner for SystemRunner {
+    fn run<'a>(&'a self, invocation: Invocation, deadline: Instant) -> BoxFuture<'a, Result<Exit>> {
+        Box::pin(run_process(invocation, deadline))
+    }
+}
+
 /// Runs the implementer and the build tools for one factory.
 pub struct Sandbox {
     config: SandboxConfig,
     keys: KeyLookup,
+    runner: Arc<dyn CommandRunner>,
     denied: Denied,
     proxy: Mutex<Option<proxy::ProxyHandle>>,
 }
@@ -119,9 +187,26 @@ impl Sandbox {
     /// * `config` - What to run and how.
     /// * `keys` - Returns the value of a key variable, or `None` when unset.
     pub fn with_key_lookup(config: SandboxConfig, keys: KeyLookup) -> Self {
+        Self::with_runner(config, keys, Arc::new(SystemRunner))
+    }
+
+    /// Builds the sandbox over its own process runner, so tests can script
+    /// what the container runtime answers.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - What to run and how.
+    /// * `keys` - Returns the value of a key variable, or `None` when unset.
+    /// * `runner` - Runs every process the sandbox asks for.
+    pub fn with_runner(
+        config: SandboxConfig,
+        keys: KeyLookup,
+        runner: Arc<dyn CommandRunner>,
+    ) -> Self {
         Self {
             config,
             keys,
+            runner,
             denied: Arc::new(Mutex::new(BTreeSet::new())),
             proxy: Mutex::new(None),
         }
@@ -290,89 +375,47 @@ impl Sandbox {
         args
     }
 
-    /// The command for a program in the worktree, on the host or in the container.
+    /// The invocation for a program in the worktree, on the host or in the
+    /// container, with the sandbox environment and nothing else.
     fn command(
         &self,
         worktree: &Path,
         home: &Path,
         program: &[&str],
         cache_writable: bool,
-    ) -> Command {
-        let mut command = match self.config.runtime {
+    ) -> Invocation {
+        let env = Some(self.environment(home));
+        match self.config.runtime {
             ContainerRuntime::None => {
                 let (bin, rest) = program.split_first().unwrap_or((&"true", &[]));
-                let mut command = if bin.ends_with(".sh") {
-                    let mut c = Command::new(bash_program());
-                    c.arg(bin);
-                    c
+                let (program, mut args) = if bin.ends_with(".sh") {
+                    (
+                        bash_program().to_string_lossy().into_owned(),
+                        vec![(*bin).to_owned()],
+                    )
                 } else {
-                    Command::new(bin)
+                    ((*bin).to_owned(), Vec::new())
                 };
-                command.args(rest);
-                command.current_dir(worktree);
-                command
+                args.extend(rest.iter().map(|s| (*s).to_owned()));
+                Invocation {
+                    program,
+                    args,
+                    env,
+                    cwd: Some(worktree.to_path_buf()),
+                }
             }
-            runtime => {
-                let mut command = Command::new(runtime_name(runtime));
-                command.args(self.run_args(worktree, home, program, cache_writable));
-                command
-            }
-        };
-        command.env_clear();
-        command.envs(self.environment(home));
-        command.stdin(Stdio::null());
-        command.stdout(Stdio::piped());
-        command.stderr(Stdio::piped());
-        command.kill_on_drop(true);
-        command
+            runtime => Invocation {
+                program: runtime_name(runtime).to_owned(),
+                args: self.run_args(worktree, home, program, cache_writable),
+                env,
+                cwd: None,
+            },
+        }
     }
 
-    /// Runs a command until it exits or the deadline passes.
-    async fn run_until(&self, mut command: Command, deadline: Instant) -> Result<Exit> {
-        let program = format!("{:?}", command.as_std().get_program());
-        let mut child = command
-            .spawn()
-            .map_err(|source| FactoryError::Spawn { program, source })?;
-        let mut stdout = child.stdout.take();
-        let mut stderr = child.stderr.take();
-        let reader = async {
-            let mut out = Vec::new();
-            let mut err = Vec::new();
-            if let Some(stdout) = stdout.as_mut() {
-                let _ = stdout.take(OUTPUT_CAP as u64).read_to_end(&mut out).await;
-            }
-            if let Some(stderr) = stderr.as_mut() {
-                let _ = stderr.take(OUTPUT_CAP as u64).read_to_end(&mut err).await;
-            }
-            (out, err)
-        };
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let waited = tokio::time::timeout(remaining, async {
-            let (output, status) = tokio::join!(reader, child.wait());
-            (output, status)
-        })
-        .await;
-        match waited {
-            Ok(((out, err), status)) => {
-                let status = status.map_err(|source| FactoryError::Spawn {
-                    program: "sandbox command".to_owned(),
-                    source,
-                })?;
-                Ok(Exit {
-                    code: status.code(),
-                    timed_out: false,
-                    output: combine(&out, &err),
-                })
-            }
-            Err(_) => {
-                let _ = child.kill().await;
-                Ok(Exit {
-                    code: None,
-                    timed_out: true,
-                    output: "(killed: deadline passed)".to_owned(),
-                })
-            }
-        }
+    /// Runs an invocation until it exits or the deadline passes.
+    async fn run_until(&self, invocation: Invocation, deadline: Instant) -> Result<Exit> {
+        self.runner.run(invocation, deadline).await
     }
 
     /// Starts the egress proxy for a ticket, replacing a previous one.
@@ -390,22 +433,7 @@ impl Sandbox {
 
     /// Warms the registry cache: `cargo fetch` with the cache mounted read-write.
     async fn prewarm(&self, worktree: &Path, home: &Path) -> Result<()> {
-        let runtime = runtime_name(self.config.runtime);
-        let created = Command::new(runtime)
-            .args(["volume", "create", CACHE_VOLUME])
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|source| FactoryError::Spawn {
-                program: runtime.to_owned(),
-                source,
-            })?;
-        if !created.status.success() {
-            return Err(FactoryError::Sandbox(format!(
-                "{runtime} volume create {CACHE_VOLUME}: {}",
-                String::from_utf8_lossy(&created.stderr).trim()
-            )));
-        }
+        ensure_cache_volume(self.runner.as_ref(), self.config.runtime).await?;
         let cargo = self.config.cargo_bin.clone();
         let command = self.command(worktree, home, &[cargo.as_str(), "fetch"], true);
         let exit = self
@@ -525,6 +553,13 @@ impl Implementer for Sandbox {
             let program = [anvil.as_str(), "--yes", "--profile", PROFILE, task];
             let command = self.command(worktree, &home, &program, false);
             let exit = self.run_until(command, deadline).await?;
+            if let Some(reason) = infrastructure_failure(&exit) {
+                return Err(FactoryError::Sandbox(format!(
+                    "{} could not start the implementer ({reason}): {}",
+                    runtime_word(self.config.runtime),
+                    last_line(&exit.output)
+                )));
+            }
             let used = usage::read(worktree, &self.config.providers);
             let status = if exit.timed_out {
                 ImplementerStatus::Timeout
@@ -577,11 +612,219 @@ impl Implementer for Sandbox {
     }
 }
 
-/// How a sandbox command ended.
-struct Exit {
-    code: Option<i32>,
-    timed_out: bool,
-    output: String,
+/// Makes sure the registry cache volume exists, creating it when it does not.
+///
+/// Every ticket and the start-up preflight call this, so it must succeed
+/// when the volume is already there: podman's `volume create` refuses a
+/// name that exists, so podman is asked `volume exists` first, and an
+/// "already exists" refusal is treated as success for any runtime.
+///
+/// # Arguments
+///
+/// * `runner` - Runs the runtime's commands.
+/// * `runtime` - podman, docker or none; none needs no volume.
+///
+/// # Errors
+///
+/// [`FactoryError::Spawn`] when the runtime cannot be started and
+/// [`FactoryError::Sandbox`] when it refuses to create the volume.
+pub async fn ensure_cache_volume(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+) -> Result<()> {
+    if runtime == ContainerRuntime::None {
+        return Ok(());
+    }
+    if runtime == ContainerRuntime::Podman {
+        let exists = housekeeping(runner, runtime, &["volume", "exists", CACHE_VOLUME]).await?;
+        if exists.code == Some(0) {
+            return Ok(());
+        }
+    }
+    let created = housekeeping(runner, runtime, &["volume", "create", CACHE_VOLUME]).await?;
+    if created.code == Some(0) || created.output.contains("already exists") {
+        return Ok(());
+    }
+    Err(FactoryError::Sandbox(format!(
+        "{} volume create {CACHE_VOLUME}: {}",
+        runtime_name(runtime),
+        created.output.trim()
+    )))
+}
+
+/// Checks that the runtime can run tickets: the worker image is built and
+/// the registry cache volume exists or can be created.
+///
+/// The service runs this before taking a ticket and `factory status`
+/// reports its result.
+///
+/// # Arguments
+///
+/// * `runner` - Runs the runtime's commands.
+/// * `runtime` - podman, docker or none; none always passes.
+/// * `image` - `[worker] image`.
+///
+/// # Errors
+///
+/// [`FactoryError::Spawn`] when the runtime cannot be started, and
+/// [`FactoryError::Sandbox`] naming the `build` command to run when the
+/// image is missing, or saying why the volume cannot be created.
+pub async fn preflight(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+    image: &str,
+) -> Result<()> {
+    if runtime == ContainerRuntime::None {
+        return Ok(());
+    }
+    let query: &[&str] = match runtime {
+        ContainerRuntime::Podman => &["image", "exists", image],
+        _ => &["image", "inspect", image],
+    };
+    let found = housekeeping(runner, runtime, query).await?;
+    if found.code != Some(0) {
+        return Err(FactoryError::Sandbox(format!(
+            "worker image {image} is not built; run `{}` in the repository (or `just image`)",
+            build_command(runtime, image)
+        )));
+    }
+    ensure_cache_volume(runner, runtime).await
+}
+
+/// The command that builds the worker image, as `justfile` and `bootstrap.sh` run it.
+///
+/// # Arguments
+///
+/// * `runtime` - podman or docker.
+/// * `image` - The tag to build.
+pub fn build_command(runtime: ContainerRuntime, image: &str) -> String {
+    format!(
+        "{} build -t {image} -f deploy/nuc/Containerfile deploy/nuc",
+        runtime_name(runtime)
+    )
+}
+
+/// Runs a short runtime command (`volume exists`, `image exists`) with the
+/// factory's own environment, which rootless podman needs.
+async fn housekeeping(
+    runner: &dyn CommandRunner,
+    runtime: ContainerRuntime,
+    args: &[&str],
+) -> Result<Exit> {
+    let invocation = Invocation {
+        program: runtime_name(runtime).to_owned(),
+        args: args.iter().map(|s| (*s).to_owned()).collect(),
+        env: None,
+        cwd: None,
+    };
+    runner
+        .run(invocation, Instant::now() + HOUSEKEEPING_TIMEOUT)
+        .await
+}
+
+/// How long a housekeeping command may take.
+const HOUSEKEEPING_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Why an implementer exit is the factory's failure rather than anvil's,
+/// or `None` when anvil itself ran.
+///
+/// The runtime exits 125 when it cannot start the container, 126 and 127
+/// when the program inside cannot run; and anvil prints `session <id>` as
+/// its first line, so a failure without that line happened before anvil
+/// started. A clean exit without the line is still anvil's (stand-ins in
+/// tests print nothing), and a timeout has no output to judge.
+fn infrastructure_failure(exit: &Exit) -> Option<String> {
+    if exit.timed_out {
+        return None;
+    }
+    match exit.code {
+        Some(code @ 125..=127) => Some(format!("exit {code}")),
+        Some(0) => None,
+        _ if started(&exit.output) => None,
+        Some(code) => Some(format!("exit {code} before anvil's session line")),
+        None => Some("killed before anvil's session line".to_owned()),
+    }
+}
+
+/// Whether anvil printed its `session <id>` line.
+fn started(output: &str) -> bool {
+    output.lines().any(|line| {
+        line.trim()
+            .strip_prefix("session ")
+            .is_some_and(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
+    })
+}
+
+/// The last non-empty line of output, or `(no output)`.
+fn last_line(output: &str) -> String {
+    output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(no output)")
+        .to_owned()
+}
+
+/// Spawns the invocation and waits for it, killing it at the deadline.
+async fn run_process(invocation: Invocation, deadline: Instant) -> Result<Exit> {
+    let mut command = Command::new(&invocation.program);
+    command.args(&invocation.args);
+    if let Some(env) = &invocation.env {
+        command.env_clear();
+        command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
+    if let Some(cwd) = &invocation.cwd {
+        command.current_dir(cwd);
+    }
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    command.kill_on_drop(true);
+    let mut child = command.spawn().map_err(|source| FactoryError::Spawn {
+        program: invocation.program.clone(),
+        source,
+    })?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let reader = async {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        if let Some(stdout) = stdout.as_mut() {
+            let _ = stdout.take(OUTPUT_CAP as u64).read_to_end(&mut out).await;
+        }
+        if let Some(stderr) = stderr.as_mut() {
+            let _ = stderr.take(OUTPUT_CAP as u64).read_to_end(&mut err).await;
+        }
+        (out, err)
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let waited = tokio::time::timeout(remaining, async {
+        let (output, status) = tokio::join!(reader, child.wait());
+        (output, status)
+    })
+    .await;
+    match waited {
+        Ok(((out, err), status)) => {
+            let status = status.map_err(|source| FactoryError::Spawn {
+                program: invocation.program.clone(),
+                source,
+            })?;
+            Ok(Exit {
+                code: status.code(),
+                timed_out: false,
+                output: combine(&out, &err),
+            })
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            Ok(Exit {
+                code: None,
+                timed_out: true,
+                output: "(killed: deadline passed)".to_owned(),
+            })
+        }
+    }
 }
 
 /// The runtime's executable name.
@@ -590,6 +833,14 @@ fn runtime_name(runtime: ContainerRuntime) -> &'static str {
         ContainerRuntime::Podman => "podman",
         ContainerRuntime::Docker => "docker",
         ContainerRuntime::None => "",
+    }
+}
+
+/// The runtime as it reads in a message: its name, or `the host`.
+fn runtime_word(runtime: ContainerRuntime) -> &'static str {
+    match runtime {
+        ContainerRuntime::None => "the host",
+        other => runtime_name(other),
     }
 }
 
@@ -872,5 +1123,50 @@ mod tests {
         let long: String = (0..100).map(|i| format!("{i}\n")).collect();
         assert!(!tail(&long).contains("39\n"));
         assert!(tail(&long).starts_with("40\n"));
+        assert_eq!(last_line("a\nError: gone\n\n"), "Error: gone");
+        assert_eq!(last_line(""), "(no output)");
+    }
+
+    #[test]
+    fn the_session_line_separates_anvil_failures_from_runtime_failures() {
+        assert!(started("session 01ARZ3NDEKTSV4RRFFQ69G5FAV\nworking\n"));
+        assert!(started("noise\n  session abc\n"));
+        assert!(!started("session \n"));
+        assert!(!started(
+            "Trying to pull localhost/anvil-factory:latest...\n"
+        ));
+
+        let exit = |code: Option<i32>, output: &str| Exit {
+            code,
+            timed_out: false,
+            output: output.to_owned(),
+        };
+        assert_eq!(
+            infrastructure_failure(&exit(Some(125), "session x\n")),
+            Some("exit 125".to_owned())
+        );
+        assert_eq!(
+            infrastructure_failure(&exit(Some(1), "Error: image not known\n")),
+            Some("exit 1 before anvil's session line".to_owned())
+        );
+        assert_eq!(
+            infrastructure_failure(&exit(Some(1), "session x\nboom\n")),
+            None
+        );
+        assert_eq!(infrastructure_failure(&exit(Some(0), "")), None);
+        assert_eq!(
+            infrastructure_failure(&exit(None, "")),
+            Some("killed before anvil's session line".to_owned())
+        );
+        let timed_out = Exit {
+            code: None,
+            timed_out: true,
+            output: "(killed: deadline passed)".to_owned(),
+        };
+        assert_eq!(infrastructure_failure(&timed_out), None);
+        assert_eq!(
+            build_command(ContainerRuntime::Podman, "localhost/anvil-factory:latest"),
+            "podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc"
+        );
     }
 }
