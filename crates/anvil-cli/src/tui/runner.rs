@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anvil_core::agent::LoopEvent;
 use anvil_core::provider::ToolCall;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
+use crossterm::event::{Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -36,8 +36,9 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Installs the panic hook once.
 static PANIC_HOOK: Once = Once::new();
 
-/// Raw mode, the alternate screen and mouse capture, undone on drop, on
-/// panic, or by an explicit [`TerminalGuard::restore`].
+/// Raw mode and the alternate screen, undone on drop, on panic, or by an
+/// explicit [`TerminalGuard::restore`]. The mouse is left to the terminal
+/// so dragging still selects and copies text.
 #[derive(Debug)]
 pub struct TerminalGuard {
     _private: (),
@@ -56,7 +57,7 @@ impl TerminalGuard {
     /// terminal is left as it was.
     pub fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(error) = execute!(io::stdout(), EnterAlternateScreen) {
             let _ = disable_raw_mode();
             return Err(error);
         }
@@ -74,7 +75,7 @@ impl TerminalGuard {
     /// Restores the terminal. Safe to call more than once.
     pub fn restore() {
         if ACTIVE.swap(false, Ordering::SeqCst) {
-            let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
             let _ = disable_raw_mode();
         }
     }

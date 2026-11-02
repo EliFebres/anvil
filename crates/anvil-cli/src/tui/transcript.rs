@@ -777,7 +777,13 @@ impl Transcript {
         let hidden_before = self.hidden_before;
         let selected = self.selected;
         let key = (width, dimmed);
+        let mut previous: Option<&Entry> = None;
         for (index, slot) in self.slots.iter_mut().enumerate().skip(hidden_before) {
+            if let Some(previous) = previous
+                && !(is_compact(previous) && is_compact(&slot.entry))
+            {
+                out.push(Line::default());
+            }
             let live = is_live(&slot.entry);
             if live || slot.cache.as_ref().is_none_or(|(k, _)| *k != key) {
                 let lines = render_entry(&mut slot.entry, width, theme, tick);
@@ -796,10 +802,22 @@ impl Transcript {
             }
             layout.push((index, out.len(), lines.len()));
             out.extend(lines);
+            previous = Some(&slot.entry);
         }
         self.layout = layout;
         out
     }
+}
+
+/// Whether an entry is a one-liner that sits directly under another one.
+fn is_compact(entry: &Entry) -> bool {
+    matches!(
+        entry,
+        Entry::Tool(ToolEntry {
+            expanded: false,
+            ..
+        }) | Entry::Check { .. }
+    )
 }
 
 /// Whether an entry changes without an event, so it must not be cached.
@@ -816,7 +834,7 @@ fn is_live(entry: &Entry) -> bool {
     )
 }
 
-/// Renders one entry, followed by a blank line.
+/// Renders one entry, without the blank line that separates entries.
 fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<Line<'static>> {
     let columns = usize::from(width).max(1);
     let mut lines = match entry {
@@ -837,6 +855,9 @@ fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<
         }
         Entry::Model { doc, open } => {
             let mut lines = doc.lines(width, theme);
+            while lines.last().is_some_and(|line| line.width() == 0) {
+                lines.pop();
+            }
             if *open {
                 append_cursor(&mut lines, columns, theme);
             }
@@ -902,7 +923,9 @@ fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<
             lines
         }
     };
-    lines.push(Line::default());
+    while lines.last().is_some_and(|line| line.width() == 0) {
+        lines.pop();
+    }
     lines
 }
 
@@ -1420,7 +1443,7 @@ mod tests {
             text: "run the tests please".to_owned(),
         });
         let text = joined(&mut transcript, 20);
-        assert_eq!(text, "you  run the tests\n     please\n");
+        assert_eq!(text, "you  run the tests\n     please");
     }
 
     #[test]
@@ -1448,7 +1471,7 @@ mod tests {
             assert_eq!(transcript.entries().len(), 1);
             let collapsed = joined(&mut transcript, 40);
             assert_eq!(
-                collapsed, "ok     shell  ls                   340ms\n",
+                collapsed, "ok     shell  ls                   340ms",
                 "{collapsed:?}"
             );
             assert!(!collapsed.contains("args:"));
@@ -1602,7 +1625,7 @@ mod tests {
         );
         assert_eq!(transcript.entries().len(), 1);
         let text = joined(&mut transcript, 40);
-        assert_eq!(text, "failed check  cargo test\n    boom\n");
+        assert_eq!(text, "failed check  cargo test\n    boom");
     }
 
     #[test]
@@ -1678,7 +1701,7 @@ mod tests {
         transcript.clear_view();
         transcript.notice("two", Level::Info);
         assert_eq!(transcript.entries().len(), 2);
-        assert_eq!(joined(&mut transcript, 40), "two\n");
+        assert_eq!(joined(&mut transcript, 40), "two");
     }
 
     #[test]
