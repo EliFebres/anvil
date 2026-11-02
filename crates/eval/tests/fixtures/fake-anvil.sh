@@ -28,11 +28,14 @@ record "eval run" "$ANVIL_HOME/.anvil/memory/touched"
 record "$3" "$ANVIL_HOME/.anvil/last-prompt.txt"
 record "$(cat .anvil/config.toml)" "$ANVIL_HOME/.anvil/last-project-config.toml"
 
+# The telemetry record goes down before the session line: the harness
+# starts the task's timeout at the first stderr line, so by then the tokens
+# a timed-out run must keep are already on disk, however slowly bash started.
 session=01ARZ3NDEKTSV4RRFFQ69G5FAV
-echo "session $session" >&2
 mkdir -p .anvil/telemetry
 day=$(date -u +%Y-%m-%d)
 printf '{"ts":"%sT10:00:00Z","session":"%s","project":"p","event":"turn","state":"build","provider":"fake","model":"fake-1","tokens":{"input":1000,"output":100,"cached":0},"latency_ms":5,"retries":0,"stop_reason":"end_turn"}\n' "$day" "$session" >> ".anvil/telemetry/$day.jsonl"
+echo "session $session" >&2
 
 if [ -f "$ANVIL_HOME/.anvil/sleep" ]; then
   sleep "$(cat "$ANVIL_HOME/.anvil/sleep")"

@@ -10,12 +10,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anvil_types::ProviderConfig;
 use anvil_types::config::{CONFIG_DIR, CONFIG_FILE};
 use serde::Serialize;
-use tokio::process::Command;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{ChildStderr, Command};
+use tokio::sync::oneshot;
 
 use crate::check::{self, forward_slashes, tail};
 use crate::error::EvalError;
@@ -31,6 +34,14 @@ const SEEDED_DIRS: [&str; 1] = ["checks"];
 
 /// Lines of stderr kept per attempt.
 const STDERR_TAIL_LINES: usize = 20;
+
+/// How long anvil may take to print its first stderr line before the
+/// task's timeout starts counting anyway.
+const STARTUP_GRACE: Duration = Duration::from_secs(30);
+
+/// How long the output pipes may stay open after anvil exited or was
+/// killed before what was read so far is taken as the whole of it.
+const PIPE_GRACE: Duration = Duration::from_millis(500);
 
 /// Where to find anvil and the user's configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,34 +119,57 @@ impl AnvilRunner {
     }
 
     /// Runs anvil once and recovers usage from the copy's telemetry.
+    ///
+    /// The task's timeout counts from anvil's first line on stderr (the
+    /// `session <id>` line), not from the spawn, so a slow start (bash on a
+    /// Windows runner takes seconds) does not eat the budget. A run that
+    /// prints nothing within [`STARTUP_GRACE`] starts the clock then.
     async fn attempt(&self, attempt: &AttemptContext<'_>) -> Result<AttemptOutcome, EvalError> {
         write_project_config(
             attempt.work_dir,
             self.provider.as_deref(),
             attempt.task.meta.max_tokens,
         )?;
+        let spawn_error = |source| EvalError::Spawn {
+            program: self.options.anvil_bin.clone(),
+            source,
+        };
         let clock = Instant::now();
-        let child = self
-            .command(attempt)
-            .spawn()
-            .map_err(|source| EvalError::Spawn {
-                program: self.options.anvil_bin.clone(),
-                source,
-            })?;
-        let waited = tokio::time::timeout(attempt.task.timeout(), child.wait_with_output()).await;
+        let mut child = self.command(attempt).spawn().map_err(spawn_error)?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let drain = tokio::spawn(async move {
+            if let Some(mut stdout) = stdout {
+                let _ = tokio::io::copy(&mut stdout, &mut tokio::io::sink()).await;
+            }
+        });
+        let (started_tx, started_rx) = oneshot::channel();
+        let collected = Arc::new(Mutex::new(String::new()));
+        let mut reader = tokio::spawn(read_stderr(stderr, started_tx, Arc::clone(&collected)));
+        let _ = tokio::time::timeout(STARTUP_GRACE, started_rx).await;
+        let waited = tokio::time::timeout(attempt.task.timeout(), child.wait()).await;
         let anvil_ms = clock.elapsed().as_millis() as u64;
-        let (status, stderr) = match waited {
-            Ok(Ok(output)) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                (status_from(output.status.code(), &stderr), stderr)
+        let code = match waited {
+            Ok(Ok(exit)) => Some(exit.code()),
+            Ok(Err(source)) => return Err(spawn_error(source)),
+            Err(_elapsed) => {
+                let _ = child.kill().await;
+                None
             }
-            Ok(Err(source)) => {
-                return Err(EvalError::Spawn {
-                    program: self.options.anvil_bin.clone(),
-                    source,
-                });
-            }
-            Err(_elapsed) => (AttemptStatus::Timeout, String::new()),
+        };
+        // A killed anvil may leave a grandchild holding the pipes open, so the
+        // readers get a moment to drain and are then abandoned.
+        if tokio::time::timeout(PIPE_GRACE, &mut reader).await.is_err() {
+            reader.abort();
+        }
+        drain.abort();
+        let stderr = collected
+            .lock()
+            .map(|text| text.clone())
+            .unwrap_or_default();
+        let status = match code {
+            Some(code) => status_from(code, &stderr),
+            None => AttemptStatus::Timeout,
         };
         let session = session_id(&stderr);
         let telemetry_dir = attempt.work_dir.join(CONFIG_DIR).join("telemetry");
@@ -185,6 +219,32 @@ impl EvalRunner for AnvilRunner {
 
     fn run_attempt<'a>(&'a self, attempt: &'a AttemptContext<'a>) -> AttemptFuture<'a> {
         Box::pin(self.attempt(attempt))
+    }
+}
+
+/// Collects a child's stderr into `into`, signalling once as soon as its
+/// first line lands so the caller knows anvil has started.
+///
+/// Dropping the signal (no stderr, or the child ends silently) releases the
+/// caller just the same.
+async fn read_stderr(
+    stderr: Option<ChildStderr>,
+    started: oneshot::Sender<()>,
+    into: Arc<Mutex<String>>,
+) {
+    let Some(stderr) = stderr else {
+        return;
+    };
+    let mut lines = BufReader::new(stderr).lines();
+    let mut started = Some(started);
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Ok(mut text) = into.lock() {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        if let Some(started) = started.take() {
+            let _ = started.send(());
+        }
     }
 }
 
