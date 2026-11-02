@@ -4,14 +4,14 @@
 //! `podman` calls, so the volume, image and start-up handling are tested
 //! without a container.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anvil_types::config::SETUP_PROVIDERS;
 use anvil_types::{AnvilConfig, ContainerRuntime};
 use factory_core::fakes::FakeRuntime;
-use factory_core::sandbox::CACHE_VOLUME;
+use factory_core::sandbox::{ANVIL_MOUNT, CACHE_VOLUME};
 use factory_core::{
     Exit, FactoryError, FactoryHome, Implementer, ImplementerStatus, Sandbox, SandboxConfig,
     ensure_cache_volume, preflight,
@@ -20,6 +20,30 @@ use factory_core::{
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
     std::fs::write(path, text).expect("write");
+}
+
+/// A stand-in for the anvil binary: an executable file under `dir`, by its
+/// canonical path (what `preflight` returns and the container mounts).
+fn fake_binary(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
+    write(&path, "#!/usr/bin/env bash\nexit 0\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    canonical(&path)
+}
+
+/// The path as `resolve_anvil_bin` reports it: canonical, without Windows'
+/// `\\?\` prefix.
+fn canonical(path: &Path) -> PathBuf {
+    let text = path
+        .canonicalize()
+        .expect("canonicalize")
+        .to_string_lossy()
+        .into_owned();
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
 }
 
 /// Whether a bash is available to run the stand-in scripts.
@@ -78,7 +102,7 @@ esac
         SandboxConfig {
             runtime: ContainerRuntime::None,
             image: String::new(),
-            anvil_bin: fake_anvil.to_string_lossy().into_owned(),
+            anvil_bin: fake_anvil,
             just_bin: fake_just.to_string_lossy().into_owned(),
             cargo_bin: "cargo".to_owned(),
             egress_allow: Vec::new(),
@@ -170,15 +194,16 @@ coder = \"anthropic\"
     assert!(sandbox.denied_hosts().is_empty());
 }
 
-/// A podman sandbox over the fake runtime, with the ticket home under `temp`.
-fn podman_sandbox(temp: &Path, runtime: Arc<FakeRuntime>) -> Sandbox {
+/// A podman sandbox over the fake runtime, with the ticket home under `temp`
+/// and `anvil_bin` as the host binary to mount.
+fn podman_sandbox(temp: &Path, anvil_bin: PathBuf, runtime: Arc<FakeRuntime>) -> Sandbox {
     let anvil: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
     let keys: factory_core::sandbox::KeyLookup = Arc::new(|_: &str| None);
     Sandbox::with_runner(
         SandboxConfig {
             runtime: ContainerRuntime::Podman,
             image: "localhost/anvil-factory:latest".to_owned(),
-            anvil_bin: "anvil".to_owned(),
+            anvil_bin,
             just_bin: "just".to_owned(),
             cargo_bin: "cargo".to_owned(),
             egress_allow: Vec::new(),
@@ -263,21 +288,168 @@ async fn the_cache_volume_is_reused_when_it_exists_and_created_once_when_not() {
 }
 
 #[tokio::test]
+async fn the_implementer_mounts_the_host_anvil_and_runs_it_from_the_mount() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let worktree = FactoryHome::under(temp.path()).work_dir("T3");
+    std::fs::create_dir_all(&worktree).expect("mkdir");
+    let anvil = fake_binary(temp.path(), "anvil");
+    let runtime = Arc::new(FakeRuntime::default());
+    let sandbox = podman_sandbox(temp.path(), anvil.clone(), Arc::clone(&runtime));
+
+    let outcome = sandbox
+        .run(
+            &worktree,
+            "do the thing",
+            Instant::now() + Duration::from_secs(60),
+        )
+        .await
+        .expect("runs");
+    assert_eq!(outcome.status, ImplementerStatus::Done);
+
+    let call = &runtime.calls()[0];
+    assert_eq!(call.program, "podman");
+    let mount = format!("{}:{ANVIL_MOUNT}:ro", anvil.display());
+    let mount_at = call
+        .args
+        .windows(2)
+        .position(|pair| pair[0] == "-v" && pair[1] == mount)
+        .unwrap_or_else(|| panic!("no `-v {mount}` in {:?}", call.args));
+    let image_at = call
+        .args
+        .iter()
+        .position(|arg| arg == "localhost/anvil-factory:latest")
+        .expect("image");
+    assert!(
+        mount_at < image_at,
+        "the mount is a run option: {:?}",
+        call.args
+    );
+    assert_eq!(
+        call.args[image_at..],
+        [
+            "localhost/anvil-factory:latest",
+            ANVIL_MOUNT,
+            "--yes",
+            "--profile",
+            "factory",
+            "do the thing",
+        ]
+        .map(str::to_owned)
+    );
+}
+
+#[tokio::test]
+async fn preflight_resolves_anvil_bin_and_refuses_a_name_that_is_not_on_path() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let image = "localhost/anvil-factory:latest";
+
+    // A bare name that is not on PATH: refused before the runtime is asked anything.
+    let runtime = FakeRuntime::default();
+    let error = preflight(
+        &runtime,
+        ContainerRuntime::Podman,
+        image,
+        "anvil-that-is-not-installed-01M6D2",
+    )
+    .await
+    .expect_err("not on PATH");
+    assert!(matches!(error, FactoryError::Sandbox(_)), "{error:?}");
+    let text = error.to_string();
+    assert!(
+        text.contains("[worker] anvil_bin = \"anvil-that-is-not-installed-01M6D2\" is not on PATH"),
+        "{text}"
+    );
+    assert!(runtime.calls().is_empty(), "{:?}", runtime.calls());
+
+    // A path to an executable file resolves to its canonical form.
+    let anvil = fake_binary(temp.path(), "anvil");
+    let runtime = FakeRuntime::default();
+    let resolved = preflight(
+        &runtime,
+        ContainerRuntime::Podman,
+        image,
+        &temp.path().join("anvil").to_string_lossy(),
+    )
+    .await
+    .expect("resolves");
+    assert_eq!(resolved, anvil);
+    assert_eq!(runtime.calls_matching(&["image", "exists", image]), 1);
+
+    // A path that does not exist names the setting too.
+    let missing = temp.path().join("nowhere").join("anvil");
+    let error = preflight(
+        &FakeRuntime::default(),
+        ContainerRuntime::Podman,
+        image,
+        &missing.to_string_lossy(),
+    )
+    .await
+    .expect_err("missing");
+    let text = error.to_string();
+    assert!(text.contains("[worker] anvil_bin"), "{text}");
+    assert!(text.contains("does not exist"), "{text}");
+
+    // The ~/.local/bin link bootstrap.sh makes resolves to the real file.
+    #[cfg(unix)]
+    {
+        let bin = temp.path().join("local-bin");
+        std::fs::create_dir_all(&bin).expect("mkdir");
+        let link = bin.join("anvil");
+        std::os::unix::fs::symlink(&anvil, &link).expect("symlink");
+        let resolved = preflight(
+            &FakeRuntime::default(),
+            ContainerRuntime::Podman,
+            image,
+            &link.to_string_lossy(),
+        )
+        .await
+        .expect("follows the link");
+        assert_eq!(resolved, anvil);
+
+        let plain = temp.path().join("not-executable");
+        write(&plain, "data");
+        let error = preflight(
+            &FakeRuntime::default(),
+            ContainerRuntime::Podman,
+            image,
+            &plain.to_string_lossy(),
+        )
+        .await
+        .expect_err("not executable");
+        assert!(error.to_string().contains("is not executable"), "{error}");
+    }
+
+    // No container: the binary still has to be there, and nothing else is asked.
+    let runtime = FakeRuntime::default();
+    let resolved = preflight(
+        &runtime,
+        ContainerRuntime::None,
+        image,
+        &temp.path().join("anvil").to_string_lossy(),
+    )
+    .await
+    .expect("resolves on the host");
+    assert_eq!(resolved, anvil);
+    assert!(runtime.calls().is_empty());
+}
+
+#[tokio::test]
 async fn a_container_that_never_starts_is_an_error_not_an_implementer_result() {
     let temp = tempfile::tempdir().expect("tempdir");
     let worktree = FactoryHome::under(temp.path()).work_dir("T2");
     std::fs::create_dir_all(&worktree).expect("mkdir");
+    let anvil = fake_binary(temp.path(), "anvil");
     let deadline = Instant::now() + Duration::from_secs(60);
 
     // podman exits 125 when it cannot start the container: the live failure.
     let runtime = Arc::new(FakeRuntime::default().with_answer(
-        &["anvil", "--yes"],
+        &[ANVIL_MOUNT, "--yes"],
         Exit::of(
             125,
             "Resolving \"localhost/anvil-factory\" using unqualified-search registries\nTrying to pull localhost/anvil-factory:latest...\nError: initializing source docker://localhost/anvil-factory:latest: pinging container registry localhost: connection refused\n",
         ),
     ));
-    let sandbox = podman_sandbox(temp.path(), Arc::clone(&runtime));
+    let sandbox = podman_sandbox(temp.path(), anvil.clone(), Arc::clone(&runtime));
     let error = sandbox
         .run(&worktree, "do the thing", deadline)
         .await
@@ -302,13 +474,13 @@ async fn a_container_that_never_starts_is_an_error_not_an_implementer_result() {
 
     // Any failure before anvil's session line is the same.
     let runtime = Arc::new(FakeRuntime::default().with_answer(
-        &["anvil", "--yes"],
+        &[ANVIL_MOUNT, "--yes"],
         Exit::of(
             1,
             "Error: crun: executable file `anvil` not found in $PATH\n",
         ),
     ));
-    let error = podman_sandbox(temp.path(), runtime)
+    let error = podman_sandbox(temp.path(), anvil.clone(), runtime)
         .run(&worktree, "do the thing", deadline)
         .await
         .expect_err("never started");
@@ -321,20 +493,20 @@ async fn a_container_that_never_starts_is_an_error_not_an_implementer_result() {
 
     // After the session line, a failure is anvil's and stays a result.
     let runtime = Arc::new(FakeRuntime::default().with_answer(
-        &["anvil", "--yes"],
+        &[ANVIL_MOUNT, "--yes"],
         Exit::of(
             1,
             "session 01ARZ3NDEKTSV4RRFFQ69G5FAV\nerror: provider refused\n",
         ),
     ));
-    let outcome = podman_sandbox(temp.path(), runtime)
+    let outcome = podman_sandbox(temp.path(), anvil.clone(), runtime)
         .run(&worktree, "do the thing", deadline)
         .await
         .expect("anvil ran");
     assert_eq!(outcome.status, ImplementerStatus::Failed { code: Some(1) });
 
     // A clean exit needs no session line.
-    let outcome = podman_sandbox(temp.path(), Arc::new(FakeRuntime::default()))
+    let outcome = podman_sandbox(temp.path(), anvil, Arc::new(FakeRuntime::default()))
         .run(&worktree, "do the thing", deadline)
         .await
         .expect("anvil ran");
@@ -343,11 +515,14 @@ async fn a_container_that_never_starts_is_an_error_not_an_implementer_result() {
 
 #[tokio::test]
 async fn preflight_wants_the_image_built_and_the_volume_creatable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let anvil = fake_binary(temp.path(), "anvil");
+    let anvil = anvil.to_string_lossy();
     let image = "localhost/anvil-factory:latest";
 
     // Image missing: the exact build command.
     let runtime = FakeRuntime::default().with_answer(&["image", "exists"], Exit::of(1, ""));
-    let error = preflight(&runtime, ContainerRuntime::Podman, image)
+    let error = preflight(&runtime, ContainerRuntime::Podman, image, &anvil)
         .await
         .expect_err("not built");
     assert_eq!(
@@ -361,7 +536,7 @@ async fn preflight_wants_the_image_built_and_the_volume_creatable() {
     let runtime = FakeRuntime::default()
         .with_answer(&["image", "exists"], Exit::of(0, ""))
         .with_answer(&["volume", "exists"], Exit::of(0, ""));
-    preflight(&runtime, ContainerRuntime::Podman, image)
+    preflight(&runtime, ContainerRuntime::Podman, image, &anvil)
         .await
         .expect("ready");
     let asked: Vec<Vec<String>> = runtime.calls().into_iter().map(|c| c.args).collect();
@@ -385,7 +560,7 @@ async fn preflight_wants_the_image_built_and_the_volume_creatable() {
             &["volume", "create"],
             Exit::of(125, "Error: no space left\n"),
         );
-    let error = preflight(&runtime, ContainerRuntime::Podman, image)
+    let error = preflight(&runtime, ContainerRuntime::Podman, image, &anvil)
         .await
         .expect_err("volume");
     assert!(
@@ -397,7 +572,7 @@ async fn preflight_wants_the_image_built_and_the_volume_creatable() {
 
     // Docker has no `exists` verbs: inspect the image, create the volume outright.
     let runtime = FakeRuntime::default();
-    preflight(&runtime, ContainerRuntime::Docker, image)
+    preflight(&runtime, ContainerRuntime::Docker, image, &anvil)
         .await
         .expect("ready");
     assert_eq!(runtime.calls_matching(&["image", "inspect", image]), 1);
@@ -407,10 +582,10 @@ async fn preflight_wants_the_image_built_and_the_volume_creatable() {
     );
     assert_eq!(runtime.calls_matching(&["volume", "exists"]), 0);
 
-    // No container: nothing to check.
+    // No container: only the binary is checked.
     let runtime = FakeRuntime::default();
-    preflight(&runtime, ContainerRuntime::None, image)
+    preflight(&runtime, ContainerRuntime::None, image, &anvil)
         .await
-        .expect("nothing to check");
+        .expect("nothing to ask the runtime");
     assert!(runtime.calls().is_empty());
 }

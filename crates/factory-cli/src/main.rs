@@ -250,23 +250,36 @@ async fn sandbox_line(root: &Path) -> String {
         Err(error) => return format!("sandbox: {error:#}"),
     };
     let worker = &factory.worker;
-    let checked = preflight(&SystemRunner, worker.runtime, &worker.image).await;
+    let checked = preflight(
+        &SystemRunner,
+        worker.runtime,
+        &worker.image,
+        &worker.anvil_bin,
+    )
+    .await;
     describe_sandbox(worker.runtime, &worker.image, checked)
 }
 
-/// One line for a preflight result.
+/// One line for a preflight result: the runtime, the image and the resolved
+/// anvil binary, or the problem.
 fn describe_sandbox(
     runtime: ContainerRuntime,
     image: &str,
-    checked: factory_core::Result<()>,
+    checked: factory_core::Result<PathBuf>,
 ) -> String {
-    let name = match runtime {
-        ContainerRuntime::Podman => "podman",
-        ContainerRuntime::Docker => "docker",
-        ContainerRuntime::None => return "sandbox: the host (runtime = \"none\")".to_owned(),
-    };
     match checked {
-        Ok(()) => format!("sandbox: ready ({name} {image})"),
+        Ok(anvil) => match runtime {
+            ContainerRuntime::Podman => {
+                format!("sandbox: ready (podman {image}; anvil {})", anvil.display())
+            }
+            ContainerRuntime::Docker => {
+                format!("sandbox: ready (docker {image}; anvil {})", anvil.display())
+            }
+            ContainerRuntime::None => format!(
+                "sandbox: the host (runtime = \"none\"; anvil {})",
+                anvil.display()
+            ),
+        },
         Err(error) => {
             // The error already says `sandbox:`; keep the line's prefix single.
             let detail = error.to_string();
@@ -364,13 +377,14 @@ mod tests {
     #[test]
     fn the_sandbox_line_names_the_runtime_or_the_problem() {
         let image = "localhost/anvil-factory:latest";
+        let anvil = PathBuf::from("/home/eli/factory-repo/target/release/anvil");
         assert_eq!(
-            describe_sandbox(ContainerRuntime::Podman, image, Ok(())),
-            "sandbox: ready (podman localhost/anvil-factory:latest)"
+            describe_sandbox(ContainerRuntime::Podman, image, Ok(anvil.clone())),
+            "sandbox: ready (podman localhost/anvil-factory:latest; anvil /home/eli/factory-repo/target/release/anvil)"
         );
         assert_eq!(
-            describe_sandbox(ContainerRuntime::None, image, Ok(())),
-            "sandbox: the host (runtime = \"none\")"
+            describe_sandbox(ContainerRuntime::None, image, Ok(anvil)),
+            "sandbox: the host (runtime = \"none\"; anvil /home/eli/factory-repo/target/release/anvil)"
         );
         let missing = factory_core::FactoryError::Sandbox("worker image x is not built".to_owned());
         assert_eq!(

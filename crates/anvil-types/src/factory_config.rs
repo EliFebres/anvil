@@ -69,8 +69,11 @@ digest_at = "08:00"
 poll_minutes = 5
 
 # Where the implementer runs. `runtime` is "podman", "docker" or "none" (no
-# container; for tests and development only). `egress_allow` lists the hosts
-# the container may reach besides every provider's base URL.
+# container; for tests and development only). `anvil_bin` is the anvil binary
+# on this host, a name on PATH or a path (symlinks are followed); the container
+# gets it mounted read-only at /usr/local/bin/anvil, since the image ships
+# none. `egress_allow` lists the hosts the container may reach besides every
+# provider's base URL.
 [worker]
 runtime = "podman"
 image = "localhost/anvil-factory:latest"
@@ -249,7 +252,9 @@ pub struct WorkerConfig {
     pub runtime: ContainerRuntime,
     /// The image built from `deploy/nuc/Containerfile`.
     pub image: String,
-    /// The anvil binary inside the container, or a host path with `runtime = "none"`.
+    /// The anvil binary on the factory host: a name looked up on `PATH` or a
+    /// path, symlinks followed. A container gets it mounted read-only at
+    /// `/usr/local/bin/anvil`; with `runtime = "none"` the host runs it.
     pub anvil_bin: String,
     /// Hosts the container may reach, besides every provider's base URL.
     pub egress_allow: Vec<String>,
