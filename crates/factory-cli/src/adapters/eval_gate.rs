@@ -67,30 +67,8 @@ impl HarnessGate {
     ///
     /// When git fails or a result file does not parse.
     pub async fn baseline(&self) -> factory_core::Result<Option<RunResult>> {
-        let main = format!("{}/main", self.remote);
-        let paths = match self.repo.ls_tree(&main, RESULTS_DIR).await {
-            Ok(paths) => paths,
-            Err(FactoryError::Git { .. }) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let mut newest: Option<RunResult> = None;
-        for path in paths.iter().filter(|p| p.ends_with(".json")) {
-            let text = self.repo.show(&main, path).await?;
-            let result: RunResult = serde_json::from_str(&text).map_err(|error| {
-                FactoryError::Config(format!(
-                    "eval result {path} on main does not parse: {error}"
-                ))
-            })?;
-            if newest
-                .as_ref()
-                .is_none_or(|current| result.finished_at > current.finished_at)
-            {
-                newest = Some(result);
-            }
-        }
-        Ok(newest)
+        newest_baseline(&self.repo, &self.remote).await
     }
-
     /// The runner for a worktree's build.
     fn runner_for(&self, worktree: &Path) -> factory_core::Result<Arc<dyn EvalRunner>> {
         match &self.runner {
@@ -146,4 +124,44 @@ impl EvalGate for HarnessGate {
     fn run<'a>(&'a self, worktree: &'a Path) -> BoxFuture<'a, factory_core::Result<GateB>> {
         Box::pin(self.gate(worktree))
     }
+}
+
+/// The newest eval result on `<remote>/main`: the baseline gate B compares
+/// against and the dashboard shows.
+///
+/// # Arguments
+///
+/// * `repo` - The factory's clone.
+/// * `remote` - The remote, normally `origin`.
+///
+/// # Returns
+///
+/// The result, or `None` when `main` has none.
+///
+/// # Errors
+///
+/// When git fails or a result file does not parse.
+pub async fn newest_baseline(repo: &Git, remote: &str) -> factory_core::Result<Option<RunResult>> {
+    let main = format!("{remote}/main");
+    let paths = match repo.ls_tree(&main, RESULTS_DIR).await {
+        Ok(paths) => paths,
+        Err(FactoryError::Git { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut newest: Option<RunResult> = None;
+    for path in paths.iter().filter(|p| p.ends_with(".json")) {
+        let text = repo.show(&main, path).await?;
+        let result: RunResult = serde_json::from_str(&text).map_err(|error| {
+            FactoryError::Config(format!(
+                "eval result {path} on main does not parse: {error}"
+            ))
+        })?;
+        if newest
+            .as_ref()
+            .is_none_or(|current| result.finished_at > current.finished_at)
+        {
+            newest = Some(result);
+        }
+    }
+    Ok(newest)
 }

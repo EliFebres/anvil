@@ -7,11 +7,13 @@
 //! by an older or newer service still renders whatever it carries.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FactoryError, Result};
+use crate::ports::ProgressEvent;
 use crate::status::OutcomeRecord;
 
 /// The schema version written into every snapshot.
@@ -442,6 +444,262 @@ impl Status {
     }
 }
 
+/// The snapshot the service keeps in memory and writes after every change.
+///
+/// It also folds implementer usage across runs: anvil's telemetry covers
+/// one run, so finished runs are added to a base and the running one is
+/// read live on top of it.
+#[derive(Debug)]
+pub struct Board {
+    path: PathBuf,
+    inner: Mutex<BoardState>,
+}
+
+/// What the board guards.
+#[derive(Debug, Default)]
+struct BoardState {
+    status: Status,
+    /// Usage of the ticket's finished implementer runs.
+    usage_base: UsageView,
+    /// The running implementer run's usage as last read.
+    usage_live: UsageView,
+    /// Whether an implementer run is going, so its telemetry is current.
+    run_going: bool,
+}
+
+impl Board {
+    /// A board that writes to `path`, starting from `status`.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - `~/.factory/status.json`.
+    /// * `status` - The first snapshot.
+    ///
+    /// # Returns
+    ///
+    /// The board; nothing is written until the first change.
+    pub fn new(path: PathBuf, status: Status) -> Self {
+        Self {
+            path,
+            inner: Mutex::new(BoardState {
+                status,
+                ..BoardState::default()
+            }),
+        }
+    }
+
+    /// Changes the snapshot and writes it. A failed write is logged: the
+    /// dashboard is never a reason to stop working a ticket.
+    ///
+    /// # Arguments
+    ///
+    /// * `change` - What to change.
+    pub fn update(&self, change: impl FnOnce(&mut Status)) {
+        let mut inner = lock(&self.inner);
+        change(&mut inner.status);
+        self.save(&mut inner);
+    }
+
+    /// A copy of the snapshot.
+    ///
+    /// # Returns
+    ///
+    /// The snapshot.
+    pub fn snapshot(&self) -> Status {
+        lock(&self.inner).status.clone()
+    }
+
+    /// Starts showing a claimed ticket: every stage pending but the claim,
+    /// and no output, usage, container or egress yet.
+    ///
+    /// # Arguments
+    ///
+    /// * `ticket` - The ticket view.
+    pub fn start_ticket(&self, ticket: TicketView) {
+        let mut inner = lock(&self.inner);
+        inner.usage_base = UsageView {
+            cost_usd: Some(0.0),
+            ..UsageView::default()
+        };
+        inner.usage_live = UsageView::default();
+        inner.run_going = false;
+        let status = &mut inner.status;
+        status.service.state = RunState::Running;
+        status.next_poll_at = None;
+        status.ticket = Some(ticket);
+        status.implementer_tail.clear();
+        status.usage = None;
+        status.container = None;
+        status.egress = None;
+        self.save(&mut inner);
+    }
+
+    /// Stops showing the ticket.
+    pub fn end_ticket(&self) {
+        let mut inner = lock(&self.inner);
+        inner.run_going = false;
+        let status = &mut inner.status;
+        status.ticket = None;
+        status.implementer_tail.clear();
+        status.usage = None;
+        status.container = None;
+        status.egress = None;
+        if status.service.state == RunState::Running {
+            status.service.state = RunState::Idle;
+        }
+        self.save(&mut inner);
+    }
+
+    /// Applies what the worker reported.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The report.
+    /// * `now` - When it came.
+    pub fn progress(&self, event: &ProgressEvent, now: DateTime<Utc>) {
+        let mut inner = lock(&self.inner);
+        match event {
+            ProgressEvent::Stage { stage, .. } => {
+                if *stage == Stage::Implement {
+                    inner.run_going = true;
+                    inner.usage_live = UsageView::default();
+                }
+                if let Some(ticket) = inner.status.ticket.as_mut() {
+                    start_stage(ticket, *stage, now);
+                }
+            }
+            ProgressEvent::Counters { run, round } => {
+                if let Some(ticket) = inner.status.ticket.as_mut() {
+                    ticket.implementer_run = *run;
+                    ticket.review_round = *round;
+                }
+            }
+            ProgressEvent::RunUsage { tokens, cost_usd } => {
+                let live = std::mem::take(&mut inner.usage_live);
+                inner.run_going = false;
+                let base = &mut inner.usage_base;
+                base.input += tokens.input;
+                base.output += tokens.output;
+                base.cached += tokens.cached;
+                base.cost_usd = base
+                    .cost_usd
+                    .zip(*cost_usd)
+                    .map(|(total, cost)| total + cost);
+                base.context_per_turn.extend(live.context_per_turn);
+                base.context_limit = live.context_limit.or(base.context_limit);
+                let usage = inner.usage_base.clone();
+                inner.status.usage = Some(usage);
+            }
+            ProgressEvent::PullRequest(number) => {
+                if let Some(ticket) = inner.status.ticket.as_mut() {
+                    ticket.pr = Some(*number);
+                }
+            }
+        }
+        self.save(&mut inner);
+    }
+
+    /// Takes in the live readings while a ticket is in progress and writes
+    /// the snapshot, so it is never more than one tick old.
+    ///
+    /// # Arguments
+    ///
+    /// * `live` - The implementer output, usage, container and egress.
+    pub fn tick(&self, live: Live) {
+        let mut inner = lock(&self.inner);
+        if inner.status.ticket.is_none() {
+            return;
+        }
+        if let Some(usage) = live.usage.filter(|_| inner.run_going) {
+            inner.usage_live = usage;
+        }
+        let mut usage = inner.usage_base.clone();
+        let current = &inner.usage_live;
+        usage.input += current.input;
+        usage.output += current.output;
+        usage.cached += current.cached;
+        let current_used = current.input + current.output + current.cached > 0;
+        if current_used {
+            usage.cost_usd = usage
+                .cost_usd
+                .zip(current.cost_usd)
+                .map(|(total, cost)| total + cost);
+        }
+        usage
+            .context_per_turn
+            .extend(current.context_per_turn.iter().copied());
+        usage.context_limit = current.context_limit.or(usage.context_limit);
+        let status = &mut inner.status;
+        status.usage = Some(usage);
+        status.implementer_tail = live.tail;
+        if let Some(ticket) = status.ticket.as_mut() {
+            ticket.detail = live.state;
+        }
+        status.container = live.container;
+        status.egress = live.egress.or(status.egress.take());
+        self.save(&mut inner);
+    }
+
+    /// Stamps and writes the snapshot.
+    fn save(&self, inner: &mut BoardState) {
+        inner.status.v = STATUS_VERSION;
+        inner.status.written_at = Some(Utc::now());
+        if let Err(error) = inner.status.save(&self.path) {
+            tracing::warn!(%error, "cannot write the dashboard status");
+        }
+    }
+}
+
+/// What the service reads every tick while a ticket is in progress.
+#[derive(Debug, Clone, Default)]
+pub struct Live {
+    /// The implementer output lines.
+    pub tail: Vec<TailLine>,
+    /// The agent's state, such as `build`.
+    pub state: Option<String>,
+    /// The running implementer run's usage.
+    pub usage: Option<UsageView>,
+    /// The container running a step.
+    pub container: Option<ContainerView>,
+    /// The egress proxy's counters.
+    pub egress: Option<EgressView>,
+}
+
+/// Starts a stage: the running one ends, this one starts, and every later
+/// stage is pending again, since a review that asks for changes sends the
+/// ticket back to the implementer.
+fn start_stage(ticket: &mut TicketView, stage: Stage, now: DateTime<Utc>) {
+    if ticket.running_stage() == Some(stage) {
+        return;
+    }
+    for view in &mut ticket.stages {
+        if view.started_at.is_some() && view.ended_at.is_none() {
+            view.ended_at = Some(now);
+        }
+    }
+    let position = Stage::ALL.iter().position(|s| *s == stage).unwrap_or(0);
+    for view in &mut ticket.stages {
+        let at = Stage::ALL
+            .iter()
+            .position(|s| *s == view.stage)
+            .unwrap_or(0);
+        if at == position {
+            view.started_at = Some(now);
+            view.ended_at = None;
+        } else if at > position {
+            view.started_at = None;
+            view.ended_at = None;
+        }
+    }
+}
+
+/// Locks a mutex, recovering from a poisoned one.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Writes a file through a temporary file in the same folder and a rename,
 /// so readers see the old content or the new, never a mix.
 ///
@@ -616,6 +874,104 @@ mod tests {
         }
         writer.join().expect("writer");
         assert!(reads > 0);
+    }
+
+    fn board_with_ticket(dir: &Path) -> Board {
+        let board = Board::new(dir.join("status.json"), Status::default());
+        let mut ticket = sample().ticket.expect("ticket");
+        ticket.stages[0].started_at = Some(Utc::now());
+        board.start_ticket(ticket);
+        board
+    }
+
+    #[test]
+    fn stages_move_forward_and_a_return_to_implement_resets_the_gates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let board = board_with_ticket(dir.path());
+        let t = |minute: u32| -> DateTime<Utc> {
+            format!("2026-11-02T15:{minute:02}:00Z")
+                .parse()
+                .expect("rfc3339")
+        };
+        let stage = |stage| ProgressEvent::stage(stage, "x");
+        board.progress(&stage(Stage::Worktree), t(1));
+        board.progress(&stage(Stage::Worktree), t(2));
+        board.progress(&stage(Stage::Implement), t(3));
+        board.progress(&stage(Stage::GateA), t(10));
+        board.progress(&stage(Stage::GateB), t(12));
+        board.progress(&stage(Stage::GateC), t(20));
+        board.progress(&stage(Stage::Implement), t(25));
+        let on_disk: Status =
+            serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).expect("file"))
+                .expect("parses");
+        let ticket = on_disk.ticket.expect("ticket");
+        assert_eq!(
+            ticket.stages[1].started_at,
+            Some(t(1)),
+            "a repeated stage keeps its start"
+        );
+        assert_eq!(ticket.stages[1].ended_at, Some(t(3)));
+        assert_eq!(ticket.stages[2].started_at, Some(t(25)));
+        assert_eq!(ticket.stages[2].ended_at, None);
+        assert!(
+            ticket.stages[3..]
+                .iter()
+                .all(|view| view.started_at.is_none())
+        );
+        assert_eq!(ticket.running_stage(), Some(Stage::Implement));
+        assert_eq!(on_disk.service.state, RunState::Running);
+    }
+
+    #[test]
+    fn usage_adds_finished_runs_to_the_live_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let board = board_with_ticket(dir.path());
+        let now = Utc::now();
+        let live = |input, turns: Vec<u64>| Live {
+            usage: Some(UsageView {
+                input,
+                output: 1,
+                cached: 0,
+                cost_usd: Some(0.5),
+                context_per_turn: turns,
+                context_limit: Some(100),
+            }),
+            ..Live::default()
+        };
+        board.tick(live(999, vec![9]));
+        assert_eq!(
+            board.snapshot().usage.expect("usage").input,
+            0,
+            "no run yet"
+        );
+        board.progress(&ProgressEvent::stage(Stage::Implement, "run 1"), now);
+        board.tick(live(10, vec![5, 10]));
+        board.progress(
+            &ProgressEvent::RunUsage {
+                tokens: crate::ports::Tokens {
+                    input: 12,
+                    output: 2,
+                    cached: 0,
+                },
+                cost_usd: Some(1.0),
+            },
+            now,
+        );
+        board.tick(live(10, vec![5, 10]));
+        let between = board.snapshot().usage.expect("usage");
+        assert_eq!(between.input, 12, "a finished run is not counted twice");
+        board.progress(&ProgressEvent::stage(Stage::Implement, "run 2"), now);
+        board.tick(live(3, vec![7]));
+        let usage = board.snapshot().usage.expect("usage");
+        assert_eq!((usage.input, usage.output), (15, 3));
+        assert_eq!(usage.context_per_turn, vec![5, 10, 7]);
+        assert_eq!(usage.cost_usd, Some(1.5));
+        assert_eq!(usage.context_limit, Some(100));
+
+        board.end_ticket();
+        let status = board.snapshot();
+        assert!(status.ticket.is_none() && status.usage.is_none());
+        assert_eq!(status.service.state, RunState::Idle);
     }
 
     #[test]

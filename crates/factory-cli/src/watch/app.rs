@@ -115,14 +115,8 @@ impl App {
                 self.pause_flag = Some(PAUSE_REASON.to_owned());
                 Some(Action::Pause)
             }
-            KeyCode::Char('r') if self.pause_flag.is_some() || self.is_paused() => {
+            KeyCode::Char('r') if self.pause_flag.is_some() => {
                 self.pause_flag = None;
-                if let Some(status) = self.status.as_mut() {
-                    status.service.reason = None;
-                    if status.service.state == factory_core::board::RunState::Paused {
-                        status.service.state = factory_core::board::RunState::Idle;
-                    }
-                }
                 Some(Action::Resume)
             }
             KeyCode::Char('l') => Some(Action::OpenLog),
@@ -161,13 +155,6 @@ impl App {
         }
     }
 
-    /// Whether the last snapshot says the service is paused.
-    fn is_paused(&self) -> bool {
-        self.status
-            .as_ref()
-            .is_some_and(|status| status.service.state == factory_core::board::RunState::Paused)
-    }
-
     /// Draws the whole screen: top bar, the working or idle screen, keys.
     ///
     /// # Arguments
@@ -199,7 +186,7 @@ impl App {
             return;
         };
         frame.render_widget(Paragraph::new(top_bar(status, &ctx, width)), top);
-        let pause_key = if self.pause_flag.is_some() || self.is_paused() {
+        let pause_key = if self.pause_flag.is_some() {
             ("r", "resume")
         } else if status.ticket.is_some() {
             ("p", "pause after this ticket")
@@ -280,10 +267,12 @@ mod tests {
     fn app_for(name: &str) -> App {
         let status = load(name);
         let now = status.written_at.expect("written_at");
+        // The runner reads the flag file; a fixture carries its reason.
+        let pause_flag = status.service.reason.clone();
         let mut app = App::new(Theme::mono(), FixedOffset::east_opt(0).expect("utc"), now);
         app.handle(WatchMsg::Status {
             status: Some(Box::new(status)),
-            pause_flag: None,
+            pause_flag,
             read_error: None,
         });
         app

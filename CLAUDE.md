@@ -35,11 +35,11 @@ Workspace lints enforce part of this mechanically: `unsafe_code = "forbid"`, `mi
 
 The full-screen UI lives in `crates/anvil-cli/src/tui/` (ratatui + crossterm). Everything under `tui/` is pure except `runner.rs`, which owns the terminal: `App` consumes `UiMsg`s and draws into a frame, so tests drive it with messages and a `TestBackend`. Modules under `tui/` may import `anvil_core`, `anvil_types` and `anvil_tui` types, tokio channels and the UI crates, and nothing else from this crate: never `Wiring`, `anvil_memory`, `anvil_compat` or telemetry. `frontend.rs` gathers what the UI shows into `SessionInfo` and bridges prompts to it. Every color comes from `anvil_tui::theme`. Scripts and CI use `--plain` (or `--yes`, or no TTY) for the line renderer, which must stay byte-identical; `ANVIL_NO_ANIMATION` skips the startup logo animation.
 
-**`factory-core`** is the ticket queue, worker loop, git operations, and merge policy. It drives `anvil` as a subprocess, not as a library, so it depends on `anvil-types` only. It must never depend on any `anvil-*` library.
+**`factory-core`** is the ticket queue, worker loop, git operations, and merge policy. It also keeps the dashboard snapshot `~/.factory/status.json` (`board.rs`, written atomically on every change and every 2 seconds while a ticket is in progress) and the outcome history `~/.factory/outcomes.jsonl`; machine facts reach it through the `Probe` port, which `factory-cli` implements. It drives `anvil` as a subprocess, not as a library, so it depends on `anvil-types` only. It must never depend on any `anvil-*` library.
 
 **`factory-review`** is multi-model review. It owns its own model calls and depends on `anvil-types` only. It must never depend on `anvil-core` or `factory-core`.
 
-**`factory-cli`** is the `factory` binary: argument parsing and wiring only. It depends on `factory-core`, `factory-review`, `eval` and `anvil-tui`. It must never depend on any other `anvil-*` library. It is the other crate allowed to use `anyhow`.
+**`factory-cli`** is the `factory` binary: argument parsing and wiring only. `factory watch` (`src/watch/`) is its full-screen dashboard over `status.json`, built like anvil's `tui/`: everything is pure except `runner.rs`, and every color comes from `anvil_tui::theme`; its snapshots are fed from `tests/fixtures/status-*.json`. It depends on `factory-core`, `factory-review`, `eval` and `anvil-tui`. It must never depend on any other `anvil-*` library. It is the other crate allowed to use `anyhow`.
 
 **`eval`** is the eval harness that scores a model or a build against a fixed task set. Both binaries use it. It depends on `anvil-types` only and must never depend on `anvil-core` or `factory-core`.
 

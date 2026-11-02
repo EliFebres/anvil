@@ -7,8 +7,10 @@
 //! ticket's notes instead of as a mystery build failure.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use crate::board::{EgressView, write_atomic};
 
 /// Hosts the proxy connects to.
 ///
@@ -88,6 +90,72 @@ pub fn record_denied(denied: &Denied, host: &str, port: u16) {
         .insert(format!("{host}:{port}"));
 }
 
+/// Connection counts for the dashboard, written to a file after each
+/// decision so the service can read them without sharing memory.
+#[derive(Debug, Clone)]
+pub struct EgressCounter {
+    counts: Arc<Mutex<EgressView>>,
+    file: PathBuf,
+}
+
+impl EgressCounter {
+    /// A counter at zero that writes to `file`.
+    ///
+    /// # Arguments
+    ///
+    /// * `file` - Where the counts go, such as `~/.factory/work/<id>-egress.json`.
+    ///
+    /// # Returns
+    ///
+    /// The counter.
+    pub fn new(file: PathBuf) -> Self {
+        Self {
+            counts: Arc::new(Mutex::new(EgressView::default())),
+            file,
+        }
+    }
+
+    /// Counts one decision and writes the counts.
+    ///
+    /// # Arguments
+    ///
+    /// * `allowed` - Whether the connection went through.
+    /// * `target` - The `host:port` asked for.
+    pub fn record(&self, allowed: bool, target: &str) {
+        let counts = {
+            let mut counts = self
+                .counts
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if allowed {
+                counts.allowed += 1;
+            } else {
+                counts.denied += 1;
+                counts.last_denied = Some(target.to_owned());
+            }
+            counts.clone()
+        };
+        let written = serde_json::to_vec(&counts)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| write_atomic(&self.file, &bytes).map_err(|error| error.to_string()));
+        if let Err(error) = written {
+            tracing::debug!(%error, "cannot write the egress counts");
+        }
+    }
+
+    /// The counts so far.
+    ///
+    /// # Returns
+    ///
+    /// A copy.
+    pub fn counts(&self) -> EgressView {
+        self.counts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
 #[cfg(unix)]
 pub use unix::{ProxyHandle, start};
 
@@ -99,7 +167,7 @@ mod unix {
     use tokio::net::{TcpStream, UnixListener, UnixStream};
     use tokio::task::JoinHandle;
 
-    use super::{Allowlist, Denied, parse_connect, record_denied};
+    use super::{Allowlist, Denied, EgressCounter, parse_connect, record_denied};
     use crate::error::{FactoryError, Result};
 
     /// Largest request head accepted.
@@ -126,6 +194,7 @@ mod unix {
     /// * `path` - The socket path; a stale file there is removed.
     /// * `allowlist` - What may be reached.
     /// * `denied` - Where refusals are recorded.
+    /// * `counter` - Counts every decision, when given.
     ///
     /// # Returns
     ///
@@ -134,7 +203,12 @@ mod unix {
     /// # Errors
     ///
     /// When the socket cannot be bound.
-    pub fn start(path: &Path, allowlist: Allowlist, denied: Denied) -> Result<ProxyHandle> {
+    pub fn start(
+        path: &Path,
+        allowlist: Allowlist,
+        denied: Denied,
+        counter: Option<EgressCounter>,
+    ) -> Result<ProxyHandle> {
         let _ = std::fs::remove_file(path);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
@@ -149,8 +223,11 @@ mod unix {
                     Ok((stream, _)) => {
                         let allowlist = allowlist.clone();
                         let denied = denied.clone();
+                        let counter = counter.clone();
                         tokio::spawn(async move {
-                            if let Err(error) = serve(stream, &allowlist, &denied).await {
+                            if let Err(error) =
+                                serve(stream, &allowlist, &denied, counter.as_ref()).await
+                            {
                                 tracing::debug!(%error, "proxy connection ended");
                             }
                         });
@@ -173,6 +250,7 @@ mod unix {
         mut client: UnixStream,
         allowlist: &Allowlist,
         denied: &Denied,
+        counter: Option<&EgressCounter>,
     ) -> std::io::Result<()> {
         let mut head = Vec::new();
         let mut byte = [0u8; 1];
@@ -189,7 +267,11 @@ mod unix {
                 .await?;
             return Ok(());
         };
-        if !allowlist.allows(&host, port) {
+        let allowed = allowlist.allows(&host, port);
+        if let Some(counter) = counter {
+            counter.record(allowed, &format!("{host}:{port}"));
+        }
+        if !allowed {
             tracing::warn!(host, port, "egress refused by the allowlist");
             record_denied(denied, &host, port);
             client
@@ -222,7 +304,7 @@ pub use other::{ProxyHandle, start};
 mod other {
     use std::path::Path;
 
-    use super::{Allowlist, Denied};
+    use super::{Allowlist, Denied, EgressCounter};
     use crate::error::{FactoryError, Result};
 
     /// Never constructed off unix.
@@ -234,7 +316,12 @@ mod other {
     /// # Errors
     ///
     /// Always [`FactoryError::Sandbox`].
-    pub fn start(_path: &Path, _allowlist: Allowlist, _denied: Denied) -> Result<ProxyHandle> {
+    pub fn start(
+        _path: &Path,
+        _allowlist: Allowlist,
+        _denied: Denied,
+        _counter: Option<EgressCounter>,
+    ) -> Result<ProxyHandle> {
         Err(FactoryError::Sandbox(
             "the egress proxy needs a unix socket; containers run on Linux only (set [worker] runtime = \"none\" here)".to_owned(),
         ))
@@ -310,10 +397,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("p.sock");
         let denied: Denied = Default::default();
+        let counter = EgressCounter::new(dir.path().join("egress.json"));
         let _proxy = start(
             &socket,
             Allowlist::new([format!("127.0.0.1:{port}")]),
             denied.clone(),
+            Some(counter.clone()),
         )
         .expect("starts");
 
@@ -347,5 +436,13 @@ mod tests {
             String::from_utf8_lossy(&reply)
         );
         assert!(denied.lock().expect("lock").contains("evil.example:443"));
+        let counts = counter.counts();
+        assert_eq!((counts.allowed, counts.denied), (1, 1));
+        assert_eq!(counts.last_denied.as_deref(), Some("evil.example:443"));
+        let written: EgressView = serde_json::from_slice(
+            &std::fs::read(dir.path().join("egress.json")).expect("egress file"),
+        )
+        .expect("parses");
+        assert_eq!(written, counts);
     }
 }

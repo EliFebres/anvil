@@ -22,7 +22,7 @@ pub mod verdict;
 
 pub use diff::DiffLines;
 pub use error::ReviewError;
-pub use model::{ANTHROPIC_VERSION, MAX_ATTEMPTS, ModelReviewer};
+pub use model::{ANTHROPIC_VERSION, MAX_ATTEMPTS, ModelReviewer, ping};
 pub use reviewer::{FakeReviewer, ReviewFuture, ReviewRequest, Reviewed, Reviewer, TicketSummary};
 pub use rules::{Rule, load_rules};
 pub use verdict::{

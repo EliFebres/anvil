@@ -127,6 +127,25 @@ impl FactoryHome {
         self.work_root().join(format!("{id}-proxy.sock"))
     }
 
+    /// The implementer's output for one ticket as it arrives, one
+    /// timestamped line per output line, for the dashboard.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The ticket id.
+    pub fn output_log(&self, id: &str) -> PathBuf {
+        self.work_root().join(format!("{id}-output.log"))
+    }
+
+    /// The egress proxy's counters for one ticket, for the dashboard.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The ticket id.
+    pub fn egress_file(&self, id: &str) -> PathBuf {
+        self.work_root().join(format!("{id}-egress.json"))
+    }
+
     /// The eval wrapper script for one ticket.
     ///
     /// # Arguments
@@ -149,6 +168,10 @@ mod tests {
         assert_eq!(home.pause_file(), Path::new("/h/.factory/pause"));
         assert_eq!(home.state_file(), Path::new("/h/.factory/state.json"));
         assert_eq!(home.status_file(), Path::new("/h/.factory/status.json"));
+        assert_eq!(
+            home.output_log("X"),
+            Path::new("/h/.factory/work/X-output.log")
+        );
         assert_eq!(home.logs_dir(), Path::new("/h/.factory/logs"));
         assert_eq!(home.state_dir(), Path::new("/h/.factory/state"));
         assert_eq!(home.work_dir("X"), Path::new("/h/.factory/work/X"));

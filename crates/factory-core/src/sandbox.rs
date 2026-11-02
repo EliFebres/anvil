@@ -21,11 +21,15 @@ use tokio::process::Command;
 use crate::error::{FactoryError, Result};
 use crate::paths::FactoryHome;
 use crate::ports::{BoxFuture, CheckOutcome, Implementer, ImplementerOutcome, ImplementerStatus};
-use crate::proxy::{self, Allowlist, Denied};
+use crate::proxy::{self, Allowlist, Denied, EgressCounter};
 use crate::usage;
 
 /// The named volume that caches the cargo registry across tickets.
 pub const CACHE_VOLUME: &str = "anvil-factory-cargo";
+
+/// The label every container gets, with the ticket id as its value, so the
+/// dashboard can find the container running a ticket's step.
+pub const TICKET_LABEL: &str = "factory.ticket";
 
 /// Where the registry cache is mounted in the image.
 const CACHE_MOUNT: &str = "/usr/local/cargo/registry";
@@ -137,6 +141,9 @@ pub struct Invocation {
     pub env: Option<Vec<(String, String)>>,
     /// The working directory, when it matters.
     pub cwd: Option<PathBuf>,
+    /// A file that gets every output line as it arrives, timestamped, so
+    /// the dashboard can follow a long run.
+    pub log: Option<PathBuf>,
 }
 
 /// How a sandbox command ended.
@@ -381,6 +388,9 @@ impl Sandbox {
             args.push("--label".to_owned());
             args.push(label.clone());
         }
+        // The dashboard finds the ticket's container by this label.
+        args.push("--label".to_owned());
+        args.push(format!("{TICKET_LABEL}={id}"));
         let cache_mode = if cache_writable { "" } else { ":ro" };
         args.extend([
             "-v".to_owned(),
@@ -455,6 +465,7 @@ impl Sandbox {
                     args,
                     env,
                     cwd: Some(worktree.to_path_buf()),
+                    log: None,
                 }
             }
             runtime => Invocation {
@@ -462,6 +473,7 @@ impl Sandbox {
                 args: self.run_args(worktree, home, program, anvil, cache_writable),
                 env,
                 cwd: None,
+                log: None,
             },
         }
     }
@@ -474,7 +486,15 @@ impl Sandbox {
     /// Starts the egress proxy for a ticket, replacing a previous one.
     fn start_proxy(&self, worktree: &Path) -> Result<()> {
         let socket = self.config.home.proxy_socket(&Self::ticket_id(worktree));
-        let handle = proxy::start(&socket, self.allowlist(), Arc::clone(&self.denied))?;
+        let egress_file = self.config.home.egress_file(&Self::ticket_id(worktree));
+        let _ = std::fs::remove_file(&egress_file);
+        let counter = EgressCounter::new(egress_file);
+        let handle = proxy::start(
+            &socket,
+            self.allowlist(),
+            Arc::clone(&self.denied),
+            Some(counter),
+        )?;
         *lock(&self.proxy) = Some(handle);
         Ok(())
     }
@@ -618,7 +638,13 @@ impl Implementer for Sandbox {
                 (self.config.anvil_bin.to_string_lossy().into_owned(), None)
             };
             let program = [anvil.as_str(), "--yes", "--profile", PROFILE, task];
-            let command = self.command(worktree, &home, &program, mount, false);
+            let mut command = self.command(worktree, &home, &program, mount, false);
+            let log = self.config.home.output_log(&Self::ticket_id(worktree));
+            if let Err(error) = start_log(&log) {
+                tracing::warn!(%error, "cannot start the implementer output log");
+            } else {
+                command.log = Some(log);
+            }
             let exit = self.run_until(command, deadline).await?;
             if let Some(reason) = infrastructure_failure(&exit) {
                 return Err(FactoryError::Sandbox(format!(
@@ -940,6 +966,7 @@ async fn housekeeping(
         args: args.iter().map(|s| (*s).to_owned()).collect(),
         env: None,
         cwd: None,
+        log: None,
     };
     runner
         .run(invocation, Instant::now() + HOUSEKEEPING_TIMEOUT)
@@ -1009,18 +1036,23 @@ async fn run_process(invocation: Invocation, deadline: Instant) -> Result<Exit> 
         program: invocation.program.clone(),
         source,
     })?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let log = invocation.log.as_deref().and_then(|path| {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .map(|file| Arc::new(Mutex::new(file)))
+            .ok()
+    });
+    // Both pipes are drained at once, so a chatty stderr cannot block the
+    // child while stdout is still open.
     let reader = async {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        if let Some(stdout) = stdout.as_mut() {
-            let _ = stdout.take(OUTPUT_CAP as u64).read_to_end(&mut out).await;
-        }
-        if let Some(stderr) = stderr.as_mut() {
-            let _ = stderr.take(OUTPUT_CAP as u64).read_to_end(&mut err).await;
-        }
-        (out, err)
+        tokio::join!(
+            pump(stdout, 'o', log.clone()),
+            pump(stderr, 'e', log.clone())
+        )
     };
     let remaining = deadline.saturating_duration_since(Instant::now());
     let waited = tokio::time::timeout(remaining, async {
@@ -1049,6 +1081,69 @@ async fn run_process(invocation: Invocation, deadline: Instant) -> Result<Exit> 
             })
         }
     }
+}
+
+/// Empties the implementer output log, creating its folder.
+fn start_log(path: &Path) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, b"")
+}
+
+/// Reads a pipe to its end, keeping the first [`OUTPUT_CAP`] bytes and
+/// appending every line to the log as `<unix ms>\t<o|e>\t<text>`.
+///
+/// A carriage return ends a log line too: anvil redraws its spinner with
+/// one, and the dashboard wants the running tool before its line ends.
+async fn pump<R: tokio::io::AsyncRead + Unpin>(
+    pipe: Option<R>,
+    stream: char,
+    log: Option<Arc<Mutex<std::fs::File>>>,
+) -> Vec<u8> {
+    let mut kept = Vec::new();
+    let Some(mut pipe) = pipe else {
+        return kept;
+    };
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match pipe.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let chunk = &buf[..n];
+        let room = OUTPUT_CAP.saturating_sub(kept.len());
+        kept.extend_from_slice(&chunk[..room.min(n)]);
+        if let Some(log) = &log {
+            for &byte in chunk {
+                if byte == b'\n' || byte == b'\r' {
+                    write_log_line(log, stream, &pending);
+                    pending.clear();
+                } else {
+                    pending.push(byte);
+                }
+            }
+        }
+    }
+    if let Some(log) = &log {
+        write_log_line(log, stream, &pending);
+    }
+    kept
+}
+
+/// Appends one non-empty line to the output log.
+fn write_log_line(log: &Mutex<std::fs::File>, stream: char, line: &[u8]) {
+    use std::io::Write;
+    if line.is_empty() {
+        return;
+    }
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or(0);
+    let text = String::from_utf8_lossy(line);
+    let _ = writeln!(lock(log), "{millis}\t{stream}\t{text}");
 }
 
 /// The runtime's executable name.
@@ -1370,6 +1465,46 @@ mod tests {
             strip_verbatim_prefix(PathBuf::from("/usr/bin/anvil")),
             PathBuf::from("/usr/bin/anvil")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_process_tees_every_line_and_still_captures_both_streams() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("out.log");
+        start_log(&log).expect("log");
+        let exit = run_process(
+            Invocation {
+                program: "sh".to_owned(),
+                args: vec![
+                    "-c".to_owned(),
+                    "printf '| grep x\\r  grep x .. ok: 1\\n' >&2; echo model text".to_owned(),
+                ],
+                env: None,
+                cwd: None,
+                log: Some(log.clone()),
+            },
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .expect("runs");
+        assert_eq!(exit.code, Some(0));
+        assert!(exit.output.contains("model text"), "{}", exit.output);
+        assert!(exit.output.contains("grep x .. ok"), "{}", exit.output);
+        let text = std::fs::read_to_string(&log).expect("log");
+        let entries: Vec<(&str, &str)> = text
+            .lines()
+            .map(|line| {
+                let mut fields = line.splitn(3, '\t');
+                let _ms = fields.next();
+                (fields.next().unwrap_or(""), fields.next().unwrap_or(""))
+            })
+            .collect();
+        assert!(entries.contains(&("e", "| grep x")), "{text}");
+        assert!(entries.contains(&("e", "  grep x .. ok: 1")), "{text}");
+        assert!(entries.contains(&("o", "model text")), "{text}");
+        let tail = crate::tail::parse(&text);
+        assert_eq!(tail.lines.len(), 2, "{tail:?}");
     }
 
     #[test]

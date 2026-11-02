@@ -6,7 +6,6 @@ use anvil_tui::layout::{fit_parts, fit_text, pad_between, spans_width};
 use anvil_tui::widgets::panel;
 use anvil_tui::{Shade, Theme};
 use chrono::{DateTime, FixedOffset, Utc};
-use factory_core::board::RunState;
 use factory_core::{OutcomeKind, OutcomeRecord, Status};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -15,6 +14,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Padding, Paragraph};
 
 use super::fmt;
+
+/// A snapshot older than this while a ticket is in progress is stale.
+const STALE_WORKING_SECS: i64 = 10;
+
+/// A poll this late is stale.
+const STALE_POLL_SECS: i64 = 120;
 
 /// Below this width the bars drop their longer words.
 const NARROW: usize = 100;
@@ -161,18 +166,30 @@ pub fn top_bar(status: &Status, ctx: &Ctx, width: usize) -> Line<'static> {
         ));
     }
     let mut right = Vec::new();
-    if let Some(written) = status.written_at {
-        let age = (ctx.now - written).num_seconds();
-        if age > 10 {
-            right.push(Span::styled(
-                format!("status {} old · ", fmt::stage_length(age)),
-                theme.fg(Shade::Danger),
-            ));
-        }
+    if let Some(age) = stale_secs(status, ctx.now) {
+        right.push(Span::styled(
+            format!("status {} old · ", fmt::stage_length(age)),
+            theme.fg(Shade::Danger),
+        ));
     }
     right.push(Span::styled(today, muted));
     let spans = fit_parts(left, middle, right, width);
     Line::from(spans).style(theme.on_surface(Style::new()))
+}
+
+/// How old the snapshot is, when it is older than it should be: the
+/// service rewrites it every two seconds while working a ticket, and at
+/// every poll otherwise.
+fn stale_secs(status: &Status, now: DateTime<Utc>) -> Option<i64> {
+    let age = (now - status.written_at?).num_seconds();
+    let late = if status.ticket.is_some() {
+        age > STALE_WORKING_SECS
+    } else {
+        status
+            .next_poll_at
+            .is_some_and(|next| (now - next).num_seconds() > STALE_POLL_SECS)
+    };
+    late.then_some(age)
 }
 
 /// The state word and what goes with it: `running`, `running · pausing
@@ -189,12 +206,10 @@ fn state_spans(status: &Status, ctx: &Ctx, room: usize) -> Vec<Span<'static>> {
         }
         return spans;
     }
-    let paused = ctx.pause_flag.map(str::to_owned).or_else(|| {
-        (status.service.state == RunState::Paused)
-            .then(|| status.service.reason.clone().unwrap_or_default())
-    });
-    match paused {
-        Some(reason) if reason.is_empty() => {
+    // The flag file is the truth: the service only rereads it on its next
+    // poll, minutes away.
+    match ctx.pause_flag {
+        Some("") => {
             vec![Span::styled("paused", theme.fg(Shade::Accent))]
         }
         Some(reason) => vec![Span::styled(

@@ -93,8 +93,10 @@ impl Harness {
     async fn work(&self) -> Outcome {
         let stages = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = Arc::clone(&stages);
-        let progress: factory_core::Progress = Arc::new(move |stage: &str| {
-            sink.lock().expect("lock").push(stage.to_owned());
+        let progress: factory_core::Progress = Arc::new(move |event| {
+            if let factory_core::ProgressEvent::Stage { text, .. } = event {
+                sink.lock().expect("lock").push(text);
+            }
         });
         self.worker
             .work(&self.ticket, &self.queue, progress)

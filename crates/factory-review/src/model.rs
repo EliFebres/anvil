@@ -368,6 +368,78 @@ impl Reviewer for ModelReviewer {
     }
 }
 
+/// Sends one minimal request to a provider, as `anvil doctor` does, and
+/// times the round trip.
+///
+/// # Arguments
+///
+/// * `name` - The provider's name, for errors.
+/// * `provider` - The provider entry from the anvil configuration.
+/// * `api_key` - Its key.
+/// * `timeout` - How long to wait.
+///
+/// # Returns
+///
+/// The round trip in milliseconds.
+///
+/// # Errors
+///
+/// [`ReviewError::UnsupportedProtocol`] for a fake provider, a transport
+/// error, or [`ReviewError::Http`] for a refusal.
+pub async fn ping(
+    name: &str,
+    provider: &ProviderConfig,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<u64, ReviewError> {
+    let base = provider.base_url.trim_end_matches('/');
+    let client = build_client(timeout)?;
+    let messages = json!([{"role": "user", "content": "ping"}]);
+    let builder = match provider.protocol {
+        Protocol::Openai => client
+            .post(format!("{base}/chat/completions"))
+            .bearer_auth(api_key)
+            .json(&json!({
+                "model": provider.model,
+                "messages": messages,
+                "max_completion_tokens": 1,
+            })),
+        Protocol::Anthropic => client
+            .post(format!("{base}/messages"))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .json(&json!({
+                "model": provider.model,
+                "max_tokens": 1,
+                "messages": messages,
+            })),
+        Protocol::Fake => {
+            return Err(ReviewError::UnsupportedProtocol {
+                provider: name.to_owned(),
+            });
+        }
+    };
+    let started = std::time::Instant::now();
+    let response = builder
+        .send()
+        .await
+        .map_err(|source| ReviewError::Transport {
+            provider: name.to_owned(),
+            source,
+        })?;
+    let millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(ReviewError::Http {
+            provider: name.to_owned(),
+            status: status.as_u16(),
+            body: head(&body),
+        });
+    }
+    Ok(millis)
+}
+
 /// A client with the configured timeout and a factory user agent.
 fn build_client(timeout: Duration) -> Result<reqwest::Client, ReviewError> {
     reqwest::Client::builder()
@@ -426,6 +498,36 @@ mod tests {
             build_client(Duration::from_secs(5)).expect("client"),
         )
         .expect("a real protocol")
+    }
+
+    #[tokio::test]
+    async fn ping_sends_a_one_token_request_and_reports_refusals() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .and(header("x-api-key", "sk-test"))
+            .and(body_partial_json(json!({"max_tokens": 1, "model": "m-1"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(anthropic_reply("OK")))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad key"))
+            .mount(&server)
+            .await;
+        let timeout = Duration::from_secs(5);
+        let anthropic = provider(Protocol::Anthropic, &server.uri());
+        assert!(ping("a", &anthropic, "sk-test", timeout).await.is_ok());
+        let openai = provider(Protocol::Openai, &server.uri());
+        let error = ping("o", &openai, "sk-test", timeout)
+            .await
+            .expect_err("401");
+        assert!(
+            matches!(error, ReviewError::Http { status: 401, .. }),
+            "{error}"
+        );
+        let fake = provider(Protocol::Fake, &server.uri());
+        assert!(ping("f", &fake, "k", timeout).await.is_err());
     }
 
     fn request() -> ReviewRequest {

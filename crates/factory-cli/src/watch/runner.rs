@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use anvil_tui::Theme;
 use anyhow::Context;
 use chrono::{FixedOffset, Local, Offset, Utc};
+use factory_core::board::RunState;
 use factory_core::{FactoryHome, StatusReader, service};
 use ratatui::DefaultTerminal;
 use ratatui::Terminal;
@@ -75,6 +76,7 @@ fn render_once(options: &WatchOptions) -> String {
     let mut app = App::new(Theme::mono(), tz_for(options), Utc::now());
     let msg = read(&mut reader, options, None);
     let skew = fixture_skew(&msg, options);
+    let msg = read(&mut reader, options, fixture_reason(&msg, options));
     app.handle(msg);
     app.handle(WatchMsg::Tick(Utc::now() + skew));
     screen_text(&app, width, height)
@@ -118,9 +120,11 @@ fn run(terminal: &mut DefaultTerminal, options: &WatchOptions) -> anyhow::Result
     let mut last_read: Option<Instant> = None;
     loop {
         if last_read.is_none_or(|at| at.elapsed() >= refresh) {
-            let msg = read(&mut reader, options, fixture_pause.clone());
+            let mut msg = read(&mut reader, options, fixture_pause.clone());
             if last_read.is_none() {
                 skew = fixture_skew(&msg, options);
+                fixture_pause = fixture_reason(&msg, options);
+                msg = read(&mut reader, options, fixture_pause.clone());
             }
             app.handle(msg);
             last_read = Some(Instant::now());
@@ -265,6 +269,20 @@ fn tz_for(options: &WatchOptions) -> FixedOffset {
         Utc.fix()
     } else {
         Local::now().offset().fix()
+    }
+}
+
+/// For a fixture file that says the service is paused, the reason, which
+/// stands in for the flag file a fixture has none of.
+fn fixture_reason(msg: &WatchMsg, options: &WatchOptions) -> Option<String> {
+    match msg {
+        WatchMsg::Status {
+            status: Some(status),
+            ..
+        } if options.file.is_some() && status.service.state == RunState::Paused => {
+            Some(status.service.reason.clone().unwrap_or_default())
+        }
+        _ => None,
     }
 }
 
