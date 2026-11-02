@@ -305,13 +305,19 @@ pub fn draw_recent(frame: &mut Frame, area: Rect, status: &Status, ctx: &Ctx) {
         .map(|record| {
             let (word, shade) = outcome_word(record.kind);
             let left_fixed = 10 + 9;
-            let room_with =
-                |detail: &str| width.saturating_sub(left_fixed + detail.chars().count() + 2);
+            // The detail never takes more than a third of the row, so a long
+            // rejection reason cannot push the title out.
+            let detail_cap = (width / 3).max(6);
+            let room_with = |detail: &str| {
+                let shown = detail.chars().count().min(detail_cap);
+                width.saturating_sub(left_fixed + shown + 2)
+            };
             let mut detail = outcome_detail(record, true);
             if room_with(&detail) < record.title.chars().count() {
                 detail = outcome_detail(record, false);
             }
             let room = room_with(&detail);
+            let detail = fit_text(&detail, detail_cap);
             let left = vec![
                 Span::styled(
                     format!("{:<9} ", fmt::when(record.finished_at, ctx.now, ctx.tz)),
@@ -320,10 +326,7 @@ pub fn draw_recent(frame: &mut Frame, area: Rect, status: &Status, ctx: &Ctx) {
                 Span::styled(format!("{word:<8} "), theme.fg(shade)),
                 Span::styled(fit_text(&record.title, room), theme.fg(Shade::Secondary)),
             ];
-            let right = vec![Span::styled(
-                fit_text(&detail, width.saturating_sub(left_fixed + 4)),
-                theme.fg(Shade::Faint),
-            )];
+            let right = vec![Span::styled(detail, theme.fg(Shade::Faint))];
             Line::from(pad_between(left, right, width))
         })
         .collect();

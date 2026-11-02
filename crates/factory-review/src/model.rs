@@ -431,6 +431,11 @@ pub async fn ping(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        // A reasoning model cannot finish in one token and says so; the
+        // provider answered, which is all a ping asks.
+        if status.as_u16() == 400 && body.contains("max_tokens") {
+            return Ok(millis);
+        }
         return Err(ReviewError::Http {
             provider: name.to_owned(),
             status: status.as_u16(),
@@ -512,6 +517,14 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer sk-reasoning"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":{"message":"Could not finish the message because max_tokens or model output limit was reached."}}"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(401).set_body_string("bad key"))
             .mount(&server)
             .await;
@@ -525,6 +538,10 @@ mod tests {
         assert!(
             matches!(error, ReviewError::Http { status: 401, .. }),
             "{error}"
+        );
+        assert!(
+            ping("o", &openai, "sk-reasoning", timeout).await.is_ok(),
+            "a model that needs more than one token still answered"
         );
         let fake = provider(Protocol::Fake, &server.uri());
         assert!(ping("f", &fake, "k", timeout).await.is_err());

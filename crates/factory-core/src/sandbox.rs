@@ -1335,6 +1335,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("-e HTTPS_PROXY=http://127.0.0.1:3128"));
+        assert!(
+            text.contains("--label factory.ticket=T1"),
+            "the dashboard finds the container by its ticket: {text}"
+        );
         assert!(text.contains("-e https_proxy=http://127.0.0.1:3128"));
         assert!(text.contains("-e CARGO_HTTP_PROXY=http://127.0.0.1:3128"));
         assert!(

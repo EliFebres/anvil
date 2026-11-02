@@ -566,6 +566,9 @@ impl Board {
                 }
                 if let Some(ticket) = inner.status.ticket.as_mut() {
                     start_stage(ticket, *stage, now);
+                    if *stage != Stage::Implement {
+                        ticket.detail = None;
+                    }
                 }
             }
             ProgressEvent::Counters { run, round } => {
@@ -632,8 +635,11 @@ impl Board {
         let status = &mut inner.status;
         status.usage = Some(usage);
         status.implementer_tail = live.tail;
+        // anvil's state means something only while the implementer runs.
         if let Some(ticket) = status.ticket.as_mut() {
-            ticket.detail = live.state;
+            ticket.detail = live
+                .state
+                .filter(|_| ticket.running_stage() == Some(Stage::Implement));
         }
         status.container = live.container;
         status.egress = live.egress.or(status.egress.take());
@@ -961,12 +967,30 @@ mod tests {
         let between = board.snapshot().usage.expect("usage");
         assert_eq!(between.input, 12, "a finished run is not counted twice");
         board.progress(&ProgressEvent::stage(Stage::Implement, "run 2"), now);
-        board.tick(live(3, vec![7]));
+        board.tick(Live {
+            state: Some("build".to_owned()),
+            ..live(3, vec![7])
+        });
+        assert_eq!(
+            board.snapshot().ticket.expect("ticket").detail.as_deref(),
+            Some("build")
+        );
         let usage = board.snapshot().usage.expect("usage");
         assert_eq!((usage.input, usage.output), (15, 3));
         assert_eq!(usage.context_per_turn, vec![5, 10, 7]);
         assert_eq!(usage.cost_usd, Some(1.5));
         assert_eq!(usage.context_limit, Some(100));
+
+        board.progress(&ProgressEvent::stage(Stage::GateA, "gate A"), now);
+        board.tick(Live {
+            state: Some("verify".to_owned()),
+            ..Live::default()
+        });
+        assert_eq!(
+            board.snapshot().ticket.expect("ticket").detail,
+            None,
+            "anvil's last state is not shown during gate A"
+        );
 
         board.end_ticket();
         let status = board.snapshot();

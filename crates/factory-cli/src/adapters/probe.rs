@@ -293,6 +293,55 @@ fn parse_size(text: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// Needs podman and the worker image: `cargo test -p factory-cli -- --ignored container`.
+    #[tokio::test]
+    #[ignore = "starts a podman container"]
+    async fn finds_a_labelled_container_and_reads_its_stats() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = "localhost/anvil-factory:latest";
+        let label = format!("{TICKET_LABEL}=PROBETEST");
+        let id = output(
+            "podman",
+            &[
+                "run",
+                "-d",
+                "--rm",
+                "--label",
+                &label,
+                "--entrypoint",
+                "sleep",
+                image,
+                "30",
+            ],
+        )
+        .await
+        .expect("container starts");
+        let probe = MachineProbe::new(MachineProbeConfig {
+            runtime: ContainerRuntime::Podman,
+            image: image.to_owned(),
+            anvil_bin: PathBuf::from("anvil"),
+            disk_path: dir.path().to_path_buf(),
+            providers: BTreeMap::new(),
+            ping: Vec::new(),
+            coder: None,
+            repo: Git::new(dir.path()),
+            remote: "origin".to_owned(),
+        });
+        let found = probe.container("PROBETEST").await;
+        let _ = output("podman", &["stop", "-t", "0", id.trim()]).await;
+        let found = found.expect("the labelled container");
+        assert!(id.starts_with(&found.id), "{id} vs {}", found.id);
+        assert!(
+            found.cpu_pct.is_some() && found.mem_bytes.is_some(),
+            "{found:?}"
+        );
+        assert!(probe.container("NO-SUCH-TICKET").await.is_none());
+        let health = probe.health().await;
+        assert_eq!(health.image.expect("image").name, "anvil-factory");
+        assert!(health.disk_free_bytes.is_some());
+        assert_eq!(health.sandbox_ready, Some(true));
+    }
+
     #[test]
     fn parses_podman_output() {
         let image = parse_image(

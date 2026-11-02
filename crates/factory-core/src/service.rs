@@ -276,6 +276,7 @@ impl Service {
         }))?;
         self.board
             .start_ticket(self.ticket_view(&claimed, claimed_at));
+        self.refresh_board();
         let ticker = self.spawn_ticker(&id.to_string());
         let progress = self.progress();
         let result = self.worker.work(&claimed, &self.queue, progress).await;

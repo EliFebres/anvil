@@ -458,6 +458,7 @@ async fn the_dashboard_status_follows_the_ticket_and_keeps_the_history() {
     assert!(ticket_view.stages[0].ended_at.is_some(), "the claim ended");
     assert_eq!(ticket_view.budget.wall_clock_minutes, 90);
     assert_eq!(seen.health.main_ci.expect("ci").state, "green");
+    assert!(seen.queue.is_empty(), "the claimed ticket left the queue");
 
     let after: factory_core::Status = serde_json::from_str(
         &std::fs::read_to_string(world.home.status_file()).expect("status file"),
