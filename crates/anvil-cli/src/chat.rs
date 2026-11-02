@@ -19,12 +19,13 @@ use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
 use anvil_telemetry::{RecordKind, SessionMode, SessionOutcome};
 use anyhow::Context;
+use tokio::sync::watch;
 
 use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, model_label, session_info};
 use crate::memory;
 use crate::telemetry::SessionTelemetry;
-use crate::tui::{Input, SessionKind, UiMsg};
+use crate::tui::{Input, SessionKind, UiMsg, wait_cancel};
 use crate::wiring::Wiring;
 
 /// Lines of help printed by `/help`.
@@ -102,6 +103,7 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
         session_context,
         telemetry: telemetry.clone(),
         console: frontend.console(),
+        cancel: frontend.cancel_watch(),
     };
     loop {
         let line = match frontend
@@ -134,14 +136,23 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
             }
             continue;
         }
-        let text = session.turn(line).await;
-        session.after_turn(text).await;
+        if let Some(text) = session.turn(line).await {
+            session.after_turn(text).await;
+        }
     }
     let messages = session.conversation.messages().to_vec();
     drop(session);
     let _ = tee.await;
+    memory::finish_session(
+        wiring,
+        &id,
+        &messages,
+        frontend.decider(yes),
+        &frontend.console(),
+        Some(&telemetry),
+    )
+    .await;
     frontend.shutdown(false).await?;
-    memory::finish_session(wiring, &id, &messages, yes, Some(&telemetry)).await;
     telemetry.finish(SessionOutcome::Chat);
     Ok(0)
 }
@@ -163,6 +174,16 @@ struct ChatSession<'a> {
     session_context: Vec<anvil_core::agent::Instruction>,
     telemetry: SessionTelemetry,
     console: Console,
+    /// Bumped by the UI when the user cancels a turn; `None` in plain mode.
+    cancel: Option<watch::Receiver<u64>>,
+}
+
+/// How a turn ended.
+enum TurnEnd {
+    /// The model stopped; here is its final text.
+    Finished(String),
+    /// The user cancelled it.
+    Cancelled,
 }
 
 impl ChatSession<'_> {
@@ -243,8 +264,9 @@ impl ChatSession<'_> {
             ("quit" | "exit" | "q", _) => return false,
             (other, _) => match self.wiring.expand_slash(&format!("/{command}")) {
                 Some(message) => {
-                    let text = self.turn(&message).await;
-                    self.after_turn(text).await;
+                    if let Some(text) = self.turn(&message).await {
+                        self.after_turn(text).await;
+                    }
                 }
                 None => self
                     .console
@@ -279,7 +301,9 @@ impl ChatSession<'_> {
         };
         self.console
             .warn(format!("a Stop hook asked for more work: {reason}"));
-        let text = self.turn(&reason).await;
+        let Some(text) = self.turn(&reason).await else {
+            return;
+        };
         if let Some(reason) = hooks.stop(&text, true).await {
             self.console.warn(format!(
                 "a Stop hook objected again; stopping anyway: {reason}"
@@ -288,14 +312,38 @@ impl ChatSession<'_> {
     }
 
     /// Sends one user line and runs the model until it stops calling tools,
-    /// marking the UI busy meanwhile.
+    /// marking the UI busy meanwhile. A cancel from the UI drops the turn
+    /// where it is, which ends the stream and kills any shell child, and
+    /// rolls the conversation back to before the line.
     ///
-    /// Returns the model's final text, empty when the provider failed.
-    async fn turn(&mut self, line: &str) -> String {
+    /// Returns the model's final text, empty when the provider failed, or
+    /// `None` when the user cancelled.
+    async fn turn(&mut self, line: &str) -> Option<String> {
         self.send_ui(UiMsg::Busy(true));
-        let text = self.run_turn(line).await;
+        let before = self.conversation.messages().len();
+        // A bump from before this turn must not cancel it.
+        let mut cancel = self.cancel.take();
+        if let Some(cancel) = &mut cancel {
+            cancel.mark_unchanged();
+        }
+        let end = {
+            let turn = self.run_turn(line);
+            tokio::pin!(turn);
+            tokio::select! {
+                text = &mut turn => TurnEnd::Finished(text),
+                () = wait_cancel(cancel.as_mut()) => TurnEnd::Cancelled,
+            }
+        };
+        self.cancel = cancel;
         self.send_ui(UiMsg::Busy(false));
-        text
+        match end {
+            TurnEnd::Finished(text) => Some(text),
+            TurnEnd::Cancelled => {
+                self.conversation.truncate(before);
+                self.console.warn("turn cancelled");
+                None
+            }
+        }
     }
 
     /// The model and tool loop of one turn.

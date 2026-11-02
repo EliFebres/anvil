@@ -1,5 +1,6 @@
 //! The UI state: consumes messages, keeps the three regions, draws them.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use anvil_core::agent::{LoopEvent, State};
@@ -11,10 +12,11 @@ use unicode_width::UnicodeWidthStr;
 
 use super::editor::{EditKey, Editor};
 use super::keys::{self, KeyAction};
+use super::modal::{Answer, Modal};
 use super::status::StatusBar;
 use super::theme::Theme;
 use super::transcript::{Entry, Transcript};
-use super::{Level, SessionInfo, SessionKind, UiMsg};
+use super::{Level, SessionInfo, SessionKind, UiMsg, UiRequest};
 
 /// How soon a second Ctrl+C must follow the first to quit.
 pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
@@ -24,12 +26,18 @@ pub const QUIT_WINDOW: Duration = Duration::from_secs(2);
 pub enum Action {
     /// Hand this line to the session.
     Submit(String),
+    /// Stop the running turn.
+    CancelTurn,
     /// Close the UI and end the session.
     Quit,
 }
 
 /// The whole UI state. Pure: time comes in as ticks and nothing here
 /// touches the terminal, the clock or the environment.
+///
+/// While a prompt is open every key goes to it, further prompts queue,
+/// and every other message waits in `deferred`, so the screen under the
+/// prompt does not change until it is answered.
 #[derive(Debug)]
 pub struct App {
     info: SessionInfo,
@@ -37,6 +45,9 @@ pub struct App {
     transcript: Transcript,
     editor: Editor,
     status: StatusBar,
+    modal: Option<Modal>,
+    pending: VecDeque<UiRequest>,
+    deferred: VecDeque<UiMsg>,
     state: State,
     busy: bool,
     now: Instant,
@@ -67,6 +78,9 @@ impl App {
             theme,
             transcript,
             editor: Editor::new(),
+            modal: None,
+            pending: VecDeque::new(),
+            deferred: VecDeque::new(),
             busy: false,
             now,
             tick: 0,
@@ -85,9 +99,16 @@ impl App {
     ///
     /// What the runner should do, if anything.
     pub fn handle(&mut self, msg: UiMsg) -> Option<Action> {
+        if self.modal.is_some() {
+            return self.handle_under_modal(msg);
+        }
         match msg {
             UiMsg::Loop(event) => {
                 self.apply_loop(&event);
+                None
+            }
+            UiMsg::Request(request) => {
+                self.open(Modal::from_request(request));
                 None
             }
             UiMsg::ToolResult {
@@ -113,6 +134,9 @@ impl App {
             }
             UiMsg::Busy(busy) => {
                 self.busy = busy;
+                if !busy {
+                    self.transcript.cancel_running(self.now);
+                }
                 None
             }
             UiMsg::Notice { text, level } => {
@@ -148,7 +172,8 @@ impl App {
         }
     }
 
-    /// Draws the transcript, the status line and the input.
+    /// Draws the transcript, the status line, the input and the open
+    /// prompt, if any, over them.
     ///
     /// # Arguments
     ///
@@ -171,6 +196,10 @@ impl App {
         );
         let (lines, (column, row)) = self.editor.render(input_area.width, &prefix, &self.theme);
         frame.render_widget(Paragraph::new(lines), input_area);
+        if let Some(modal) = &mut self.modal {
+            modal.draw(frame, area, &self.theme);
+            return;
+        }
         let x = input_area
             .x
             .saturating_add(column)
@@ -198,6 +227,75 @@ impl App {
     #[cfg(test)]
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    /// Whether a prompt is open, for tests.
+    #[cfg(test)]
+    pub fn has_modal(&self) -> bool {
+        self.modal.is_some()
+    }
+
+    /// Handles a message while a prompt is open: keys and the wheel go to
+    /// the prompt, new prompts queue, everything else waits.
+    fn handle_under_modal(&mut self, msg: UiMsg) -> Option<Action> {
+        match msg {
+            UiMsg::Key(key) => {
+                if keys::map(key, true) == KeyAction::Cancel {
+                    return self.ctrl_c();
+                }
+                let answer = self.modal.as_mut().and_then(|modal| modal.key(key))?;
+                let modal = self.modal.take()?;
+                self.close_modal(modal, answer)
+            }
+            UiMsg::Mouse(mouse) => {
+                if let Some(modal) = &mut self.modal {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => modal.wheel(true),
+                        MouseEventKind::ScrollDown => modal.wheel(false),
+                        _ => {}
+                    }
+                }
+                None
+            }
+            UiMsg::Request(request) => {
+                self.pending.push_back(request);
+                None
+            }
+            UiMsg::Tick(_) => None,
+            other => {
+                self.deferred.push_back(other);
+                None
+            }
+        }
+    }
+
+    /// Opens a prompt. The quit window resets so the first Ctrl+C in a
+    /// prompt only closes it.
+    fn open(&mut self, modal: Modal) {
+        self.last_ctrl_c = None;
+        self.modal = Some(modal);
+    }
+
+    /// Answers a prompt: records it, replies, replays what waited and
+    /// opens the next queued prompt.
+    fn close_modal(&mut self, modal: Modal, answer: Answer) -> Option<Action> {
+        if let Some(question) = modal.question() {
+            self.transcript.push(Entry::Answer {
+                question,
+                answer: answer.label(),
+            });
+        }
+        modal.reply(answer);
+        let mut action = None;
+        while let Some(msg) = self.deferred.pop_front() {
+            if let Some(next) = self.handle(msg) {
+                action = Some(next);
+            }
+        }
+        if let Some(request) = self.pending.pop_front() {
+            self.open(Modal::from_request(request));
+        }
+        action
     }
 
     /// Applies a loop event to the transcript and the status line.
@@ -326,11 +424,7 @@ impl App {
         }
         if self.info.kind == SessionKind::Run {
             match word {
-                "help" => {
-                    self.show_help();
-                    self.transcript
-                        .notice("during a run: /expand, /help, /quit", Level::Warn);
-                }
+                "help" => self.show_help(),
                 "quit" | "exit" | "q" => return Some(Action::Quit),
                 _ => self.transcript.notice(
                     format!("`/{word}` is not available during a run"),
@@ -342,7 +436,9 @@ impl App {
         Some(Action::Submit(text))
     }
 
-    /// Ctrl+C: quit on a quick second press, otherwise explain.
+    /// Ctrl+C: quit on a quick second press. Otherwise close any prompt
+    /// with its safe answer, which unblocks the session, and cancel the
+    /// turn if one is running.
     fn ctrl_c(&mut self) -> Option<Action> {
         if let Some(last) = self.last_ctrl_c
             && self.now.saturating_duration_since(last) <= QUIT_WINDOW
@@ -350,28 +446,31 @@ impl App {
             return Some(Action::Quit);
         }
         self.last_ctrl_c = Some(self.now);
-        let text = if self.busy {
-            "cancelling a turn is not available yet; press Ctrl+C again within 2 s to quit"
-        } else {
-            "press Ctrl+C again within 2 s to quit"
-        };
-        self.transcript.notice(text, Level::Warn);
-        None
+        let mut action = None;
+        if let Some(modal) = self.modal.take() {
+            let answer = modal.safe_answer();
+            action = self.close_modal(modal, answer);
+        }
+        if self.is_busy() {
+            self.transcript.notice(
+                "cancelling; press Ctrl+C again within 2 s to quit",
+                Level::Warn,
+            );
+            return action.or(Some(Action::CancelTurn));
+        }
+        self.transcript
+            .notice("press Ctrl+C again within 2 s to quit", Level::Warn);
+        action
     }
 
-    /// Shows the key help in the transcript.
+    /// Whether a turn is running. A run is busy until it ends.
+    fn is_busy(&self) -> bool {
+        self.busy || (self.info.kind == SessionKind::Run && !self.finished)
+    }
+
+    /// Opens the key help.
     fn show_help(&mut self) {
-        let width = keys::HELP
-            .iter()
-            .map(|(key, _)| key.width())
-            .max()
-            .unwrap_or(0);
-        let text = keys::HELP
-            .iter()
-            .map(|(key, meaning)| format!("  {key:<width$}  {meaning}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.transcript.notice(format!("keys\n{text}"), Level::Warn);
+        self.open(Modal::help(self.info.kind == SessionKind::Run));
     }
 
     /// The input prompt: the state and a chevron.
@@ -386,19 +485,21 @@ mod tests {
     use std::sync::Arc;
 
     use anvil_core::agent::{
-        AgentLoop, AutoApprove, CheckCommand, EventSink, LoopConfig, LoopProviders,
+        AgentLoop, AutoApprove, CheckCommand, EventSink, LoopConfig, LoopProviders, PlanDecision,
     };
     use anvil_core::provider::{Event, FakeProvider, Provider, StopReason, ToolCall, Usage};
     use anvil_core::tools::{
-        OutputStats, Permissions, PromptAnswer, StaticPrompt, ToolContext, ToolOutcome,
-        ToolRegistry,
+        OutputStats, PermissionRequest, Permissions, PromptAnswer, StaticPrompt, ToolContext,
+        ToolOutcome, ToolRegistry,
     };
     use anvil_types::LimitsConfig;
     use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use tokio::sync::oneshot;
 
     use super::*;
+    use crate::tui::MemoryAnswer;
     use crate::tui::runner::plan_message;
 
     const PLAN_LINE: &str = "1. [ ] Write notes.txt";
@@ -425,6 +526,13 @@ mod tests {
         app.handle(UiMsg::Key(KeyEvent::new(code, KeyModifiers::NONE)))
     }
 
+    fn ctrl_c(app: &mut App) -> Option<Action> {
+        app.handle(UiMsg::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )))
+    }
+
     fn type_line(app: &mut App, text: &str) {
         for ch in text.chars() {
             key(app, KeyCode::Char(ch));
@@ -445,6 +553,28 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    fn shell_call(id: &str, command: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_owned(),
+            name: "shell".to_owned(),
+            arguments_json: format!("{{\"command\": \"{command}\"}}"),
+        }
+    }
+
+    /// Opens a permission prompt for a shell command.
+    fn ask_permission(app: &mut App, command: &str) -> oneshot::Receiver<PromptAnswer> {
+        let (tx, rx) = oneshot::channel();
+        app.handle(UiMsg::Request(UiRequest::Permission {
+            request: PermissionRequest {
+                tool: "shell".to_owned(),
+                target: Some(command.to_owned()),
+                arguments: serde_json::json!({ "command": command }),
+            },
+            reply: tx,
+        }));
+        rx
     }
 
     /// Runs the loop on scripted providers and returns every event it
@@ -625,6 +755,171 @@ mod tests {
     }
 
     #[test]
+    fn open_permission_modal() {
+        let (mut app, _) = new_app();
+        type_line(&mut app, "run the tests");
+        key(&mut app, KeyCode::Enter);
+        app.handle(UiMsg::Busy(true));
+        app.handle(UiMsg::Loop(LoopEvent::TextDelta(
+            "Running the suite now.\n".to_owned(),
+        )));
+        app.handle(UiMsg::Loop(LoopEvent::ToolStarted {
+            call: shell_call("c1", "cargo test --all"),
+        }));
+        let _reply = ask_permission(&mut app, "cargo test --all");
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn modal_is_never_overdrawn() {
+        let (mut app, base) = new_app();
+        app.handle(UiMsg::Busy(true));
+        let mut reply = ask_permission(&mut app, "cargo test");
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let before = terminal.backend().buffer().clone();
+        for n in 1..=20u64 {
+            app.handle(UiMsg::Tick(base + Duration::from_millis(120 * n)));
+        }
+        app.handle(UiMsg::Loop(LoopEvent::ToolStarted {
+            call: shell_call("c2", "ls"),
+        }));
+        app.handle(UiMsg::Loop(LoopEvent::TextDelta("more text".to_owned())));
+        app.handle(UiMsg::Notice {
+            text: "a notice".to_owned(),
+            level: Level::Warn,
+        });
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        assert_eq!(terminal.backend().buffer(), &before);
+        assert!(app.transcript().plain_text().is_empty());
+        assert_eq!(key(&mut app, KeyCode::Char('y')), None);
+        assert_eq!(reply.try_recv(), Ok(PromptAnswer::Yes));
+        assert!(!app.has_modal());
+        let text = app.transcript().plain_text();
+        assert!(text.contains("? allow shell cargo test? yes"), "{text}");
+        assert!(text.contains("shell ls"), "{text}");
+        assert!(text.contains("more text"), "{text}");
+        assert!(text.contains("a notice"), "{text}");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        assert_ne!(terminal.backend().buffer(), &before);
+    }
+
+    #[test]
+    fn typed_answer_lands_in_modal_not_transcript() {
+        let (mut app, _) = new_app();
+        let mut reply = ask_permission(&mut app, "ls");
+        type_line(&mut app, "helloy");
+        assert!(app.editor().is_empty());
+        assert_eq!(reply.try_recv(), Ok(PromptAnswer::Yes));
+        let entries = app.transcript().entries();
+        assert!(matches!(entries.last(), Some(Entry::Answer { .. })));
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::User { .. }))
+        );
+    }
+
+    #[test]
+    fn prompts_queue_and_open_in_order() {
+        let (mut app, _) = new_app();
+        let mut first = ask_permission(&mut app, "first");
+        let mut second = ask_permission(&mut app, "second");
+        assert!(app.has_modal());
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(first.try_recv(), Ok(PromptAnswer::No));
+        assert!(app.has_modal(), "the second prompt opens next");
+        assert!(second.try_recv().is_err());
+        key(&mut app, KeyCode::Char('a'));
+        assert_eq!(second.try_recv(), Ok(PromptAnswer::Always));
+        assert!(!app.has_modal());
+    }
+
+    #[test]
+    fn esc_gives_safe_answers() {
+        let (mut app, _) = new_app();
+        let mut permission = ask_permission(&mut app, "rm -rf build");
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(permission.try_recv(), Ok(PromptAnswer::No));
+
+        let (tx, mut memory) = oneshot::channel();
+        app.handle(UiMsg::Request(UiRequest::Memory {
+            topic: "workflow".to_owned(),
+            fact: "commits on dev".to_owned(),
+            reply: tx,
+        }));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(memory.try_recv(), Ok(MemoryAnswer::Drop));
+
+        let (tx, mut plan) = oneshot::channel();
+        app.handle(UiMsg::Request(UiRequest::Plan {
+            plan: "# Plan\n\n1. [ ] a\n".to_owned(),
+            reply: tx,
+        }));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.has_modal(), "Esc on a plan asks for feedback");
+        type_line(&mut app, "no, smaller");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(
+            plan.try_recv(),
+            Ok(PlanDecision::Revise("no, smaller".to_owned()))
+        );
+        let text = app.transcript().plain_text();
+        assert!(
+            text.contains("? build this plan? revise: no, smaller"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_once_cancels_twice_quits() {
+        let (mut app, base) = new_app();
+        assert_eq!(ctrl_c(&mut app), None, "idle: nothing to cancel");
+        app.handle(UiMsg::Tick(base + Duration::from_secs(3)));
+        app.handle(UiMsg::Busy(true));
+        assert_eq!(ctrl_c(&mut app), Some(Action::CancelTurn));
+        app.handle(UiMsg::Tick(base + Duration::from_secs(4)));
+        assert_eq!(ctrl_c(&mut app), Some(Action::Quit));
+    }
+
+    #[test]
+    fn ctrl_c_closes_the_prompt_safely_then_cancels() {
+        let (mut app, base) = new_app();
+        app.handle(UiMsg::Busy(true));
+        let mut reply = ask_permission(&mut app, "cargo test");
+        assert_eq!(ctrl_c(&mut app), Some(Action::CancelTurn));
+        assert_eq!(reply.try_recv(), Ok(PromptAnswer::No));
+        assert!(!app.has_modal());
+        app.handle(UiMsg::Tick(base + Duration::from_millis(500)));
+        assert_eq!(ctrl_c(&mut app), Some(Action::Quit));
+    }
+
+    #[test]
+    fn a_run_is_busy_until_it_ends() {
+        let mut info = info();
+        info.kind = SessionKind::Run;
+        let mut app = App::new(info, Theme::mono(), Instant::now());
+        assert_eq!(ctrl_c(&mut app), Some(Action::CancelTurn));
+    }
+
+    #[test]
+    fn question_mark_opens_the_help_and_any_key_closes_it() {
+        let (mut app, _) = new_app();
+        key(&mut app, KeyCode::Char('?'));
+        assert!(app.has_modal());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let drawn = rows(&terminal).join("\n");
+        assert!(drawn.contains("Ctrl+C"), "{drawn}");
+        key(&mut app, KeyCode::Char('x'));
+        assert!(!app.has_modal());
+        assert!(app.editor().is_empty());
+        assert!(app.transcript().plain_text().is_empty());
+    }
+
+    #[test]
     fn plan_message_reads_the_file() {
         let dir = tempfile::tempdir().expect("dir");
         let path: PathBuf = dir.path().join("plan.md");
@@ -661,6 +956,10 @@ mod tests {
         assert_eq!(key(&mut app, KeyCode::Enter), None);
         type_line(&mut app, "/compact");
         assert_eq!(key(&mut app, KeyCode::Enter), None);
+        type_line(&mut app, "/help");
+        assert_eq!(key(&mut app, KeyCode::Enter), None);
+        assert!(app.has_modal());
+        key(&mut app, KeyCode::Esc);
         type_line(&mut app, "/quit");
         assert_eq!(key(&mut app, KeyCode::Enter), Some(Action::Quit));
     }
@@ -670,11 +969,7 @@ mod tests {
         let (mut app, _) = new_app();
         for id in ["a", "b"] {
             app.handle(UiMsg::Loop(LoopEvent::ToolStarted {
-                call: ToolCall {
-                    id: id.to_owned(),
-                    name: "shell".to_owned(),
-                    arguments_json: "{\"command\": \"ls\"}".to_owned(),
-                },
+                call: shell_call(id, "ls"),
             }));
         }
         type_line(&mut app, "/expand");
@@ -683,17 +978,6 @@ mod tests {
         terminal.draw(|frame| app.draw(frame)).expect("draw");
         let drawn = rows(&terminal);
         assert_eq!(drawn.iter().filter(|row| row.contains("args:")).count(), 2);
-    }
-
-    #[test]
-    fn ctrl_c_twice_within_two_seconds_quits() {
-        let (mut app, base) = new_app();
-        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(app.handle(UiMsg::Key(ctrl_c)), None);
-        app.handle(UiMsg::Tick(base + Duration::from_secs(3)));
-        assert_eq!(app.handle(UiMsg::Key(ctrl_c)), None);
-        app.handle(UiMsg::Tick(base + Duration::from_secs(4)));
-        assert_eq!(app.handle(UiMsg::Key(ctrl_c)), Some(Action::Quit));
     }
 
     #[test]

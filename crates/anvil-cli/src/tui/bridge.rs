@@ -1,14 +1,19 @@
 //! How the session reaches the UI: a cloneable handle over the message
-//! channel, and the tool hook that forwards every result to it.
+//! channel, the prompt and gate that ask through it, the tool hook that
+//! forwards every result to it, and the cancel signal that comes back.
 
 use std::sync::Arc;
 
+use anvil_core::agent::{PlanDecision, PlanGate};
 use anvil_core::provider::{ToolCall, ToolResult};
-use anvil_core::tools::{HookDecision, HookFuture, ToolContext, ToolHook};
+use anvil_core::tools::{
+    HookDecision, HookFuture, PermissionPrompt, PermissionRequest, PromptAnswer, ToolContext,
+    ToolHook,
+};
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
 
-use super::{Level, UiMsg};
+use super::{Level, UiMsg, UiRequest};
 
 /// A sender into the UI. Dropping every handle closes the UI.
 #[derive(Debug, Clone)]
@@ -50,6 +55,104 @@ impl UiHandle {
             text: text.into(),
             level,
         });
+    }
+}
+
+/// Waits for the UI's answer from the session's thread.
+///
+/// The prompt hooks are synchronous and run on the thread that drives the
+/// session, inside the runtime, so this steps out of the runtime for the
+/// wait. It needs the multi-thread runtime; a current-thread runtime
+/// panics here.
+///
+/// # Arguments
+///
+/// * `reply` - The channel the UI answers on.
+///
+/// # Returns
+///
+/// The answer, or `None` when the UI went away without one.
+pub fn block_on_reply<T>(reply: oneshot::Receiver<T>) -> Option<T> {
+    tokio::task::block_in_place(|| reply.blocking_recv().ok())
+}
+
+/// Resolves when the user cancels the current turn, and never when there
+/// is no UI or the UI has gone.
+///
+/// # Arguments
+///
+/// * `cancel` - The cancel signal, or `None` in plain mode.
+pub async fn wait_cancel(cancel: Option<&mut watch::Receiver<u64>>) {
+    if let Some(cancel) = cancel
+        && cancel.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
+}
+
+/// Asks each `ask` permission through the UI's modal. A closed UI
+/// declines.
+#[derive(Debug, Clone)]
+pub struct TuiPrompt {
+    ui: UiHandle,
+}
+
+impl TuiPrompt {
+    /// A prompt over a UI handle.
+    ///
+    /// # Arguments
+    ///
+    /// * `ui` - The UI.
+    ///
+    /// # Returns
+    ///
+    /// The prompt.
+    pub fn new(ui: UiHandle) -> Self {
+        Self { ui }
+    }
+}
+
+impl PermissionPrompt for TuiPrompt {
+    fn ask(&self, request: &PermissionRequest) -> PromptAnswer {
+        let (reply, answer) = oneshot::channel();
+        self.ui.send(UiMsg::Request(UiRequest::Permission {
+            request: request.clone(),
+            reply,
+        }));
+        block_on_reply(answer).unwrap_or(PromptAnswer::No)
+    }
+}
+
+/// Reviews each plan through the UI's modal. A closed UI aborts.
+#[derive(Debug, Clone)]
+pub struct TuiGate {
+    ui: UiHandle,
+}
+
+impl TuiGate {
+    /// A gate over a UI handle.
+    ///
+    /// # Arguments
+    ///
+    /// * `ui` - The UI.
+    ///
+    /// # Returns
+    ///
+    /// The gate.
+    pub fn new(ui: UiHandle) -> Self {
+        Self { ui }
+    }
+}
+
+impl PlanGate for TuiGate {
+    fn review(&self, plan: &str) -> PlanDecision {
+        let (reply, decision) = oneshot::channel();
+        self.ui.send(UiMsg::Request(UiRequest::Plan {
+            plan: plan.to_owned(),
+            reply,
+        }));
+        block_on_reply(decision).unwrap_or(PlanDecision::Abort)
     }
 }
 
@@ -185,5 +288,82 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prompt_and_gate_round_trip_through_the_ui() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let ui = UiHandle::new(tx);
+        let answering = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    UiMsg::Request(UiRequest::Permission { request, reply }) => {
+                        seen.push(request.tool);
+                        let _ = reply.send(PromptAnswer::Always);
+                    }
+                    UiMsg::Request(UiRequest::Plan { plan, reply }) => {
+                        seen.push(plan);
+                        let _ = reply.send(PlanDecision::Revise("shorter".to_owned()));
+                    }
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+            seen
+        });
+        let request = PermissionRequest {
+            tool: "shell".to_owned(),
+            target: Some("ls".to_owned()),
+            arguments: Value::Null,
+        };
+        assert_eq!(
+            TuiPrompt::new(ui.clone()).ask(&request),
+            PromptAnswer::Always
+        );
+        assert_eq!(
+            TuiGate::new(ui.clone()).review("# Plan"),
+            PlanDecision::Revise("shorter".to_owned())
+        );
+        drop(ui);
+        assert_eq!(
+            answering.await.expect("answering task"),
+            vec!["shell".to_owned(), "# Plan".to_owned()]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_closed_ui_gives_the_safe_answers() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        let ui = UiHandle::new(tx);
+        let request = PermissionRequest {
+            tool: "shell".to_owned(),
+            target: None,
+            arguments: Value::Null,
+        };
+        assert_eq!(TuiPrompt::new(ui.clone()).ask(&request), PromptAnswer::No);
+        assert_eq!(TuiGate::new(ui).review("# Plan"), PlanDecision::Abort);
+    }
+
+    #[tokio::test]
+    async fn wait_cancel_resolves_on_a_bump_and_never_without_a_ui() {
+        let (tx, mut rx) = watch::channel(0u64);
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_millis(50), wait_cancel(None)).await;
+        assert!(waited.is_err(), "plain mode never cancels");
+        tx.send_modify(|n| *n += 1);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_cancel(Some(&mut rx)),
+        )
+        .await
+        .expect("a bump cancels");
+        drop(tx);
+        let gone = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            wait_cancel(Some(&mut rx)),
+        )
+        .await;
+        assert!(gone.is_err(), "a gone UI never cancels");
     }
 }

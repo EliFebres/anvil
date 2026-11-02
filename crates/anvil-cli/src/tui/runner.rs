@@ -20,7 +20,7 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
 use super::app::{Action, App};
@@ -95,6 +95,8 @@ pub struct UiChannels {
     pub msgs: mpsc::UnboundedReceiver<UiMsg>,
     /// Lines and quit go back to the session here.
     pub input: mpsc::UnboundedSender<Input>,
+    /// Bumped once per cancelled turn; the session watches it.
+    pub cancel: watch::Sender<u64>,
     /// The project root, which relative tool paths resolve against.
     pub cwd: PathBuf,
 }
@@ -237,6 +239,7 @@ pub async fn run_ui(mut app: App, mut channels: UiChannels) -> io::Result<UiExit
                 Action::Submit(line) => {
                     let _ = channels.input.send(Input::Line(line));
                 }
+                Action::CancelTurn => channels.cancel.send_modify(|n| *n = n.wrapping_add(1)),
                 Action::Quit => quit = true,
             }
         }

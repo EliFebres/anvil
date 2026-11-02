@@ -6,19 +6,23 @@ use std::time::Instant;
 
 use std::sync::Arc;
 
-use anvil_core::agent::{AgentLoop, LoopResult, State};
+use anvil_core::agent::{AgentLoop, IncompleteReason, LoopResult, SUMMARY_FILE, State, Status};
 use anvil_core::context;
 use anvil_core::tools::ToolHook;
 use anvil_telemetry::SessionMode;
 use anyhow::{Context, bail};
 use tokio::task::JoinHandle;
 
+use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, session_info};
 use crate::memory;
 use crate::telemetry::SessionTelemetry;
-use crate::tui::SessionKind;
+use crate::tui::{SessionKind, UiMsg, wait_cancel};
 use crate::wiring::{Wiring, home_dir};
 use anvil_types::LoadedConfig;
+
+/// What a cancelled run reports as its summary and its status detail.
+const CANCELLED: &str = "cancelled by the user";
 
 /// Runs a task through the loop and returns the process exit code.
 ///
@@ -54,7 +58,7 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
     telemetry.record_skill_requires(&wiring, &registry);
-    let mut config = wiring.loop_config(task, session_dir, &registry)?;
+    let mut config = wiring.loop_config(task, session_dir.clone(), &registry)?;
     let hooks = wiring.hook_runner();
     if let Some(hooks) = &hooks {
         config
@@ -75,30 +79,105 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = drive(agent, tee, frontend).await?;
-    run_stop_hooks(hooks.as_deref(), &result).await;
-    remember(&wiring, &id, yes, &telemetry).await;
+    let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
+    remember(&wiring, &id, &frontend, yes, &telemetry).await;
+    frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())
 }
 
+/// Runs the loop to its end or the user's cancel, waits for every event
+/// to be recorded and shown, then runs the Stop hooks.
+async fn finish_run(
+    agent: AgentLoop,
+    tee: JoinHandle<()>,
+    session_dir: &Path,
+    frontend: &Frontend,
+    hooks: Option<&anvil_compat::HookRunner>,
+) -> LoopResult {
+    let console = frontend.console();
+    let result = drive(agent, frontend.cancel_watch(), session_dir, &console).await;
+    let _ = tee.await;
+    run_stop_hooks(hooks, &result, &console).await;
+    result
+}
+
+/// Runs the loop until it ends or the user cancels it. Dropping the loop
+/// mid-flight ends the provider stream and kills any shell child; the
+/// session log already holds the progress, so `anvil resume` continues it.
+async fn drive(
+    agent: AgentLoop,
+    mut cancel: Option<tokio::sync::watch::Receiver<u64>>,
+    session_dir: &Path,
+    console: &Console,
+) -> LoopResult {
+    if let Some(cancel) = &mut cancel {
+        cancel.mark_unchanged();
+    }
+    let run = agent.run();
+    tokio::pin!(run);
+    tokio::select! {
+        result = &mut run => result,
+        () = wait_cancel(cancel.as_mut()) => {
+            if let Some(ui) = console.ui() {
+                ui.send(UiMsg::Busy(false));
+            }
+            console.warn(format!("{CANCELLED}; `anvil resume` continues the session"));
+            let summary_path = session_dir.join(SUMMARY_FILE);
+            if let Err(error) = std::fs::write(&summary_path, CANCELLED) {
+                tracing::warn!(%error, path = %summary_path.display(), "cannot write the summary");
+            }
+            LoopResult {
+                status: Status::Incomplete {
+                    reason: IncompleteReason::Unexpected {
+                        detail: CANCELLED.to_owned(),
+                    },
+                },
+                summary: CANCELLED.to_owned(),
+                summary_path,
+                rounds: Default::default(),
+                spend: Default::default(),
+            }
+        }
+    }
+}
+
 /// Runs the memory extraction over the session log of a finished run.
-async fn remember(wiring: &Wiring, id: &str, yes: bool, telemetry: &SessionTelemetry) {
+async fn remember(
+    wiring: &Wiring,
+    id: &str,
+    frontend: &Frontend,
+    yes: bool,
+    telemetry: &SessionTelemetry,
+) {
+    let console = frontend.console();
     match context::load_session(&wiring.cwd, id) {
         Ok(snapshot) => {
-            memory::finish_session(wiring, id, &snapshot.messages, yes, Some(telemetry)).await;
+            memory::finish_session(
+                wiring,
+                id,
+                &snapshot.messages,
+                frontend.decider(yes),
+                &console,
+                Some(telemetry),
+            )
+            .await;
         }
-        Err(error) => eprintln!("warning: memory extraction skipped: {error}"),
+        Err(error) => console.warn(format!("warning: memory extraction skipped: {error}")),
     }
 }
 
 /// Runs the Stop hooks after a loop finished. A hook that objects is
 /// reported; the loop is not resumed.
-async fn run_stop_hooks(hooks: Option<&anvil_compat::HookRunner>, result: &LoopResult) {
+async fn run_stop_hooks(
+    hooks: Option<&anvil_compat::HookRunner>,
+    result: &LoopResult,
+    console: &Console,
+) {
     if let Some(hooks) = hooks
         && let Some(reason) = hooks.stop(&result.summary, false).await
     {
-        eprintln!("a Stop hook objected: {reason}");
+        console.warn(format!("a Stop hook objected: {reason}"));
     }
 }
 
@@ -136,6 +215,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
     telemetry.record_skill_requires(&wiring, &registry);
+    let session_dir = snapshot.dir.clone();
     let mut config =
         wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry)?;
     let hooks = wiring.hook_runner();
@@ -159,23 +239,11 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = drive(agent, tee, frontend).await?;
-    run_stop_hooks(hooks.as_deref(), &result).await;
-    remember(&wiring, id, yes, &telemetry).await;
+    let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
+    remember(&wiring, id, &frontend, yes, &telemetry).await;
+    frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())
-}
-
-/// Runs the loop, then waits for every event to be recorded and rendered.
-async fn drive(
-    agent: AgentLoop,
-    tee: JoinHandle<()>,
-    frontend: Frontend,
-) -> anyhow::Result<LoopResult> {
-    let result = agent.run().await;
-    let _ = tee.await;
-    frontend.shutdown(true).await?;
-    Ok(result)
 }
 
 /// Prints the saved sessions, newest first.

@@ -6,20 +6,23 @@ use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anvil_core::agent::{AutoApprove, LoopEvent, PlanDecision, PlanGate, State};
+use anvil_core::agent::{AutoApprove, LoopEvent, PlanGate, State};
 use anvil_core::tools::{PermissionPrompt, PromptAnswer, StaticPrompt, ToolHook, ToolRegistry};
+use anvil_memory::{Decision, Proposal};
 use anyhow::Context;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::console::Console;
+use crate::memory::{terminal_decider, tui_decider};
 use crate::render;
 use crate::terminal::{TerminalGate, TerminalPrompt};
 use crate::tui::runner::{UiChannels, run_ui};
 use crate::tui::{
-    App, Input, Level, ResultTee, SessionInfo, SessionKind, Theme, UiExit, UiHandle, UiMsg,
+    App, Input, ResultTee, SessionInfo, SessionKind, Theme, TuiGate, TuiPrompt, UiExit, UiHandle,
+    UiMsg,
 };
 use crate::wiring::Wiring;
 
@@ -77,6 +80,7 @@ pub struct PlainFrontend {
 pub struct TuiFrontend {
     ui: UiHandle,
     input: mpsc::UnboundedReceiver<Input>,
+    cancel: watch::Receiver<u64>,
     task: JoinHandle<io::Result<()>>,
 }
 
@@ -105,12 +109,14 @@ impl Frontend {
             UiKind::Tui => {
                 let (msg_tx, msg_rx) = mpsc::unbounded_channel();
                 let (input_tx, input_rx) = mpsc::unbounded_channel();
+                let (cancel_tx, cancel_rx) = watch::channel(0u64);
                 let cwd = info.cwd.clone();
                 let app = App::new(info, Theme::detect(), Instant::now());
                 let channels = UiChannels {
                     events: events_rx,
                     msgs: msg_rx,
                     input: input_tx,
+                    cancel: cancel_tx,
                     cwd,
                 };
                 let task = tokio::spawn(async move {
@@ -121,6 +127,7 @@ impl Frontend {
                 Frontend::Tui(TuiFrontend {
                     ui: UiHandle::new(msg_tx),
                     input: input_rx,
+                    cancel: cancel_rx,
                     task,
                 })
             }
@@ -140,10 +147,8 @@ impl Frontend {
         }
     }
 
-    /// Who answers `ask` permission decisions.
-    ///
-    /// Under the full-screen UI every asked call is declined until the
-    /// permission modal lands.
+    /// Who answers `ask` permission decisions: stdin in plain mode, the
+    /// permission prompt under the UI.
     ///
     /// # Arguments
     ///
@@ -158,14 +163,12 @@ impl Frontend {
         }
         match self {
             Frontend::Plain(_) => Box::new(TerminalPrompt),
-            Frontend::Tui(_) => Box::new(StaticPrompt(PromptAnswer::No)),
+            Frontend::Tui(tui) => Box::new(TuiPrompt::new(tui.ui.clone())),
         }
     }
 
-    /// Who approves the plan.
-    ///
-    /// Under the full-screen UI the plan is approved as written, with a
-    /// notice, until the approval modal lands.
+    /// Who approves the plan: stdin in plain mode, the plan prompt under
+    /// the UI.
     ///
     /// # Arguments
     ///
@@ -180,7 +183,39 @@ impl Frontend {
         }
         match self {
             Frontend::Plain(_) => Box::new(TerminalGate),
-            Frontend::Tui(tui) => Box::new(NoticeGate { ui: tui.ui.clone() }),
+            Frontend::Tui(tui) => Box::new(TuiGate::new(tui.ui.clone())),
+        }
+    }
+
+    /// Who decides which proposed memory facts to keep: stdin in plain
+    /// mode, the keep/drop prompt under the UI.
+    ///
+    /// # Arguments
+    ///
+    /// * `yes` - Whether the run is unattended, which keeps everything.
+    ///
+    /// # Returns
+    ///
+    /// The decider, called once per proposal.
+    pub fn decider(&self, yes: bool) -> Box<dyn FnMut(&Proposal) -> Decision> {
+        if yes {
+            return Box::new(|_| Decision::Keep);
+        }
+        match self {
+            Frontend::Plain(_) => terminal_decider(),
+            Frontend::Tui(tui) => tui_decider(tui.ui.clone()),
+        }
+    }
+
+    /// The signal the UI bumps when the user cancels a turn.
+    ///
+    /// # Returns
+    ///
+    /// A watch on it, or `None` in plain mode, which never cancels.
+    pub fn cancel_watch(&self) -> Option<watch::Receiver<u64>> {
+        match self {
+            Frontend::Plain(_) => None,
+            Frontend::Tui(tui) => Some(tui.cancel.clone()),
         }
     }
 
@@ -265,22 +300,6 @@ impl Frontend {
                 }
             }
         }
-    }
-}
-
-/// Approves every plan and says so in the transcript; the stand-in until
-/// the approval modal exists.
-struct NoticeGate {
-    ui: UiHandle,
-}
-
-impl PlanGate for NoticeGate {
-    fn review(&self, _plan: &str) -> PlanDecision {
-        self.ui.notice(
-            "plan approved as written; the approval prompt is not available yet",
-            Level::Warn,
-        );
-        PlanDecision::Approve
     }
 }
 

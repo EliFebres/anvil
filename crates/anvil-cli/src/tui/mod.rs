@@ -12,6 +12,7 @@ pub mod bridge;
 pub mod editor;
 pub mod keys;
 pub mod markdown;
+pub mod modal;
 pub mod runner;
 pub mod status;
 pub mod theme;
@@ -21,13 +22,14 @@ pub mod wrap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anvil_core::agent::{LoopEvent, State};
+use anvil_core::agent::{LoopEvent, PlanDecision, State};
+use anvil_core::tools::{PermissionRequest, PromptAnswer};
 use anvil_types::Price;
 use crossterm::event::{KeyEvent, MouseEvent};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 pub use app::App;
-pub use bridge::{ResultTee, UiHandle};
+pub use bridge::{ResultTee, TuiGate, TuiPrompt, UiHandle, block_on_reply, wait_cancel};
 pub use theme::Theme;
 
 /// What a session tells the UI about itself when it starts.
@@ -72,11 +74,51 @@ pub enum Level {
     Error,
 }
 
+/// What the user said about a proposed memory fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryAnswer {
+    /// Save it.
+    Keep,
+    /// Forget it.
+    Drop,
+}
+
+/// A question the session asks the user; the UI answers on the channel it
+/// carries. Dropping the sender gives the asker its safe answer.
+#[derive(Debug)]
+pub enum UiRequest {
+    /// May this tool call run?
+    Permission {
+        /// What is about to run.
+        request: PermissionRequest,
+        /// Where the answer goes.
+        reply: oneshot::Sender<PromptAnswer>,
+    },
+    /// Should this plan be built?
+    Plan {
+        /// The plan text.
+        plan: String,
+        /// Where the decision goes.
+        reply: oneshot::Sender<PlanDecision>,
+    },
+    /// Should this fact be remembered?
+    Memory {
+        /// The topic it would go under.
+        topic: String,
+        /// The fact.
+        fact: String,
+        /// Where the answer goes.
+        reply: oneshot::Sender<MemoryAnswer>,
+    },
+}
+
 /// Everything the UI consumes, from the session and from the terminal.
 #[derive(Debug)]
 pub enum UiMsg {
     /// An event from the agent loop or the chat turn.
     Loop(LoopEvent),
+    /// A question for the user, shown as a modal.
+    Request(UiRequest),
     /// A tool call's full result, from the tool hook.
     ToolResult {
         /// The call.

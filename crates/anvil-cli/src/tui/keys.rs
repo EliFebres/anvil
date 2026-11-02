@@ -106,10 +106,13 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("click", "expand or collapse the tool call under the mouse"),
     ("Ctrl+L", "clear the view (the session keeps everything)"),
-    ("Ctrl+C", "cancel the turn; twice within 2 s quits"),
+    (
+        "Ctrl+C",
+        "close a prompt safely and cancel the turn; twice within 2 s quits",
+    ),
     (
         "Esc",
-        "close a prompt with its safe answer; drop the selection",
+        "close a prompt with its safe answer (a plan asks for feedback); drop the selection",
     ),
     ("?", "this help, when the input is empty"),
 ];

@@ -73,6 +73,13 @@ pub enum Entry {
         /// How loud.
         level: Level,
     },
+    /// A prompt the user answered.
+    Answer {
+        /// What was asked.
+        question: String,
+        /// What the user said.
+        answer: String,
+    },
 }
 
 /// A tool call as the transcript shows it.
@@ -106,6 +113,11 @@ pub enum ToolStatus {
         duration: Duration,
         /// The first line of the result.
         preview: String,
+    },
+    /// Stopped by the user before it finished.
+    Cancelled {
+        /// How long it ran.
+        duration: Duration,
     },
 }
 
@@ -304,7 +316,7 @@ impl Transcript {
                 if let Entry::Tool(tool) = &mut self.slots[index].entry {
                     let started = match tool.status {
                         ToolStatus::Running { started } => started,
-                        ToolStatus::Finished { .. } => now,
+                        ToolStatus::Finished { .. } | ToolStatus::Cancelled { .. } => now,
                     };
                     tool.status = ToolStatus::Finished {
                         outcome: *outcome,
@@ -423,6 +435,41 @@ impl Transcript {
         }
     }
 
+    /// Ends what a cancelled turn left running: the open model text, tool
+    /// calls still spinning and checks still running.
+    ///
+    /// # Arguments
+    ///
+    /// * `now` - The current time, for the durations.
+    pub fn cancel_running(&mut self, now: Instant) {
+        self.close_model();
+        for slot in &mut self.slots {
+            match &mut slot.entry {
+                Entry::Tool(ToolEntry {
+                    status: status @ ToolStatus::Running { .. },
+                    ..
+                }) => {
+                    if let ToolStatus::Running { started } = *status {
+                        *status = ToolStatus::Cancelled {
+                            duration: now.saturating_duration_since(started),
+                        };
+                    }
+                    slot.cache = None;
+                }
+                Entry::Check {
+                    status: status @ CheckStatus::Running,
+                    ..
+                } => {
+                    *status = CheckStatus::Failed {
+                        tail: "cancelled".to_owned(),
+                    };
+                    slot.cache = None;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Expands every tool call.
     pub fn expand_all(&mut self) {
         for slot in &mut self.slots {
@@ -535,6 +582,7 @@ impl Transcript {
                 Entry::Check { command, .. } => format!("check {command}"),
                 Entry::Review { .. } => "review".to_owned(),
                 Entry::Notice { text, .. } => text.clone(),
+                Entry::Answer { question, answer } => format!("? {question} {answer}"),
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -780,6 +828,22 @@ fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<
                 .map(|line| Line::styled(line, style))
                 .collect()
         }
+        Entry::Answer { question, answer } => {
+            let mut lines: Vec<Line<'static>> = wrap(question, columns.saturating_sub(2).max(1))
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    let lead = if index == 0 { "? " } else { "  " };
+                    Line::styled(format!("{lead}{line}"), theme.dim)
+                })
+                .collect();
+            lines.extend(
+                wrap(answer, columns.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|line| Line::styled(format!("  {line}"), theme.user)),
+            );
+            lines
+        }
     };
     lines.push(Line::default());
     lines
@@ -807,6 +871,12 @@ fn render_tool(tool: &ToolEntry, width: usize, theme: &Theme, tick: u64) -> Vec<
                 preview.clone(),
             )
         }
+        ToolStatus::Cancelled { duration } => (
+            "cancelled".to_owned(),
+            theme.dim,
+            duration_label(*duration),
+            String::new(),
+        ),
     };
     let head = format!("{} {}", tool_icon(&tool.call.name), tool.call.name);
     let mut spans = vec![Span::raw(head.clone()), Span::raw(" ")];
@@ -1255,6 +1325,41 @@ mod tests {
         transcript.viewport = 10;
         transcript.click(0);
         assert_eq!(transcript.selected, Some(0));
+    }
+
+    #[test]
+    fn cancel_running_ends_the_open_text_tools_and_checks() {
+        let now = Instant::now();
+        let mut transcript = fresh();
+        transcript.append_text("half a thought");
+        transcript.apply(
+            &LoopEvent::ToolStarted {
+                call: call("a", "shell", "{\"command\":\"sleep 9\"}"),
+            },
+            now,
+        );
+        transcript.apply(
+            &LoopEvent::CheckStarted {
+                command: "cargo test".to_owned(),
+            },
+            now,
+        );
+        transcript.cancel_running(now + Duration::from_millis(340));
+        transcript.append_text("later");
+        assert_eq!(transcript.entries().len(), 4);
+        let text = joined(&mut transcript, 60);
+        assert!(
+            text.contains("$ shell sleep 9  cancelled 340ms"),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("failed `cargo test`:\n    cancelled"),
+            "{text:?}"
+        );
+        assert!(
+            !transcript.entries().iter().any(|entry| is_live(entry)),
+            "nothing keeps spinning"
+        );
     }
 
     #[test]

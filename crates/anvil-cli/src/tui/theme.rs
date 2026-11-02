@@ -1,9 +1,8 @@
 //! One theme that reads on dark and light terminals.
 //!
-//! Only state banners, user messages and tool failures carry a color (the
-//! modal border joins them when modals land). Everything else uses the
-//! terminal's default foreground with bold or dim, so `NO_COLOR` loses
-//! nothing but the accents.
+//! Only state banners, user messages, tool failures and the modal border
+//! carry a color. Everything else uses the terminal's default foreground
+//! with bold or dim, so `NO_COLOR` loses nothing but the accents.
 
 use ratatui::style::{Color, Modifier, Style};
 
@@ -16,6 +15,8 @@ pub struct Theme {
     pub user: Style,
     /// Failed tool calls and error notices.
     pub failure: Style,
+    /// The border of a prompt.
+    pub modal_border: Style,
     /// Secondary text: notices, borders, tool summaries.
     pub dim: Style,
     /// Inline and fenced code.
@@ -53,6 +54,7 @@ impl Theme {
             state: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             user: Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
             failure: Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+            modal_border: Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ..Self::mono()
         }
     }
@@ -67,6 +69,7 @@ impl Theme {
             state: Style::new().add_modifier(Modifier::BOLD),
             user: Style::new().add_modifier(Modifier::BOLD),
             failure: Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            modal_border: Style::new().add_modifier(Modifier::BOLD),
             dim: Style::new().add_modifier(Modifier::DIM),
             code: Style::new().add_modifier(Modifier::BOLD),
             heading: Style::new().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
@@ -87,6 +90,7 @@ mod tests {
             theme.state,
             theme.user,
             theme.failure,
+            theme.modal_border,
             theme.dim,
             theme.code,
             theme.heading,
@@ -104,6 +108,7 @@ mod tests {
         assert!(theme.state.fg.is_some());
         assert!(theme.user.fg.is_some());
         assert!(theme.failure.fg.is_some());
+        assert!(theme.modal_border.fg.is_some());
         for style in [
             theme.dim,
             theme.code,
