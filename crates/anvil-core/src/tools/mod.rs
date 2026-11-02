@@ -12,6 +12,7 @@ pub mod grep;
 pub mod list_dir;
 mod output;
 pub mod permissions;
+pub mod preview;
 pub mod read_file;
 pub mod shell;
 pub mod write_file;

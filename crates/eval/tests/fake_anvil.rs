@@ -108,6 +108,10 @@ async fn a_failing_fake_is_incomplete_with_its_reason() {
     );
 }
 
+/// The fake records its tokens, prints its session line, then sleeps for
+/// longer than the task's 1 s timeout. The harness starts that timeout at
+/// the session line, so however slowly bash starts the record is on disk
+/// before the kill.
 #[tokio::test]
 async fn a_slow_fake_times_out_and_keeps_the_tokens_it_recorded() {
     let runner = Arc::new(runner(None).expect("runner"));
@@ -120,6 +124,11 @@ async fn a_slow_fake_times_out_and_keeps_the_tokens_it_recorded() {
         attempt.anvil_ms < 15_000,
         "killed at the 1s timeout, took {}ms",
         attempt.anvil_ms
+    );
+    assert_eq!(
+        attempt.session.as_deref(),
+        Some("01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        "stderr written before the kill is kept"
     );
     assert_eq!(attempt.tokens.total(), 1100);
     assert!(!attempt.passed);

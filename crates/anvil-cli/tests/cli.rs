@@ -564,3 +564,30 @@ fn ticket_submit_help_states_the_outbound_rule() {
     );
     assert!(stdout.contains("--all"), "{stdout}");
 }
+
+/// The escape sequence that enters the alternate screen; the full-screen
+/// UI starts with it, the line renderer never emits it.
+const ALTERNATE_SCREEN: &str = "\x1b[?1049h";
+
+#[test]
+fn plain_is_selected_without_a_tty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    init(dir.path());
+    for args in [
+        vec!["chat"],
+        vec!["--plain", "chat"],
+        vec!["--yes", "run", "hello"],
+    ] {
+        let out = anvil(dir.path())
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("anvil runs");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stdout.contains(ALTERNATE_SCREEN) && !stderr.contains(ALTERNATE_SCREEN),
+            "{args:?} entered the alternate screen off a terminal"
+        );
+    }
+}

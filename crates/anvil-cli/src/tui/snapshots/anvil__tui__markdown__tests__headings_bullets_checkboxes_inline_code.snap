@@ -1,0 +1,19 @@
+---
+source: crates/anvil-cli/src/tui/markdown.rs
+expression: "joined(&mut doc, 40)"
+---
+# Plan
+1. [ ] Add the tui module
+2. [x] Wire chat
+Some emphasis, strong and code in a
+paragraph that is long enough to wrap
+around.
+╭─ rust ───────────────────────────────╮
+│ fn main() {                          │
+│     println!("hi");                  │
+│ }                                    │
+╰──────────────────────────────────────╯
+• bullet one
+• bullet two
+│ quoted
+────────────────────────────────────────

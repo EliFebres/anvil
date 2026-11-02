@@ -8,9 +8,7 @@ use anvil_compat::{
     AgentSet, CommandSet, DelegateTool, HookConfig, HookRunner, McpTools, ServerSet, SkillRoots,
     SkillSet, SkillTool, SubagentEnv,
 };
-use anvil_core::agent::{
-    AutoApprove, ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders, PlanGate,
-};
+use anvil_core::agent::{ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders};
 use anvil_core::context;
 use anvil_core::provider::{self, Provider, SharedBudget, TokenBudget};
 use anvil_core::tools::{
@@ -20,7 +18,7 @@ use anvil_types::AnvilConfig;
 use anyhow::Context;
 
 use crate::memory::{self, RuleChecks};
-use crate::terminal::{TerminalGate, TerminalPrompt};
+use crate::terminal::TerminalPrompt;
 
 /// The home directory: `ANVIL_HOME` when set, otherwise the OS home.
 ///
@@ -475,23 +473,6 @@ impl Wiring {
     pub fn new_session_dir(&self) -> (PathBuf, String) {
         let id = context::new_session_id();
         (context::session_dir(&self.cwd, &id), id)
-    }
-
-    /// The plan gate for this invocation.
-    ///
-    /// # Arguments
-    ///
-    /// * `yes` - Whether `--yes` was given.
-    ///
-    /// # Returns
-    ///
-    /// Auto-approval with `--yes`, the terminal otherwise.
-    pub fn gate(yes: bool) -> Box<dyn PlanGate> {
-        if yes {
-            Box::new(AutoApprove)
-        } else {
-            Box::new(TerminalGate)
-        }
     }
 
     /// The permission prompt for this invocation.

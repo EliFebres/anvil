@@ -1,0 +1,28 @@
+---
+source: crates/anvil-cli/src/tui/app.rs
+expression: terminal.backend()
+---
+"BUILD ──────────────────────────────────────────────────────────────────────────"
+"                                                                                "
+"you  rename help╭ Permission ──────────────────────────────────╮                "
+"                │ edit_file wants to change src/lib.rs         │                "
+"Renaming b to be│                                              │                "
+"                │ ╭──────────────────────────────────────────╮ │                "
+"ok     edit_file│ │       1                                  │ │            40ms"
+"▌ src/lib.rs:4-1│ │   }                                      │ │                "
+"▌       1       │ │                                          │ │                "
+"▌   }           │ │ - fn b() {}                              │ │                "
+"▌               │ │ + fn beta() {}                           │ │                "
+"▌ - fn b() {}   │ │                                          │ │                "
+"▌ + fn beta() {}│ │   pub fn c() {                           │ │                "
+"▌               │ │ -     b();                               │ │                "
+"▌   pub fn c() {│ │ +     beta();                            │ │                "
+"▌ -     b();    │ │   }                                      │ │                "
+"▌ +     beta(); │ ╰──────────────────────────────────────────╯ │                "
+"▌   }           │                                              │                "
+"                │ output cap 30 KiB                            │                "
+"Done; cargo chec│                                              │                "
+" BUILD · main (t│ y allow   n deny   a always       esc = deny │· out 0 · 00:00 "
+"╭───────────────╰──────────────────────────────────────────────╯───────────────╮"
+"│input is paused while the question above is open                              │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"

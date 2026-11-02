@@ -31,6 +31,8 @@ Workspace lints enforce part of this mechanically: `unsafe_code = "forbid"`, `mi
 
 **`anvil-cli`** is the `anvil` binary: clap argument parsing and wiring only. It is the one place where the `anvil-*` libraries meet. It must never depend on any `factory-*` crate. It is one of the two crates allowed to use `anyhow`.
 
+The full-screen UI lives in `crates/anvil-cli/src/tui/` (ratatui + crossterm). Everything under `tui/` is pure except `runner.rs`, which owns the terminal: `App` consumes `UiMsg`s and draws into a frame, so tests drive it with messages and a `TestBackend`. Modules under `tui/` may import `anvil_core` and `anvil_types` types, tokio channels and the UI crates, and nothing else from this crate: never `Wiring`, `anvil_memory`, `anvil_compat` or telemetry. `frontend.rs` gathers what the UI shows into `SessionInfo` and bridges prompts to it. Every color comes from `tui/theme.rs`. Scripts and CI use `--plain` (or `--yes`, or no TTY) for the line renderer, which must stay byte-identical; `ANVIL_NO_ANIMATION` skips the startup logo animation.
+
 **`factory-core`** is the ticket queue, worker loop, git operations, and merge policy. It drives `anvil` as a subprocess, not as a library, so it depends on `anvil-types` only. It must never depend on any `anvil-*` library.
 
 **`factory-review`** is multi-model review. It owns its own model calls and depends on `anvil-types` only. It must never depend on `anvil-core` or `factory-core`.

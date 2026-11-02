@@ -15,6 +15,11 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NAME")]
     pub profile: Option<String>,
 
+    /// Use the line renderer and stdin prompts instead of the full-screen UI.
+    /// Chosen automatically with --yes or when a standard stream is not a terminal.
+    #[arg(long, global = true)]
+    pub plain: bool,
+
     /// What to do.
     #[command(subcommand)]
     pub command: Option<Command>,

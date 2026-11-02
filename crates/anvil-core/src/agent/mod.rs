@@ -738,6 +738,9 @@ impl AgentLoop {
         for call in calls {
             self.events
                 .emit(LoopEvent::ToolStarted { call: call.clone() });
+            if let Some(edit) = crate::tools::preview::proposed_edit(call, &self.ctx) {
+                self.events.emit(edit);
+            }
             let execution = self.registry.execute(call, &self.ctx).await;
             if execution.outcome.is_denial() {
                 self.denial_seen = true;
