@@ -22,7 +22,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
     | bash -s -- --to /usr/local/bin
 
 # The worktree is mounted at /work and owned by the host user; with
-# `podman run --userns=keep-id` that user maps to `worker` here.
+# `podman run --userns=keep-id:uid=1000,gid=1000` that user maps to `worker`
+# here whatever its uid on the host (WORKER_UID in factory-core's sandbox.rs).
 RUN useradd --uid 1000 --create-home worker \
     && mkdir -p /work /run/factory \
     && chown worker:worker /work /run/factory \

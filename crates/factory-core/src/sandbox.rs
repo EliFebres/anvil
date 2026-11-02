@@ -39,6 +39,9 @@ const HOME_MOUNT: &str = "/anvil-home";
 /// Where the proxy socket is mounted; `entrypoint.sh` bridges it to port 3128.
 const PROXY_MOUNT: &str = "/run/factory/proxy.sock";
 
+/// The uid and gid of `worker` in `deploy/nuc/Containerfile`.
+pub const WORKER_UID: u32 = 1000;
+
 /// Where the host's anvil binary is mounted and run from.
 pub const ANVIL_MOUNT: &str = "/usr/local/bin/anvil";
 
@@ -363,7 +366,11 @@ impl Sandbox {
             .map(|s| (*s).to_owned())
             .collect();
         match self.config.runtime {
-            ContainerRuntime::Podman => args.push("--userns=keep-id".to_owned()),
+            // The host user becomes the image's `worker`, whatever its uid on
+            // the host, so the mounts it owns stay readable inside.
+            ContainerRuntime::Podman => args.push(format!(
+                "--userns=keep-id:uid={WORKER_UID},gid={WORKER_UID}"
+            )),
             ContainerRuntime::Docker => {
                 args.push("--user".to_owned());
                 args.push(current_uid_gid());
@@ -1215,7 +1222,7 @@ mod tests {
         );
         let text = args.join(" ");
         assert!(
-            text.starts_with("run --rm --network none --init --userns=keep-id "),
+            text.starts_with("run --rm --network none --init --userns=keep-id:uid=1000,gid=1000 "),
             "{text}"
         );
         assert!(
