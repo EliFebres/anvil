@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # One-time NUC bootstrap. Idempotent: run it again after a reboot or a pull.
+# After the first run, `factory update` does the pull, the builds and the
+# restart on its own.
 #
 #   ssh nuc 'bash -s' < deploy/nuc/bootstrap.sh
 #
