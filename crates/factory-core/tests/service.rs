@@ -50,6 +50,7 @@ impl Harness {
             notifier: Arc::clone(&notifier) as Arc<_>,
             hostname: "nuc".to_owned(),
             clock: clock_at(hour),
+            probe: Arc::new(factory_core::NoProbe),
         })
         .expect("service");
         Self {
@@ -364,8 +365,117 @@ async fn an_empty_protected_list_is_refused() {
         notifier: Arc::new(RecordingNotifier::default()),
         hostname: "nuc".to_owned(),
         clock: clock_at(7),
+        probe: Arc::new(factory_core::NoProbe),
     })
     .err()
     .expect("refused");
     assert!(error.to_string().contains("[protected]"), "{error}");
+}
+
+/// A worker that reports stages and reads the dashboard status while it
+/// works, so the test sees what `factory watch` would mid-ticket.
+struct PeekingWorker {
+    status_file: std::path::PathBuf,
+    seen: std::sync::Mutex<Option<factory_core::Status>>,
+}
+
+impl factory_core::Worker for PeekingWorker {
+    fn work<'a>(
+        &'a self,
+        _ticket: &'a anvil_types::Ticket,
+        _queue: &'a factory_core::TicketQueue,
+        progress: factory_core::Progress,
+    ) -> factory_core::BoxFuture<'a, factory_core::Result<Outcome>> {
+        Box::pin(async move {
+            use factory_core::{ProgressEvent, Stage};
+            progress(ProgressEvent::stage(
+                Stage::Worktree,
+                "preparing the worktree",
+            ));
+            progress(ProgressEvent::stage(Stage::Implement, "implementer run 1"));
+            progress(ProgressEvent::Counters { run: 1, round: 0 });
+            progress(ProgressEvent::PullRequest(7));
+            let mut reader = factory_core::StatusReader::new();
+            *self.seen.lock().expect("lock") = reader.poll(&self.status_file).cloned();
+            Ok(Outcome::Merged {
+                pr: 7,
+                cost_usd: Some(0.5),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn the_dashboard_status_follows_the_ticket_and_keeps_the_history() {
+    if !have_git() {
+        return;
+    }
+    let world = World::new();
+    let queue = world.queue().await;
+    let worker = Arc::new(PeekingWorker {
+        status_file: world.home.status_file(),
+        seen: std::sync::Mutex::new(None),
+    });
+    let config: FactoryConfig =
+        toml::from_str(&FactoryConfig::template("owner/repo")).expect("template");
+    let service = Service::new(ServiceDeps {
+        home: world.home.clone(),
+        config,
+        queue,
+        worker: Arc::clone(&worker) as Arc<_>,
+        host: Arc::new(FakeHost::green()),
+        notifier: Arc::new(RecordingNotifier::default()),
+        hostname: "nuc".to_owned(),
+        clock: Arc::new(Local::now),
+        probe: Arc::new(factory_core::NoProbe),
+    })
+    .expect("service");
+    let t = ticket(Priority::P1, "2026-10-01T00:00:00Z", TicketKind::Bug);
+    world.submit(&t, "origin/main");
+
+    assert_eq!(service.run_once().await.expect("runs"), Tick::Worked(t.id));
+
+    let seen = worker
+        .seen
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("status mid-ticket");
+    assert_eq!(seen.service.state, factory_core::board::RunState::Running);
+    assert_eq!(seen.host, "nuc");
+    assert_eq!(seen.repo, "owner/repo");
+    let ticket_view = seen.ticket.expect("ticket");
+    assert_eq!(ticket_view.id, t.id.to_string());
+    assert_eq!(ticket_view.kind, "bug");
+    assert_eq!(ticket_view.priority, "p1");
+    assert_eq!(ticket_view.implementer_run, 1);
+    assert_eq!(ticket_view.implementer_runs_max, 2);
+    assert_eq!(ticket_view.pr, Some(7));
+    assert_eq!(
+        ticket_view.running_stage(),
+        Some(factory_core::Stage::Implement)
+    );
+    assert!(ticket_view.stages[0].ended_at.is_some(), "the claim ended");
+    assert_eq!(ticket_view.budget.wall_clock_minutes, 90);
+    assert_eq!(seen.health.main_ci.expect("ci").state, "green");
+    assert!(seen.queue.is_empty(), "the claimed ticket left the queue");
+
+    let after: factory_core::Status = serde_json::from_str(
+        &std::fs::read_to_string(world.home.status_file()).expect("status file"),
+    )
+    .expect("parses");
+    assert!(after.ticket.is_none());
+    assert_eq!(after.service.state, factory_core::board::RunState::Idle);
+    assert_eq!(after.recent.len(), 1);
+    assert_eq!(after.recent[0].pr, Some(7));
+    assert!(after.recent[0].started_at.is_some());
+    assert_eq!(after.today.merged, 1);
+    assert_eq!(after.week.expect("week").totals.merged, 1);
+    let history = factory_core::history::read(&world.home.outcomes_file());
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].kind, OutcomeKind::Merged);
+    assert!(
+        !world.home.output_log(&t.id.to_string()).exists(),
+        "the ticket's live files are cleaned up"
+    );
 }

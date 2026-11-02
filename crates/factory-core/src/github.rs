@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use octocrab::Octocrab;
 use serde::{Deserialize, Serialize};
 
+use crate::board::NeedsHuman;
 use crate::error::{FactoryError, Result};
-use crate::ports::{BoxFuture, CiStatus, CodeHost, InlineComment, PullRequest};
+use crate::ports::{BoxFuture, CiStatus, CodeHost, InlineComment, NEEDS_HUMAN_LABEL, PullRequest};
 
 /// The environment variable that holds the factory's own token.
 pub const TOKEN_ENV: &str = "FACTORY_GITHUB_TOKEN";
@@ -107,6 +108,32 @@ struct RunJson {
     status: Option<String>,
     conclusion: Option<String>,
     html_url: String,
+}
+
+/// One entry of `GET /repos/{owner}/{repo}/issues`; pull requests carry
+/// a `pull_request` object.
+#[derive(Deserialize)]
+struct IssueJson {
+    number: u64,
+    title: String,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
+}
+
+/// The distinct top-level folders (with a trailing `/`) and root files of
+/// some paths, in first-seen order.
+fn top_level(paths: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for path in paths {
+        let top = match path.split_once('/') {
+            Some((dir, _)) => format!("{dir}/"),
+            None => path.clone(),
+        };
+        if !out.contains(&top) {
+            out.push(top);
+        }
+    }
+    out
 }
 
 /// `GET /repos/{owner}/{repo}/commits/{sha}/check-runs`.
@@ -349,6 +376,11 @@ impl GitHub {
 
     /// The latest run of the CI workflow on `main`, as a [`CiStatus`].
     async fn ci_of_main(&self) -> Result<CiStatus> {
+        Ok(self.ci_of_main_with_sha().await?.0)
+    }
+
+    /// The status of the latest CI run on `main` and the commit it ran on.
+    async fn ci_of_main_with_sha(&self) -> Result<(CiStatus, Option<String>)> {
         let route = format!(
             "/repos/{}/{}/actions/workflows/{CI_WORKFLOW}/runs",
             self.owner, self.repo
@@ -359,13 +391,14 @@ impl GitHub {
             .await
         {
             Ok(runs) => runs,
-            Err(error) if status_of(&error) == Some(404) => return Ok(CiStatus::Unknown),
+            Err(error) if status_of(&error) == Some(404) => return Ok((CiStatus::Unknown, None)),
             Err(error) => return Err(host_error(error)),
         };
         let Some(run) = runs.workflow_runs.into_iter().next() else {
-            return Ok(CiStatus::Unknown);
+            return Ok((CiStatus::Unknown, None));
         };
-        Ok(match (run.status.as_deref(), run.conclusion.as_deref()) {
+        let sha = run.head_sha.clone();
+        let status = match (run.status.as_deref(), run.conclusion.as_deref()) {
             (Some("completed"), Some("success" | "skipped" | "neutral")) => CiStatus::Green,
             (Some("completed"), Some(_)) => CiStatus::Red {
                 sha: run.head_sha,
@@ -373,7 +406,39 @@ impl GitHub {
             },
             (Some("completed"), None) => CiStatus::Unknown,
             _ => CiStatus::Pending,
-        })
+        };
+        Ok((status, Some(sha)))
+    }
+
+    /// Open pull requests labelled [`NEEDS_HUMAN_LABEL`] and the top-level
+    /// paths each changes.
+    async fn needs_human(&self) -> Result<Vec<NeedsHuman>> {
+        let route = format!("/repos/{}/{}/issues", self.owner, self.repo);
+        let issues: Vec<IssueJson> = self
+            .octocrab
+            .get(
+                route,
+                Some(&[
+                    ("labels", NEEDS_HUMAN_LABEL),
+                    ("state", "open"),
+                    ("per_page", "30"),
+                ]),
+            )
+            .await
+            .map_err(host_error)?;
+        let mut out = Vec::new();
+        for issue in issues
+            .into_iter()
+            .filter(|issue| issue.pull_request.is_some())
+        {
+            let files = self.changed_files(issue.number).await?;
+            out.push(NeedsHuman {
+                pr: issue.number,
+                title: issue.title,
+                touches: top_level(&files),
+            });
+        }
+        Ok(out)
     }
 
     /// The `ci` check run of a commit right now.
@@ -436,6 +501,14 @@ impl GitHub {
 impl CodeHost for GitHub {
     fn main_ci(&self) -> BoxFuture<'_, Result<CiStatus>> {
         Box::pin(self.ci_of_main())
+    }
+
+    fn main_ci_with_sha(&self) -> BoxFuture<'_, Result<(CiStatus, Option<String>)>> {
+        Box::pin(self.ci_of_main_with_sha())
+    }
+
+    fn needs_human_prs(&self) -> BoxFuture<'_, Result<Vec<NeedsHuman>>> {
+        Box::pin(self.needs_human())
     }
 
     fn open_pull<'a>(
@@ -652,6 +725,12 @@ mod tests {
                 expected
             );
         }
+        let (_, sha) = client(&server)
+            .await
+            .main_ci_with_sha()
+            .await
+            .expect("status");
+        assert_eq!(sha, None, "no runs, no commit");
         server.reset().await;
         Mock::given(method("GET"))
             .and(path(route))
@@ -663,6 +742,38 @@ mod tests {
         assert_eq!(
             client(&server).await.main_ci().await.expect("status"),
             CiStatus::Unknown
+        );
+    }
+
+    #[tokio::test]
+    async fn lists_pull_requests_waiting_on_a_human_with_what_they_touch() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/issues"))
+            .and(query_param("labels", NEEDS_HUMAN_LABEL))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "number": 13, "title": "release.yml permissions", "pull_request": {} },
+                { "number": 14, "title": "an issue, not a pull request" }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/pulls/13/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                { "filename": ".github/workflows/release.yml" },
+                { "filename": ".github/workflows/ci.yml" },
+                { "filename": "justfile" }
+            ])))
+            .mount(&server)
+            .await;
+        let github = client(&server).await;
+        assert_eq!(
+            github.needs_human_prs().await.expect("list"),
+            vec![NeedsHuman {
+                pr: 13,
+                title: "release.yml permissions".to_owned(),
+                touches: vec![".github/".to_owned(), "justfile".to_owned()],
+            }]
         );
     }
 

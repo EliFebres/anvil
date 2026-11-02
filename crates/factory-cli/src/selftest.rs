@@ -424,6 +424,7 @@ impl World {
             notifier: Arc::new(LogNotifier),
             hostname: hostname(),
             clock: system_clock(),
+            probe: Arc::new(factory_core::NoProbe),
         })?;
         Ok(Parts { service, sandbox })
     }

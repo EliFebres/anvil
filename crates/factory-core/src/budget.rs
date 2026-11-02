@@ -104,6 +104,11 @@ impl Budget {
         self.tokens_used
     }
 
+    /// Review rounds that asked for changes so far.
+    pub fn review_rounds(&self) -> u32 {
+        self.review_rounds
+    }
+
     /// Fails once the wall clock has run out.
     ///
     /// # Arguments

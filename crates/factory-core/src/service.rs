@@ -1,22 +1,37 @@
 //! The service loop: poll the state branch, take the next ticket, work it,
 //! record what happened.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anvil_types::{FactoryConfig, TicketKind};
-use chrono::{DateTime, Local, NaiveTime, Utc};
+use anvil_types::ticket::dirs;
+use anvil_types::{FactoryConfig, Ticket, TicketKind};
+use chrono::{DateTime, FixedOffset, Local, NaiveTime, Offset, Utc};
+use serde::Serialize;
 use ulid::Ulid;
 
+use crate::board::{
+    Board, BudgetView, CiView, Live, PollView, QueuedTicket, RunState, STATUS_VERSION, Stage,
+    StageView, Status, TicketView, write_atomic,
+};
+use crate::budget::{MAX_GATE_A_ATTEMPTS, MAX_REVIEW_ROUNDS};
 use crate::error::{FactoryError, Result};
 use crate::notify::{Event, Notifier};
 use crate::paths::FactoryHome;
-use crate::ports::{CiStatus, CodeHost, Outcome, Progress, Worker};
+use crate::ports::{CiStatus, CodeHost, Outcome, Probe, Progress, ProgressEvent, Worker};
 use crate::status::{InProgress, OutcomeKind, OutcomeRecord, ServiceState};
 use crate::tickets::{MODEL_NOTE, TicketQueue, Transition};
+use crate::{history, tail};
 
 /// Errors in a row after which the loop pauses itself.
 pub const ERRORS_BEFORE_PAUSE: u32 = 2;
+
+/// How often the dashboard status is rewritten while a ticket is in progress.
+const BOARD_TICK: Duration = Duration::from_secs(2);
+
+/// How often the providers are pinged for the health panel.
+const PING_EVERY: Duration = Duration::from_secs(3600);
 
 /// A source of the current local time; tests inject one.
 pub type Clock = Arc<dyn Fn() -> DateTime<Local> + Send + Sync>;
@@ -50,6 +65,8 @@ pub struct ServiceDeps {
     pub hostname: String,
     /// The local clock.
     pub clock: Clock,
+    /// Looks at the machine for the dashboard.
+    pub probe: Arc<dyn Probe>,
 }
 
 /// The factory service.
@@ -63,6 +80,9 @@ pub struct Service {
     hostname: String,
     clock: Clock,
     state: Arc<Mutex<ServiceState>>,
+    board: Arc<Board>,
+    probe: Arc<dyn Probe>,
+    last_ping: Mutex<Option<Instant>>,
 }
 
 impl Service {
@@ -88,7 +108,21 @@ impl Service {
             ));
         }
         let state = ServiceState::load(&deps.home.state_file())?;
-        Ok(Self {
+        let outcomes: Vec<OutcomeRecord> = state.outcomes.iter().cloned().collect();
+        if let Err(error) = history::seed(&deps.home.outcomes_file(), &outcomes) {
+            tracing::warn!(%error, "cannot start the outcome history");
+        }
+        let board = Board::new(
+            deps.home.status_file(),
+            Status {
+                v: STATUS_VERSION,
+                host: deps.hostname.clone(),
+                repo: deps.config.github.repo.clone(),
+                started_at: Some((deps.clock)().with_timezone(&Utc)),
+                ..Status::default()
+            },
+        );
+        let service = Self {
             home: deps.home,
             config: deps.config,
             queue: deps.queue,
@@ -98,7 +132,17 @@ impl Service {
             hostname: deps.hostname,
             clock: deps.clock,
             state: Arc::new(Mutex::new(state)),
-        })
+            board: Arc::new(board),
+            probe: deps.probe,
+            last_ping: Mutex::new(None),
+        };
+        service.refresh_board();
+        Ok(service)
+    }
+
+    /// A copy of the dashboard snapshot.
+    pub fn status(&self) -> Status {
+        self.board.snapshot()
     }
 
     /// The queue.
@@ -122,15 +166,28 @@ impl Service {
     pub async fn run_forever(&self) -> Result<()> {
         let poll = Duration::from_secs(self.config.service.poll_minutes * 60);
         loop {
+            self.refresh_health().await;
+            let started = Utc::now();
+            let clock = Instant::now();
             let tick = match self.run_once().await {
                 Ok(tick) => tick,
                 Err(error) => {
                     tracing::error!(%error, "poll failed");
                     self.count_error(None, &error).await;
+                    self.refresh_board();
                     Tick::Idle
                 }
             };
-            if !matches!(tick, Tick::Worked(_)) {
+            let secs = clock.elapsed().as_secs_f64();
+            let worked = matches!(tick, Tick::Worked(_));
+            self.board.update(|status| {
+                status.last_poll = Some(PollView { at: started, secs });
+                status.next_poll_at = (!worked).then(|| {
+                    Utc::now()
+                        + chrono::Duration::seconds(i64::try_from(poll.as_secs()).unwrap_or(0))
+                });
+            });
+            if !worked {
                 tokio::time::sleep(poll).await;
             }
         }
@@ -147,12 +204,22 @@ impl Service {
     /// When the state branch cannot be refreshed, the code host cannot be
     /// reached, or a ticket move fails.
     pub async fn run_once(&self) -> Result<Tick> {
+        let tick = self.poll_and_work().await;
+        self.refresh_board();
+        tick
+    }
+
+    /// The body of [`Self::run_once`].
+    async fn poll_and_work(&self) -> Result<Tick> {
         if let Some(reason) = self.paused() {
             tracing::info!(reason, "paused; not taking tickets");
             return Ok(Tick::Paused(reason));
         }
         self.queue.refresh().await?;
-        if let CiStatus::Red { sha, url } = self.host.main_ci().await? {
+        let (ci, sha) = self.host.main_ci_with_sha().await?;
+        self.board
+            .update(|status| status.health.main_ci = Some(ci_view(&ci, sha)));
+        if let CiStatus::Red { sha, url } = ci {
             let reason =
                 format!("main CI is red at {sha} ({url}); not stacking changes on a broken base");
             self.pause_and_notify(&reason).await?;
@@ -200,25 +267,52 @@ impl Service {
         }
 
         let claimed = self.queue.claim(&ticket, &self.hostname).await?;
+        let claimed_at = claimed.claimed_at.unwrap_or_else(Utc::now);
         self.set_in_progress(Some(InProgress {
             id: id.to_string(),
             title: title.clone(),
             stage: "claimed".to_owned(),
-            since: claimed.claimed_at.unwrap_or_else(Utc::now),
+            since: claimed_at,
         }))?;
+        self.board
+            .start_ticket(self.ticket_view(&claimed, claimed_at));
+        self.refresh_board();
+        let ticker = self.spawn_ticker(&id.to_string());
         let progress = self.progress();
         let result = self.worker.work(&claimed, &self.queue, progress).await;
+        ticker.abort();
+        self.board.end_ticket();
+        let _ = std::fs::remove_file(self.home.output_log(&id.to_string()));
+        let _ = std::fs::remove_file(self.home.egress_file(&id.to_string()));
         self.set_in_progress(None)?;
-        self.finish(id, &title, result).await?;
+        self.finish(id, &title, claimed_at, result).await?;
         Ok(Tick::Worked(id))
     }
 
     /// Applies the worker's outcome to the queue, the state and the notifier.
-    async fn finish(&self, id: Ulid, title: &str, result: Result<Outcome>) -> Result<()> {
+    async fn finish(
+        &self,
+        id: Ulid,
+        title: &str,
+        started: DateTime<Utc>,
+        result: Result<Outcome>,
+    ) -> Result<()> {
+        let record = |kind, detail: &str, cost_usd, pr| {
+            self.record_outcome(OutcomeRecord {
+                id: id.to_string(),
+                title: title.to_owned(),
+                kind,
+                detail: detail.to_owned(),
+                finished_at: Utc::now(),
+                cost_usd,
+                pr,
+                started_at: Some(started),
+            })
+        };
         match result {
             Ok(Outcome::Merged { pr, cost_usd }) => {
                 self.queue.transition(id, Transition::Merged { pr }).await?;
-                self.record(id, title, OutcomeKind::Merged, &format!("#{pr}"), cost_usd)?;
+                record(OutcomeKind::Merged, &format!("#{pr}"), cost_usd, Some(pr))?;
                 self.reset_errors()?;
                 self.notify(Event::Merged {
                     id: id.to_string(),
@@ -239,7 +333,7 @@ impl Service {
                         },
                     )
                     .await?;
-                self.record(id, title, OutcomeKind::Waiting, &reason, cost_usd)?;
+                record(OutcomeKind::Waiting, &reason, cost_usd, Some(pr))?;
                 self.reset_errors()?;
                 self.notify(Event::NeedsHuman {
                     id: id.to_string(),
@@ -263,7 +357,7 @@ impl Service {
                         },
                     )
                     .await?;
-                self.record(id, title, OutcomeKind::Rejected, &reason, cost_usd)?;
+                record(OutcomeKind::Rejected, &reason, cost_usd, None)?;
                 self.reset_errors()?;
                 self.notify(Event::Rejected {
                     id: id.to_string(),
@@ -274,13 +368,13 @@ impl Service {
             }
             Ok(Outcome::Paused { reason }) => {
                 self.queue.transition(id, Transition::Reopen).await?;
-                self.record(id, title, OutcomeKind::Reopened, &reason, None)?;
+                record(OutcomeKind::Reopened, &reason, None, None)?;
                 self.pause_and_notify(&reason).await?;
             }
             Err(error) => {
                 tracing::error!(%id, %error, "working the ticket failed; reopening it");
                 self.queue.transition(id, Transition::Reopen).await?;
-                self.record(id, title, OutcomeKind::Reopened, &error.to_string(), None)?;
+                record(OutcomeKind::Reopened, &error.to_string(), None, None)?;
                 self.count_error(Some(id), &error).await;
             }
         }
@@ -397,11 +491,16 @@ impl Service {
     /// A progress sink that updates the in-progress stage.
     fn progress(&self) -> Progress {
         let state = Arc::clone(&self.state);
+        let board = Arc::clone(&self.board);
         let path = self.home.state_file();
-        Arc::new(move |stage: &str| {
+        Arc::new(move |event: ProgressEvent| {
+            board.progress(&event, Utc::now());
+            let ProgressEvent::Stage { text, .. } = event else {
+                return;
+            };
             let mut guard = lock(&state);
             if let Some(current) = guard.in_progress.as_mut() {
-                current.stage = stage.to_owned();
+                current.stage = text;
             }
             if let Err(error) = guard.save(&path) {
                 tracing::warn!(%error, "cannot save the state");
@@ -422,15 +521,163 @@ impl Service {
         detail: &str,
         cost_usd: Option<f64>,
     ) -> Result<()> {
-        lock(&self.state).record(OutcomeRecord {
+        self.record_outcome(OutcomeRecord {
             id: id.to_string(),
             title: title.to_owned(),
             kind,
             detail: detail.to_owned(),
             finished_at: Utc::now(),
             cost_usd,
+            pr: None,
+            started_at: None,
+        })
+    }
+
+    /// Keeps an outcome in the state and the history, and shows it.
+    fn record_outcome(&self, record: OutcomeRecord) -> Result<()> {
+        if let Err(error) = history::append(&self.home.outcomes_file(), &record) {
+            tracing::warn!(%error, "cannot append to the outcome history");
+        }
+        lock(&self.state).record(record);
+        self.save_state()?;
+        self.refresh_board();
+        Ok(())
+    }
+
+    /// What the dashboard shows of a claimed ticket.
+    fn ticket_view(&self, ticket: &Ticket, claimed_at: DateTime<Utc>) -> TicketView {
+        let stages = Stage::ALL
+            .iter()
+            .map(|stage| StageView {
+                stage: *stage,
+                started_at: (*stage == Stage::Claim).then_some(claimed_at),
+                ended_at: None,
+            })
+            .collect();
+        TicketView {
+            id: ticket.id.to_string(),
+            title: ticket.title.clone(),
+            kind: word(&ticket.kind),
+            priority: word(&ticket.priority),
+            symptom: ticket
+                .symptom
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_owned(),
+            claimed_at: Some(claimed_at),
+            stages,
+            detail: None,
+            implementer_run: 0,
+            implementer_runs_max: MAX_GATE_A_ATTEMPTS,
+            review_round: 0,
+            review_rounds_max: MAX_REVIEW_ROUNDS,
+            budget: BudgetView {
+                wall_clock_minutes: self.config.budget.wall_clock_minutes,
+                tokens: self.config.budget.tokens,
+            },
+            pr: None,
+        }
+    }
+
+    /// Rewrites the dashboard status every [`BOARD_TICK`] with the live
+    /// implementer output, usage, container and egress, until aborted.
+    fn spawn_ticker(&self, id: &str) -> tokio::task::JoinHandle<()> {
+        let board = Arc::clone(&self.board);
+        let probe = Arc::clone(&self.probe);
+        let home = self.home.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(BOARD_TICK);
+            loop {
+                interval.tick().await;
+                let log = std::fs::read_to_string(home.output_log(&id)).unwrap_or_default();
+                let parsed = tail::parse(&log);
+                let egress = std::fs::read(home.egress_file(&id))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+                let live = Live {
+                    tail: parsed.lines,
+                    state: parsed.state,
+                    usage: probe.usage(&home.work_dir(&id)),
+                    container: probe.container(&id).await,
+                    egress,
+                };
+                board.tick(live);
+            }
+        })
+    }
+
+    /// Refreshes what the dashboard derives from the state, the history and
+    /// the queue folders: the service state, today, the week, the queue,
+    /// the waiting tickets and recent outcomes.
+    fn refresh_board(&self) {
+        let now_local = (self.clock)();
+        let now = now_local.with_timezone(&Utc);
+        let tz: FixedOffset = now_local.offset().fix();
+        let outcomes = history::read(&self.home.outcomes_file());
+        let queue: Vec<QueuedTicket> = self
+            .queue
+            .open_tickets()
+            .map(|open| open.tickets.iter().map(queued).collect())
+            .unwrap_or_default();
+        let waiting = tickets_in(&self.queue.dir().join(dirs::WAITING_DIR));
+        let paused = self.paused();
+        let state = lock(&self.state).clone();
+        let waiting_count = u32::try_from(waiting.len()).unwrap_or(u32::MAX);
+        self.board.update(|status| {
+            status.service.state = if status.ticket.is_some() {
+                RunState::Running
+            } else if paused.is_some() {
+                RunState::Paused
+            } else {
+                RunState::Idle
+            };
+            status.service.reason = paused;
+            status.recent = state.outcomes.iter().cloned().collect();
+            status.today = history::today(&outcomes, now, tz);
+            status.week = Some(history::week(&outcomes, now, tz, waiting_count));
+            status.queue = queue;
+            status.waiting = waiting;
+            status.health.errors_in_a_row = state.consecutive_errors;
         });
-        self.save_state()
+    }
+
+    /// Asks the probe about the machine, pings the providers once an hour
+    /// and lists the pull requests waiting on a human.
+    async fn refresh_health(&self) {
+        let probed = self.probe.health().await;
+        let ping_due = lock(&self.last_ping).is_none_or(|at| at.elapsed() >= PING_EVERY);
+        let providers = if ping_due {
+            *lock(&self.last_ping) = Some(Instant::now());
+            Some(self.probe.ping_providers().await)
+        } else {
+            None
+        };
+        let needs_human = match self.host.needs_human_prs().await {
+            Ok(list) => Some(list),
+            Err(error) => {
+                tracing::warn!(%error, "cannot list the pull requests waiting on a human");
+                None
+            }
+        };
+        self.board.update(|status| {
+            let health = &mut status.health;
+            health.image = probed.image;
+            health.binary_version = probed.binary_version;
+            health.disk_free_bytes = probed.disk_free_bytes;
+            health.cargo_cache_bytes = probed.cargo_cache_bytes;
+            health.baseline = probed.baseline.or(health.baseline.take());
+            health.sandbox_ready = probed.sandbox_ready;
+            if let Some(providers) = providers {
+                health.providers = providers;
+                health.pinged_at = Some(Utc::now());
+            }
+            if let Some(list) = needs_human {
+                status.needs_human = list;
+            }
+        });
     }
 
     fn save_state(&self) -> Result<()> {
@@ -449,12 +696,7 @@ impl Service {
 ///
 /// When the file cannot be written.
 pub fn pause(home: &FactoryHome, reason: &str) -> Result<()> {
-    let path = home.pause_file();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|source| FactoryError::io("creating", dir, source))?;
-    }
-    std::fs::write(&path, format!("{reason}\n"))
-        .map_err(|source| FactoryError::io("writing", &path, source))
+    write_atomic(&home.pause_file(), format!("{reason}\n").as_bytes())
 }
 
 /// Removes the pause flag; fine when it is already gone.
@@ -484,6 +726,53 @@ pub fn pause_reason(home: &FactoryHome) -> Option<String> {
     std::fs::read_to_string(home.pause_file())
         .ok()
         .map(|text| text.trim().to_owned())
+}
+
+/// The dashboard's view of main's CI.
+fn ci_view(ci: &CiStatus, sha: Option<String>) -> CiView {
+    let (state, sha) = match ci {
+        CiStatus::Green => ("green", sha),
+        CiStatus::Red { sha, .. } => ("red", Some(sha.clone())),
+        CiStatus::Pending => ("pending", sha),
+        CiStatus::Unknown => ("unknown", sha),
+    };
+    CiView {
+        state: state.to_owned(),
+        sha: sha.map(|sha| sha.chars().take(7).collect()),
+    }
+}
+
+/// A ticket as a queue row.
+fn queued(ticket: &Ticket) -> QueuedTicket {
+    QueuedTicket {
+        id: ticket.id.to_string(),
+        priority: word(&ticket.priority),
+        title: ticket.title.clone(),
+    }
+}
+
+/// The valid tickets in a queue folder, as queue rows.
+fn tickets_in(dir: &Path) -> Vec<QueuedTicket> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut tickets: Vec<Ticket> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|text| toml::from_str(&text).ok())
+        .collect();
+    tickets.sort_by_key(|ticket| ticket.id);
+    tickets.iter().map(queued).collect()
+}
+
+/// How an enum serializes, such as `p2` or `bug`.
+fn word<T: Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 /// This machine's name, from the `hostname` command, else the environment,

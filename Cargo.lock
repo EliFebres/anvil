@@ -945,6 +945,7 @@ dependencies = [
 name = "factory-cli"
 version = "0.1.0"
 dependencies = [
+ "anvil-tui",
  "anvil-types",
  "anyhow",
  "chrono",
@@ -952,6 +953,8 @@ dependencies = [
  "eval",
  "factory-core",
  "factory-review",
+ "insta",
+ "ratatui",
  "serde",
  "serde_json",
  "tempfile",
@@ -961,6 +964,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "ulid",
+ "unicode-width",
  "wiremock",
 ]
 
