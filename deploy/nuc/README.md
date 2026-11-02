@@ -10,7 +10,7 @@ ssh nuc 'bash -s' < deploy/nuc/bootstrap.sh
 
 | file | what it is |
 |---|---|
-| `bootstrap.sh` | One-time, idempotent setup: packages, Rust, the clone at `~/factory-repo`, `~/.factory/env`, the binaries, the worker image, the service. |
+| `bootstrap.sh` | One-time, idempotent setup: packages, Rust with the `x86_64-unknown-linux-musl` target, the clone at `~/factory-repo`, `~/.factory/env`, the binaries (anvil twice: for the host, and static for the container), the worker image, the service. |
 | `env.template` | The secrets file, copied to `~/.factory/env` with mode 600. The service loads it itself; the unit never names it. |
 | `factory.service` | The systemd user unit `factory install-service` installs. Logs go to journald and `~/.factory/logs/factory.jsonl`. |
 | `Containerfile`, `entrypoint.sh` | The worker image: stable Rust, `just`, `rg`, Python with pytest and pandas, `socat`. The entrypoint bridges the egress proxy's socket to `localhost:3128`. |
@@ -35,7 +35,7 @@ After a change lands on `main`, log into the NUC and run:
 factory update
 ```
 
-It sets the pause flag and waits for the ticket in progress to finish (printing its stage every 30 seconds), stops the service, pulls `main` into `~/factory-repo`, rebuilds `anvil` and `factory` in release mode (the binaries in `~/.local/bin` are links into `target/release`), rebuilds the worker image named in `factory.toml`, re-installs the unit and starts the service. `factory update --now` skips the wait; a ticket that was in progress then stays in `tickets/claimed/` on `factory/state` and the command says which one; to retry it, move the file to `tickets/open/`, set `status = "open"` and drop `claimed_at` and `claimed_by`.
+It sets the pause flag and waits for the ticket in progress to finish (printing its stage every 30 seconds), stops the service, pulls `main` into `~/factory-repo`, rebuilds `anvil` and `factory` in release mode (the binaries in `~/.local/bin` are links into `target/release`; `anvil doctor` and the eval harness use that `anvil`), installs `musl-tools` and the `x86_64-unknown-linux-musl` target if they are missing and builds `anvil` once more for it (`target/x86_64-unknown-linux-musl/release/anvil`, which `[worker] anvil_bin` names: the container mounts it, and a static binary is the only kind the image's older glibc can run; `ldd` proves it static), rebuilds the worker image named in `factory.toml`, re-installs the unit and starts the service. `factory update --now` skips the wait; a ticket that was in progress then stays in `tickets/claimed/` on `factory/state` and the command says which one; to retry it, move the file to `tickets/open/`, set `status = "open"` and drop `claimed_at` and `claimed_by`.
 
 ## First run
 

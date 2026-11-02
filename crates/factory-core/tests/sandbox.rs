@@ -350,6 +350,7 @@ async fn preflight_resolves_anvil_bin_and_refuses_a_name_that_is_not_on_path() {
         ContainerRuntime::Podman,
         image,
         "anvil-that-is-not-installed-01M6D2",
+        temp.path(),
     )
     .await
     .expect_err("not on PATH");
@@ -369,6 +370,7 @@ async fn preflight_resolves_anvil_bin_and_refuses_a_name_that_is_not_on_path() {
         ContainerRuntime::Podman,
         image,
         &temp.path().join("anvil").to_string_lossy(),
+        temp.path(),
     )
     .await
     .expect("resolves");
@@ -382,12 +384,46 @@ async fn preflight_resolves_anvil_bin_and_refuses_a_name_that_is_not_on_path() {
         ContainerRuntime::Podman,
         image,
         &missing.to_string_lossy(),
+        temp.path(),
     )
     .await
     .expect_err("missing");
     let text = error.to_string();
     assert!(text.contains("[worker] anvil_bin"), "{text}");
     assert!(text.contains("does not exist"), "{text}");
+    assert!(
+        !text.contains("factory update"),
+        "an absolute path is not a build artifact: {text}"
+    );
+
+    // A relative path starts at the repository root: the default names the
+    // musl build under target/, and a missing one says what builds it.
+    let built = fake_binary(
+        &temp.path().join("target/x86_64-unknown-linux-musl/release"),
+        "anvil",
+    );
+    let resolved = preflight(
+        &FakeRuntime::default(),
+        ContainerRuntime::Podman,
+        image,
+        "target/x86_64-unknown-linux-musl/release/anvil",
+        temp.path(),
+    )
+    .await
+    .expect("resolves from the root");
+    assert_eq!(resolved, built);
+    let error = preflight(
+        &FakeRuntime::default(),
+        ContainerRuntime::Podman,
+        image,
+        "target/x86_64-unknown-linux-musl/release/anvil",
+        &temp.path().join("elsewhere"),
+    )
+    .await
+    .expect_err("not built there");
+    let text = error.to_string();
+    assert!(text.contains("elsewhere"), "{text}");
+    assert!(text.contains("`factory update` builds it"), "{text}");
 
     // The ~/.local/bin link bootstrap.sh makes resolves to the real file.
     #[cfg(unix)]
@@ -401,6 +437,7 @@ async fn preflight_resolves_anvil_bin_and_refuses_a_name_that_is_not_on_path() {
             ContainerRuntime::Podman,
             image,
             &link.to_string_lossy(),
+            temp.path(),
         )
         .await
         .expect("follows the link");
@@ -413,6 +450,7 @@ async fn preflight_resolves_anvil_bin_and_refuses_a_name_that_is_not_on_path() {
             ContainerRuntime::Podman,
             image,
             &plain.to_string_lossy(),
+            temp.path(),
         )
         .await
         .expect_err("not executable");
@@ -426,6 +464,7 @@ async fn preflight_resolves_anvil_bin_and_refuses_a_name_that_is_not_on_path() {
         ContainerRuntime::None,
         image,
         &temp.path().join("anvil").to_string_lossy(),
+        temp.path(),
     )
     .await
     .expect("resolves on the host");
@@ -522,9 +561,15 @@ async fn preflight_wants_the_image_built_and_the_volume_creatable() {
 
     // Image missing: the exact build command.
     let runtime = FakeRuntime::default().with_answer(&["image", "exists"], Exit::of(1, ""));
-    let error = preflight(&runtime, ContainerRuntime::Podman, image, &anvil)
-        .await
-        .expect_err("not built");
+    let error = preflight(
+        &runtime,
+        ContainerRuntime::Podman,
+        image,
+        &anvil,
+        temp.path(),
+    )
+    .await
+    .expect_err("not built");
     assert_eq!(
         error.to_string(),
         "sandbox: worker image localhost/anvil-factory:latest is not built; run `podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc` in the repository (or `just image`)"
@@ -536,9 +581,15 @@ async fn preflight_wants_the_image_built_and_the_volume_creatable() {
     let runtime = FakeRuntime::default()
         .with_answer(&["image", "exists"], Exit::of(0, ""))
         .with_answer(&["volume", "exists"], Exit::of(0, ""));
-    preflight(&runtime, ContainerRuntime::Podman, image, &anvil)
-        .await
-        .expect("ready");
+    preflight(
+        &runtime,
+        ContainerRuntime::Podman,
+        image,
+        &anvil,
+        temp.path(),
+    )
+    .await
+    .expect("ready");
     let asked: Vec<Vec<String>> = runtime.calls().into_iter().map(|c| c.args).collect();
     assert_eq!(
         asked,
@@ -560,9 +611,15 @@ async fn preflight_wants_the_image_built_and_the_volume_creatable() {
             &["volume", "create"],
             Exit::of(125, "Error: no space left\n"),
         );
-    let error = preflight(&runtime, ContainerRuntime::Podman, image, &anvil)
-        .await
-        .expect_err("volume");
+    let error = preflight(
+        &runtime,
+        ContainerRuntime::Podman,
+        image,
+        &anvil,
+        temp.path(),
+    )
+    .await
+    .expect_err("volume");
     assert!(
         error
             .to_string()
@@ -572,9 +629,15 @@ async fn preflight_wants_the_image_built_and_the_volume_creatable() {
 
     // Docker has no `exists` verbs: inspect the image, create the volume outright.
     let runtime = FakeRuntime::default();
-    preflight(&runtime, ContainerRuntime::Docker, image, &anvil)
-        .await
-        .expect("ready");
+    preflight(
+        &runtime,
+        ContainerRuntime::Docker,
+        image,
+        &anvil,
+        temp.path(),
+    )
+    .await
+    .expect("ready");
     assert_eq!(runtime.calls_matching(&["image", "inspect", image]), 1);
     assert_eq!(
         runtime.calls_matching(&["volume", "create", CACHE_VOLUME]),
@@ -584,7 +647,7 @@ async fn preflight_wants_the_image_built_and_the_volume_creatable() {
 
     // No container: only the binary is checked.
     let runtime = FakeRuntime::default();
-    preflight(&runtime, ContainerRuntime::None, image, &anvil)
+    preflight(&runtime, ContainerRuntime::None, image, &anvil, temp.path())
         .await
         .expect("nothing to ask the runtime");
     assert!(runtime.calls().is_empty());
