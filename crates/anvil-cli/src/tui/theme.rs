@@ -198,6 +198,30 @@ impl Theme {
         Style::new().fg(self.border)
     }
 
+    /// The style of a removed diff line.
+    ///
+    /// # Returns
+    ///
+    /// Danger text on the removed background.
+    pub fn removed(&self) -> Style {
+        if self.depth == Depth::Mono {
+            return self.fg(Shade::Danger);
+        }
+        self.fg(Shade::Danger).bg(self.removed_bg)
+    }
+
+    /// The style of an added diff line.
+    ///
+    /// # Returns
+    ///
+    /// Success text on the added background.
+    pub fn added(&self) -> Style {
+        if self.depth == Depth::Mono {
+            return self.fg(Shade::Success);
+        }
+        self.fg(Shade::Success).bg(self.added_bg)
+    }
+
     /// The same theme with every role pushed into the quiet shades, so a
     /// modal drawn over it is the only thing at full contrast.
     ///
@@ -371,8 +395,11 @@ mod tests {
                 "{shade:?} is {color:?}"
             );
         }
-        assert_eq!(dim.removed_bg, theme.bg);
-        assert_eq!(dim.added_bg, theme.bg);
+        assert_eq!(dim.removed().bg, Some(theme.bg));
+        assert_eq!(dim.added().bg, Some(theme.bg));
+        assert_eq!(theme.removed().bg, Some(theme.removed_bg));
+        assert_eq!(theme.added().fg, Some(theme.success));
+        assert_eq!(Theme::mono().added().bg, None);
         assert_eq!(dim.surface, theme.surface);
     }
 

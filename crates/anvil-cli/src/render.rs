@@ -112,7 +112,9 @@ impl<O: Write, E: Write> Renderer<O, E> {
                 };
                 self.err_line(&format!("== {}{again}", state_title(state)));
             }
-            LoopEvent::Transition { .. } | LoopEvent::TurnFinished { .. } => {}
+            LoopEvent::Transition { .. }
+            | LoopEvent::TurnFinished { .. }
+            | LoopEvent::ProposedEdit { .. } => {}
             LoopEvent::ToolStarted { call } => {
                 self.end_line();
                 self.spinning = Some((call, 0));
@@ -336,6 +338,11 @@ mod tests {
                 visit: 1,
             },
             LoopEvent::ToolStarted { call },
+            LoopEvent::ProposedEdit {
+                path: PathBuf::from("notes.txt"),
+                old: String::new(),
+                new: "hello\n".to_owned(),
+            },
             LoopEvent::ToolFinished {
                 call_id: "c1".to_owned(),
                 name: "shell".to_owned(),

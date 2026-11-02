@@ -416,6 +416,9 @@ impl ChatSession<'_> {
             for call in &turn.tool_calls {
                 self.events
                     .emit(LoopEvent::ToolStarted { call: call.clone() });
+                if let Some(edit) = anvil_core::tools::preview::proposed_edit(call, &self.ctx) {
+                    self.events.emit(edit);
+                }
                 let execution = self.registry.execute(call, &self.ctx).await;
                 if let Some(path) = serde_json::from_str::<serde_json::Value>(&call.arguments_json)
                     .ok()

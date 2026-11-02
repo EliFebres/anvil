@@ -9,6 +9,7 @@
 
 pub mod app;
 pub mod bridge;
+pub mod diff;
 pub mod editor;
 pub mod keys;
 pub mod markdown;

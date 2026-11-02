@@ -806,6 +806,73 @@ mod tests {
         assert!(!app.welcome);
     }
 
+    /// A chat turn that edits a file: the user line, the model's text, the
+    /// edit_file call with its proposed diff, and the finished call.
+    fn build_session(width: u16, height: u16) -> Terminal<TestBackend> {
+        let (mut app, base) = new_app();
+        app.handle(UiMsg::Loop(LoopEvent::StateEntered {
+            state: State::Build,
+            visit: 1,
+        }));
+        type_line(&mut app, "rename helper b to beta in src/lib.rs");
+        key(&mut app, KeyCode::Enter);
+        app.handle(UiMsg::Busy(true));
+        app.handle(UiMsg::Loop(LoopEvent::TextDelta(
+            "Renaming `b` to `beta` and updating its one caller.\n".to_owned(),
+        )));
+        app.handle(UiMsg::Loop(LoopEvent::ToolStarted {
+            call: ToolCall {
+                id: "e1".to_owned(),
+                name: "edit_file".to_owned(),
+                arguments_json:
+                    "{\"path\": \"src/lib.rs\", \"old\": \"fn b() {}\", \"new\": \"fn beta() {}\"}"
+                        .to_owned(),
+            },
+        }));
+        let old = "//! Helpers.\n\npub fn a() -> u32 {\n    1\n}\n\nfn b() {}\n\npub fn c() {\n    b();\n}\n";
+        let new = "//! Helpers.\n\npub fn a() -> u32 {\n    1\n}\n\nfn beta() {}\n\npub fn c() {\n    beta();\n}\n";
+        app.handle(UiMsg::Loop(LoopEvent::ProposedEdit {
+            path: PathBuf::from("src/lib.rs"),
+            old: old.to_owned(),
+            new: new.to_owned(),
+        }));
+        app.handle(UiMsg::ToolResult {
+            call_id: "e1".to_owned(),
+            text: "replaced 1 occurrence(s) in src/lib.rs".to_owned(),
+            is_error: false,
+        });
+        app.handle(UiMsg::Tick(base + Duration::from_millis(40)));
+        app.handle(UiMsg::Loop(LoopEvent::ToolFinished {
+            call_id: "e1".to_owned(),
+            name: "edit_file".to_owned(),
+            outcome: ToolOutcome::Completed,
+            preview: "replaced 1 occurrence(s) in src/lib.rs".to_owned(),
+            stats: OutputStats {
+                bytes: 38,
+                truncated: false,
+                digest: 0,
+            },
+        }));
+        app.handle(UiMsg::Loop(LoopEvent::TextDelta(
+            "Done; `cargo check` passes.".to_owned(),
+        )));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        terminal
+    }
+
+    #[test]
+    fn build_session_120() {
+        let terminal = build_session(120, 38);
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn build_session_80() {
+        let terminal = build_session(80, 24);
+        insta::assert_snapshot!(terminal.backend());
+    }
+
     #[test]
     fn empty_session() {
         let (mut app, _) = new_app();

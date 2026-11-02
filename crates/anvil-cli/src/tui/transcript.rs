@@ -15,6 +15,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use super::Level;
+use super::diff::{Diff, RowKind, diff};
 use super::markdown::{MarkdownDoc, inline_lines};
 use super::theme::{Shade, Theme};
 use super::welcome::Welcome;
@@ -54,6 +55,13 @@ pub enum Entry {
     },
     /// A tool call, one collapsed line or the full arguments and result.
     Tool(ToolEntry),
+    /// What an edit is about to change, as a diff.
+    Edit {
+        /// The file as shown.
+        shown_path: String,
+        /// The change.
+        diff: Diff,
+    },
     /// A state the loop entered, drawn as a full-width rule.
     Banner {
         /// The state.
@@ -351,6 +359,14 @@ impl Transcript {
                     self.slots[index].cache = None;
                 }
             }
+            LoopEvent::ProposedEdit { path, old, new } => {
+                self.close_model();
+                let shown_path = self.display_path(path);
+                self.push(Entry::Edit {
+                    shown_path,
+                    diff: diff(old, new),
+                });
+            }
             LoopEvent::ReviewVerdict { verdict } => {
                 self.close_model();
                 self.push(Entry::Review {
@@ -600,6 +616,7 @@ impl Transcript {
                 Entry::User { text } => format!("> {text}"),
                 Entry::Model { doc, .. } => doc.text().to_owned(),
                 Entry::Tool(tool) => format!("{} {}", tool.call.name, tool.summary),
+                Entry::Edit { shown_path, .. } => format!("edit {shown_path}"),
                 Entry::Banner { state, visit, .. } => banner_title(*state, *visit),
                 Entry::Plan(plan) => plan
                     .items
@@ -800,7 +817,7 @@ impl Transcript {
         let mut previous: Option<&Entry> = None;
         for (index, slot) in self.slots.iter_mut().enumerate().skip(hidden_before) {
             if let Some(previous) = previous
-                && !(is_compact(previous) && is_compact(&slot.entry))
+                && separated(previous, &slot.entry)
             {
                 out.push(Line::default());
             }
@@ -832,6 +849,15 @@ impl Transcript {
         self.layout = layout;
         out
     }
+}
+
+/// Whether a blank line goes between two entries: not between one-liners,
+/// and not between a tool call and the edit it proposes.
+fn separated(previous: &Entry, next: &Entry) -> bool {
+    if matches!(previous, Entry::Tool(_)) && matches!(next, Entry::Edit { .. }) {
+        return false;
+    }
+    !(is_compact(previous) && is_compact(next))
 }
 
 /// Whether an entry is a one-liner that sits directly under another one.
@@ -898,6 +924,7 @@ fn render_entry(
             lines
         }
         Entry::Tool(tool) => render_tool(tool, columns, theme, tick),
+        Entry::Edit { shown_path, diff } => render_edit(shown_path, diff, columns, theme),
         Entry::Banner {
             state,
             visit,
@@ -1085,6 +1112,44 @@ fn render_tool(tool: &ToolEntry, width: usize, theme: &Theme, tick: u64) -> Vec<
                 ));
             }
         }
+    }
+    lines
+}
+
+/// A proposed edit: the path and line range, then the diff rows behind a
+/// left rule, each colored line filled to the edge.
+fn render_edit(shown_path: &str, diff: &Diff, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let rule = Span::styled("▌ ", theme.border());
+    let inner = width.saturating_sub(4).max(1);
+    let range = if diff.start_line == diff.end_line {
+        format!("{shown_path}:{}", diff.start_line)
+    } else {
+        format!("{shown_path}:{}-{}", diff.start_line, diff.end_line)
+    };
+    let mut lines = vec![Line::from(vec![
+        rule.clone(),
+        Span::styled(range, theme.fg(Shade::Muted)),
+    ])];
+    for row in &diff.rows {
+        let (mark, style) = match row.kind {
+            RowKind::Context => (' ', theme.fg(Shade::Muted)),
+            RowKind::Removed => ('-', theme.removed()),
+            RowKind::Added => ('+', theme.added()),
+        };
+        for (_, segment) in segments(&row.text, inner) {
+            let text = format!("{mark} {segment}");
+            let pad = " ".repeat(width.saturating_sub(2 + text.width()));
+            lines.push(Line::from(vec![
+                rule.clone(),
+                Span::styled(format!("{text}{pad}"), style),
+            ]));
+        }
+    }
+    if diff.rows.is_empty() {
+        lines.push(Line::from(vec![
+            rule,
+            Span::styled("(no change)", theme.fg(Shade::Faint)),
+        ]));
     }
     lines
 }
@@ -1726,6 +1791,50 @@ mod tests {
             !transcript.entries().iter().any(|entry| is_live(entry, now)),
             "nothing keeps spinning"
         );
+    }
+
+    #[test]
+    fn edits_render_as_a_diff_block_under_their_tool_line() {
+        let now = Instant::now();
+        let theme = Theme::truecolor();
+        let mut transcript = fresh();
+        transcript.apply(
+            &LoopEvent::ToolStarted {
+                call: call(
+                    "e1",
+                    "edit_file",
+                    "{\"path\":\"src/lib.rs\",\"old\":\"fn b() {}\",\"new\":\"fn beta() {}\"}",
+                ),
+            },
+            now,
+        );
+        transcript.apply(
+            &LoopEvent::ProposedEdit {
+                path: PathBuf::from("/project/src/lib.rs"),
+                old: "fn a() {}\r\nfn b() {}\r\nfn c() {}\r\n".to_owned(),
+                new: "fn a() {}\r\nfn beta() {}\r\nfn c() {}\r\n".to_owned(),
+            },
+            now,
+        );
+        let lines = transcript.lines(40, &theme, 0, false, now);
+        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            text,
+            vec![
+                "..     edit_file  src/lib.rs".to_owned(),
+                "▌ src/lib.rs:1-3".to_owned(),
+                "▌   fn a() {}                           ".to_owned(),
+                "▌ - fn b() {}                           ".to_owned(),
+                "▌ + fn beta() {}                        ".to_owned(),
+                "▌   fn c() {}                           ".to_owned(),
+            ]
+        );
+        assert_eq!(lines[1].spans[0].style.fg, Some(theme.border));
+        assert_eq!(lines[3].spans[1].style.bg, Some(theme.removed_bg));
+        assert_eq!(lines[3].spans[1].style.fg, Some(theme.danger));
+        assert_eq!(lines[4].spans[1].style.bg, Some(theme.added_bg));
+        assert_eq!(lines[4].spans[1].style.fg, Some(theme.success));
+        assert_eq!(lines[2].spans[1].style.fg, Some(theme.muted));
     }
 
     #[test]
