@@ -5,14 +5,14 @@ mod review;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anvil_types::dotenv;
 use anvil_types::factory_config::FACTORY_FILE;
+use anvil_types::{ContainerRuntime, dotenv};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use factory_cli::install::{InstallOptions, config_home, install};
 use factory_cli::update::{UpdateOptions, update};
 use factory_cli::{logging, wiring};
-use factory_core::{FactoryHome, ServiceState, Tick, service};
+use factory_core::{FactoryHome, ServiceState, SystemRunner, Tick, preflight, service};
 
 /// The Dark Factory: works tickets from `tickets/open/` into reviewed pull requests.
 #[derive(Debug, Parser)]
@@ -238,7 +238,42 @@ async fn status(cwd: &Path, factory_home: FactoryHome) -> anyhow::Result<i32> {
     for (path, problem) in open.unusable {
         println!("unusable: {}: {problem}", path.display());
     }
+    println!("\n{}", sandbox_line(&root).await);
     Ok(0)
+}
+
+/// The `sandbox:` line of `factory status`: whether the runtime could run a
+/// ticket right now. A problem is reported, never fatal.
+async fn sandbox_line(root: &Path) -> String {
+    let factory = match wiring::read_factory(root) {
+        Ok(factory) => factory,
+        Err(error) => return format!("sandbox: {error:#}"),
+    };
+    let worker = &factory.worker;
+    let checked = preflight(&SystemRunner, worker.runtime, &worker.image).await;
+    describe_sandbox(worker.runtime, &worker.image, checked)
+}
+
+/// One line for a preflight result.
+fn describe_sandbox(
+    runtime: ContainerRuntime,
+    image: &str,
+    checked: factory_core::Result<()>,
+) -> String {
+    let name = match runtime {
+        ContainerRuntime::Podman => "podman",
+        ContainerRuntime::Docker => "docker",
+        ContainerRuntime::None => return "sandbox: the host (runtime = \"none\")".to_owned(),
+    };
+    match checked {
+        Ok(()) => format!("sandbox: ready ({name} {image})"),
+        Err(error) => {
+            // The error already says `sandbox:`; keep the line's prefix single.
+            let detail = error.to_string();
+            let detail = detail.strip_prefix("sandbox: ").unwrap_or(&detail);
+            format!("sandbox: {detail}")
+        }
+    }
 }
 
 /// One line for `factory run --once`.
@@ -324,5 +359,23 @@ mod tests {
     fn ticks_read_as_one_line() {
         assert_eq!(describe_tick(&Tick::Idle), "idle: no open tickets");
         assert_eq!(describe_tick(&Tick::Paused("x".to_owned())), "paused: x");
+    }
+
+    #[test]
+    fn the_sandbox_line_names_the_runtime_or_the_problem() {
+        let image = "localhost/anvil-factory:latest";
+        assert_eq!(
+            describe_sandbox(ContainerRuntime::Podman, image, Ok(())),
+            "sandbox: ready (podman localhost/anvil-factory:latest)"
+        );
+        assert_eq!(
+            describe_sandbox(ContainerRuntime::None, image, Ok(())),
+            "sandbox: the host (runtime = \"none\")"
+        );
+        let missing = factory_core::FactoryError::Sandbox("worker image x is not built".to_owned());
+        assert_eq!(
+            describe_sandbox(ContainerRuntime::Podman, image, Err(missing)),
+            "sandbox: worker image x is not built"
+        );
     }
 }
