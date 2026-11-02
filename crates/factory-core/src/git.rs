@@ -1,9 +1,13 @@
 //! The git commands the factory needs, run in one repository or worktree.
 //!
-//! Every command carries the factory's identity and never signs. There is no
-//! way to force-push, reset hard or delete `main` through this module; the
-//! factory's safety rules are enforced where the commands are built.
+//! Every command carries the factory's identity and never signs. Commands
+//! that reach the remote also carry the GitHub token, when the handle has
+//! one, as `-c` arguments built fresh for each call and never written to a
+//! config file. There is no way to force-push, reset hard or delete `main`
+//! through this module; the factory's safety rules are enforced where the
+//! commands are built.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -25,14 +29,25 @@ const IDENTITY: [&str; 6] = [
 const FORBIDDEN_PUSH_ARGS: [&str; 4] = ["--force", "-f", "--force-with-lease", "--delete"];
 
 /// One repository or worktree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Git {
     /// The folder commands run in.
     dir: PathBuf,
+    /// The GitHub token remote commands authenticate with, when there is one.
+    token: Option<String>,
+}
+
+impl fmt::Debug for Git {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Git")
+            .field("dir", &self.dir)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Git {
-    /// A handle on a repository or worktree folder.
+    /// A handle on a repository or worktree folder, without a token.
     ///
     /// # Arguments
     ///
@@ -44,6 +59,38 @@ impl Git {
     pub fn new(dir: &Path) -> Self {
         Self {
             dir: dir.to_path_buf(),
+            token: None,
+        }
+    }
+
+    /// The same handle with a GitHub token for the commands that reach the
+    /// remote.
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token; it stays in memory and `Debug` redacts it.
+    ///
+    /// # Returns
+    ///
+    /// The handle.
+    pub fn with_github_token(mut self, token: &str) -> Self {
+        self.token = Some(token.to_owned());
+        self
+    }
+
+    /// A handle on another folder with the same token, for worktrees.
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The other folder.
+    ///
+    /// # Returns
+    ///
+    /// The handle.
+    pub fn at(&self, dir: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            token: self.token.clone(),
         }
     }
 
@@ -52,7 +99,53 @@ impl Git {
         &self.dir
     }
 
-    /// Runs one git command and returns its trimmed stdout.
+    /// Builds one git command: the identity, the token when the command
+    /// reaches the remote, then `args`.
+    ///
+    /// # Arguments
+    ///
+    /// * `remote` - Whether the command talks to the remote.
+    /// * `args` - The arguments after `git`.
+    fn command(&self, remote: bool, args: &[&str]) -> Command {
+        let mut command = Command::new("git");
+        command.args(IDENTITY);
+        if remote && let Some(token) = &self.token {
+            command.args(anvil_types::github::git_auth_args(token));
+        }
+        command
+            .args(args)
+            .current_dir(&self.dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null());
+        command
+    }
+
+    /// Runs one command and returns its raw stdout.
+    ///
+    /// # Arguments
+    ///
+    /// * `remote` - Whether the command talks to the remote.
+    /// * `args` - The arguments after `git`; only these name the command in
+    ///   an error, so the token never does.
+    async fn output(&self, remote: bool, args: &[&str]) -> Result<Vec<u8>> {
+        let output = self
+            .command(remote, args)
+            .output()
+            .await
+            .map_err(|source| FactoryError::Spawn {
+                program: "git".to_owned(),
+                source,
+            })?;
+        if !output.status.success() {
+            return Err(FactoryError::Git {
+                command: args.join(" "),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        Ok(output.stdout)
+    }
+
+    /// Runs one local git command and returns its trimmed stdout.
     ///
     /// # Arguments
     ///
@@ -67,30 +160,20 @@ impl Git {
     /// [`FactoryError::Spawn`] when git cannot start, [`FactoryError::Git`]
     /// with stderr when it exits non-zero.
     pub async fn run(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("git")
-            .args(IDENTITY)
-            .args(args)
-            .current_dir(&self.dir)
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|source| FactoryError::Spawn {
-                program: "git".to_owned(),
-                source,
-            })?;
-        if !output.status.success() {
-            return Err(FactoryError::Git {
-                command: args.join(" "),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        let stdout = self.output(false, args).await?;
+        Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
+    }
+
+    /// Runs one git command that reaches the remote, with the token.
+    async fn run_remote(&self, args: &[&str]) -> Result<()> {
+        self.output(true, args).await?;
+        Ok(())
     }
 
     /// `git fetch --prune <remote>`.
     pub async fn fetch_prune(&self, remote: &str) -> Result<()> {
-        self.run(&["fetch", "--prune", "--quiet", remote]).await?;
-        Ok(())
+        self.run_remote(&["fetch", "--prune", "--quiet", remote])
+            .await
     }
 
     /// The full sha of a revision.
@@ -154,46 +237,16 @@ impl Git {
 
     /// The unified diff between two revisions.
     pub async fn diff_text(&self, a: &str, b: &str) -> Result<String> {
-        let output = Command::new("git")
-            .args(IDENTITY)
-            .args(["diff", a, b])
-            .current_dir(&self.dir)
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|source| FactoryError::Spawn {
-                program: "git".to_owned(),
-                source,
-            })?;
-        if !output.status.success() {
-            return Err(FactoryError::Git {
-                command: format!("diff {a} {b}"),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let stdout = self.output(false, &["diff", a, b]).await?;
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
     }
 
     /// The content of a file at a revision.
     pub async fn show(&self, rev: &str, path: &str) -> Result<String> {
-        let output = Command::new("git")
-            .args(IDENTITY)
-            .args(["show", &format!("{rev}:{path}")])
-            .current_dir(&self.dir)
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|source| FactoryError::Spawn {
-                program: "git".to_owned(),
-                source,
-            })?;
-        if !output.status.success() {
-            return Err(FactoryError::Git {
-                command: format!("show {rev}:{path}"),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let stdout = self
+            .output(false, &["show", &format!("{rev}:{path}")])
+            .await?;
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
     }
 
     /// The paths of every file in a folder at a revision, with `/` separators.
@@ -245,8 +298,7 @@ impl Git {
                 "the factory never force-pushes or deletes through push: refused `{refspec}`"
             )));
         }
-        self.run(&["push", "--quiet", remote, refspec]).await?;
-        Ok(())
+        self.run_remote(&["push", "--quiet", remote, refspec]).await
     }
 
     /// Deletes one remote branch. `main` and the state branch are refused.
@@ -256,16 +308,14 @@ impl Git {
                 "the factory never deletes `{branch}`"
             )));
         }
-        self.run(&["push", "--quiet", remote, "--delete", branch])
-            .await?;
-        Ok(())
+        self.run_remote(&["push", "--quiet", remote, "--delete", branch])
+            .await
     }
 
     /// `git pull --ff-only <remote> <branch>`.
     pub async fn pull_ff_only(&self, remote: &str, branch: &str) -> Result<()> {
-        self.run(&["pull", "--quiet", "--ff-only", remote, branch])
-            .await?;
-        Ok(())
+        self.run_remote(&["pull", "--quiet", "--ff-only", remote, branch])
+            .await
     }
 
     /// Adds a worktree on a new branch, replacing a stale one of the same name.
@@ -305,8 +355,7 @@ impl Git {
             "worktree", "add", "--quiet", "-B", branch, &path_text, &upstream,
         ])
         .await?;
-        let worktree = Git::new(path);
-        worktree
+        self.at(path)
             .run(&[
                 "branch",
                 "--quiet",
@@ -337,6 +386,46 @@ impl Git {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The arguments a command would run with.
+    fn args_of(command: &Command) -> Vec<String> {
+        command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn remote_commands_carry_the_token_and_local_ones_do_not() {
+        let git = Git::new(Path::new(".")).with_github_token("fake-token");
+        let expected = anvil_types::github::git_auth_args("fake-token");
+        let remote = args_of(&git.command(true, &["push", "origin", "main"]));
+        assert!(remote.windows(4).any(|w| w == expected), "{remote:?}");
+        assert_eq!(&remote[remote.len() - 3..], ["push", "origin", "main"]);
+        let local = args_of(&git.command(false, &["status"]));
+        assert!(
+            !local.iter().any(|arg| arg.contains("extraheader")),
+            "{local:?}"
+        );
+        let plain = args_of(&Git::new(Path::new(".")).command(true, &["fetch"]));
+        assert!(
+            !plain.iter().any(|arg| arg.contains("extraheader")),
+            "{plain:?}"
+        );
+    }
+
+    #[test]
+    fn debug_and_derived_handles_keep_the_token_private() {
+        let git = Git::new(Path::new(".")).with_github_token("fake-token");
+        let text = format!("{git:?}");
+        assert!(!text.contains("fake-token"), "{text}");
+        assert!(text.contains("<redacted>"), "{text}");
+        let other = git.at(Path::new("elsewhere"));
+        assert_eq!(other.token, git.token);
+        assert_eq!(other.dir(), Path::new("elsewhere"));
+        assert!(!format!("{:?}", Git::new(Path::new("."))).contains("redacted"));
+    }
 
     #[tokio::test]
     async fn push_refuses_force_and_delete() {

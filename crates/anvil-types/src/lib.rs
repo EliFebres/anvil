@@ -4,7 +4,8 @@
 //! schema, provider and role configuration, telemetry references and the
 //! skill manifest, plus a validator for each. Besides validation, the only
 //! logic here is loading: the merged anvil configuration, the `.env` files
-//! and `factory.toml`, which both binaries read the same way. The crate
+//! and `factory.toml`, which both binaries read the same way, plus the git
+//! arguments both pass to reach GitHub with a token. The crate
 //! depends on no other workspace crate, and never on tokio or reqwest.
 
 pub mod boundary;
@@ -12,6 +13,7 @@ pub mod config;
 pub mod dotenv;
 pub mod error;
 pub mod factory_config;
+pub mod github;
 pub mod schema;
 pub mod skill;
 pub mod ticket;

@@ -27,6 +27,7 @@ dotenvy = "0.15"
 serde-saphyr = "2.0"
 regex = "1"
 schemars = { version = "1.2", features = ["chrono04"] }
+base64 = "0.23"
 
 # Errors
 thiserror = "2.0"
