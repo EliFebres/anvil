@@ -190,7 +190,7 @@ pub enum Level {
 pub enum MemoryAnswer {
     /// Save it.
     Keep,
-    /// Forget it.
+    /// Leave it out.
     Drop,
 }
 
