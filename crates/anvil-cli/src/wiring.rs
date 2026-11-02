@@ -8,13 +8,15 @@ use anvil_compat::{
     AgentSet, CommandSet, DelegateTool, HookConfig, HookRunner, McpTools, ServerSet, SkillRoots,
     SkillSet, SkillTool, SubagentEnv,
 };
-use anvil_core::agent::{ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders};
+use anvil_core::agent::{
+    ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders, PromptSection,
+};
 use anvil_core::context;
 use anvil_core::provider::{self, Provider, SharedBudget, TokenBudget};
 use anvil_core::tools::{
     PermissionPrompt, Permissions, PromptAnswer, Shell, StaticPrompt, ToolContext, ToolRegistry,
 };
-use anvil_types::AnvilConfig;
+use anvil_types::{AnvilConfig, PromptConfig};
 use anyhow::Context;
 
 use crate::memory::{self, RuleChecks};
@@ -434,7 +436,8 @@ impl Wiring {
         session_dir: PathBuf,
         registry: &ToolRegistry,
     ) -> anyhow::Result<LoopConfig> {
-        let sections = memory::prompt_sections(self.home.as_deref(), &self.cwd)?;
+        let mut sections = memory::prompt_sections(self.home.as_deref(), &self.cwd)?;
+        sections.coder.extend(profile_section(&self.config.prompt));
         Ok(LoopConfig {
             task,
             cwd: self.cwd.clone(),
@@ -510,5 +513,48 @@ impl SubagentEnv for Wiring {
 
     fn context_window(&self) -> u32 {
         Wiring::context_window(self)
+    }
+}
+
+/// The heading the configured `[prompt] notes` appear under.
+const PROFILE_NOTES_HEADING: &str = "Profile notes";
+
+/// The `[prompt] notes` as one coder section, or nothing when there are none.
+fn profile_section(prompt: &PromptConfig) -> Option<PromptSection> {
+    if prompt.notes.is_empty() {
+        return None;
+    }
+    let text = prompt
+        .notes
+        .iter()
+        .map(|note| format!("- {}", note.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(PromptSection {
+        heading: PROFILE_NOTES_HEADING.to_owned(),
+        text,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_notes_no_section() {
+        assert_eq!(profile_section(&PromptConfig::default()), None);
+    }
+
+    #[test]
+    fn notes_become_one_bulleted_section() {
+        let prompt = PromptConfig {
+            notes: vec![
+                "one program per command".to_owned(),
+                " no pipes ".to_owned(),
+            ],
+        };
+        let section = profile_section(&prompt).expect("a section");
+        assert_eq!(section.heading, "Profile notes");
+        assert_eq!(section.text, "- one program per command\n- no pipes");
     }
 }

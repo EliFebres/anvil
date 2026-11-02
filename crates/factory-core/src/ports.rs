@@ -61,6 +61,40 @@ pub enum ImplementerStatus {
     Timeout,
 }
 
+impl ImplementerStatus {
+    /// Whether anvil stopped because a state or the session used its budget.
+    ///
+    /// # Returns
+    ///
+    /// True for an incomplete run whose reason is anvil's
+    /// `the <state> state used its token|turn budget` or
+    /// `the session used its token budget`.
+    pub fn is_budget_stop(&self) -> bool {
+        let Self::Incomplete(reason) = self else {
+            return false;
+        };
+        reason.contains("used its token budget") || reason.contains("used its turn budget")
+    }
+
+    /// The anvil state whose budget ran out, such as `plan`.
+    ///
+    /// # Returns
+    ///
+    /// The state's name when the run stopped on a per-state budget, `None`
+    /// otherwise (the session budget included).
+    pub fn budget_state(&self) -> Option<&str> {
+        if !self.is_budget_stop() {
+            return None;
+        }
+        let Self::Incomplete(reason) = self else {
+            return None;
+        };
+        let (before, _) = reason.split_once(" state used its ")?;
+        let (_, state) = before.rsplit_once("the ")?;
+        (!state.is_empty() && !state.contains(' ')).then_some(state)
+    }
+}
+
 /// What one implementer run produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplementerOutcome {
@@ -450,4 +484,28 @@ pub trait Worker: Send + Sync {
         queue: &'a TicketQueue,
         progress: Progress,
     ) -> BoxFuture<'a, Result<Outcome>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// anvil's own wording, from `IncompleteReason`'s Display in anvil-core:
+    /// the factory reads it from the output, so a change there must show here.
+    #[test]
+    fn budget_stops_name_their_state() {
+        let stop = |reason: &str| ImplementerStatus::Incomplete(reason.to_owned());
+        let plan = stop("the plan state used its token budget");
+        assert!(plan.is_budget_stop());
+        assert_eq!(plan.budget_state(), Some("plan"));
+        let turns = stop("the build state used its turn budget (after a denied tool call)");
+        assert_eq!(turns.budget_state(), Some("build"));
+        let session = stop("the session used its token budget");
+        assert!(session.is_budget_stop());
+        assert_eq!(session.budget_state(), None);
+        let review = stop("the reviewer requested changes 3 times; giving up");
+        assert!(!review.is_budget_stop());
+        assert_eq!(review.budget_state(), None);
+        assert!(!ImplementerStatus::Done.is_budget_stop());
+    }
 }

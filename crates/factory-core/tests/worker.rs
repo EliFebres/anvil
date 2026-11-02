@@ -375,6 +375,83 @@ async fn budgets_reject_with_their_reason() {
 }
 
 #[tokio::test]
+async fn a_plan_that_runs_out_of_budget_is_retried_once_then_rejected_with_the_reason() {
+    if !have_git() {
+        return;
+    }
+    let plan = "the plan state used its token budget";
+    let h = Harness::new(
+        ScriptedImplementer::default().with_runs(vec![
+            ScriptedRun::incomplete(plan, 10),
+            ScriptedRun::incomplete(plan, 10),
+        ]),
+        FakeEvalGate::default(),
+        FakeSwarm::default(),
+        clock(usize::MAX),
+    )
+    .await;
+    let outcome = h.work().await;
+    let Outcome::Rejected { reason, notes, .. } = &outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(
+        reason,
+        &format!("implementer run 2 stopped before changing anything: {plan}")
+    );
+    assert!(
+        notes.contains(&format!(
+            "implementer run 1 stopped before changing anything: {plan}; retrying once"
+        )),
+        "{notes}"
+    );
+    assert_eq!(h.implementer.runs(), 2, "one retry, not more");
+    assert_eq!(
+        h.implementer.checks(),
+        0,
+        "gate A never ran on an empty tree"
+    );
+    let tasks = h.implementer.tasks();
+    assert!(!tasks[0].contains("ran out of budget while planning"));
+    assert!(tasks[1].contains("ran out of budget while planning"));
+
+    // The retry can succeed: the second run writes the change and it merges.
+    let h = Harness::new(
+        ScriptedImplementer::default().with_runs(vec![
+            ScriptedRun::incomplete(plan, 10),
+            ScriptedRun::default_edit(),
+        ]),
+        FakeEvalGate::default(),
+        FakeSwarm::default(),
+        clock(usize::MAX),
+    )
+    .await;
+    let outcome = h.work().await;
+    assert!(matches!(outcome, Outcome::Merged { .. }), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn a_build_budget_stop_with_no_changes_is_rejected_with_the_reason_not_retried() {
+    if !have_git() {
+        return;
+    }
+    let build = "the build state used its token budget";
+    let h = Harness::new(
+        ScriptedImplementer::default().with_runs(vec![ScriptedRun::incomplete(build, 10)]),
+        FakeEvalGate::default(),
+        FakeSwarm::default(),
+        clock(usize::MAX),
+    )
+    .await;
+    let outcome = h.work().await;
+    assert!(
+        matches!(&outcome, Outcome::Rejected { reason, .. }
+            if reason == &format!("implementer run 1 stopped before changing anything: {build}")),
+        "{outcome:?}"
+    );
+    assert_eq!(h.implementer.runs(), 1);
+}
+
+#[tokio::test]
 async fn a_secret_in_the_worktree_rejects_before_anything_is_pushed() {
     if !have_git() {
         return;
