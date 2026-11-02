@@ -14,6 +14,7 @@ anvil-core = { path = "crates/anvil-core" }
 anvil-compat = { path = "crates/anvil-compat" }
 anvil-memory = { path = "crates/anvil-memory" }
 anvil-telemetry = { path = "crates/anvil-telemetry" }
+anvil-tui = { path = "crates/anvil-tui" }
 factory-core = { path = "crates/factory-core" }
 factory-review = { path = "crates/factory-review" }
 eval = { path = "crates/eval" }

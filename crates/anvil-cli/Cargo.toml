@@ -18,6 +18,7 @@ anvil-compat.workspace = true
 anvil-core.workspace = true
 anvil-memory.workspace = true
 anvil-telemetry.workspace = true
+anvil-tui.workspace = true
 anvil-types.workspace = true
 futures-util.workspace = true
 pulldown-cmark.workspace = true

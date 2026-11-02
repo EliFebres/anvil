@@ -7,18 +7,12 @@ use std::time::{Duration, Instant};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::theme::{Shade, Theme};
-use super::wrap::wrap;
 use super::{PermissionMode, RecentSession, SessionInfo};
+use anvil_tui::layout::{count_label, fit_text};
+use anvil_tui::wrap::wrap;
+use anvil_tui::{Shade, Theme};
 
-/// The word ANVIL in figlet's slant font.
-pub const LOGO: [&str; 5] = [
-    "    ___    _   ___    ________ ",
-    "   /   |  / | / / |  / /  _/ / ",
-    "  / /| | /  |/ /| | / // // /  ",
-    " / ___ |/ /|  / | |/ // // /___",
-    "/_/  |_/_/ |_/  |___/___/_____/",
-];
+pub use anvil_tui::LOGO;
 
 /// The tagline under the version.
 const TAGLINE: &str = "Eli's personal coding agent that constantly improves itself";
@@ -169,7 +163,7 @@ impl Welcome {
             };
             let used =
                 2 + session.id.width() + 2 + session.status.width() + 2 + session.when.width() + 2;
-            let task = fit(&session.task, width.saturating_sub(used).max(8));
+            let task = fit_text(&session.task, width.saturating_sub(used).max(8));
             lines.push(Line::from(vec![
                 Span::styled(format!("  {}  ", session.id), theme.fg(Shade::Faint)),
                 Span::styled(session.status.clone(), theme.fg(status_shade)),
@@ -200,7 +194,7 @@ impl Welcome {
         };
         lines.push(pair(
             "project",
-            fit(&self.project, width.saturating_sub(9).max(8)),
+            fit_text(&self.project, width.saturating_sub(9).max(8)),
         ));
         lines.push(pair("coder", self.coder.clone()));
         lines.push(pair(
@@ -216,9 +210,9 @@ impl Welcome {
             "loaded",
             format!(
                 "{} · {} · {}",
-                count(self.rules.len(), "rule"),
-                count(self.skills, "skill"),
-                count(self.mcp_servers, "mcp server")
+                count_label(self.rules.len(), "rule"),
+                count_label(self.skills, "skill"),
+                count_label(self.mcp_servers, "mcp server")
             ),
         ));
         lines
@@ -246,34 +240,6 @@ impl Welcome {
     fn finished_after(&self) -> Duration {
         ROW_DELAY.saturating_mul(u32::try_from(LOGO.len() - 1).unwrap_or(u32::MAX)) + BRIGHTEN
     }
-}
-
-/// `1 rule` or `3 rules`.
-fn count(n: usize, noun: &str) -> String {
-    if n == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{n} {noun}s")
-    }
-}
-
-/// Cuts text to `width` columns with an ellipsis.
-fn fit(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w + 1 > width {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push('…');
-    out
 }
 
 #[cfg(test)]

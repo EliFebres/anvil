@@ -1,0 +1,14 @@
+[package]
+name = "anvil-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The palette and small layout helpers both full-screen UIs draw with: anvil's TUI and factory watch."
+
+[dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+unicode-width.workspace = true
+
+[lints]
+workspace = true
