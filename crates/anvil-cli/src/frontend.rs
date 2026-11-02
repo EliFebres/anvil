@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anvil_core::agent::{AutoApprove, LoopEvent, PlanGate, State};
+use anvil_core::agent::{AutoApprove, LoopEvent, PlanGate, State, Status};
 use anvil_core::tools::{PermissionPrompt, PromptAnswer, StaticPrompt, ToolHook, ToolRegistry};
 use anvil_memory::{Decision, Proposal};
 use anyhow::Context;
@@ -16,13 +16,13 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::console::Console;
-use crate::memory::{terminal_decider, tui_decider};
+use crate::memory::{self, terminal_decider, tui_decider};
 use crate::render;
 use crate::terminal::{TerminalGate, TerminalPrompt};
 use crate::tui::runner::{UiChannels, run_ui};
 use crate::tui::{
-    App, Input, PermissionMode, ResultTee, SessionInfo, SessionKind, Theme, TuiGate, TuiPrompt,
-    UiExit, UiHandle, UiMsg,
+    App, Input, PermissionMode, RecentSession, ResultTee, SessionInfo, SessionKind, Theme, TuiGate,
+    TuiPrompt, UiExit, UiHandle, UiMsg, animate_logo,
 };
 use crate::wiring::Wiring;
 
@@ -341,6 +341,23 @@ pub fn session_info(
             .iter()
             .map(|command| format!("/{}", command.name)),
     );
+    let rules = wiring
+        .home
+        .as_deref()
+        .and_then(|home| memory::open_rules(home).ok())
+        .map(|set| {
+            set.rules
+                .into_iter()
+                .map(|rule| (rule.id, rule.rule))
+                .collect()
+        })
+        .unwrap_or_default();
+    let recent_sessions = anvil_core::context::list_sessions(&wiring.cwd)
+        .unwrap_or_default()
+        .into_iter()
+        .take(RECENT_SESSIONS)
+        .map(recent_session)
+        .collect();
     SessionInfo {
         kind,
         cwd: wiring.cwd.clone(),
@@ -354,6 +371,81 @@ pub fn session_info(
         },
         initial_state,
         slash_commands,
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        coder: model_label(wiring, coder),
+        reviewer: wiring
+            .config
+            .roles
+            .reviewer
+            .as_deref()
+            .map(|name| model_label(wiring, name)),
+        rules,
+        skills: wiring.skills.skills().len(),
+        mcp_servers: wiring.mcp_servers.servers().len(),
+        recent_sessions,
+        animate: animate_logo(
+            io::stdout().is_terminal(),
+            std::env::var_os("ANVIL_NO_ANIMATION").is_some(),
+        ),
+    }
+}
+
+/// How many saved sessions the startup screen lists.
+const RECENT_SESSIONS: usize = 5;
+
+/// A saved session as the startup screen shows it.
+fn recent_session(session: anvil_core::context::SessionSummary) -> RecentSession {
+    let (status, ok) = match (&session.status, session.last_state) {
+        (Some(Status::Done), _) => ("done", Some(true)),
+        (Some(Status::Incomplete { .. }), _) => ("incomplete", Some(false)),
+        (Some(Status::Denied { .. }), _) => ("denied", Some(false)),
+        (Some(Status::ProviderError { .. }), _) => ("error", Some(false)),
+        (None, Some(state)) => {
+            return RecentSession {
+                status: format!("stopped in {state}"),
+                ..recent_session_with(session, "", None)
+            };
+        }
+        (None, None) => ("empty", None),
+    };
+    recent_session_with(session, status, ok)
+}
+
+/// A saved session with its status already decided.
+fn recent_session_with(
+    session: anvil_core::context::SessionSummary,
+    status: &str,
+    ok: Option<bool>,
+) -> RecentSession {
+    let status = status.to_owned();
+    RecentSession {
+        id: session.meta.id,
+        status,
+        ok,
+        task: session.meta.task,
+        when: session
+            .meta
+            .created_at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
+    }
+}
+
+/// A provider's name with its model, as the startup screen shows it.
+///
+/// # Arguments
+///
+/// * `wiring` - Providers and paths.
+/// * `name` - The provider name from `[providers]`.
+///
+/// # Returns
+///
+/// `name (model)`, or just the name when it is not configured.
+pub fn model_label(wiring: &Wiring, name: &str) -> String {
+    match wiring.config.providers.get(name) {
+        Some(provider) => format!("{name} ({})", provider.model),
+        None => name.to_owned(),
     }
 }
 

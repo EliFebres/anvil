@@ -7,7 +7,7 @@ use anvil_core::agent::{LoopEvent, State};
 use crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, BorderType, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::editor::{EditKey, Editor};
@@ -16,6 +16,7 @@ use super::modal::{Answer, Modal};
 use super::status::StatusBar;
 use super::theme::{Shade, Theme};
 use super::transcript::{Entry, Transcript};
+use super::welcome::Welcome;
 use super::{Level, PermissionMode, SessionInfo, SessionKind, UiMsg, UiRequest};
 
 /// How soon a second Ctrl+C must follow the first to quit.
@@ -55,6 +56,8 @@ pub struct App {
     now: Instant,
     tick: u64,
     last_ctrl_c: Option<Instant>,
+    /// Nothing has happened yet: the startup screen is showing.
+    welcome: bool,
     /// The session ended; the next key closes the UI.
     finished: bool,
 }
@@ -72,7 +75,8 @@ impl App {
     ///
     /// The UI, empty.
     pub fn new(info: SessionInfo, theme: Theme, now: Instant) -> Self {
-        let transcript = Transcript::new(info.cwd.clone());
+        let mut transcript = Transcript::new(info.cwd.clone());
+        transcript.push(Entry::Welcome(Welcome::new(&info, now)));
         Self {
             status: StatusBar::new(&info, now),
             state: info.initial_state,
@@ -87,6 +91,7 @@ impl App {
             now,
             tick: 0,
             last_ctrl_c: None,
+            welcome: true,
             finished: false,
         }
     }
@@ -106,6 +111,7 @@ impl App {
         }
         match msg {
             UiMsg::Loop(event) => {
+                self.welcome = false;
                 self.apply_loop(&event);
                 None
             }
@@ -187,8 +193,11 @@ impl App {
     pub fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
         let prefix = self.prompt_prefix();
-        let input_height = self.editor.height(area.width, prefix.width());
-        let [transcript_area, status_area, input_area] = Layout::vertical([
+        let input_height = self
+            .editor
+            .height(area.width.saturating_sub(2), prefix.width())
+            .saturating_add(2);
+        let [transcript_area, status_area, input_box] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(input_height),
@@ -201,11 +210,21 @@ impl App {
             self.theme
         };
         self.transcript
-            .draw(frame, transcript_area, &theme, self.tick, dimmed);
+            .draw(frame, transcript_area, &theme, self.tick, dimmed, self.now);
         frame.render_widget(
             self.status.line(status_area.width, self.now, &theme),
             status_area,
         );
+        let border = if self.welcome && !dimmed {
+            theme.fg(Shade::Accent)
+        } else {
+            theme.border()
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(border);
+        let input_area = block.inner(input_box);
+        frame.render_widget(block, input_box);
         let prefix_shade = if dimmed { Shade::Faint } else { Shade::Accent };
         let (lines, (column, row)) =
             self.editor
@@ -417,6 +436,7 @@ impl App {
         }
         let text = self.editor.take().trim().to_owned();
         self.editor.push_history(&text);
+        self.welcome = false;
         self.transcript.jump_bottom();
         self.transcript.push(Entry::User { text: text.clone() });
         let Some(command) = text.strip_prefix('/') else {
@@ -519,8 +539,9 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
-    use crate::tui::MemoryAnswer;
     use crate::tui::runner::plan_message;
+    use crate::tui::welcome::LOGO;
+    use crate::tui::{MemoryAnswer, RecentSession};
 
     const PLAN_LINE: &str = "1. [ ] Write notes.txt";
 
@@ -534,6 +555,38 @@ mod tests {
             permission_mode: PermissionMode::Ask,
             initial_state: State::Build,
             slash_commands: vec!["/plan".to_owned(), "/plain".to_owned()],
+            version: "0.1.0".to_owned(),
+            coder: "main (test-model)".to_owned(),
+            reviewer: Some("reviewer (test-reviewer)".to_owned()),
+            rules: vec![
+                (
+                    "docstrings".to_owned(),
+                    "Every public item gets a doc comment.".to_owned(),
+                ),
+                (
+                    "no-unwrap".to_owned(),
+                    "No unwrap outside tests.".to_owned(),
+                ),
+            ],
+            skills: 3,
+            mcp_servers: 1,
+            recent_sessions: vec![
+                RecentSession {
+                    id: "01K9ABCDEFGHJKMNPQRSTVWXYZ".to_owned(),
+                    status: "done".to_owned(),
+                    ok: Some(true),
+                    task: "add a --dry-run flag".to_owned(),
+                    when: "2026-11-01 09:30".to_owned(),
+                },
+                RecentSession {
+                    id: "01K9ABCDEFGHJKMNPQRSTVWXY0".to_owned(),
+                    status: "incomplete".to_owned(),
+                    ok: Some(false),
+                    task: "rename the config module".to_owned(),
+                    when: "2026-10-31 18:02".to_owned(),
+                },
+            ],
+            animate: false,
         }
     }
 
@@ -694,6 +747,66 @@ mod tests {
     }
 
     #[test]
+    fn startup_120() {
+        let (mut app, _) = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(120, 38)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn startup_80() {
+        let (mut app, _) = new_app();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn the_logo_draws_in_over_the_first_ticks() {
+        let mut info = info();
+        info.animate = true;
+        let base = Instant::now();
+        let mut app = App::new(info, Theme::mono(), base);
+        let mut terminal = Terminal::new(TestBackend::new(120, 38)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let first = rows(&terminal);
+        let logo_rows = |rows: &[String]| {
+            rows.iter()
+                .filter(|row| LOGO.iter().any(|logo| row.starts_with(logo)))
+                .count()
+        };
+        assert_eq!(logo_rows(&first), 1, "{}", first.join("\n"));
+        app.handle(UiMsg::Tick(base + Duration::from_secs(1)));
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        assert_eq!(logo_rows(&rows(&terminal)), LOGO.len());
+    }
+
+    #[test]
+    fn the_input_border_is_accented_until_something_happens() {
+        let (mut app, _) = new_app();
+        let theme = Theme::truecolor();
+        let mut app_color = App::new(info(), theme, Instant::now());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal.draw(|frame| app_color.draw(frame)).expect("draw");
+        let corner = |terminal: &Terminal<TestBackend>| {
+            terminal
+                .backend()
+                .buffer()
+                .cell((0, 21))
+                .map(|cell| (cell.symbol().to_owned(), cell.fg))
+                .expect("cell")
+        };
+        assert_eq!(corner(&terminal), ("╭".to_owned(), theme.accent));
+        app_color.handle(UiMsg::Loop(LoopEvent::TextDelta("hi".to_owned())));
+        terminal.draw(|frame| app_color.draw(frame)).expect("draw");
+        assert_eq!(corner(&terminal), ("╭".to_owned(), theme.border));
+        type_line(&mut app, "x");
+        key(&mut app, KeyCode::Enter);
+        assert!(!app.welcome);
+    }
+
+    #[test]
     fn empty_session() {
         let (mut app, _) = new_app();
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
@@ -763,17 +876,12 @@ mod tests {
         }));
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
         terminal.draw(|frame| app.draw(frame)).expect("draw");
-        let collapsed = rows(&terminal);
-        assert!(
-            collapsed[0].starts_with("ok     shell  cargo test --all"),
-            "{:?}",
-            collapsed[0]
-        );
-        assert!(
-            collapsed[0].trim_end().ends_with("1.2s"),
-            "{:?}",
-            collapsed[0]
-        );
+        let drawn = rows(&terminal);
+        let collapsed = drawn
+            .iter()
+            .find(|row| row.starts_with("ok     shell  cargo test --all"))
+            .expect("the tool line");
+        assert!(collapsed.trim_end().ends_with("1.2s"), "{collapsed:?}");
         key(&mut app, KeyCode::Enter);
         terminal.draw(|frame| app.draw(frame)).expect("draw");
         insta::assert_snapshot!(terminal.backend());
@@ -818,7 +926,7 @@ mod tests {
         });
         terminal.draw(|frame| app.draw(frame)).expect("draw");
         assert_eq!(terminal.backend().buffer(), &before);
-        assert!(app.transcript().plain_text().is_empty());
+        assert_eq!(app.transcript().plain_text(), "welcome");
         assert_eq!(key(&mut app, KeyCode::Char('y')), None);
         assert_eq!(reply.try_recv(), Ok(PromptAnswer::Yes));
         assert!(!app.has_modal());
@@ -941,7 +1049,7 @@ mod tests {
         key(&mut app, KeyCode::Char('x'));
         assert!(!app.has_modal());
         assert!(app.editor().is_empty());
-        assert!(app.transcript().plain_text().is_empty());
+        assert_eq!(app.transcript().plain_text(), "welcome");
     }
 
     #[test]
@@ -954,7 +1062,7 @@ mod tests {
         );
         let mut terminal = Terminal::new(TestBackend::new(100, 10)).expect("terminal");
         terminal.draw(|frame| app.draw(frame)).expect("draw");
-        let row = &rows(&terminal)[8];
+        let row = &rows(&terminal)[6];
         assert!(row.contains("mode: accept-edits"), "{row:?}");
         for expected in [
             PermissionMode::Plan,
@@ -968,7 +1076,7 @@ mod tests {
         }
         app.handle(UiMsg::PermissionMode(PermissionMode::Plan));
         terminal.draw(|frame| app.draw(frame)).expect("draw");
-        assert!(rows(&terminal)[8].contains("mode: plan"));
+        assert!(rows(&terminal)[6].contains("mode: plan"));
     }
 
     #[test]
@@ -1040,7 +1148,11 @@ d"
             Some(Action::Submit("hello there".to_owned()))
         );
         assert!(app.editor().is_empty());
-        assert_eq!(app.transcript().plain_text(), "> hello there");
+        assert_eq!(
+            app.transcript().plain_text(),
+            "welcome
+> hello there"
+        );
         assert_eq!(key(&mut app, KeyCode::Enter), None);
     }
 
@@ -1121,7 +1233,7 @@ d"
         assert_eq!(app.prompt_prefix(), "review > ");
         let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
         terminal.draw(|frame| app.draw(frame)).expect("draw");
-        let row = &rows(&terminal)[8];
+        let row = &rows(&terminal)[6];
         assert!(row.starts_with(" REVIEW · main (test-model)"), "{row:?}");
     }
 }

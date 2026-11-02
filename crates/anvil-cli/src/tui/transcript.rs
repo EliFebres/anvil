@@ -17,6 +17,7 @@ use unicode_width::UnicodeWidthStr;
 use super::Level;
 use super::markdown::{MarkdownDoc, inline_lines};
 use super::theme::{Shade, Theme};
+use super::welcome::Welcome;
 use super::wrap::{segments, wrap};
 
 /// Lines a mouse wheel notch scrolls.
@@ -37,6 +38,8 @@ const CURSOR: &str = "█";
 /// One thing that happened.
 #[derive(Debug)]
 pub enum Entry {
+    /// The startup screen.
+    Welcome(Welcome),
     /// A line the user sent.
     User {
         /// The text.
@@ -593,6 +596,7 @@ impl Transcript {
         self.slots
             .iter()
             .map(|slot| match &slot.entry {
+                Entry::Welcome(_) => "welcome".to_owned(),
                 Entry::User { text } => format!("> {text}"),
                 Entry::Model { doc, .. } => doc.text().to_owned(),
                 Entry::Tool(tool) => format!("{} {}", tool.call.name, tool.summary),
@@ -666,8 +670,17 @@ impl Transcript {
     /// * `theme` - Styles, already dimmed when a prompt is open.
     /// * `tick` - The spinner frame counter.
     /// * `dimmed` - Whether `theme` is the dimmed one, for the cache.
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, tick: u64, dimmed: bool) {
-        let lines = self.lines(area.width, theme, tick, dimmed);
+    /// * `now` - The current time, for the startup animation.
+    pub fn draw(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        tick: u64,
+        dimmed: bool,
+        now: Instant,
+    ) {
+        let lines = self.lines(area.width, theme, tick, dimmed, now);
         let height = usize::from(area.height);
         self.viewport = height;
         self.total = lines.len();
@@ -771,7 +784,14 @@ impl Transcript {
 
     /// Every visible entry's lines, rendered or taken from the cache, with
     /// the selection highlighted and the layout recorded for clicks.
-    fn lines(&mut self, width: u16, theme: &Theme, tick: u64, dimmed: bool) -> Vec<Line<'static>> {
+    fn lines(
+        &mut self,
+        width: u16,
+        theme: &Theme,
+        tick: u64,
+        dimmed: bool,
+        now: Instant,
+    ) -> Vec<Line<'static>> {
         let mut out = Vec::new();
         let mut layout = Vec::new();
         let hidden_before = self.hidden_before;
@@ -784,11 +804,13 @@ impl Transcript {
             {
                 out.push(Line::default());
             }
-            let live = is_live(&slot.entry);
+            let live = is_live(&slot.entry, now);
             if live || slot.cache.as_ref().is_none_or(|(k, _)| *k != key) {
-                let lines = render_entry(&mut slot.entry, width, theme, tick);
+                let lines = render_entry(&mut slot.entry, width, theme, tick, now);
                 slot.cache = Some((key, lines));
             }
+            // A live entry's lines are stale by the next draw; render it again then.
+            let keep = !live;
             let Some((_, lines)) = &slot.cache else {
                 continue;
             };
@@ -802,6 +824,9 @@ impl Transcript {
             }
             layout.push((index, out.len(), lines.len()));
             out.extend(lines);
+            if !keep {
+                slot.cache = None;
+            }
             previous = Some(&slot.entry);
         }
         self.layout = layout;
@@ -821,23 +846,32 @@ fn is_compact(entry: &Entry) -> bool {
 }
 
 /// Whether an entry changes without an event, so it must not be cached.
-fn is_live(entry: &Entry) -> bool {
-    matches!(
-        entry,
+fn is_live(entry: &Entry, now: Instant) -> bool {
+    match entry {
+        Entry::Welcome(welcome) => welcome.is_animating(now),
         Entry::Tool(ToolEntry {
             status: ToolStatus::Running { .. },
             ..
-        }) | Entry::Check {
+        })
+        | Entry::Check {
             status: CheckStatus::Running,
             ..
-        }
-    )
+        } => true,
+        _ => false,
+    }
 }
 
 /// Renders one entry, without the blank line that separates entries.
-fn render_entry(entry: &mut Entry, width: u16, theme: &Theme, tick: u64) -> Vec<Line<'static>> {
+fn render_entry(
+    entry: &mut Entry,
+    width: u16,
+    theme: &Theme,
+    tick: u64,
+    now: Instant,
+) -> Vec<Line<'static>> {
     let columns = usize::from(width).max(1);
     let mut lines = match entry {
+        Entry::Welcome(welcome) => welcome.lines(columns, theme, now),
         Entry::User { text } => {
             let lead_width = YOU.width() + 2;
             wrap(text, columns.saturating_sub(lead_width).max(1))
@@ -1416,7 +1450,7 @@ mod tests {
 
     fn joined(transcript: &mut Transcript, width: u16) -> String {
         transcript
-            .lines(width, &Theme::mono(), 0, false)
+            .lines(width, &Theme::mono(), 0, false, Instant::now())
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
@@ -1535,7 +1569,7 @@ mod tests {
             "# Plan\n\nAssumption: `src/main.rs` is the entry point.\n\n\
              1. [x] Read `src/main.rs`\n2. [ ] Edit `src/lib.rs`\n3. [ ] Run `cargo test`\n",
         );
-        let lines = transcript.lines(60, &theme, 0, false);
+        let lines = transcript.lines(60, &theme, 0, false, Instant::now());
         let marks: Vec<(String, Option<ratatui::style::Color>)> = lines
             .iter()
             .flat_map(|line| line.spans.iter())
@@ -1580,7 +1614,7 @@ mod tests {
             },
             now,
         );
-        let open = transcript.lines(40, &theme, 0, false);
+        let open = transcript.lines(40, &theme, 0, false, Instant::now());
         assert_eq!(
             open[0].to_string(),
             "PLAN ───────────────────────────────────"
@@ -1594,7 +1628,7 @@ mod tests {
             },
             now + Duration::from_secs(41),
         );
-        let lines = transcript.lines(40, &theme, 0, false);
+        let lines = transcript.lines(40, &theme, 0, false, Instant::now());
         assert_eq!(
             lines[0].to_string(),
             "PLAN ─────────────────────── done in 41s"
@@ -1689,7 +1723,7 @@ mod tests {
             "{text:?}"
         );
         assert!(
-            !transcript.entries().iter().any(|entry| is_live(entry)),
+            !transcript.entries().iter().any(|entry| is_live(entry, now)),
             "nothing keeps spinning"
         );
     }
@@ -1709,9 +1743,9 @@ mod tests {
         let theme = Theme::truecolor();
         let mut transcript = fresh();
         transcript.notice("hello", Level::Error);
-        let bright = transcript.lines(40, &theme, 0, false);
-        let dim = transcript.lines(40, &theme.dimmed(), 0, true);
-        let bright_again = transcript.lines(40, &theme, 0, false);
+        let bright = transcript.lines(40, &theme, 0, false, Instant::now());
+        let dim = transcript.lines(40, &theme.dimmed(), 0, true, Instant::now());
+        let bright_again = transcript.lines(40, &theme, 0, false, Instant::now());
         assert_eq!(bright[0].style.fg, Some(theme.danger));
         assert_eq!(dim[0].style.fg, Some(theme.muted));
         assert_eq!(bright_again[0].style.fg, Some(theme.danger));

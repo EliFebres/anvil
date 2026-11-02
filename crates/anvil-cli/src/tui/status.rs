@@ -272,6 +272,14 @@ mod tests {
             permission_mode: PermissionMode::Ask,
             initial_state: State::Build,
             slash_commands: Vec::new(),
+            version: String::new(),
+            coder: String::new(),
+            reviewer: None,
+            rules: Vec::new(),
+            skills: 0,
+            mcp_servers: 0,
+            recent_sessions: Vec::new(),
+            animate: false,
         }
     }
 

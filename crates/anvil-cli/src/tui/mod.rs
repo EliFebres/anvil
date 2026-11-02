@@ -17,6 +17,7 @@ pub mod runner;
 pub mod status;
 pub mod theme;
 pub mod transcript;
+pub mod welcome;
 pub mod wrap;
 
 use std::path::PathBuf;
@@ -115,6 +116,52 @@ pub struct SessionInfo {
     pub initial_state: State,
     /// Every slash command Tab may complete, each starting with `/`.
     pub slash_commands: Vec<String>,
+    /// The anvil version, for the startup screen.
+    pub version: String,
+    /// The coder as `name (model)`.
+    pub coder: String,
+    /// The reviewer as `name (model)`, if one is configured.
+    pub reviewer: Option<String>,
+    /// The standing rules as `(id, text)`.
+    pub rules: Vec<(String, String)>,
+    /// How many skills are loaded.
+    pub skills: usize,
+    /// How many MCP servers are configured.
+    pub mcp_servers: usize,
+    /// The newest saved sessions, newest first.
+    pub recent_sessions: Vec<RecentSession>,
+    /// Whether the logo draws in over time; off when stdout is not a
+    /// terminal or `ANVIL_NO_ANIMATION` is set.
+    pub animate: bool,
+}
+
+/// A saved session as the startup screen lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentSession {
+    /// The session id.
+    pub id: String,
+    /// How it ended, or where it stopped.
+    pub status: String,
+    /// Whether it ended well; `None` when it did not end.
+    pub ok: Option<bool>,
+    /// The task.
+    pub task: String,
+    /// When it started, in local time.
+    pub when: String,
+}
+
+/// Whether the startup logo should animate.
+///
+/// # Arguments
+///
+/// * `is_tty` - Whether stdout is a terminal.
+/// * `no_animation` - Whether `ANVIL_NO_ANIMATION` is set.
+///
+/// # Returns
+///
+/// True only on a terminal without the opt-out.
+pub fn animate_logo(is_tty: bool, no_animation: bool) -> bool {
+    is_tty && !no_animation
 }
 
 /// Which kind of session the UI fronts.
