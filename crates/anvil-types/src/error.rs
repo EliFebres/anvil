@@ -75,6 +75,15 @@ pub enum ValidationError {
         base_url: String,
     },
 
+    /// A fake provider lacks a `script`, or a real one has one.
+    #[error(
+        "provider `{name}`: `script` is required with protocol = \"fake\" and allowed with no other protocol"
+    )]
+    FakeScript {
+        /// The provider entry name.
+        name: String,
+    },
+
     /// A provider declares a context window of zero tokens.
     #[error("provider `{name}` has context_window 0; it must be positive")]
     ZeroContextWindow {

@@ -178,6 +178,7 @@ mod tests {
             supports_reasoning: false,
             max_output_tokens: None,
             price_per_mtoken: price,
+            script: None,
         }
     }
 

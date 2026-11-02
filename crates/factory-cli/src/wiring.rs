@@ -9,9 +9,9 @@ use anvil_types::{AnvilConfig, FactoryConfig, config};
 use anyhow::Context;
 use factory_core::github::{FALLBACK_TOKEN_ENV, TOKEN_ENV, token_from_env};
 use factory_core::{
-    FactoryHome, Git, GitHub, LogNotifier, Notifier, Sandbox, SandboxConfig, Service, ServiceDeps,
-    SystemRunner, TicketQueue, TicketWorker, WebhookNotifier, WorkerDeps, hostname, preflight,
-    system_clock,
+    FactoryHome, Git, GitHub, LogNotifier, Notifier, Sandbox, SandboxConfig, SandboxOptions,
+    Service, ServiceDeps, SystemRunner, TicketQueue, TicketWorker, WebhookNotifier, WorkerDeps,
+    hostname, preflight, system_clock,
 };
 use factory_review::{ModelReviewer, load_rules};
 use tokio::process::Command;
@@ -197,7 +197,7 @@ pub async fn sandbox(
         runtime: loaded.factory.worker.runtime,
         image: loaded.factory.worker.image.clone(),
         anvil_bin,
-        just_bin: "just".to_owned(),
+        options: SandboxOptions::default(),
         cargo_bin: "cargo".to_owned(),
         egress_allow: loaded.factory.worker.egress_allow.clone(),
         providers: loaded.anvil.providers.clone(),

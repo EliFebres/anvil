@@ -30,6 +30,7 @@ async fn live_endpoint_answers_pong() {
         supports_reasoning: std::env::var("ANVIL_LIVE_REASONING").is_ok(),
         max_output_tokens: Some(256),
         price_per_mtoken: None,
+        script: None,
     };
     let provider = provider::from_config(
         "live",

@@ -36,10 +36,17 @@ struct Turn {
     text: String,
 }
 
+/// The two HTTP shapes a reviewer can speak; a fake provider has none.
+#[derive(Debug, Clone, Copy)]
+enum Wire {
+    Openai,
+    Anthropic,
+}
+
 /// A reviewer that asks a model.
 pub struct ModelReviewer {
     id: ReviewerId,
-    protocol: Protocol,
+    wire: Wire,
     url: String,
     api_key: String,
     max_output_tokens: Option<u32>,
@@ -63,6 +70,11 @@ impl ModelReviewer {
     /// # Returns
     ///
     /// The reviewer.
+    ///
+    /// # Errors
+    ///
+    /// [`ReviewError::UnsupportedProtocol`] for a `protocol = "fake"` provider,
+    /// which replays a script and cannot read a pull request.
     pub fn new(
         provider_name: &str,
         stance: Stance,
@@ -70,26 +82,31 @@ impl ModelReviewer {
         api_key: String,
         rules: &[Rule],
         client: reqwest::Client,
-    ) -> Self {
+    ) -> Result<Self, ReviewError> {
         let base = provider.base_url.trim_end_matches('/');
-        let url = match provider.protocol {
-            Protocol::Openai => format!("{base}/chat/completions"),
-            Protocol::Anthropic => format!("{base}/messages"),
+        let (wire, url) = match provider.protocol {
+            Protocol::Openai => (Wire::Openai, format!("{base}/chat/completions")),
+            Protocol::Anthropic => (Wire::Anthropic, format!("{base}/messages")),
+            Protocol::Fake => {
+                return Err(ReviewError::UnsupportedProtocol {
+                    provider: provider_name.to_owned(),
+                });
+            }
         };
-        Self {
+        Ok(Self {
             id: ReviewerId {
                 provider: provider_name.to_owned(),
                 stance,
                 model: provider.model.clone(),
             },
-            protocol: provider.protocol,
+            wire,
             url,
             api_key,
             max_output_tokens: provider.max_output_tokens,
             price: provider.price_per_mtoken,
             system: system_prompt(stance, rules),
             client,
-        }
+        })
     }
 
     /// Builds every reviewer `factory.toml` lists, keys taken from the environment.
@@ -151,6 +168,11 @@ impl ModelReviewer {
                     .ok_or_else(|| ReviewError::UnknownProvider {
                         provider: name.to_owned(),
                     })?;
+            if provider.protocol == Protocol::Fake {
+                return Err(ReviewError::UnsupportedProtocol {
+                    provider: name.to_owned(),
+                });
+            }
             let api_key = key_lookup(&provider.api_key_env)
                 .filter(|key| !key.trim().is_empty())
                 .ok_or_else(|| ReviewError::MissingApiKey {
@@ -172,7 +194,7 @@ impl ModelReviewer {
                 api_key,
                 rules,
                 client,
-            )));
+            )?));
         }
         Ok(reviewers)
     }
@@ -221,14 +243,14 @@ impl ModelReviewer {
 
     /// One non-streaming completion: the reply text and its usage.
     async fn complete(&self, turns: &[Turn]) -> Result<(String, Usage), ReviewError> {
-        let body = match self.protocol {
-            Protocol::Openai => self.openai_body(turns),
-            Protocol::Anthropic => self.anthropic_body(turns),
+        let body = match self.wire {
+            Wire::Openai => self.openai_body(turns),
+            Wire::Anthropic => self.anthropic_body(turns),
         };
         let builder = self.client.post(&self.url).json(&body);
-        let builder = match self.protocol {
-            Protocol::Openai => builder.bearer_auth(&self.api_key),
-            Protocol::Anthropic => builder
+        let builder = match self.wire {
+            Wire::Openai => builder.bearer_auth(&self.api_key),
+            Wire::Anthropic => builder
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION),
         };
@@ -248,9 +270,9 @@ impl ModelReviewer {
             });
         }
         let value: Value = serde_json::from_str(&text).map_err(|error| self.shape(error))?;
-        match self.protocol {
-            Protocol::Openai => self.openai_reply(&value),
-            Protocol::Anthropic => self.anthropic_reply(&value),
+        match self.wire {
+            Wire::Openai => self.openai_reply(&value),
+            Wire::Anthropic => self.anthropic_reply(&value),
         }
     }
 
@@ -390,6 +412,7 @@ mod tests {
                 output: 10.0,
                 cached: Some(0.1),
             }),
+            script: None,
         }
     }
 
@@ -402,6 +425,7 @@ mod tests {
             &[],
             build_client(Duration::from_secs(5)).expect("client"),
         )
+        .expect("a real protocol")
     }
 
     fn request() -> ReviewRequest {

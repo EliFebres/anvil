@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anvil_types::config::SETUP_PROVIDERS;
 use anvil_types::{AnvilConfig, ContainerRuntime};
 use factory_core::fakes::FakeRuntime;
-use factory_core::sandbox::{ANVIL_MOUNT, CACHE_VOLUME};
+use factory_core::sandbox::{ANVIL_MOUNT, CACHE_VOLUME, SandboxOptions};
 use factory_core::{
     Exit, FactoryError, FactoryHome, Implementer, ImplementerStatus, Sandbox, SandboxConfig,
     ensure_cache_volume, preflight,
@@ -103,7 +103,10 @@ esac
             runtime: ContainerRuntime::None,
             image: String::new(),
             anvil_bin: fake_anvil,
-            just_bin: fake_just.to_string_lossy().into_owned(),
+            options: SandboxOptions {
+                check_command: vec![fake_just.to_string_lossy().into_owned(), "check".to_owned()],
+                ..SandboxOptions::default()
+            },
             cargo_bin: "cargo".to_owned(),
             egress_allow: Vec::new(),
             providers: anvil.providers.clone(),
@@ -204,7 +207,7 @@ fn podman_sandbox(temp: &Path, anvil_bin: PathBuf, runtime: Arc<FakeRuntime>) ->
             runtime: ContainerRuntime::Podman,
             image: "localhost/anvil-factory:latest".to_owned(),
             anvil_bin,
-            just_bin: "just".to_owned(),
+            options: SandboxOptions::default(),
             cargo_bin: "cargo".to_owned(),
             egress_allow: Vec::new(),
             providers: anvil.providers,

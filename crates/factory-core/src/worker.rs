@@ -230,20 +230,22 @@ impl TicketWorker {
             }
 
             // Gate B: the eval harness on the branch build.
-            progress("building the release binary");
-            let build = deps
-                .implementer
-                .build_release(worktree, run.budget.deadline())
-                .await?;
-            run.notes.section(
-                &format!("release build: {}", pass_word(build.passed)),
-                &build.output_tail,
-            );
-            if !build.passed {
-                return Ok(run.reject(
-                    "the release build of anvil failed after `just check` passed".to_owned(),
-                    deps.implementer.as_ref(),
-                ));
+            if deps.eval_gate.needs_release_build() {
+                progress("building the release binary");
+                let build = deps
+                    .implementer
+                    .build_release(worktree, run.budget.deadline())
+                    .await?;
+                run.notes.section(
+                    &format!("release build: {}", pass_word(build.passed)),
+                    &build.output_tail,
+                );
+                if !build.passed {
+                    return Ok(run.reject(
+                        "the release build of anvil failed after `just check` passed".to_owned(),
+                        deps.implementer.as_ref(),
+                    ));
+                }
             }
             progress("gate B: eval against main");
             match deps.eval_gate.run(worktree).await? {
