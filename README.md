@@ -25,7 +25,32 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 | `anvil --plain ...` | Keep the line renderer and stdin prompts. Chosen automatically when a standard stream is not a terminal. |
 | `anvil --profile <name> ...` | Layer `~/.anvil/profiles/<name>.toml` over the config; its `[permissions]` table replaces the project's. |
 
-`anvil chat` opens a full-screen terminal UI: a scrolling transcript, a status line (state, model, permission mode, tokens, cost, context used, elapsed time) and a multi-line input with history and Tab completion of slash commands. Shift+Enter, Alt+Enter or Ctrl+J insert a line break; `?` on an empty input lists the keys.
+#### The full-screen UI
+
+`anvil chat`, `anvil run` and `anvil resume` open a full-screen terminal UI: a scrolling transcript, a status line (state, model, permission mode, tokens, cost, context used, elapsed time) and a multi-line input with history and Tab completion of slash commands. Shift+Enter, Alt+Enter or Ctrl+J insert a line break; Shift+Tab cycles the permission mode; Ctrl+C cancels the turn, twice quits; `?` on an empty input lists the keys.
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/ui-startup.png" alt="The startup screen: the ANVIL logo, version, project, coder, reviewer, mode, what loaded, the standing rules and recent sessions">
+      <p align="center"><b>Startup.</b> What is loaded, your standing rules and the last few sessions.</p>
+    </td>
+    <td width="50%">
+      <img src="docs/ui-build-session.png" alt="A build session: the user's request, the model's reply, an edit_file tool line and the diff it made">
+      <p align="center"><b>A build turn.</b> Every edit shows as a diff under its tool line; Enter expands any tool call.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/ui-permission-modal.png" alt="A permission prompt over the dimmed transcript showing the proposed diff with allow, deny and always choices">
+      <p align="center"><b>Permission.</b> An <code>ask</code> rule pauses the turn and shows exactly what would change.</p>
+    </td>
+    <td width="50%">
+      <img src="docs/ui-plan-approval.png" alt="A plan with its checklist and the question bar: y build, r revise, q quit">
+      <p align="center"><b>Plan approval.</b> Build it, send it back with feedback, or quit. The boxes tick as the model works through them.</p>
+    </td>
+  </tr>
+</table>
 
 Three kinds of state live under `~/.anvil/`, all plain files you can edit:
 
