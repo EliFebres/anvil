@@ -1,0 +1,17 @@
+id = "01M6D20KVA7TZJNN66ZFVCRWVD"
+created_at = "2026-11-02T02:39:20.649741900Z"
+kind = "bug"
+title = "User flag: `anvil ticket submit` pushes to the current project's `origin`, so a "
+symptom = "Anvil's ticket submit subcommand pushes tickets to the origin remote of whatever project the user is currently working in. A ticket filed from any repository other than anvil's own therefore lands in the wrong repository, and the factory never receives it. Ticket delivery depends on the user's working directory when it should always target anvil's monorepo."
+repro = "Configure anvil with the factory pointing at its monorepo, then open an unrelated Git repository that has its own origin and file a ticket from there. Observe that the ticket is pushed to that repository's origin instead of the anvil monorepo."
+spec = "Add a remote key to the tickets section of anvil's config. Its value is a full Git URL pointing at the anvil monorepo. The setup command seeds this value from the GitHub repository setting in the factory config file and does not overwrite a value the user has already set. The ticket submit subcommand stops using the current project's remotes entirely. Instead it writes and pushes tickets from a small dedicated clone kept inside anvil's home directory. Anvil creates that clone on first use, using a shallow or sparse checkout where possible, and fetches or rebases it before each push. If the configured remote is missing, submit fails with a clear error that names the config key and suggests running setup. It must never fall back to the project's origin. The doctor command gets a new check: it confirms the configured remote is set, that the dedicated clone's push URL matches it, and that it resolves to the same repository named in the factory config. It reports a mismatch or an unreachable remote as a failure."
+acceptance = [
+    "Submitting a ticket while inside an unrelated Git project pushes the ticket to the configured anvil monorepo and leaves the project's remotes and working tree untouched.",
+    "Running setup on a fresh install fills in the tickets remote key from the factory config's GitHub repository, and running it again does not overwrite a user-edited value.",
+    "When the tickets remote is unset, submit exits non-zero with an error naming the missing config key and pushes nothing anywhere.",
+    "The doctor command passes when the dedicated clone's remote matches the configured repository, and fails with a descriptive message when the URL points elsewhere or cannot be reached.",
+]
+evidence = ["01M6D1YE3BHKQKQZ2KD6ZNW135"]
+priority = "p2"
+status = "open"
+origin = "cli"
