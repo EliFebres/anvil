@@ -3,11 +3,14 @@
 mod review;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anvil_types::dotenv;
+use anvil_types::factory_config::FACTORY_FILE;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use factory_cli::install::{InstallOptions, config_home, install};
+use factory_cli::update::{UpdateOptions, update};
 use factory_cli::{logging, wiring};
 use factory_core::{FactoryHome, ServiceState, Tick, service};
 
@@ -44,6 +47,16 @@ enum Command {
     Resume,
     /// Install deploy/nuc/factory.service as a systemd user unit and start it (Linux only).
     InstallService,
+    /// Stop the service, pull main, rebuild the binaries and the worker image, and start it again (Linux only).
+    ///
+    /// A ticket in progress finishes first: the pause flag stops the loop from
+    /// claiming another one and the update waits until the worker is idle.
+    /// Runs in the repository that holds the current folder, else ~/factory-repo.
+    Update {
+        /// Stop at once; a ticket in progress stays claimed on factory/state.
+        #[arg(long)]
+        now: bool,
+    },
     /// Say whether an environment variable is set after the env files load, and where it came from.
     ///
     /// The value is never printed. Files load in this order, first definition
@@ -151,6 +164,38 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             }
             Ok(0)
         }
+        Command::Update { now } => {
+            if !cfg!(target_os = "linux") {
+                anyhow::bail!("update needs systemd; run it on the NUC");
+            }
+            let factory_home = factory_home.context("no home directory; set FACTORY_HOME")?;
+            let home = home.context("no home directory")?;
+            let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
+            let repo_root = runtime.block_on(update_root(&cwd, &home));
+            println!("== repository: {}", repo_root.display());
+            update(&UpdateOptions {
+                repo_root,
+                home: factory_home,
+                config_home: config_home(&home),
+                now,
+                poll: UPDATE_POLL,
+            })?;
+            Ok(0)
+        }
+    }
+}
+
+/// How often `factory update` re-reads the state file while a ticket finishes.
+const UPDATE_POLL: Duration = Duration::from_secs(30);
+
+/// The repository `factory update` works in: the one around `cwd` when it
+/// holds a `factory.toml`, otherwise `~/factory-repo`, where bootstrap put it.
+async fn update_root(cwd: &Path, home: &Path) -> PathBuf {
+    let root = wiring::repo_root(cwd).await;
+    if root.join(FACTORY_FILE).is_file() {
+        root
+    } else {
+        home.join("factory-repo")
     }
 }
 

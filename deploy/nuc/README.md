@@ -27,6 +27,16 @@ ssh nuc 'bash -s' < deploy/nuc/bootstrap.sh
 
 `factory status` shows the queue, the ticket in progress and the last ten outcomes; `factory pause` and `factory resume` toggle the flag the loop checks between tickets. The service pauses itself when `main` is red, when there is no eval result on `main` to gate against, or after two errors in a row, and says so on the webhook.
 
+## Updating
+
+After a change lands on `main`, log into the NUC and run:
+
+```
+factory update
+```
+
+It sets the pause flag and waits for the ticket in progress to finish (printing its stage every 30 seconds), stops the service, pulls `main` into `~/factory-repo`, rebuilds `anvil` and `factory` in release mode (the binaries in `~/.local/bin` are links into `target/release`), rebuilds the worker image named in `factory.toml`, re-installs the unit and starts the service. `factory update --now` skips the wait; a ticket that was in progress then stays in `tickets/claimed/` on `factory/state` and the command says which one; to retry it, move the file to `tickets/open/`, set `status = "open"` and drop `claimed_at` and `claimed_by`.
+
 ## First run
 
 `main` needs an eval result under `eval/results/` before any ticket can pass Gate B; until the baseline commit reaches `main` the service pauses with "no eval result on main". Run `anvil doctor --fix-github` once so `factory/state` exists with its ruleset, then `factory resume`.
