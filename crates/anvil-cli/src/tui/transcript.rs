@@ -1395,15 +1395,14 @@ fn parse_plan_item(line: &str) -> Option<PlanItem> {
         line[digits..].strip_prefix(['.', ')'])?
     };
     let rest = rest.trim_start();
-    let (done, text) = if let Some(text) = rest.strip_prefix("[ ]") {
-        (false, text)
-    } else if let Some(text) = rest
-        .strip_prefix("[x]")
-        .or_else(|| rest.strip_prefix("[X]"))
-    {
-        (true, text)
-    } else {
-        return None;
+    let (done, text) = match rest.strip_prefix("[ ]") {
+        Some(text) => (false, text),
+        None => {
+            let text = rest
+                .strip_prefix("[x]")
+                .or_else(|| rest.strip_prefix("[X]"))?;
+            (true, text)
+        }
     };
     Some(PlanItem {
         done,
