@@ -3,14 +3,14 @@ source: crates/anvil-cli/src/tui/app.rs
 expression: terminal.backend()
 ---
 "                                                                                "
+"recent sessions                                                                 "
+"  01K9ABCDEFGHJKMNPQRSTVWXYZ  done  add a --dry-run flag  2026-11-01 09:30      "
+"  01K9ABCDEFGHJKMNPQRSTVWXY0  incomplete  rename the config m…  2026-10-31 18:02"
+"                                                                                "
 "warning: not a git repository; the reviewer will see touched files instead of a "
 "diff                                                                            "
 "                                                                                "
 "PLAN ──────────────────────────────────────────────────────────────── done in 0s"
-"                                                                                "
-"# Plan                                                                          "
-"1. [ ] Write notes.txt                                                          "
-"2. [ ] Add a test                                                               "
 "                                                                                "
 "╭──────────────────────────────────────────────────────────────────────────────╮"
 "│ Plan                                                                         │"

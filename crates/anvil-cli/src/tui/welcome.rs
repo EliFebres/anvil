@@ -21,7 +21,7 @@ pub const LOGO: [&str; 5] = [
 ];
 
 /// The tagline under the version.
-const TAGLINE: &str = "a coding agent that improves itself";
+const TAGLINE: &str = "Eli's personal coding agent that constantly improves itself";
 
 /// How long after the previous row the next logo row appears.
 const ROW_DELAY: Duration = Duration::from_millis(80);
@@ -182,11 +182,16 @@ impl Welcome {
 
     /// The block beside the logo: version, tagline and the key-value lines.
     fn header(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let mut lines = vec![
-            Line::styled(format!("anvil {}", self.version), theme.bold(Shade::Text)),
-            Line::styled(TAGLINE, theme.fg(Shade::Muted)),
-            Line::default(),
-        ];
+        let mut lines = vec![Line::styled(
+            format!("anvil {}", self.version),
+            theme.bold(Shade::Text),
+        )];
+        lines.extend(
+            wrap(TAGLINE, width)
+                .into_iter()
+                .map(|line| Line::styled(line, theme.fg(Shade::Muted))),
+        );
+        lines.push(Line::default());
         let pair = |key: &str, value: String| {
             Line::from(vec![
                 Span::styled(format!("{key:<9}"), theme.fg(Shade::Muted)),

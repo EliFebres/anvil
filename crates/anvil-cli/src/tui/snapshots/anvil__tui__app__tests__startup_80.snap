@@ -3,7 +3,8 @@ source: crates/anvil-cli/src/tui/app.rs
 expression: terminal.backend()
 ---
 "                                  anvil 0.1.0                                   "
-"    ___    _   ___    ________    a coding agent that improves itself           "
+"                                  Eli's personal coding agent that constantly   "
+"    ___    _   ___    ________    improves itself                               "
 "   /   |  / | / / |  / /  _/ /                                                  "
 "  / /| | /  |/ /| | / // // /     project                                       "
 " / ___ |/ /|  / | |/ // // /___   coder    main (test-model)                    "
@@ -18,7 +19,6 @@ expression: terminal.backend()
 "recent sessions                                                                 "
 "  01K9ABCDEFGHJKMNPQRSTVWXYZ  done  add a --dry-run flag  2026-11-01 09:30      "
 "  01K9ABCDEFGHJKMNPQRSTVWXY0  incomplete  rename the config m…  2026-10-31 18:02"
-"                                                                                "
 "                                                                                "
 "                                                                                "
 "                                                                                "

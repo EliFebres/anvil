@@ -186,6 +186,23 @@ impl Theme {
         style.bg(self.surface)
     }
 
+    /// A style moved onto the screen background, for inset boxes on a
+    /// raised surface.
+    ///
+    /// # Arguments
+    ///
+    /// * `style` - The style.
+    ///
+    /// # Returns
+    ///
+    /// The style with the background color; unchanged in monochrome.
+    pub fn on_bg(&self, style: Style) -> Style {
+        if self.depth == Depth::Mono {
+            return style;
+        }
+        style.bg(self.bg)
+    }
+
     /// The style of borders and rules.
     ///
     /// # Returns

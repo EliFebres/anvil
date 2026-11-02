@@ -177,8 +177,11 @@ impl MarkdownDoc {
         }
     }
 
-    /// Every delta so far, verbatim, for tests.
-    #[cfg(test)]
+    /// Every delta so far, verbatim.
+    ///
+    /// # Returns
+    ///
+    /// The source text.
     pub fn text(&self) -> &str {
         &self.source
     }

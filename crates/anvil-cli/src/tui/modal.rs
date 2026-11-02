@@ -1,9 +1,9 @@
-//! Prompts drawn over the transcript: tool permission, plan approval,
-//! memory keep/drop and the key help. While one is open every key goes to
-//! it and nothing else on the screen changes.
+//! Prompts drawn over the transcript: tool permission, memory keep/drop and
+//! the key help. While one is open every key goes to it, the screen behind
+//! it is dimmed, and nothing else changes until it is answered.
 
-use anvil_core::agent::PlanDecision;
-use anvil_core::tools::{PermissionRequest, PromptAnswer};
+use anvil_core::tools::shell::DEFAULT_TIMEOUT_S;
+use anvil_core::tools::{DEFAULT_OUTPUT_CAP, PermissionRequest, PromptAnswer};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -12,21 +12,19 @@ use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use tokio::sync::oneshot;
 use unicode_width::UnicodeWidthStr;
 
-use super::editor::{EditKey, Editor};
+use super::MemoryAnswer;
+use super::diff::Diff;
 use super::keys;
-use super::markdown::MarkdownDoc;
 use super::theme::{Shade, Theme};
+use super::transcript::diff_lines;
 use super::wrap::{segments, wrap};
-use super::{MemoryAnswer, UiRequest};
 
-/// The widest a prompt gets, borders included.
-const MAX_WIDTH: u16 = 90;
+/// The prompt's share of the screen width.
+const WIDTH_PERCENT: u16 = 60;
 
-/// Rows the revise editor may take inside the plan prompt.
-const REVISE_ROWS: u16 = 3;
-
-/// The prompt the user asked to revise the plan with.
-const REVISE_PREFIX: &str = "what should change? ";
+/// Rows the prompt needs besides the payload: borders, context, gaps,
+/// the inset box's borders, the limits line and the choices line.
+const FIXED_ROWS: u16 = 10;
 
 /// A prompt waiting for the user.
 #[derive(Debug)]
@@ -35,20 +33,11 @@ pub enum Modal {
     Permission {
         /// What is about to run.
         request: PermissionRequest,
+        /// The change it would make, when the call edits a file.
+        edit: Option<Diff>,
         /// Where the answer goes.
         reply: oneshot::Sender<PromptAnswer>,
-        /// First body line shown.
-        scroll: usize,
-    },
-    /// Should this plan be built?
-    Plan {
-        /// The plan, rendered as markdown; boxed because it is large.
-        doc: Box<MarkdownDoc>,
-        /// The feedback editor, open after `r`.
-        revise: Option<Editor>,
-        /// Where the decision goes.
-        reply: oneshot::Sender<PlanDecision>,
-        /// First body line shown.
+        /// First payload line shown.
         scroll: usize,
     },
     /// Should this fact be remembered?
@@ -64,7 +53,7 @@ pub enum Modal {
     Help {
         /// Whether the session is a run, which takes only slash commands.
         run: bool,
-        /// First body line shown.
+        /// First payload line shown.
         scroll: usize,
     },
 }
@@ -74,8 +63,6 @@ pub enum Modal {
 pub enum Answer {
     /// A permission answer.
     Permission(PromptAnswer),
-    /// A plan decision.
-    Plan(PlanDecision),
     /// A memory answer.
     Memory(MemoryAnswer),
     /// The help was closed.
@@ -90,12 +77,9 @@ impl Answer {
     /// A short label.
     pub fn label(&self) -> String {
         match self {
-            Answer::Permission(PromptAnswer::Yes) => "yes".to_owned(),
-            Answer::Permission(PromptAnswer::No) => "no".to_owned(),
+            Answer::Permission(PromptAnswer::Yes) => "allow".to_owned(),
+            Answer::Permission(PromptAnswer::No) => "deny".to_owned(),
             Answer::Permission(PromptAnswer::Always) => "always".to_owned(),
-            Answer::Plan(PlanDecision::Approve) => "yes".to_owned(),
-            Answer::Plan(PlanDecision::Revise(feedback)) => format!("revise: {feedback}"),
-            Answer::Plan(PlanDecision::Abort) => "quit".to_owned(),
             Answer::Memory(MemoryAnswer::Keep) => "keep".to_owned(),
             Answer::Memory(MemoryAnswer::Drop) => "drop".to_owned(),
             Answer::Help => String::new(),
@@ -103,36 +87,51 @@ impl Answer {
     }
 }
 
+/// One `key description` choice on the last line of a prompt.
+struct Choice {
+    key: &'static str,
+    label: &'static str,
+    shade: Shade,
+}
+
 impl Modal {
-    /// The prompt for a request.
+    /// The permission prompt for a call.
     ///
     /// # Arguments
     ///
-    /// * `request` - The question and its reply channel.
+    /// * `request` - What is about to run.
+    /// * `edit` - The change it would make, when known.
+    /// * `reply` - Where the answer goes.
     ///
     /// # Returns
     ///
     /// The prompt.
-    pub fn from_request(request: UiRequest) -> Self {
-        match request {
-            UiRequest::Permission { request, reply } => Modal::Permission {
-                request,
-                reply,
-                scroll: 0,
-            },
-            UiRequest::Plan { plan, reply } => {
-                let mut doc = MarkdownDoc::new();
-                doc.push(&plan);
-                doc.finish();
-                Modal::Plan {
-                    doc: Box::new(doc),
-                    revise: None,
-                    reply,
-                    scroll: 0,
-                }
-            }
-            UiRequest::Memory { topic, fact, reply } => Modal::Memory { topic, fact, reply },
+    pub fn permission(
+        request: PermissionRequest,
+        edit: Option<Diff>,
+        reply: oneshot::Sender<PromptAnswer>,
+    ) -> Self {
+        Modal::Permission {
+            request,
+            edit,
+            reply,
+            scroll: 0,
         }
+    }
+
+    /// The keep/drop prompt for a proposed fact.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - The topic it would go under.
+    /// * `fact` - The fact.
+    /// * `reply` - Where the answer goes.
+    ///
+    /// # Returns
+    ///
+    /// The prompt.
+    pub fn memory(topic: String, fact: String, reply: oneshot::Sender<MemoryAnswer>) -> Self {
+        Modal::Memory { topic, fact, reply }
     }
 
     /// The key help.
@@ -158,13 +157,12 @@ impl Modal {
             Modal::Permission { request, .. } => {
                 Some(format!("allow {} {}?", request.tool, target_text(request)))
             }
-            Modal::Plan { .. } => Some("build this plan?".to_owned()),
             Modal::Memory { topic, fact, .. } => Some(format!("keep [{topic}] {fact}?")),
             Modal::Help { .. } => None,
         }
     }
 
-    /// The answer that does nothing irreversible: no, quit, drop.
+    /// The answer that does nothing irreversible: deny or drop.
     ///
     /// # Returns
     ///
@@ -172,22 +170,9 @@ impl Modal {
     pub fn safe_answer(&self) -> Answer {
         match self {
             Modal::Permission { .. } => Answer::Permission(PromptAnswer::No),
-            Modal::Plan { .. } => Answer::Plan(PlanDecision::Abort),
             Modal::Memory { .. } => Answer::Memory(MemoryAnswer::Drop),
             Modal::Help { .. } => Answer::Help,
         }
-    }
-
-    /// Whether the plan prompt is taking feedback, for tests.
-    #[cfg(test)]
-    pub fn is_editing(&self) -> bool {
-        matches!(
-            self,
-            Modal::Plan {
-                revise: Some(_),
-                ..
-            }
-        )
     }
 
     /// Handles a key.
@@ -212,43 +197,8 @@ impl Modal {
                 KeyCode::Char('n' | 'N') if plain => Some(Answer::Permission(PromptAnswer::No)),
                 KeyCode::Char('a' | 'A') if plain => Some(Answer::Permission(PromptAnswer::Always)),
                 KeyCode::Esc => Some(Answer::Permission(PromptAnswer::No)),
-                _ => {
-                    self.scroll_key(key.code);
-                    None
-                }
-            },
-            Modal::Plan {
-                revise: Some(editor),
-                ..
-            } => match key.code {
-                KeyCode::Enter if !editor.is_empty() => {
-                    let feedback = editor.take().trim().to_owned();
-                    Some(Answer::Plan(PlanDecision::Revise(feedback)))
-                }
-                KeyCode::Esc => {
-                    if let Modal::Plan { revise, .. } = self {
-                        *revise = None;
-                    }
-                    None
-                }
-                _ => {
-                    if let Some(edit) = edit_key(key) {
-                        editor.key(edit);
-                    }
-                    None
-                }
-            },
-            Modal::Plan { revise, .. } => match key.code {
-                KeyCode::Char('y' | 'Y') if plain => Some(Answer::Plan(PlanDecision::Approve)),
-                KeyCode::Char('q' | 'Q' | 'n' | 'N') if plain => {
-                    Some(Answer::Plan(PlanDecision::Abort))
-                }
-                KeyCode::Char('r' | 'R') | KeyCode::Esc if plain => {
-                    *revise = Some(Editor::new());
-                    None
-                }
-                _ => {
-                    self.scroll_key(key.code);
+                code => {
+                    self.scroll_key(code);
                     None
                 }
             },
@@ -259,8 +209,8 @@ impl Modal {
                 _ => None,
             },
             Modal::Help { .. } => match key.code {
-                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
-                    self.scroll_key(key.code);
+                code @ (KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown) => {
+                    self.scroll_key(code);
                     None
                 }
                 _ => Some(Answer::Help),
@@ -268,7 +218,7 @@ impl Modal {
         }
     }
 
-    /// Scrolls the body by a mouse wheel notch.
+    /// Scrolls the payload by a mouse wheel notch.
     ///
     /// # Arguments
     ///
@@ -289,9 +239,6 @@ impl Modal {
             (Modal::Permission { reply, .. }, Answer::Permission(answer)) => {
                 let _ = reply.send(answer);
             }
-            (Modal::Plan { reply, .. }, Answer::Plan(decision)) => {
-                let _ = reply.send(decision);
-            }
             (Modal::Memory { reply, .. }, Answer::Memory(answer)) => {
                 let _ = reply.send(answer);
             }
@@ -299,41 +246,41 @@ impl Modal {
         }
     }
 
-    /// Draws the prompt centered over `area`.
+    /// Draws the prompt centered over `area`: a box on the raised surface
+    /// with the title, a line of context, the payload in an inset box,
+    /// the limits and the choices.
     ///
     /// # Arguments
     ///
     /// * `frame` - The frame.
     /// * `area` - The whole screen.
-    /// * `theme` - Styles.
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let width = area.width.saturating_sub(4).clamp(20, MAX_WIDTH);
+    /// * `theme` - Styles, at full contrast.
+    ///
+    /// # Returns
+    ///
+    /// The rectangle the prompt covered.
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) -> Rect {
+        let width = (area.width * WIDTH_PERCENT / 100).clamp(30.min(area.width), area.width);
         let inner_width = usize::from(width.saturating_sub(4)).max(1);
-        let body = self.body(inner_width, theme);
-        let editor_rows = match self {
-            Modal::Plan {
-                revise: Some(editor),
-                ..
-            } => editor
-                .height(width.saturating_sub(4), REVISE_PREFIX.width())
-                .min(REVISE_ROWS),
-            _ => 0,
-        };
-        let fixed = 2 + editor_rows + 2;
-        let max_body = usize::from(area.height.saturating_sub(fixed).max(1));
-        let shown = body.len().clamp(1, max_body);
-        let scroll = self.clamp_scroll(body.len().saturating_sub(shown));
+        let payload_width = inner_width.saturating_sub(4).max(1);
+        let payload = self.payload(payload_width, theme);
+        let max_payload = usize::from(area.height.saturating_sub(FIXED_ROWS).max(1));
+        let shown = payload.len().clamp(1, max_payload);
+        let scroll = self.clamp_scroll(payload.len().saturating_sub(shown));
         let height = u16::try_from(shown)
             .unwrap_or(u16::MAX)
-            .saturating_add(fixed);
-        let rect = centered(area, width, height.min(area.height));
+            .saturating_add(FIXED_ROWS)
+            .min(area.height);
+        let rect = centered(area, width, height);
+        let surface = theme.on_surface(theme.fg(Shade::Text));
         frame.render_widget(Clear, rect);
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
-            .border_style(theme.fg(Shade::Accent))
+            .border_style(theme.on_surface(theme.fg(Shade::Accent)))
+            .style(surface)
             .title(Span::styled(
                 format!(" {} ", self.title()),
-                theme.bold(Shade::Accent),
+                theme.on_surface(theme.bold(Shade::Accent)),
             ));
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
@@ -342,114 +289,197 @@ impl Modal {
             width: inner.width.saturating_sub(2),
             ..inner
         };
-        let [body_area, editor_area, _, footer_area] = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(editor_rows),
+        let [context_area, _, box_area, _, limits_area, _, choices_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(padded);
-        let visible: Vec<Line<'static>> = body.into_iter().skip(scroll).take(shown).collect();
-        frame.render_widget(Paragraph::new(visible), body_area);
-        if let Modal::Plan {
-            revise: Some(editor),
-            ..
-        } = self
-        {
-            let (lines, (column, row)) =
-                editor.render(editor_area.width, REVISE_PREFIX, theme, Shade::Accent);
-            frame.render_widget(Paragraph::new(lines), editor_area);
-            let x = editor_area
-                .x
-                .saturating_add(column)
-                .min(editor_area.right().saturating_sub(1));
-            let y = editor_area
-                .y
-                .saturating_add(row)
-                .min(editor_area.bottom().saturating_sub(1));
-            frame.set_cursor_position((x, y));
-        }
         frame.render_widget(
-            Paragraph::new(Line::styled(self.footer(), theme.fg(Shade::Muted))),
-            footer_area,
+            Paragraph::new(Line::styled(self.context(), theme.fg(Shade::Muted))),
+            context_area,
         );
+        let inset = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(theme.on_bg(theme.border()))
+            .style(theme.on_bg(theme.fg(Shade::Text)));
+        let payload_area = inset.inner(box_area);
+        frame.render_widget(inset, box_area);
+        let visible: Vec<Line<'static>> = payload
+            .into_iter()
+            .skip(scroll)
+            .take(usize::from(payload_area.height))
+            .collect();
+        let payload_area = Rect {
+            x: payload_area.x.saturating_add(1),
+            width: payload_area.width.saturating_sub(2),
+            ..payload_area
+        };
+        frame.render_widget(Paragraph::new(visible), payload_area);
+        frame.render_widget(
+            Paragraph::new(Line::styled(self.limits(), theme.fg(Shade::Muted))),
+            limits_area,
+        );
+        frame.render_widget(
+            Paragraph::new(self.choices_line(usize::from(choices_area.width), theme)),
+            choices_area,
+        );
+        rect
     }
 
     /// The title in the border.
     fn title(&self) -> &'static str {
         match self {
-            Modal::Permission { .. } => "permission",
-            Modal::Plan { .. } => "plan",
-            Modal::Memory { .. } => "remember?",
-            Modal::Help { .. } => "keys",
+            Modal::Permission { .. } => "Permission",
+            Modal::Memory { .. } => "Remember these?",
+            Modal::Help { .. } => "Keys",
         }
     }
 
-    /// The key hints under the body.
-    fn footer(&self) -> &'static str {
+    /// The muted line under the title.
+    fn context(&self) -> String {
         match self {
-            Modal::Permission { .. } => "[y]es  [n]o  [a]lways    Esc = no",
-            Modal::Plan {
-                revise: Some(_), ..
-            } => "Enter = send the feedback    Esc = back",
-            Modal::Plan { .. } => "[y]es, build it  [r]evise  [q]uit    Esc = revise",
-            Modal::Memory { .. } => "[k]eep  [d]rop    Esc = drop",
-            Modal::Help { .. } => "any key closes",
+            Modal::Permission { request, edit, .. } => match (request.tool.as_str(), edit) {
+                ("shell", _) => "shell wants to run".to_owned(),
+                (tool, Some(_)) => format!("{tool} wants to change {}", target_text(request)),
+                (tool, None) => format!("{tool} wants to run with"),
+            },
+            Modal::Memory { topic, .. } => format!("proposed from this session, under {topic}"),
+            Modal::Help { run: true, .. } => {
+                "during a run the input takes /expand, /help and /quit".to_owned()
+            }
+            Modal::Help { run: false, .. } => "what the keys do".to_owned(),
         }
     }
 
-    /// The body lines at a width. The plan's markdown caches its lines, so
-    /// this takes the prompt mutably.
-    fn body(&mut self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    /// The payload lines at a width.
+    fn payload(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         match self {
-            Modal::Permission { request, .. } => {
-                let mut lines = vec![Line::from(vec![
-                    Span::styled(request.tool.clone(), theme.bold(Shade::Text)),
-                    Span::raw(" "),
-                    Span::raw(target_text(request)),
-                ])];
+            Modal::Permission { request, edit, .. } => {
+                if let Some(diff) = edit {
+                    return diff_lines(diff, width, theme);
+                }
+                if request.tool == "shell"
+                    && let Some(target) = &request.target
+                {
+                    return segments(target, width)
+                        .into_iter()
+                        .map(|(_, segment)| Line::styled(segment, theme.fg(Shade::Text)))
+                        .collect();
+                }
                 let args = serde_json::to_string_pretty(&request.arguments)
                     .unwrap_or_else(|_| request.arguments.to_string());
-                if request.arguments.is_object() || request.arguments.is_array() {
-                    lines.push(Line::default());
-                    for line in args.lines() {
-                        for (_, segment) in segments(line, width) {
-                            lines.push(Line::styled(segment, theme.fg(Shade::Muted)));
-                        }
-                    }
-                }
-                lines
+                args.lines()
+                    .flat_map(|line| segments(line, width))
+                    .map(|(_, segment)| Line::styled(segment, theme.fg(Shade::Text)))
+                    .collect()
             }
-            Modal::Plan { doc, .. } => doc.lines(u16::try_from(width).unwrap_or(u16::MAX), theme),
-            Modal::Memory { topic, fact, .. } => {
-                let mut lines = vec![Line::styled(format!("[{topic}]"), theme.fg(Shade::Muted))];
-                lines.extend(wrap(fact, width).into_iter().map(Line::from));
-                lines
-            }
-            Modal::Help { run, .. } => {
+            Modal::Memory { fact, .. } => wrap(fact, width)
+                .into_iter()
+                .map(|line| Line::styled(line, theme.fg(Shade::Text)))
+                .collect(),
+            Modal::Help { .. } => {
                 let key_width = keys::HELP
                     .iter()
                     .map(|(key, _)| key.width())
                     .max()
                     .unwrap_or(0);
-                let mut lines: Vec<Line<'static>> = keys::HELP
+                keys::HELP
                     .iter()
                     .map(|(key, meaning)| {
                         Line::from(vec![
                             Span::styled(format!("{key:<key_width$}"), theme.bold(Shade::Text)),
-                            Span::raw(format!("  {meaning}")),
+                            Span::styled(format!("  {meaning}"), theme.fg(Shade::Text)),
                         ])
                     })
-                    .collect();
-                if *run {
-                    lines.push(Line::default());
-                    lines.push(Line::from(
-                        "during a run the input takes /expand, /help and /quit",
-                    ));
-                }
-                lines
+                    .collect()
             }
         }
+    }
+
+    /// The limits line: what bounds the call.
+    fn limits(&self) -> String {
+        match self {
+            Modal::Permission { request, .. } => {
+                let cap = format!("output cap {} KiB", DEFAULT_OUTPUT_CAP / 1024);
+                if request.tool == "shell" {
+                    let timeout = request
+                        .arguments
+                        .get("timeout_s")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(DEFAULT_TIMEOUT_S);
+                    format!("timeout {timeout}s · {cap}")
+                } else {
+                    cap
+                }
+            }
+            Modal::Memory { .. } => "kept facts load into every session in this repo".to_owned(),
+            Modal::Help { .. } => "PageUp and PageDown scroll this list".to_owned(),
+        }
+    }
+
+    /// The choices and the safe answer, laid out over `width`.
+    fn choices_line(&self, width: usize, theme: &Theme) -> Line<'static> {
+        let (choices, escape): (Vec<Choice>, &str) = match self {
+            Modal::Permission { .. } => (
+                vec![
+                    Choice {
+                        key: "y",
+                        label: "allow",
+                        shade: Shade::Success,
+                    },
+                    Choice {
+                        key: "n",
+                        label: "deny",
+                        shade: Shade::Danger,
+                    },
+                    Choice {
+                        key: "a",
+                        label: "always",
+                        shade: Shade::Success,
+                    },
+                ],
+                "esc = deny",
+            ),
+            Modal::Memory { .. } => (
+                vec![
+                    Choice {
+                        key: "k",
+                        label: "keep",
+                        shade: Shade::Success,
+                    },
+                    Choice {
+                        key: "d",
+                        label: "drop",
+                        shade: Shade::Danger,
+                    },
+                ],
+                "esc = drop",
+            ),
+            Modal::Help { .. } => (Vec::new(), "any key closes"),
+        };
+        let mut spans = Vec::new();
+        let mut used = 0;
+        for (index, choice) in choices.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::raw("   "));
+                used += 3;
+            }
+            spans.push(Span::styled(choice.key, theme.bold(choice.shade)));
+            spans.push(Span::styled(
+                format!(" {}", choice.label),
+                theme.fg(Shade::Text),
+            ));
+            used += choice.key.width() + 1 + choice.label.width();
+        }
+        let gap = width.saturating_sub(used + escape.width()).max(1);
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(escape, theme.fg(Shade::Faint)));
+        Line::from(spans)
     }
 
     /// Scrolls on the arrow and page keys.
@@ -463,14 +493,14 @@ impl Modal {
         }
     }
 
-    /// Moves the first shown line; the draw clamps it to the body.
+    /// Moves the first shown payload line; the draw clamps it.
     fn scroll_by(&mut self, delta: isize) {
         if let Some(scroll) = self.scroll_mut() {
             *scroll = scroll.saturating_add_signed(delta);
         }
     }
 
-    /// Keeps the scroll within the body and returns it.
+    /// Keeps the scroll within the payload and returns it.
     fn clamp_scroll(&mut self, max: usize) -> usize {
         match self.scroll_mut() {
             Some(scroll) => {
@@ -484,9 +514,7 @@ impl Modal {
     /// The scroll position of the prompts that have one.
     fn scroll_mut(&mut self) -> Option<&mut usize> {
         match self {
-            Modal::Permission { scroll, .. }
-            | Modal::Plan { scroll, .. }
-            | Modal::Help { scroll, .. } => Some(scroll),
+            Modal::Permission { scroll, .. } | Modal::Help { scroll, .. } => Some(scroll),
             Modal::Memory { .. } => None,
         }
     }
@@ -498,22 +526,6 @@ fn target_text(request: &PermissionRequest) -> String {
         .target
         .clone()
         .unwrap_or_else(|| request.arguments.to_string())
-}
-
-/// The editing key for the revise editor, if the key is one.
-fn edit_key(key: KeyEvent) -> Option<EditKey> {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    match key.code {
-        KeyCode::Char(ch) if !ctrl && !alt => Some(EditKey::Char(ch)),
-        KeyCode::Backspace => Some(EditKey::Backspace),
-        KeyCode::Delete => Some(EditKey::Delete),
-        KeyCode::Left => Some(EditKey::Left),
-        KeyCode::Right => Some(EditKey::Right),
-        KeyCode::Home => Some(EditKey::Home),
-        KeyCode::End => Some(EditKey::End),
-        _ => None,
-    }
 }
 
 /// A rectangle of the given size in the middle of `area`.
@@ -534,23 +546,15 @@ mod tests {
 
     fn permission() -> (Modal, oneshot::Receiver<PromptAnswer>) {
         let (tx, rx) = oneshot::channel();
-        let modal = Modal::from_request(UiRequest::Permission {
-            request: PermissionRequest {
+        let modal = Modal::permission(
+            PermissionRequest {
                 tool: "shell".to_owned(),
                 target: Some("cargo test".to_owned()),
-                arguments: serde_json::json!({"command": "cargo test"}),
+                arguments: serde_json::json!({"command": "cargo test", "timeout_s": 300}),
             },
-            reply: tx,
-        });
-        (modal, rx)
-    }
-
-    fn plan() -> (Modal, oneshot::Receiver<PlanDecision>) {
-        let (tx, rx) = oneshot::channel();
-        let modal = Modal::from_request(UiRequest::Plan {
-            plan: "# Plan\n\n1. [ ] a\n".to_owned(),
-            reply: tx,
-        });
+            None,
+            tx,
+        );
         (modal, rx)
     }
 
@@ -559,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_keys_and_reply() {
+    fn permission_keys_reply_and_limits() {
         let (mut modal, mut rx) = permission();
         assert_eq!(press(&mut modal, KeyCode::Char('x')), None);
         assert_eq!(
@@ -567,6 +571,8 @@ mod tests {
             Some(Answer::Permission(PromptAnswer::Always))
         );
         assert_eq!(modal.question().as_deref(), Some("allow shell cargo test?"));
+        assert_eq!(modal.context(), "shell wants to run");
+        assert_eq!(modal.limits(), "timeout 300s · output cap 30 KiB");
         modal.reply(Answer::Permission(PromptAnswer::Always));
         assert_eq!(rx.try_recv(), Ok(PromptAnswer::Always));
     }
@@ -579,42 +585,9 @@ mod tests {
     }
 
     #[test]
-    fn plan_revise_takes_feedback_and_esc_goes_back() {
-        let (mut modal, mut rx) = plan();
-        assert_eq!(press(&mut modal, KeyCode::Esc), None);
-        assert!(modal.is_editing());
-        assert_eq!(
-            press(&mut modal, KeyCode::Enter),
-            None,
-            "empty feedback stays"
-        );
-        assert_eq!(press(&mut modal, KeyCode::Esc), None);
-        assert!(!modal.is_editing());
-        assert_eq!(press(&mut modal, KeyCode::Char('r')), None);
-        for ch in "add tests".chars() {
-            press(&mut modal, KeyCode::Char(ch));
-        }
-        let answer = press(&mut modal, KeyCode::Enter);
-        assert_eq!(
-            answer,
-            Some(Answer::Plan(PlanDecision::Revise("add tests".to_owned())))
-        );
-        assert_eq!(modal.safe_answer(), Answer::Plan(PlanDecision::Abort));
-        modal.reply(answer.expect("answered"));
-        assert_eq!(
-            rx.try_recv(),
-            Ok(PlanDecision::Revise("add tests".to_owned()))
-        );
-    }
-
-    #[test]
     fn memory_and_help_keys() {
         let (tx, mut rx) = oneshot::channel();
-        let mut modal = Modal::from_request(UiRequest::Memory {
-            topic: "tooling".to_owned(),
-            fact: "uses just".to_owned(),
-            reply: tx,
-        });
+        let mut modal = Modal::memory("tooling".to_owned(), "uses just".to_owned(), tx);
         assert_eq!(press(&mut modal, KeyCode::Char('q')), None);
         assert_eq!(
             press(&mut modal, KeyCode::Esc),
@@ -626,6 +599,24 @@ mod tests {
         assert_eq!(press(&mut help, KeyCode::Down), None);
         assert_eq!(press(&mut help, KeyCode::Char('x')), Some(Answer::Help));
         assert_eq!(help.question(), None);
+        assert_eq!(help.safe_answer(), Answer::Help);
+    }
+
+    #[test]
+    fn choices_put_the_safe_answer_at_the_right_edge() {
+        let (modal, _rx) = permission();
+        let theme = Theme::truecolor();
+        let line = modal.choices_line(50, &theme);
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(text.width(), 50);
+        assert!(text.starts_with("y allow   n deny   a always"), "{text:?}");
+        assert!(text.ends_with("esc = deny"), "{text:?}");
+        assert_eq!(line.spans[0].style.fg, Some(theme.success));
+        assert_eq!(line.spans[3].style.fg, Some(theme.danger));
     }
 
     #[test]

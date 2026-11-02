@@ -473,6 +473,14 @@ impl Transcript {
             }
             None => {
                 self.close_model();
+                // The model just streamed this very text; the checklist replaces
+                // it rather than showing the plan twice.
+                let streamed = self.slots.last().is_some_and(|slot| {
+                    matches!(&slot.entry, Entry::Model { doc, .. } if doc.text().trim() == text.trim())
+                });
+                if streamed {
+                    self.slots.pop();
+                }
                 self.push(Entry::Plan(block));
             }
         }
@@ -511,6 +519,34 @@ impl Transcript {
                 _ => {}
             }
         }
+    }
+
+    /// Whether a plan block is shown.
+    ///
+    /// # Returns
+    ///
+    /// True once a plan file was set.
+    pub fn has_plan(&self) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| matches!(slot.entry, Entry::Plan(_)))
+    }
+
+    /// The most recent proposed edit of a file, for the permission prompt.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The path as the tool call gave it.
+    ///
+    /// # Returns
+    ///
+    /// The diff, if an edit of that file was proposed.
+    pub fn last_edit_for(&self, target: &str) -> Option<Diff> {
+        let shown = self.display_path(&self.cwd.join(target));
+        self.slots.iter().rev().find_map(|slot| match &slot.entry {
+            Entry::Edit { shown_path, diff } if *shown_path == shown => Some(diff.clone()),
+            _ => None,
+        })
     }
 
     /// Expands every tool call.
@@ -1120,7 +1156,6 @@ fn render_tool(tool: &ToolEntry, width: usize, theme: &Theme, tick: u64) -> Vec<
 /// left rule, each colored line filled to the edge.
 fn render_edit(shown_path: &str, diff: &Diff, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let rule = Span::styled("▌ ", theme.border());
-    let inner = width.saturating_sub(4).max(1);
     let range = if diff.start_line == diff.end_line {
         format!("{shown_path}:{}", diff.start_line)
     } else {
@@ -1130,6 +1165,30 @@ fn render_edit(shown_path: &str, diff: &Diff, width: usize, theme: &Theme) -> Ve
         rule.clone(),
         Span::styled(range, theme.fg(Shade::Muted)),
     ])];
+    for line in diff_lines(diff, width.saturating_sub(2).max(1), theme) {
+        let style = line.style;
+        let mut spans = vec![rule.clone()];
+        spans.extend(line.spans.into_iter().map(|span| span.patch_style(style)));
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// The rows of a diff as lines: context muted, removed and added lines on
+/// their backgrounds, each filled to `width`.
+///
+/// # Arguments
+///
+/// * `diff` - The change.
+/// * `width` - Columns.
+/// * `theme` - Styles.
+///
+/// # Returns
+///
+/// The lines; one faint `(no change)` line for an empty diff.
+pub fn diff_lines(diff: &Diff, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(2).max(1);
+    let mut lines = Vec::new();
     for row in &diff.rows {
         let (mark, style) = match row.kind {
             RowKind::Context => (' ', theme.fg(Shade::Muted)),
@@ -1138,18 +1197,12 @@ fn render_edit(shown_path: &str, diff: &Diff, width: usize, theme: &Theme) -> Ve
         };
         for (_, segment) in segments(&row.text, inner) {
             let text = format!("{mark} {segment}");
-            let pad = " ".repeat(width.saturating_sub(2 + text.width()));
-            lines.push(Line::from(vec![
-                rule.clone(),
-                Span::styled(format!("{text}{pad}"), style),
-            ]));
+            let pad = " ".repeat(width.saturating_sub(text.width()));
+            lines.push(Line::styled(format!("{text}{pad}"), style));
         }
     }
-    if diff.rows.is_empty() {
-        lines.push(Line::from(vec![
-            rule,
-            Span::styled("(no change)", theme.fg(Shade::Faint)),
-        ]));
+    if lines.is_empty() {
+        lines.push(Line::styled("(no change)", theme.fg(Shade::Faint)));
     }
     lines
 }

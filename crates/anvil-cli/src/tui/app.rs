@@ -1,13 +1,16 @@
 //! The UI state: consumes messages, keeps the three regions, draws them.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anvil_core::agent::{LoopEvent, State};
-use crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
+use anvil_core::agent::{LoopEvent, PlanDecision, State};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
+use tokio::sync::oneshot;
 use unicode_width::UnicodeWidthStr;
 
 use super::editor::{EditKey, Editor};
@@ -35,6 +38,24 @@ pub enum Action {
     Quit,
 }
 
+/// The plan approval question: a bar above the input until answered.
+#[derive(Debug)]
+struct PlanQuestion {
+    /// Where the decision goes.
+    reply: oneshot::Sender<PlanDecision>,
+    /// Whether the input is taking the revision text.
+    revising: bool,
+}
+
+/// What the plan question was asked.
+const PLAN_QUESTION: &str = "build this plan?";
+
+/// The prompt prefix while revising a plan.
+const REVISE_PREFIX: &str = "revise > ";
+
+/// What the input shows while a prompt is open.
+const PAUSED: &str = "input is paused while the question above is open";
+
 /// The whole UI state. Pure: time comes in as ticks and nothing here
 /// touches the terminal, the clock or the environment.
 ///
@@ -51,6 +72,10 @@ pub struct App {
     modal: Option<Modal>,
     pending: VecDeque<UiRequest>,
     deferred: VecDeque<UiMsg>,
+    /// The plan question, shown as a bar above the input.
+    question: Option<PlanQuestion>,
+    /// Where the last draw put the prompt, for tests.
+    modal_rect: Option<Rect>,
     state: State,
     busy: bool,
     now: Instant,
@@ -87,6 +112,8 @@ impl App {
             modal: None,
             pending: VecDeque::new(),
             deferred: VecDeque::new(),
+            question: None,
+            modal_rect: None,
             busy: false,
             now,
             tick: 0,
@@ -116,7 +143,7 @@ impl App {
                 None
             }
             UiMsg::Request(request) => {
-                self.open(Modal::from_request(request));
+                self.open_request(request);
                 None
             }
             UiMsg::ToolResult {
@@ -197,9 +224,11 @@ impl App {
             .editor
             .height(area.width.saturating_sub(2), prefix.width())
             .saturating_add(2);
-        let [transcript_area, status_area, input_box] = Layout::vertical([
+        let question_height = u16::from(self.question.is_some());
+        let [transcript_area, status_area, question_area, input_box] = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(1),
+            Constraint::Length(question_height),
             Constraint::Length(input_height),
         ])
         .areas(area);
@@ -215,6 +244,12 @@ impl App {
             self.status.line(status_area.width, self.now, &theme),
             status_area,
         );
+        if self.question.is_some() {
+            frame.render_widget(
+                Paragraph::new(self.question_bar(usize::from(question_area.width), &theme)),
+                question_area,
+            );
+        }
         let border = if self.welcome && !dimmed {
             theme.fg(Shade::Accent)
         } else {
@@ -225,15 +260,19 @@ impl App {
             .border_style(border);
         let input_area = block.inner(input_box);
         frame.render_widget(block, input_box);
-        let prefix_shade = if dimmed { Shade::Faint } else { Shade::Accent };
-        let (lines, (column, row)) =
-            self.editor
-                .render(input_area.width, &prefix, &theme, prefix_shade);
-        frame.render_widget(Paragraph::new(lines), input_area);
         if let Some(modal) = &mut self.modal {
-            modal.draw(frame, area, &self.theme);
+            frame.render_widget(
+                Paragraph::new(Line::styled(PAUSED, theme.fg(Shade::Faint))),
+                input_area,
+            );
+            self.modal_rect = Some(modal.draw(frame, area, &self.theme));
             return;
         }
+        self.modal_rect = None;
+        let (lines, (column, row)) =
+            self.editor
+                .render(input_area.width, &prefix, &theme, Shade::Accent);
+        frame.render_widget(Paragraph::new(lines), input_area);
         let x = input_area
             .x
             .saturating_add(column)
@@ -267,6 +306,18 @@ impl App {
     #[cfg(test)]
     pub fn has_modal(&self) -> bool {
         self.modal.is_some()
+    }
+
+    /// Whether the plan question is open, for tests.
+    #[cfg(test)]
+    pub fn has_question(&self) -> bool {
+        self.question.is_some()
+    }
+
+    /// Where the last draw put the prompt, for tests.
+    #[cfg(test)]
+    pub fn modal_rect(&self) -> Option<Rect> {
+        self.modal_rect
     }
 
     /// Handles a message while a prompt is open: keys and the wheel go to
@@ -303,6 +354,97 @@ impl App {
         }
     }
 
+    /// Routes a request: the plan question goes to the bar above the
+    /// input, everything else opens a prompt.
+    fn open_request(&mut self, request: UiRequest) {
+        match request {
+            UiRequest::Plan { plan, reply } => {
+                if !self.transcript.has_plan() {
+                    self.transcript.set_plan(PathBuf::from("plan.md"), &plan);
+                }
+                self.question = Some(PlanQuestion {
+                    reply,
+                    revising: false,
+                });
+                self.last_ctrl_c = None;
+            }
+            UiRequest::Permission { request, reply } => {
+                let edit = request
+                    .target
+                    .as_deref()
+                    .filter(|_| request.tool == "edit_file" || request.tool == "write_file")
+                    .and_then(|target| self.transcript.last_edit_for(target));
+                self.open(Modal::permission(request, edit, reply));
+            }
+            UiRequest::Memory { topic, fact, reply } => {
+                self.open(Modal::memory(topic, fact, reply));
+            }
+        }
+    }
+
+    /// Answers the plan question and records it.
+    fn answer_plan(&mut self, decision: PlanDecision) {
+        let Some(question) = self.question.take() else {
+            return;
+        };
+        let answer = match &decision {
+            PlanDecision::Approve => "build".to_owned(),
+            PlanDecision::Revise(text) => format!("revise: {text}"),
+            PlanDecision::Abort => "quit".to_owned(),
+        };
+        self.transcript.push(Entry::Answer {
+            question: PLAN_QUESTION.to_owned(),
+            answer,
+        });
+        let _ = question.reply.send(decision);
+    }
+
+    /// Handles a key while the plan question is open; `None` when the key
+    /// is not the question's to handle.
+    fn plan_key(&mut self, key: KeyEvent) -> Option<Option<Action>> {
+        let revising = self.question.as_ref()?.revising;
+        let action = keys::map(key, self.editor.is_empty());
+        if matches!(
+            action,
+            KeyAction::Cancel
+                | KeyAction::PageUp
+                | KeyAction::PageDown
+                | KeyAction::ClearView
+                | KeyAction::CycleMode
+                | KeyAction::Ignore
+        ) {
+            return None;
+        }
+        if revising {
+            return match action {
+                KeyAction::Submit if !self.editor.is_empty() => {
+                    let text = self.editor.take().trim().to_owned();
+                    self.answer_plan(PlanDecision::Revise(text));
+                    Some(None)
+                }
+                KeyAction::Escape => {
+                    self.editor.take();
+                    if let Some(question) = &mut self.question {
+                        question.revising = false;
+                    }
+                    Some(None)
+                }
+                _ => None,
+            };
+        }
+        match key.code {
+            KeyCode::Char('y' | 'Y') => self.answer_plan(PlanDecision::Approve),
+            KeyCode::Char('r' | 'R') => {
+                if let Some(question) = &mut self.question {
+                    question.revising = true;
+                }
+            }
+            KeyCode::Char('q' | 'Q') => self.answer_plan(PlanDecision::Abort),
+            _ => {}
+        }
+        Some(None)
+    }
+
     /// Opens a prompt. The quit window resets so the first Ctrl+C in a
     /// prompt only closes it.
     fn open(&mut self, modal: Modal) {
@@ -327,7 +469,7 @@ impl App {
             }
         }
         if let Some(request) = self.pending.pop_front() {
-            self.open(Modal::from_request(request));
+            self.open_request(request);
         }
         action
     }
@@ -357,6 +499,9 @@ impl App {
     fn key(&mut self, key: KeyEvent) -> Option<Action> {
         if self.finished {
             return Some(Action::Quit);
+        }
+        if let Some(handled) = self.plan_key(key) {
+            return handled;
         }
         match keys::map(key, self.editor.is_empty()) {
             KeyAction::Submit => self.submit(),
@@ -491,6 +636,9 @@ impl App {
             let answer = modal.safe_answer();
             action = self.close_modal(modal, answer);
         }
+        if self.question.is_some() {
+            self.answer_plan(PlanDecision::Abort);
+        }
         if self.is_busy() {
             self.transcript.notice(
                 "cancelling; press Ctrl+C again within 2 s to quit",
@@ -515,17 +663,45 @@ impl App {
 
     /// The input prompt: the state and a chevron.
     fn prompt_prefix(&self) -> String {
+        if self.question.as_ref().is_some_and(|q| q.revising) {
+            return REVISE_PREFIX.to_owned();
+        }
         format!("{} > ", self.state.name())
+    }
+
+    /// The plan question bar: the question and its three keys.
+    fn question_bar(&self, width: usize, theme: &Theme) -> Line<'static> {
+        let right = "--yes skips this ";
+        let mut spans = vec![
+            Span::styled(" Build this plan?", theme.bold(Shade::Accent)),
+            Span::raw("   "),
+            Span::styled("y", theme.bold(Shade::Success)),
+            Span::styled(" build   ", theme.fg(Shade::Text)),
+            Span::styled("r", theme.bold(Shade::Accent2)),
+            Span::styled(" revise   ", theme.fg(Shade::Text)),
+            Span::styled("q", theme.bold(Shade::Danger)),
+            Span::styled(" quit", theme.fg(Shade::Text)),
+        ];
+        let used: usize = spans.iter().map(|span| span.content.width()).sum();
+        spans.push(Span::raw(
+            " ".repeat(width.saturating_sub(used + right.width())),
+        ));
+        spans.push(Span::styled(right, theme.fg(Shade::Faint)));
+        Line::from(spans).style(theme.on_surface(theme.fg(Shade::Text)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::Arc;
 
+    use super::*;
+    use crate::tui::runner::plan_message;
+    use crate::tui::welcome::LOGO;
+    use crate::tui::{MemoryAnswer, RecentSession};
     use anvil_core::agent::{
-        AgentLoop, AutoApprove, CheckCommand, EventSink, LoopConfig, LoopProviders, PlanDecision,
+        AgentLoop, AutoApprove, CheckCommand, EventSink, LoopConfig, LoopProviders,
     };
     use anvil_core::provider::{Event, FakeProvider, Provider, StopReason, ToolCall, Usage};
     use anvil_core::tools::{
@@ -536,14 +712,8 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use tokio::sync::oneshot;
 
-    use super::*;
-    use crate::tui::runner::plan_message;
-    use crate::tui::welcome::LOGO;
-    use crate::tui::{MemoryAnswer, RecentSession};
-
-    const PLAN_LINE: &str = "1. [ ] Write notes.txt";
+    const PLAN_LINE: &str = "Write notes.txt";
 
     fn info() -> SessionInfo {
         SessionInfo {
@@ -808,7 +978,7 @@ mod tests {
 
     /// A chat turn that edits a file: the user line, the model's text, the
     /// edit_file call with its proposed diff, and the finished call.
-    fn build_session(width: u16, height: u16) -> Terminal<TestBackend> {
+    fn build_session(width: u16, height: u16) -> (App, Terminal<TestBackend>) {
         let (mut app, base) = new_app();
         app.handle(UiMsg::Loop(LoopEvent::StateEntered {
             state: State::Build,
@@ -858,19 +1028,196 @@ mod tests {
         )));
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal.draw(|frame| app.draw(frame)).expect("draw");
-        terminal
+        (app, terminal)
     }
 
     #[test]
     fn build_session_120() {
-        let terminal = build_session(120, 38);
+        let (_, terminal) = build_session(120, 38);
         insta::assert_snapshot!(terminal.backend());
     }
 
     #[test]
     fn build_session_80() {
-        let terminal = build_session(80, 24);
+        let (_, terminal) = build_session(80, 24);
         insta::assert_snapshot!(terminal.backend());
+    }
+
+    /// The build session with the edit still pending its permission.
+    fn permission_session(
+        width: u16,
+        height: u16,
+    ) -> (App, Terminal<TestBackend>, oneshot::Receiver<PromptAnswer>) {
+        let (mut app, mut terminal) = build_session(width, height);
+        let (tx, rx) = oneshot::channel();
+        app.handle(UiMsg::Request(UiRequest::Permission {
+            request: PermissionRequest {
+                tool: "edit_file".to_owned(),
+                target: Some("src/lib.rs".to_owned()),
+                arguments: serde_json::json!({"path": "src/lib.rs", "old": "fn b() {}", "new": "fn beta() {}"}),
+            },
+            reply: tx,
+        }));
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        (app, terminal, rx)
+    }
+
+    #[test]
+    fn permission_modal_120() {
+        let (_, terminal, _rx) = permission_session(120, 38);
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn permission_modal_80() {
+        let (_, terminal, _rx) = permission_session(80, 24);
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn modal_dims_everything_behind_it() {
+        let theme = Theme::truecolor();
+        let mut app = App::new(info(), theme, Instant::now());
+        app.handle(UiMsg::Loop(LoopEvent::StateEntered {
+            state: State::Build,
+            visit: 1,
+        }));
+        app.handle(UiMsg::Loop(LoopEvent::ProposedEdit {
+            path: PathBuf::from("src/lib.rs"),
+            old: "a\n".to_owned(),
+            new: "b\n".to_owned(),
+        }));
+        app.handle(UiMsg::Loop(LoopEvent::ToolStarted {
+            call: shell_call("c1", "cargo test"),
+        }));
+        let (tx, _rx) = oneshot::channel();
+        app.handle(UiMsg::Request(UiRequest::Permission {
+            request: PermissionRequest {
+                tool: "shell".to_owned(),
+                target: Some("cargo test".to_owned()),
+                arguments: serde_json::json!({"command": "cargo test"}),
+            },
+            reply: tx,
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(120, 38)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let modal = app.modal_rect().expect("a prompt was drawn");
+        let buffer = terminal.backend().buffer();
+        let loud = [theme.accent, theme.accent2, theme.success, theme.danger];
+        let mut outside = 0;
+        let mut inside = 0;
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let cell = buffer.cell((x, y)).expect("cell");
+                if modal.contains((x, y).into()) {
+                    inside += usize::from(loud.contains(&cell.fg));
+                    continue;
+                }
+                outside += 1;
+                assert!(
+                    !loud.contains(&cell.fg),
+                    "loud fg at {x},{y}: {:?}",
+                    cell.fg
+                );
+                assert!(
+                    cell.bg != theme.removed_bg && cell.bg != theme.added_bg,
+                    "diff bg at {x},{y}"
+                );
+            }
+        }
+        assert!(outside > 0);
+        assert!(inside > 0, "the prompt itself keeps its accents");
+        let drawn = rows(&terminal).join("\n");
+        assert!(drawn.contains(PAUSED), "{drawn}");
+    }
+
+    /// A plan just written, with the approval question open.
+    fn plan_session(
+        width: u16,
+        height: u16,
+    ) -> (App, Terminal<TestBackend>, oneshot::Receiver<PlanDecision>) {
+        let (mut app, _) = new_app();
+        app.handle(UiMsg::Loop(LoopEvent::StateEntered {
+            state: State::Plan,
+            visit: 1,
+        }));
+        let plan = "# Plan\n\nAssumption: the flag only affects `anvil run`.\n\n\
+            1. [ ] Add `--dry-run` to `crates/anvil-cli/src/cli.rs`\n\
+            2. [ ] Skip the tool calls in `crates/anvil-core/src/agent/mod.rs` when it is set\n\
+            3. [ ] Test it in `crates/anvil-cli/tests/cli.rs`\n";
+        app.handle(UiMsg::Loop(LoopEvent::TextDelta(plan.to_owned())));
+        app.handle(UiMsg::Loop(LoopEvent::TurnFinished {
+            state: State::Plan,
+            stop_reason: StopReason::EndTurn,
+            usage: Some(Usage {
+                input: 1_200,
+                output: 90,
+                cached: 0,
+            }),
+            latency_ms: 10,
+            retries: 0,
+        }));
+        app.handle(UiMsg::Plan {
+            path: PathBuf::from(".anvil/sessions/01TESTSESSION/plan.md"),
+            text: plan.to_owned(),
+        });
+        let (tx, rx) = oneshot::channel();
+        app.handle(UiMsg::Request(UiRequest::Plan {
+            plan: plan.to_owned(),
+            reply: tx,
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        (app, terminal, rx)
+    }
+
+    #[test]
+    fn plan_approval_120() {
+        let (_, terminal, _rx) = plan_session(120, 38);
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn plan_approval_80() {
+        let (_, terminal, _rx) = plan_session(80, 24);
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
+    fn plan_question_takes_y_r_q_and_revise_uses_the_input() {
+        let (mut app, mut terminal, mut rx) = plan_session(120, 38);
+        assert!(app.has_question());
+        assert!(!app.has_modal());
+        key(&mut app, KeyCode::Char('x'));
+        assert!(app.editor().is_empty(), "stray keys do not reach the input");
+        key(&mut app, KeyCode::Char('r'));
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        assert!(rows(&terminal).iter().any(|row| row.contains("revise >")));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.prompt_prefix(), "plan > ");
+        key(&mut app, KeyCode::Char('r'));
+        type_line(&mut app, "fewer steps");
+        assert_eq!(key(&mut app, KeyCode::Enter), None);
+        assert_eq!(
+            rx.try_recv(),
+            Ok(PlanDecision::Revise("fewer steps".to_owned()))
+        );
+        assert!(!app.has_question());
+        let text = app.transcript().plain_text();
+        assert!(
+            text.contains("? build this plan? revise: fewer steps"),
+            "{text}"
+        );
+
+        let (mut app, _, mut rx) = plan_session(80, 24);
+        key(&mut app, KeyCode::Char('y'));
+        assert_eq!(rx.try_recv(), Ok(PlanDecision::Approve));
+        let (mut app, _, mut rx) = plan_session(80, 24);
+        key(&mut app, KeyCode::Char('q'));
+        assert_eq!(rx.try_recv(), Ok(PlanDecision::Abort));
+        let (mut app, _, mut rx) = plan_session(80, 24);
+        assert_eq!(ctrl_c(&mut app), None, "a chat is idle while it asks");
+        assert_eq!(rx.try_recv(), Ok(PlanDecision::Abort));
     }
 
     #[test]
@@ -955,24 +1302,6 @@ mod tests {
     }
 
     #[test]
-    fn open_permission_modal() {
-        let (mut app, _) = new_app();
-        type_line(&mut app, "run the tests");
-        key(&mut app, KeyCode::Enter);
-        app.handle(UiMsg::Busy(true));
-        app.handle(UiMsg::Loop(LoopEvent::TextDelta(
-            "Running the suite now.\n".to_owned(),
-        )));
-        app.handle(UiMsg::Loop(LoopEvent::ToolStarted {
-            call: shell_call("c1", "cargo test --all"),
-        }));
-        let _reply = ask_permission(&mut app, "cargo test --all");
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");
-        terminal.draw(|frame| app.draw(frame)).expect("draw");
-        insta::assert_snapshot!(terminal.backend());
-    }
-
-    #[test]
     fn modal_is_never_overdrawn() {
         let (mut app, base) = new_app();
         app.handle(UiMsg::Busy(true));
@@ -998,7 +1327,7 @@ mod tests {
         assert_eq!(reply.try_recv(), Ok(PromptAnswer::Yes));
         assert!(!app.has_modal());
         let text = app.transcript().plain_text();
-        assert!(text.contains("? allow shell cargo test? yes"), "{text}");
+        assert!(text.contains("? allow shell cargo test? allow"), "{text}");
         assert!(text.contains("shell ls"), "{text}");
         assert!(text.contains("more text"), "{text}");
         assert!(text.contains("a notice"), "{text}");
@@ -1059,17 +1388,13 @@ mod tests {
             reply: tx,
         }));
         key(&mut app, KeyCode::Esc);
-        assert!(app.has_modal(), "Esc on a plan asks for feedback");
-        type_line(&mut app, "no, smaller");
-        key(&mut app, KeyCode::Enter);
+        assert!(app.has_question(), "Esc leaves the plan question open");
+        assert!(plan.try_recv().is_err());
+        drop(app);
         assert_eq!(
             plan.try_recv(),
-            Ok(PlanDecision::Revise("no, smaller".to_owned()))
-        );
-        let text = app.transcript().plain_text();
-        assert!(
-            text.contains("? build this plan? revise: no, smaller"),
-            "{text}"
+            Err(oneshot::error::TryRecvError::Closed),
+            "a closed UI gives the asker its safe answer"
         );
     }
 

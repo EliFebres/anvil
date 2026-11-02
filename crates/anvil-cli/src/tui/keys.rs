@@ -105,6 +105,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("Tab", "complete a slash command"),
     ("Shift+Tab", "cycle the permission mode"),
     (
+        "y, r, q",
+        "answer a plan question: build, revise (then type and Enter), quit",
+    ),
+    (
         "PageUp, PageDown",
         "scroll the transcript; typing jumps back down",
     ),
