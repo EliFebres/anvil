@@ -183,6 +183,23 @@ async fn claim_and_transitions_move_the_file_and_merged_is_final() {
     let files = world.state_files();
     assert!(files.contains(&format!("{}/{}.toml", dirs::REJECTED_DIR, r.id)));
     assert!(files.contains(&format!("{}/{}.notes.md", dirs::REJECTED_DIR, r.id)));
+    assert_eq!(queue.rejected_ids().expect("rejected ids"), vec![r.id]);
+
+    let back = queue
+        .transition(r.id, Transition::Reopen)
+        .await
+        .expect("reopen a rejected ticket");
+    assert_eq!(back.status, TicketStatus::Open);
+    assert_eq!(back.note, None);
+    assert_eq!(back.claimed_by, None);
+    let files = world.state_files();
+    assert!(files.contains(&format!("{}/{}.toml", dirs::OPEN_DIR, r.id)));
+    assert!(!files.contains(&format!("{}/{}.toml", dirs::REJECTED_DIR, r.id)));
+    assert!(
+        !files.contains(&format!("{}/{}.notes.md", dirs::REJECTED_DIR, r.id)),
+        "the rejection notes go with the reopen"
+    );
+    assert!(queue.rejected_ids().expect("rejected ids").is_empty());
 
     let o = ticket(Priority::P1, "2026-10-03T00:00:00Z", TicketKind::Bug);
     world.submit(&o, "origin/main");

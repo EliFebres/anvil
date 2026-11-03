@@ -10,6 +10,7 @@ use anvil_types::{ContainerRuntime, dotenv};
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use factory_cli::install::{InstallOptions, config_home, install};
+use factory_cli::reopen::{Target, reopen};
 use factory_cli::selftest::{SelftestOptions, selftest};
 use factory_cli::update::{UpdateOptions, update};
 use factory_cli::watch::{WatchOptions, watch};
@@ -61,6 +62,18 @@ enum Command {
     },
     /// Clear the pause flag.
     Resume,
+    /// Move tickets back to tickets/open on factory/state, dropping the claim, note and notes file.
+    ///
+    /// Takes one id (rejected, claimed or waiting) or `--all` for every
+    /// rejected ticket. Refuses the ticket a running service is working.
+    Reopen {
+        /// The ticket to reopen.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<ulid::Ulid>,
+        /// Reopen every ticket in tickets/rejected.
+        #[arg(long)]
+        all: bool,
+    },
     /// Install deploy/nuc/factory.service as a systemd user unit and start it (Linux only).
     InstallService,
     /// Stop the service, pull main, rebuild the binaries (and the worker image when its recipe changed), and start it again (Linux only).
@@ -211,6 +224,33 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             let factory_home = factory_home.context("no home directory; set FACTORY_HOME")?;
             service::resume(&factory_home)?;
             println!("resumed");
+            Ok(0)
+        }
+        Command::Reopen { id, all } => {
+            let factory_home = factory_home.context("no home directory; set FACTORY_HOME")?;
+            let target = match id {
+                Some(id) if !all => Target::One(id),
+                _ => Target::AllRejected,
+            };
+            let reopened = tokio::runtime::Runtime::new()
+                .context("starting the async runtime")?
+                .block_on(async {
+                    let root = wiring::repo_root(&cwd).await;
+                    let active = cfg!(target_os = "linux")
+                        && factory_cli::update::systemctl_ok(&[
+                            "--user",
+                            "is-active",
+                            "--quiet",
+                            "factory",
+                        ]);
+                    reopen(&root, &factory_home, target, active).await
+                })?;
+            if reopened.is_empty() {
+                println!("nothing to reopen");
+            }
+            for ticket in reopened {
+                println!("reopened {} {}", ticket.id, ticket.title);
+            }
             Ok(0)
         }
         Command::InstallService => {
@@ -458,6 +498,30 @@ fn file_supplying<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reopen_takes_one_id_or_all_but_not_both_or_neither() {
+        let id = "01M6D20KVA7TZJNN66ZFVCRWVD";
+        let one = Cli::try_parse_from(["factory", "reopen", id]).expect("one id");
+        assert!(matches!(
+            one.command,
+            Command::Reopen {
+                id: Some(_),
+                all: false
+            }
+        ));
+        let all = Cli::try_parse_from(["factory", "reopen", "--all"]).expect("--all");
+        assert!(matches!(
+            all.command,
+            Command::Reopen {
+                id: None,
+                all: true
+            }
+        ));
+        assert!(Cli::try_parse_from(["factory", "reopen"]).is_err());
+        assert!(Cli::try_parse_from(["factory", "reopen", id, "--all"]).is_err());
+        assert!(Cli::try_parse_from(["factory", "reopen", "not-a-ulid"]).is_err());
+    }
 
     #[test]
     fn ticks_read_as_one_line() {
