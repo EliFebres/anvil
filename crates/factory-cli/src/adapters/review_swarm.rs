@@ -107,6 +107,7 @@ impl ReviewSwarm for Swarm {
                 diff: input.diff.clone(),
                 changed_files: input.changed_files.clone(),
                 guidelines: input.guidelines.clone(),
+                earlier_findings: input.earlier_findings.clone(),
             };
             let verdict = factory_review::review(&request, &self.reviewers).await;
             Ok(Self::report(&verdict, &input.diff))

@@ -278,6 +278,10 @@ async fn review_changes_buy_one_more_round_and_the_second_approval_merges() {
         tasks[1]
     );
     assert!(tasks[1].contains("`max_results` is never applied"));
+    let inputs = h.swarm.inputs();
+    assert!(inputs[0].earlier_findings.is_empty());
+    assert_eq!(inputs[1].earlier_findings.len(), 1);
+    assert!(inputs[1].earlier_findings[0].contains("`max_results` is never applied"));
 }
 
 #[tokio::test]

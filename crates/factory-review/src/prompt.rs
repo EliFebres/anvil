@@ -10,6 +10,9 @@ use crate::rules::Rule;
 /// Bytes of diff sent to a reviewer before the rest is cut.
 pub const MAX_DIFF_BYTES: usize = 300 * 1024;
 
+/// What a reviewer must do with an earlier round's findings.
+const EARLIER_NOTE: &str = "An earlier review round raised these and the implementer changed the code to address them. Do not ask to undo or remove a change that addresses one of them, even if you would have scoped it differently; raise a finding only if the change itself is wrong.";
+
 /// The JSON contract every stance ends with.
 const OUTPUT: &str = include_str!("../prompts/output.md");
 
@@ -50,7 +53,8 @@ pub fn system_prompt(stance: Stance, rules: &[Rule]) -> String {
     text
 }
 
-/// The user message: ticket, guidelines, changed files and the diff.
+/// The user message: ticket, guidelines, earlier rounds' findings, changed
+/// files and the diff.
 ///
 /// # Arguments
 ///
@@ -72,6 +76,14 @@ pub fn user_message(request: &ReviewRequest) -> String {
             text,
             "\n# Repository guidelines (CLAUDE.md)\n\n{}",
             guidelines.trim()
+        );
+    }
+    for (index, findings) in request.earlier_findings.iter().enumerate() {
+        let _ = writeln!(
+            text,
+            "\n# Findings from review round {}\n\n{EARLIER_NOTE}\n\n{}",
+            index + 1,
+            findings.trim()
         );
     }
     text.push_str("\n# Changed files\n\n");
@@ -135,6 +147,7 @@ mod tests {
             diff: "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,2 @@\n fn main() {}\n+fn count() {}\n".to_owned(),
             changed_files: vec!["src/main.rs".to_owned()],
             guidelines: Some("# CLAUDE.md\n\nNo unwrap outside tests.\n".to_owned()),
+            earlier_findings: Vec::new(),
         }
     }
 
@@ -168,6 +181,19 @@ mod tests {
         let mut without = request();
         without.guidelines = None;
         assert!(!user_message(&without).contains("CLAUDE.md"));
+    }
+
+    #[test]
+    fn earlier_rounds_findings_come_with_the_do_not_undo_note() {
+        let mut later = request();
+        later.earlier_findings =
+            vec!["- **blocker** (openai/correctness): the clone needs a lock".to_owned()];
+        let text = user_message(&later);
+        assert!(text.contains("# Findings from review round 1"), "{text}");
+        assert!(text.contains("the clone needs a lock"));
+        assert!(text.contains("Do not ask to undo"));
+        assert!(text.find("round 1") < text.find("# Diff"));
+        assert!(!user_message(&request()).contains("Findings from review round"));
     }
 
     #[test]

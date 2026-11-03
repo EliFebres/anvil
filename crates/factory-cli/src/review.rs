@@ -68,6 +68,7 @@ pub async fn run(options: Options) -> anyhow::Result<i32> {
         diff,
         changed_files,
         guidelines: std::fs::read_to_string(root.join(GUIDELINES_FILE)).ok(),
+        earlier_findings: Vec::new(),
     };
     eprintln!(
         "reviewing {}#{number} with {} reviewer(s)",

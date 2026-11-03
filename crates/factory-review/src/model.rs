@@ -553,6 +553,7 @@ mod tests {
             diff: "+x".to_owned(),
             changed_files: vec!["src/lib.rs".to_owned()],
             guidelines: None,
+            earlier_findings: Vec::new(),
         }
     }
 
