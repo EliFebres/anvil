@@ -53,7 +53,13 @@ pub const ANVIL_MOUNT: &str = "/usr/local/bin/anvil";
 const PROXY_URL: &str = "http://127.0.0.1:3128";
 
 /// Variables the host passes through besides the keys, so programs can run at all.
-const PASSTHROUGH_ENV: [&str; 9] = [
+///
+/// The `XDG_*` and `CONTAINERS_*` ones locate rootless podman's image store.
+/// Without them `podman run` can read a different store from the shell that
+/// ran `just image` (a snap terminal sets its own `XDG_DATA_HOME`), and run a
+/// stale image. They configure the runtime only: nothing reaches a container
+/// except its `-e` flags.
+const PASSTHROUGH_ENV: [&str; 15] = [
     "PATH",
     "HOME",
     "USERPROFILE",
@@ -63,6 +69,12 @@ const PASSTHROUGH_ENV: [&str; 9] = [
     "LANG",
     "TERM",
     "CARGO_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_RUNTIME_DIR",
+    "CONTAINERS_CONF",
+    "CONTAINERS_STORAGE_CONF",
+    "CONTAINERS_REGISTRIES_CONF",
 ];
 
 /// Lines of output kept from a run.
@@ -343,6 +355,10 @@ impl Sandbox {
         if !self.containerized() {
             env.push(("ANVIL_HOME".to_owned(), home.to_string_lossy().into_owned()));
         }
+        // `just check` formats before checking when it sees this, so a
+        // formatting-only difference can never reject a ticket. A container
+        // gets it from `run_args` too, since only key names are forwarded.
+        env.push(("ANVIL_PROFILE".to_owned(), PROFILE.to_owned()));
         env
     }
 
@@ -401,6 +417,8 @@ impl Sandbox {
             format!("{}:{HOME_MOUNT}", home.display()),
             "-e".to_owned(),
             format!("ANVIL_HOME={HOME_MOUNT}"),
+            "-e".to_owned(),
+            format!("ANVIL_PROFILE={PROFILE}"),
             "-v".to_owned(),
             format!(
                 "{}:{CACHE_MOUNT}{cache_mode}",
@@ -1349,7 +1367,9 @@ mod tests {
             text.contains("-v /h/.factory/work/T1:/work -w /work"),
             "{text}"
         );
-        assert!(text.contains("-v /h/.factory/work/T1-home:/anvil-home -e ANVIL_HOME=/anvil-home"));
+        assert!(text.contains(
+            "-v /h/.factory/work/T1-home:/anvil-home -e ANVIL_HOME=/anvil-home -e ANVIL_PROFILE=factory"
+        ));
         assert!(
             text.contains(&format!("-v {CACHE_VOLUME}:{CACHE_MOUNT}:ro")),
             "{text}"
@@ -1388,7 +1408,12 @@ mod tests {
             ),
             "{mounted}"
         );
-        for (name, value) in sandbox.environment(Path::new("/h/.factory/work/T1-home")) {
+        let environment = sandbox.environment(Path::new("/h/.factory/work/T1-home"));
+        assert!(
+            environment.contains(&("ANVIL_PROFILE".to_owned(), "factory".to_owned())),
+            "{environment:?}"
+        );
+        for (name, value) in environment {
             assert!(
                 !["FACTORY_GITHUB_TOKEN", "GITHUB_TOKEN", "WEBHOOK_URL"].contains(&name.as_str()),
                 "{name}={value}"

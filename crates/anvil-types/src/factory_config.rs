@@ -82,10 +82,11 @@ image = "localhost/anvil-factory:latest"
 anvil_bin = "target/x86_64-unknown-linux-musl/release/anvil"
 egress_allow = ["github.com", "index.crates.io", "static.crates.io"]
 
-# Per-ticket limits. Exceeding one rejects the ticket with the reason.
+# Per-ticket limits. Exceeding one rejects the ticket with the reason. Tokens
+# are weighted like anvil's budgets: cached input counts a tenth.
 [budget]
 wall_clock_minutes = 90
-tokens = 6000000
+tokens = 9000000
 
 # Paths the factory never merges on its own: a pull request touching one is
 # labelled `needs-human` and its ticket waits. Globs match repository-relative
@@ -117,7 +118,7 @@ pub const DEFAULT_POLL_MINUTES: u64 = 5;
 pub const DEFAULT_WALL_CLOCK_MINUTES: u64 = 90;
 
 /// Token budget per ticket when `[budget] tokens` is not set.
-pub const DEFAULT_TOKEN_BUDGET: u64 = 6_000_000;
+pub const DEFAULT_TOKEN_BUDGET: u64 = 9_000_000;
 
 /// Local time of the daily digest when `[notify] digest_at` is not set.
 pub const DEFAULT_DIGEST_AT: &str = "08:00";
@@ -292,7 +293,8 @@ impl Default for WorkerConfig {
 pub struct BudgetConfig {
     /// Wall clock a ticket may take, from claim to merge.
     pub wall_clock_minutes: u64,
-    /// Tokens the implementer may use over every attempt.
+    /// Weighted tokens (input, output and a tenth of cached input) the
+    /// implementer may use over every attempt.
     pub tokens: u64,
 }
 

@@ -439,6 +439,7 @@ impl ScriptedRun {
 pub struct ScriptedImplementer {
     runs: Mutex<VecDeque<ScriptedRun>>,
     checks: Mutex<VecDeque<bool>>,
+    check_rewrites: Vec<(String, String)>,
     builds: Mutex<VecDeque<bool>>,
     denied: Vec<String>,
     tasks: Mutex<Vec<String>>,
@@ -457,6 +458,15 @@ impl ScriptedImplementer {
     /// Sets the Gate A results; an exhausted script passes.
     pub fn with_checks(mut self, checks: Vec<bool>) -> Self {
         self.checks = Mutex::new(checks.into());
+        self
+    }
+
+    /// Files a passing Gate A rewrites in the worktree, as its `cargo fmt` does.
+    pub fn with_check_rewrites(mut self, files: &[(&str, &str)]) -> Self {
+        self.check_rewrites = files
+            .iter()
+            .map(|(path, content)| ((*path).to_owned(), (*content).to_owned()))
+            .collect();
         self
     }
 
@@ -527,11 +537,21 @@ impl Implementer for ScriptedImplementer {
 
     fn check<'a>(
         &'a self,
-        _worktree: &'a Path,
+        worktree: &'a Path,
         _deadline: Instant,
     ) -> BoxFuture<'a, Result<CheckOutcome>> {
         self.check_count.fetch_add(1, Ordering::SeqCst);
         let passed = lock(&self.checks).pop_front().unwrap_or(true);
+        if passed {
+            for (path, content) in &self.check_rewrites {
+                let full = worktree.join(path);
+                if let Err(source) = std::fs::write(&full, content) {
+                    return Box::pin(std::future::ready(Err(FactoryError::io(
+                        "writing", &full, source,
+                    ))));
+                }
+            }
+        }
         Box::pin(std::future::ready(Ok(CheckOutcome {
             passed,
             output_tail: if passed {

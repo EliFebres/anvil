@@ -179,3 +179,46 @@ fn missing_nested_and_write_all_are_rejected() {
     assert_eq!(problems("ci.yml", Some(&Permissions::WriteAll)).len(), 1);
     assert!(problems("ci.yml", Some(&Permissions::ReadAll)).is_empty());
 }
+
+/// The channel pinned in the repository's `rust-toolchain.toml`.
+fn pinned_toolchain() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rust-toolchain.toml");
+    let text = std::fs::read_to_string(&path).expect("rust-toolchain.toml exists");
+    let table: toml::Table = toml::from_str(&text).expect("rust-toolchain.toml parses");
+    table["toolchain"]["channel"]
+        .as_str()
+        .expect("toolchain.channel is a string")
+        .to_owned()
+}
+
+/// Every Rust install in a workflow names the pinned version, so CI formats
+/// and lints with the same toolchain as the host and the worker image.
+#[test]
+fn every_workflow_installs_the_pinned_toolchain() {
+    let pinned = pinned_toolchain();
+    let mut installs = 0;
+    for entry in std::fs::read_dir(workflows_dir()).expect("workflows dir") {
+        let path = entry.expect("entry").path();
+        let text = std::fs::read_to_string(&path).expect("read workflow");
+        let name = path.display();
+        let uses = text
+            .lines()
+            .filter(|line| line.contains("dtolnay/rust-toolchain@"))
+            .count();
+        let versions: Vec<&str> = text
+            .lines()
+            .filter_map(|line| strip_comment(line).trim().strip_prefix("toolchain:"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            versions.len(),
+            uses,
+            "{name}: every dtolnay/rust-toolchain step sets `toolchain:`"
+        );
+        for version in versions {
+            assert_eq!(version, pinned, "{name}: must match rust-toolchain.toml");
+        }
+        installs += uses;
+    }
+    assert!(installs > 0, "no workflow installs Rust");
+}

@@ -46,7 +46,7 @@ fn the_factory_profile_matches_factory_toml_and_locks_permissions() {
     );
     let budgets = [
         ("plan", &anvil.limits.plan, 400_000),
-        ("build", &anvil.limits.build, 1_500_000),
+        ("build", &anvil.limits.build, 3_000_000),
         ("review", &anvil.limits.review, 300_000),
         ("optimize", &anvil.limits.optimize, 200_000),
         ("verify", &anvil.limits.verify, 300_000),
@@ -92,7 +92,6 @@ fn the_factory_profile_matches_factory_toml_and_locks_permissions() {
 #[test]
 fn the_container_files_are_consistent() {
     let containerfile = read("deploy/nuc/Containerfile");
-    assert!(containerfile.contains("FROM docker.io/library/rust:1-bookworm"));
     for tool in [
         "socat",
         "python3-pytest",
@@ -137,4 +136,30 @@ fn the_container_files_are_consistent() {
         !unit.contains("EnvironmentFile"),
         "secrets never come from the unit"
     );
+}
+
+/// The worker image's Rust is the pinned toolchain: the container cannot
+/// download another, and it must format exactly like the host and CI.
+#[test]
+fn the_worker_image_uses_the_pinned_toolchain() {
+    let pinned: toml::Table = toml::from_str(&read("rust-toolchain.toml")).expect("parses");
+    let channel = pinned["toolchain"]["channel"].as_str().expect("channel");
+    let containerfile = read("deploy/nuc/Containerfile");
+    let from = containerfile
+        .lines()
+        .find(|line| line.starts_with("FROM "))
+        .expect("a FROM line");
+    assert_eq!(
+        from,
+        format!("FROM docker.io/library/rust:{channel}-bookworm"),
+        "deploy/nuc/Containerfile must match rust-toolchain.toml"
+    );
+    let targets = pinned["toolchain"]["targets"].as_array().expect("targets");
+    for target in targets {
+        let target = target.as_str().expect("a target name");
+        assert!(
+            containerfile.contains(&format!("rustup target add {target}")),
+            "the image must add {target}, or rustup downloads it inside the offline container"
+        );
+    }
 }

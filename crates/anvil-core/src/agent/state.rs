@@ -92,13 +92,26 @@ pub enum IncompleteReason {
         /// The state.
         state: State,
     },
-    /// A state used all of its tokens.
+    /// A state used all of its weighted tokens.
     TokenBudget {
         /// The state.
         state: State,
+        /// Weighted tokens the state used; zero in logs written before it was recorded.
+        #[serde(default)]
+        used: u64,
+        /// The state's limit; zero in logs written before it was recorded.
+        #[serde(default)]
+        limit: u64,
     },
-    /// The whole session used its token budget.
-    SessionBudget,
+    /// The whole session used its weighted token budget.
+    SessionBudget {
+        /// Weighted tokens the session used; zero in logs written before it was recorded.
+        #[serde(default)]
+        used: u64,
+        /// The session's limit; zero in logs written before it was recorded.
+        #[serde(default)]
+        limit: u64,
+    },
     /// The reviewer sent the work back too many times.
     ReviewRoundsExhausted,
     /// Verification failed too many times.
@@ -118,10 +131,14 @@ impl fmt::Display for IncompleteReason {
             IncompleteReason::TurnBudget { state } => {
                 write!(f, "the {state} state used its turn budget")
             }
-            IncompleteReason::TokenBudget { state } => {
-                write!(f, "the {state} state used its token budget")
-            }
-            IncompleteReason::SessionBudget => f.write_str("the session used its token budget"),
+            IncompleteReason::TokenBudget { state, used, limit } => write!(
+                f,
+                "the {state} state used its token budget ({used} of {limit} weighted tokens)"
+            ),
+            IncompleteReason::SessionBudget { used, limit } => write!(
+                f,
+                "the session used its token budget ({used} of {limit} weighted tokens)"
+            ),
             IncompleteReason::ReviewRoundsExhausted => write!(
                 f,
                 "the reviewer requested changes {MAX_REVIEW_ROUNDS} times; giving up"
@@ -393,7 +410,10 @@ mod tests {
     #[test]
     fn exit_codes_and_messages() {
         assert_eq!(Status::Done.exit_code(), 0);
-        let reason = IncompleteReason::SessionBudget;
+        let reason = IncompleteReason::SessionBudget {
+            used: 12,
+            limit: 10,
+        };
         assert_eq!(
             Status::Incomplete {
                 reason: reason.clone()
@@ -401,7 +421,13 @@ mod tests {
             .exit_code(),
             2
         );
-        assert_eq!(Status::Denied { reason }.exit_code(), 3);
+        assert_eq!(
+            Status::Denied {
+                reason: reason.clone()
+            }
+            .exit_code(),
+            3
+        );
         assert_eq!(
             Status::ProviderError {
                 error: ProviderError::Timeout { after_s: 1 }
@@ -417,6 +443,36 @@ mod tests {
             }
             .to_string(),
             "incomplete: the build state used its turn budget"
+        );
+        assert_eq!(
+            IncompleteReason::TokenBudget {
+                state: State::Build,
+                used: 3_000_100,
+                limit: 3_000_000
+            }
+            .to_string(),
+            "the build state used its token budget (3000100 of 3000000 weighted tokens)"
+        );
+        assert_eq!(
+            reason.to_string(),
+            "the session used its token budget (12 of 10 weighted tokens)"
+        );
+    }
+
+    #[test]
+    fn budget_reasons_from_older_logs_still_load() {
+        let old: IncompleteReason =
+            serde_json::from_str(r#"{"reason":"session_budget"}"#).expect("loads");
+        assert_eq!(old, IncompleteReason::SessionBudget { used: 0, limit: 0 });
+        let old: IncompleteReason =
+            serde_json::from_str(r#"{"reason":"token_budget","state":"build"}"#).expect("loads");
+        assert_eq!(
+            old,
+            IncompleteReason::TokenBudget {
+                state: State::Build,
+                used: 0,
+                limit: 0
+            }
         );
     }
 

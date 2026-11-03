@@ -191,6 +191,31 @@ async fn a_clean_ticket_goes_from_worktree_to_squash_merge() {
 }
 
 #[tokio::test]
+async fn what_gate_a_formats_is_committed_and_merged() {
+    if !have_git() {
+        return;
+    }
+    let path = "skills/hello/SKILL.md";
+    let formatted = "---\nname: hello\n---\n\nSay hello, formatted.\n";
+    let h = Harness::new(
+        ScriptedImplementer::default()
+            .with_runs(vec![ScriptedRun::done(&[(path, "unformatted")], 1000)])
+            .with_check_rewrites(&[(path, formatted)]),
+        FakeEvalGate::default(),
+        FakeSwarm::default(),
+        clock(usize::MAX),
+    )
+    .await;
+    let outcome = h.work().await;
+    assert!(matches!(outcome, Outcome::Merged { .. }), "{outcome:?}");
+    assert_eq!(
+        git(&h.world.remote, &["show", &format!("main:{path}")]).trim_end(),
+        formatted.trim_end()
+    );
+    assert!(h.swarm.inputs()[0].diff.contains("+Say hello, formatted."));
+}
+
+#[tokio::test]
 async fn gate_a_gets_one_retry_with_the_failure_appended_then_rejects() {
     if !have_git() {
         return;
@@ -323,11 +348,11 @@ async fn budgets_reject_with_their_reason() {
     if !have_git() {
         return;
     }
-    // Tokens: the template allows 6,000,000; one run uses more.
+    // Tokens: the template allows 9,000,000 weighted; one run uses more.
     let h = Harness::new(
         ScriptedImplementer::default().with_runs(vec![ScriptedRun::done(
             &[("skills/big/SKILL.md", "x")],
-            7_000_000,
+            10_000_000,
         )]),
         FakeEvalGate::default(),
         FakeSwarm::default(),

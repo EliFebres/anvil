@@ -1,4 +1,9 @@
 //! The per-session token budget and the decorator that enforces it.
+//!
+//! The budget counts weighted tokens ([`Usage::weighted`]): cached input at a
+//! tenth, matching what is paid.
+//!
+//! [`Usage::weighted`]: super::types::Usage::weighted
 
 use std::sync::{Arc, Mutex};
 
@@ -9,7 +14,7 @@ use super::error::ProviderError;
 use super::types::{CompletionRequest, Event};
 use super::{EventStream, Provider, lock_or_recover};
 
-/// Tokens used against a limit.
+/// Weighted tokens used against a limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TokenBudget {
     /// Tokens consumed so far.
@@ -105,7 +110,7 @@ impl TokenBudget {
 }
 
 /// A provider that refuses requests once the shared budget is spent and
-/// debits every [`Event::Usage`] it sees.
+/// debits every [`Event::Usage`] it sees, weighted.
 pub struct Budgeted<P> {
     /// The provider doing the work.
     inner: P,
@@ -146,7 +151,7 @@ impl<P: Provider> Provider for Budgeted<P> {
         let budget = Arc::clone(&self.budget);
         let events = self.inner.complete(request).map(move |item| {
             if let Ok(Event::Usage(usage)) = &item {
-                lock_or_recover(&budget).debit(usage.total());
+                lock_or_recover(&budget).debit(usage.weighted());
             }
             item
         });
@@ -213,9 +218,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn budgeted_debits_usage_total() {
+    async fn budgeted_debits_weighted_usage() {
         let budget = TokenBudget::shared(100);
-        let fake = FakeProvider::new(vec![usage_script(10, 5, 3)]);
+        let fake = FakeProvider::new(vec![usage_script(10, 5, 30)]);
         let provider = Budgeted::new(fake, Arc::clone(&budget));
         let items = drain(provider.complete(CompletionRequest::default())).await;
         assert_eq!(items.len(), 2);

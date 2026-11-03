@@ -5,8 +5,11 @@
 #
 # The factory runs it with --network none; entrypoint.sh bridges the egress
 # proxy's unix socket (mounted at /run/factory/proxy.sock) to localhost:3128.
-# Tracks stable Rust like CI does; the workspace needs 1.88 or newer.
-FROM docker.io/library/rust:1-bookworm
+# The Rust version must equal rust-toolchain.toml (factory-cli's deploy test
+# checks it): the container cannot reach static.rust-lang.org, so rustup must
+# find the pinned toolchain already installed, and host, container and CI must
+# format identically.
+FROM docker.io/library/rust:1.99.1-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -15,7 +18,9 @@ RUN apt-get update \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-RUN rustup component add rustfmt clippy
+# Everything rust-toolchain.toml lists, or rustup would try to download it.
+RUN rustup component add rustfmt clippy \
+    && rustup target add x86_64-unknown-linux-musl
 
 # just: the prebuilt binary, the same way bootstrap.sh installs it on the host.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \

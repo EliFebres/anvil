@@ -37,6 +37,18 @@ impl Tokens {
         self.input + self.output + self.cached
     }
 
+    /// Tokens weighted by what they cost: cached input counts a tenth.
+    ///
+    /// This mirrors anvil's `Usage::weighted`, which its budgets count and
+    /// this crate cannot depend on, so the ticket budget agrees with them.
+    ///
+    /// # Returns
+    ///
+    /// `input + output + cached / 10`.
+    pub fn weighted(self) -> u64 {
+        self.input + self.output + self.cached / 10
+    }
+
     /// Adds another count.
     pub fn add(&mut self, other: Tokens) {
         self.input += other.input;
@@ -495,17 +507,29 @@ mod tests {
     #[test]
     fn budget_stops_name_their_state() {
         let stop = |reason: &str| ImplementerStatus::Incomplete(reason.to_owned());
-        let plan = stop("the plan state used its token budget");
+        let plan = stop("the plan state used its token budget (400100 of 400000 weighted tokens)");
         assert!(plan.is_budget_stop());
         assert_eq!(plan.budget_state(), Some("plan"));
         let turns = stop("the build state used its turn budget (after a denied tool call)");
         assert_eq!(turns.budget_state(), Some("build"));
-        let session = stop("the session used its token budget");
+        let session =
+            stop("the session used its token budget (4500100 of 4500000 weighted tokens)");
         assert!(session.is_budget_stop());
         assert_eq!(session.budget_state(), None);
         let review = stop("the reviewer requested changes 3 times; giving up");
         assert!(!review.is_budget_stop());
         assert_eq!(review.budget_state(), None);
         assert!(!ImplementerStatus::Done.is_budget_stop());
+    }
+
+    #[test]
+    fn weighted_tokens_count_cached_input_at_a_tenth() {
+        let tokens = Tokens {
+            input: 151_527,
+            output: 25_794,
+            cached: 1_767_875,
+        };
+        assert_eq!(tokens.total(), 1_945_196);
+        assert_eq!(tokens.weighted(), 354_108);
     }
 }

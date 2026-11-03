@@ -165,11 +165,12 @@ impl TicketWorker {
                     &out.output_tail,
                 );
                 run.notes.line(&format!(
-                    "tokens: {} (input {}, output {}, cached {}){}",
+                    "tokens: {} (input {}, output {}, cached {}; weighted {}){}",
                     out.tokens.total(),
                     out.tokens.input,
                     out.tokens.output,
                     out.tokens.cached,
+                    out.tokens.weighted(),
                     out.cost_usd
                         .map(|c| format!(", ${c:.2}"))
                         .unwrap_or_default()
@@ -179,7 +180,7 @@ impl TicketWorker {
                     tokens: out.tokens,
                     cost_usd: out.cost_usd,
                 });
-                if let Err(exceeded) = run.budget.add_tokens(out.tokens.total()) {
+                if let Err(exceeded) = run.budget.add_tokens(out.tokens.weighted()) {
                     return Ok(run.reject(exceeded.to_string(), deps.implementer.as_ref()));
                 }
                 if out.status == ImplementerStatus::Timeout {
@@ -244,6 +245,10 @@ impl TicketWorker {
                     &check.output_tail,
                 );
                 if check.passed {
+                    // Inside the factory `just check` formats before it checks,
+                    // so what it reformatted must reach the pushed branch.
+                    wt.commit_all(&format!("factory: cargo fmt (gate A, run {n})"))
+                        .await?;
                     run.gates.push(GateRecord {
                         name: "A: just check".to_owned(),
                         passed: true,
@@ -529,7 +534,7 @@ impl Run {
         }
         self.notes.line(&format!("**Rejected:** {reason}"));
         self.notes.line(&format!(
-            "tokens used: {}{}",
+            "weighted tokens used: {}{}",
             self.budget.tokens_used(),
             self.cost
                 .map(|c| format!(", cost ${c:.2}"))
