@@ -474,6 +474,25 @@ pub struct PermissionRules {
     /// What an unmatched call gets instead of the tool's own default.
     #[serde(rename = "default", skip_serializing_if = "Option::is_none")]
     pub unmatched: Option<Unmatched>,
+    /// Tools pre-approved for every session, by name; the same as passing
+    /// `--allow-tool <name>`. Kept in memory, never written back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow_tools: Vec<String>,
+}
+
+impl PermissionRules {
+    /// Whether the table sets any rule besides `allow_tools`.
+    ///
+    /// # Returns
+    ///
+    /// `false` for a table that only pre-approves tools, which therefore
+    /// should not replace the project's `.anvil/permissions.toml`.
+    pub fn has_rules(&self) -> bool {
+        !self.allow.is_empty()
+            || !self.ask.is_empty()
+            || !self.deny.is_empty()
+            || self.unmatched.is_some()
+    }
 }
 
 /// The whole anvil configuration file.
@@ -805,6 +824,19 @@ mod tests {
         assert!(toml::from_str::<PermissionRules>("block = []").is_err());
         let text = toml::to_string(&PermissionRules::default()).expect("serializes");
         assert!(!text.contains("default"), "{text}");
+        assert!(!text.contains("allow_tools"), "{text}");
+        assert!(!PermissionRules::default().has_rules());
+    }
+
+    #[test]
+    fn permission_rules_accept_allow_tools_without_counting_them_as_rules() {
+        let rules: PermissionRules =
+            toml::from_str("allow_tools = [\"edit_file\", \"write_file\"]\n").expect("parses");
+        assert_eq!(rules.allow_tools, vec!["edit_file", "write_file"]);
+        assert!(!rules.has_rules());
+        let config: PermissionRules =
+            toml::from_str("allow = [\"shell\"]\nallow_tools = [\"edit_file\"]\n").expect("parses");
+        assert!(config.has_rules());
     }
 
     #[test]

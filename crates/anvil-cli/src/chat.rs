@@ -76,6 +76,7 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
     let info = session_info(wiring, SessionKind::Chat, false, State::Build);
     let (mut frontend, events_tx) = Frontend::start(ui, info);
     let (events, tee) = telemetry.sink(Some(events_tx));
+    telemetry.observe_permissions(wiring);
     let mut registry = wiring.registry(telemetry.recording(frontend.prompt(false)))?;
     frontend.install_tool_hook(
         &mut registry,

@@ -1,6 +1,3 @@
-//! What a file-writing tool call will do, computed before it runs so the
-//! change can be shown and judged.
-
 use serde_json::Value;
 
 use crate::agent::LoopEvent;

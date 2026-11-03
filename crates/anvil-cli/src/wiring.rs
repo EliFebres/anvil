@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anvil_compat::{
     AgentSet, CommandSet, DelegateTool, HookConfig, HookRunner, McpTools, ServerSet, SkillRoots,
@@ -14,7 +14,8 @@ use anvil_core::agent::{
 use anvil_core::context;
 use anvil_core::provider::{self, Provider, SharedBudget, TokenBudget};
 use anvil_core::tools::{
-    PermissionPrompt, Permissions, PromptAnswer, Shell, StaticPrompt, ToolContext, ToolRegistry,
+    PermissionObserver, PermissionPrompt, Permissions, PromptAnswer, SessionApprovals, Shell,
+    StaticPrompt, ToolContext, ToolRegistry,
 };
 use anvil_types::{AnvilConfig, PromptConfig};
 use anyhow::Context;
@@ -64,6 +65,12 @@ pub struct Wiring {
     pub mcp: Arc<McpTools>,
     /// The session this wiring serves, once one exists.
     session: Option<SessionInfo>,
+    /// Session-scoped tool approvals, shared by every registry and clone so
+    /// sub-agents see the approvals the user gave the main loop.
+    approvals: Arc<Mutex<SessionApprovals>>,
+    /// The session's permission observer, shared by every clone so
+    /// sub-agent registries built later report to it too.
+    observer: Arc<Mutex<Option<Arc<dyn PermissionObserver>>>>,
 }
 
 /// The session a run or chat belongs to, for hook payloads.
@@ -110,7 +117,8 @@ impl Wiring {
     ///
     /// # Errors
     ///
-    /// When the current directory cannot be determined.
+    /// When the current directory cannot be determined, or when
+    /// `permissions.allow_tools` names an invalid tool.
     pub fn new(config: AnvilConfig) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir().context("cannot determine the current directory")?;
         let home = home_dir();
@@ -120,6 +128,10 @@ impl Wiring {
         let agents = Arc::new(AgentSet::discover(&cwd, home.as_deref()));
         let hooks = Arc::new(HookConfig::load(&cwd, home.as_deref()));
         let mcp_servers = ServerSet::load(&cwd, home.as_deref());
+        let approvals = Arc::new(Mutex::new(
+            SessionApprovals::preapproved(config_allow_tools(&config))
+                .context("permissions.allow_tools in the configuration")?,
+        ));
         Ok(Self {
             cwd,
             home,
@@ -132,7 +144,39 @@ impl Wiring {
             mcp_servers,
             mcp: Arc::new(McpTools::default()),
             session: None,
+            approvals,
+            observer: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Pre-approves tools for this session on top of `permissions.allow_tools`,
+    /// as `--allow-tool` does. Call it before building any registry.
+    ///
+    /// # Arguments
+    ///
+    /// * `tools` - Tool names.
+    ///
+    /// # Errors
+    ///
+    /// When a name is empty or contains whitespace or a `:`.
+    pub fn allow_tools(&mut self, tools: &[String]) -> anyhow::Result<()> {
+        let all = config_allow_tools(&self.config).chain(tools.iter().map(String::as_str));
+        let approvals = SessionApprovals::preapproved(all).context("--allow-tool")?;
+        self.approvals = Arc::new(Mutex::new(approvals));
+        Ok(())
+    }
+
+    /// Reports every permission decision of this session, in the main
+    /// registry and in every sub-agent registry, to `observer`. Call it
+    /// before [`Wiring::registry`]; clones share the setting.
+    ///
+    /// # Arguments
+    ///
+    /// * `observer` - The observer, such as the session telemetry.
+    pub fn set_permission_observer(&self, observer: Arc<dyn PermissionObserver>) {
+        if let Ok(mut slot) = self.observer.lock() {
+            *slot = Some(observer);
+        }
     }
 
     /// Resolves every MCP server's tool list so [`Wiring::registry`] can
@@ -365,12 +409,17 @@ impl Wiring {
         prompt: Box<dyn PermissionPrompt>,
     ) -> anyhow::Result<ToolRegistry> {
         let permissions = match &self.config.permissions {
-            Some(rules) => {
+            Some(rules) if rules.has_rules() => {
                 Permissions::from_rules(rules).context("permissions in the configuration")?
             }
-            None => Permissions::load(&self.cwd).context("loading permissions")?,
+            _ => Permissions::load(&self.cwd).context("loading permissions")?,
         };
-        let mut registry = ToolRegistry::with_builtins(permissions, prompt);
+        let mut registry = ToolRegistry::with_builtins(permissions, prompt)
+            .with_session_approvals(Arc::clone(&self.approvals));
+        let observer = self.observer.lock().ok().and_then(|slot| slot.clone());
+        if let Some(observer) = observer {
+            registry.set_observer(observer);
+        }
         registry.register(Box::new(SkillTool::new(Arc::clone(&self.skills))));
         self.mcp.register(&mut registry);
         if let Some(runner) = self.hook_runner() {
@@ -516,6 +565,14 @@ impl SubagentEnv for Wiring {
     }
 }
 
+/// The tools `permissions.allow_tools` pre-approves, if any.
+fn config_allow_tools(config: &AnvilConfig) -> impl Iterator<Item = &str> {
+    config
+        .permissions
+        .iter()
+        .flat_map(|rules| rules.allow_tools.iter().map(String::as_str))
+}
+
 /// The heading the configured `[prompt] notes` appear under.
 const PROFILE_NOTES_HEADING: &str = "Profile notes";
 
@@ -556,5 +613,84 @@ mod tests {
         let section = profile_section(&prompt).expect("a section");
         assert_eq!(section.heading, "Profile notes");
         assert_eq!(section.text, "- one program per command\n- no pipes");
+    }
+
+    /// Five `edit_file` calls in `dir` through `registry`; returns how many
+    /// completed.
+    async fn completed_edits(registry: &ToolRegistry, dir: &Path) -> usize {
+        let ctx = ToolContext::new(dir);
+        let mut completed = 0;
+        for i in 0..5 {
+            let name = format!("f{i}.txt");
+            std::fs::write(dir.join(&name), "old\n").expect("write");
+            let call = anvil_core::provider::ToolCall {
+                id: format!("e{i}"),
+                name: "edit_file".to_owned(),
+                arguments_json: serde_json::json!({"path": name, "old": "old", "new": "new"})
+                    .to_string(),
+            };
+            let execution = registry.execute(&call, &ctx).await;
+            if execution.outcome == anvil_core::tools::ToolOutcome::Completed {
+                completed += 1;
+            }
+        }
+        completed
+    }
+
+    fn config(extra: &str) -> AnvilConfig {
+        toml::from_str(&format!(
+            "{}\n{extra}",
+            anvil_types::config::CONFIG_TEMPLATE
+        ))
+        .expect("config parses")
+    }
+
+    fn refusing() -> Box<dyn PermissionPrompt> {
+        Box::new(StaticPrompt(PromptAnswer::No))
+    }
+
+    #[tokio::test]
+    async fn allow_tool_flag_and_config_key_pre_approve_edit_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut flagged = Wiring::new(config("")).expect("wiring");
+        flagged
+            .allow_tools(&["edit_file".to_owned()])
+            .expect("valid names");
+        let registry = flagged.registry(refusing()).expect("registry");
+        assert_eq!(completed_edits(&registry, dir.path()).await, 5);
+
+        let configured =
+            Wiring::new(config("[permissions]\nallow_tools = [\"edit_file\"]\n")).expect("wiring");
+        let registry = configured.registry(refusing()).expect("registry");
+        assert_eq!(completed_edits(&registry, dir.path()).await, 5);
+
+        let neither = Wiring::new(config("")).expect("wiring");
+        let registry = neither.registry(refusing()).expect("registry");
+        assert_eq!(completed_edits(&registry, dir.path()).await, 0);
+    }
+
+    #[test]
+    fn invalid_allow_tool_names_are_errors() {
+        let mut wiring = Wiring::new(config("")).expect("wiring");
+        let error = wiring
+            .allow_tools(&["edit file".to_owned()])
+            .expect_err("whitespace");
+        assert!(format!("{error:#}").contains("--allow-tool"), "{error:#}");
+        let configured = Wiring::new(config("[permissions]\nallow_tools = [\"\"]\n"));
+        assert!(configured.is_err());
+    }
+
+    #[tokio::test]
+    async fn subagent_registry_shares_the_session_approvals() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wiring = Wiring::new(config("")).expect("wiring");
+        let main = wiring.registry(refusing()).expect("registry");
+        main.session_approvals()
+            .lock()
+            .expect("lock")
+            .approve("edit_file", dir.path())
+            .expect("approve");
+        let subagent = SubagentEnv::registry(&wiring.clone()).expect("registry");
+        assert_eq!(completed_edits(&subagent, dir.path()).await, 5);
     }
 }

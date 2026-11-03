@@ -1,5 +1,3 @@
-//! The `grep` tool: regex search over files, honoring `.gitignore`.
-
 use std::path::Path;
 
 use globset::{GlobBuilder, GlobMatcher};

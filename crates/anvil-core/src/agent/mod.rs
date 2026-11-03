@@ -1572,6 +1572,102 @@ mod tests {
         assert_eq!(snapshot.status, Some(Status::Done));
     }
 
+    /// Lets a test keep a handle on the prompt the registry owns.
+    struct SharedPrompt(Arc<crate::tools::ScriptedPrompt>);
+
+    impl crate::tools::PermissionPrompt for SharedPrompt {
+        fn ask(&self, request: &crate::tools::PermissionRequest) -> PromptAnswer {
+            self.0.ask(request)
+        }
+    }
+
+    /// An `edit_file` turn on `path` whose usage reports `prompt_tokens`.
+    fn heavy_edit_turn(id: &str, path: &str, prompt_tokens: u64) -> Script {
+        vec![
+            Ok(Event::ToolCall(ToolCall {
+                id: id.to_owned(),
+                name: "edit_file".to_owned(),
+                arguments_json: serde_json::json!({"path": path, "old": "old", "new": "new"})
+                    .to_string(),
+            })),
+            Ok(Event::Usage(crate::provider::Usage {
+                input: prompt_tokens,
+                output: 5,
+                cached: 0,
+            })),
+            Ok(Event::Done {
+                stop_reason: StopReason::ToolUse,
+            }),
+        ]
+    }
+
+    #[tokio::test]
+    async fn session_approval_survives_compaction_and_a_retried_call() {
+        let mut h = Harness::with_summarizer(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                heavy_edit_turn("e0", "f0.txt", 100),
+                heavy_edit_turn("e1", "./f1.txt", 100),
+                heavy_edit_turn("e2", "f2.txt", 100),
+                heavy_edit_turn("e3", "f3.txt", 900),
+                heavy_edit_turn("e4", "f4.txt", 100),
+                heavy_edit_turn("e0", "f0.txt", 100),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("simplified"),
+            ],
+            vec![approve()],
+            vec![FakeProvider::text_turn("## Task\nsummary of earlier work")],
+        );
+        for i in 0..5 {
+            std::fs::write(h.dir.path().join(format!("f{i}.txt")), "old\n").expect("write");
+        }
+        let mut config = h.config(CheckCommand::Command("exit 0".to_owned()));
+        config.context_window = 1000;
+        let prompt = Arc::new(crate::tools::ScriptedPrompt::new(vec![
+            PromptAnswer::Session,
+        ]));
+        let registry = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(SharedPrompt(Arc::clone(&prompt))),
+        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        h.events = rx;
+        let agent = AgentLoop::new(
+            config,
+            LoopProviders {
+                coder: Arc::clone(&h.coder) as Arc<dyn Provider>,
+                reviewer: Arc::clone(&h.reviewer) as Arc<dyn Provider>,
+                summarizer: Arc::clone(&h.summarizer) as Arc<dyn Provider>,
+            },
+            registry,
+            ToolContext::new(h.dir.path()),
+            Box::new(AutoApprove),
+            EventSink::new(tx),
+        );
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        assert_eq!(h.summarizer.calls(), 1, "one compaction");
+        assert_eq!(prompt.requests().len(), 1, "only the first edit prompts");
+        for i in 0..5 {
+            let text =
+                std::fs::read_to_string(h.dir.path().join(format!("f{i}.txt"))).expect("read");
+            assert_eq!(text, "new\n", "f{i}.txt");
+        }
+        let events = h.drain();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LoopEvent::Compacted { .. }))
+        );
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            LoopEvent::ToolFinished {
+                outcome: ToolOutcome::DeclinedByUser,
+                ..
+            }
+        )));
+    }
+
     #[tokio::test]
     async fn session_log_records_the_run_and_resume_continues_it() {
         let mut h = Harness::new(
