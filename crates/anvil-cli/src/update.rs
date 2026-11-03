@@ -224,7 +224,7 @@ async fn list_releases(
 /// GitHub lists same-day releases by tag name, and the tag ends with a
 /// commit's hex sha, so its order says nothing about which one is newer.
 fn newest_first(mut releases: Vec<Release>) -> Vec<Release> {
-    releases.sort_by(|a, b| b.published_at.cmp(&a.published_at));
+    releases.sort_by_key(|release| std::cmp::Reverse(release.published_at));
     releases
 }
 
