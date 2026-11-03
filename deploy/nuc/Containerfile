@@ -1,5 +1,6 @@
 # The worker image: the Rust toolchain pinned in rust-toolchain.toml plus what
-# `just check` and the eval checks need. The build context is the repository
+# `just check`, the eval checks and the standing rules need (`python` for the
+# docstring check). The build context is the repository
 # root (.dockerignore lets in only the files below); `factory update` builds
 # it, labelled with a hash of its inputs, whenever that hash changes:
 #
@@ -18,7 +19,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git socat ca-certificates curl \
         musl-tools \
-        python3 python3-pytest python3-pandas \
+        python3 python-is-python3 python3-pytest python3-pandas \
         ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
