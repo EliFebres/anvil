@@ -6,7 +6,7 @@
 //! loop (at most two review rounds)
 //!   loop (one Gate A retry per ticket)
 //!     implementer run -> commit -> secret scan -> Gate A: just check
-//!   release build -> Gate B: eval against main -> Gate C: review swarm
+//!   release build -> Gate B: eval against main (one retry) -> Gate C: review swarm
 //! push -> pull request -> minors as comments
 //! protected path touched? -> label needs-human, wait
 //! CI green? -> squash merge, delete branch
@@ -139,6 +139,7 @@ impl TicketWorker {
         deps.implementer.prepare(worktree).await?;
 
         let mut plan_retried = false;
+        let mut eval_retried = false;
         let mut earlier_findings: Vec<String> = Vec::new();
         let (minors, review_cost) = loop {
             run.gates.clear();
@@ -307,6 +308,16 @@ impl TicketWorker {
                         passed: false,
                         detail: format!("{} regression(s)", report.regressions.len()),
                     });
+                    // A branch that breaks anvil itself fails every task in
+                    // seconds; one more run with the evidence can fix that.
+                    if !eval_retried {
+                        eval_retried = true;
+                        run.notes.line(
+                            "gate B failed; sending the regressions back to the implementer once",
+                        );
+                        task = render::append_eval_failure(&task, &report.summary);
+                        continue;
+                    }
                     return Ok(run.reject(
                         format!(
                             "gate B: {} eval task(s) regressed against main: {}",

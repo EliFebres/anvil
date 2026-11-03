@@ -56,6 +56,19 @@ pub fn append_check_failure(task: &str, output: &str) -> String {
     )
 }
 
+/// Appends Gate B's regressions to the task for one more implementer run.
+///
+/// # Arguments
+///
+/// * `task` - The task so far.
+/// * `summary` - Gate B's comparison and the regressed attempt's output, as Markdown.
+pub fn append_eval_failure(task: &str, summary: &str) -> String {
+    format!(
+        "{task}\n## Previous attempt failed gate B: the eval tasks regressed\n\nThe eval harness ran the branch's release `anvil` on fixed coding tasks that pass on `main`. Find out from the output below why the branch's `anvil` failed them (a task that fails with 0 tokens usually means `anvil` exits before calling the model) and fix the branch; the same tasks run again.\n\n{}\n",
+        summary.trim()
+    )
+}
+
 /// Appends a note that the previous attempt ran out of budget while planning.
 ///
 /// # Arguments

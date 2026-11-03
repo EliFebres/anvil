@@ -107,9 +107,10 @@ impl HarnessGate {
             .map_err(|error| FactoryError::Sandbox(format!("eval run: {error}")))?;
         let outcome = eval::gate(&base, &candidate);
         let comparison = eval::compare(&base, &candidate);
+        let evidence = regression_evidence(&candidate, &outcome.regressions);
         let report = EvalGateReport {
             regressions: outcome.regressions.clone(),
-            summary: format!("```\n{comparison}{outcome}```"),
+            summary: format!("```\n{comparison}{outcome}```{evidence}"),
             cost_usd: candidate.totals.cost_usd,
         };
         Ok(if outcome.passed {
@@ -124,6 +125,43 @@ impl EvalGate for HarnessGate {
     fn run<'a>(&'a self, worktree: &'a Path) -> BoxFuture<'a, factory_core::Result<GateB>> {
         Box::pin(self.gate(worktree))
     }
+}
+
+/// What the branch's anvil printed on the first regressed task, so a
+/// regression comes with its cause instead of only a table.
+///
+/// # Arguments
+///
+/// * `candidate` - The branch's run.
+/// * `regressions` - The regressed task names.
+///
+/// # Returns
+///
+/// A Markdown section, or an empty string when no regressed task ran.
+pub fn regression_evidence(candidate: &RunResult, regressions: &[String]) -> String {
+    let Some((name, attempt)) = regressions.iter().find_map(|name| {
+        candidate
+            .tasks
+            .iter()
+            .find(|task| &task.name == name)
+            .and_then(|task| task.attempts.iter().find(|a| !a.passed))
+            .map(|attempt| (name, attempt))
+    }) else {
+        return String::new();
+    };
+    let mut text = format!(
+        "\n\nThe branch's anvil on `{name}` ended {}, {} tokens. Its stderr:\n\n```\n{}\n```\n",
+        attempt.status.label(),
+        attempt.tokens.total(),
+        attempt.stderr_tail.trim()
+    );
+    if !attempt.check_tail.trim().is_empty() {
+        text.push_str(&format!(
+            "\n`check.sh` printed:\n\n```\n{}\n```\n",
+            attempt.check_tail.trim()
+        ));
+    }
+    text
 }
 
 /// The newest eval result on `<remote>/main`: the baseline gate B compares
@@ -164,4 +202,38 @@ pub async fn newest_baseline(repo: &Git, remote: &str) -> factory_core::Result<O
         }
     }
     Ok(newest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eval::FakeRunner;
+
+    async fn candidate() -> RunResult {
+        let options = RunOptions {
+            repo_root: std::env::temp_dir(),
+            tasks_dir: Path::new(env!("CARGO_MANIFEST_DIR")).join("../eval/tests/fixtures/tasks"),
+            tags: Vec::new(),
+            repeat: 1,
+            parallel: 1,
+            provider: Some("fake".to_owned()),
+            progress: None,
+        };
+        let runner = FakeRunner::scripted(&[
+            ("pass-when-done", &[false]),
+            ("greps-marker", &[true]),
+            ("always-fails", &[true]),
+        ]);
+        eval::run_with(&options, runner).await.expect("fake run")
+    }
+
+    #[tokio::test]
+    async fn evidence_quotes_the_first_regressed_attempts_stderr() {
+        let run = candidate().await;
+        let text = regression_evidence(&run, &["pass-when-done".to_owned()]);
+        assert!(text.contains("`pass-when-done`"), "{text}");
+        assert!(text.contains("Its stderr:\n\n```\ndone\n```"), "{text}");
+        assert!(regression_evidence(&run, &[]).is_empty());
+        assert!(regression_evidence(&run, &["no-such-task".to_owned()]).is_empty());
+    }
 }
