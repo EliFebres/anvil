@@ -29,7 +29,7 @@ use chrono::Utc;
 use factory_core::fakes::LocalHost;
 use factory_core::github::{FALLBACK_TOKEN_ENV, TOKEN_ENV};
 use factory_core::ports::{BoxFuture, CheckOutcome, EvalGate, EvalGateReport, GateB, Implementer};
-use factory_core::sandbox::KeyLookup;
+use factory_core::sandbox::{KeyLookup, snap_overrides};
 use factory_core::{
     FactoryHome, Git, LogNotifier, OutcomeKind, Sandbox, SandboxConfig, SandboxOptions, Service,
     ServiceDeps, ServiceState, SystemRunner, Tick, TicketQueue, TicketWorker, WorkerDeps,
@@ -147,6 +147,12 @@ async fn pipeline(
         "preflight: image, anvil binary, script",
         preflight(world, options, &factory).await,
     )?;
+    if world.runtime == ContainerRuntime::Podman {
+        steps.report(
+            "image store: podman reads the store the systemd service uses, not a snap's",
+            image_store().await,
+        )?;
+    }
     steps.report(
         "bare repo: push the working tree as main and factory/state",
         world.seed(&options.repo_root).await,
@@ -767,6 +773,19 @@ async fn preflight(
     Ok(anvil)
 }
 
+/// Fails when podman, as the factory runs it, reads a store under `~/snap/`.
+///
+/// The systemd service never sees a snap terminal's `XDG_DATA_HOME`, so an
+/// image built or tested in that store is not the one the service runs.
+async fn image_store() -> anyhow::Result<()> {
+    let root = podman(&["info", "--format", "{{.Store.GraphRoot}}"]).await?;
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() && Path::new(&root).starts_with(Path::new(&home).join("snap")) {
+        bail!("podman's store is {root}, a snap app's private home; the service reads another one");
+    }
+    Ok(())
+}
+
 /// The toolchain pin file, at the repository root.
 const TOOLCHAIN_FILE: &str = "rust-toolchain.toml";
 
@@ -1138,7 +1157,11 @@ async fn run_git(mut command: Command) -> anyhow::Result<String> {
 
 /// Runs one podman command; its stdout, or its output as the error.
 async fn podman(args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("podman")
+    let mut command = Command::new("podman");
+    for name in snap_overrides() {
+        command.env_remove(name);
+    }
+    let output = command
         .args(args)
         .output()
         .await

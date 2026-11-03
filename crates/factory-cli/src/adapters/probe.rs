@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use factory_core::board::{
     BaselineView, ContainerView, HealthView, ImageView, ProviderLatency, UsageView,
 };
-use factory_core::sandbox::{CACHE_VOLUME, TICKET_LABEL};
+use factory_core::sandbox::{CACHE_VOLUME, TICKET_LABEL, snap_overrides};
 use factory_core::{BoxFuture, Git, Probe, usage};
 use tokio::process::Command;
 
@@ -211,9 +211,19 @@ impl Probe for MachineProbe {
     }
 }
 
+/// `program` with `args`, without a snap terminal's podman store variables.
+fn command(program: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command.args(args);
+    for name in snap_overrides() {
+        command.env_remove(name);
+    }
+    command
+}
+
 /// A command's stdout when it succeeds within the timeout.
 async fn output(program: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::time::timeout(COMMAND_TIMEOUT, Command::new(program).args(args).output())
+    let out = tokio::time::timeout(COMMAND_TIMEOUT, command(program, args).output())
         .await
         .ok()?
         .ok()?;
@@ -224,7 +234,7 @@ async fn output(program: &str, args: &[&str]) -> Option<String> {
 
 /// A command's stdout whatever its exit code, within the timeout.
 async fn output_any(program: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::time::timeout(COMMAND_TIMEOUT, Command::new(program).args(args).output())
+    let out = tokio::time::timeout(COMMAND_TIMEOUT, command(program, args).output())
         .await
         .ok()?
         .ok()?;

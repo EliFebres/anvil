@@ -18,6 +18,7 @@ use std::time::Duration;
 use anvil_types::factory_config::{DEFAULT_ANVIL_BIN, IMPLEMENTER_TARGET};
 use anvil_types::{ContainerRuntime, FactoryConfig};
 use anyhow::Context;
+use factory_core::sandbox::snap_overrides;
 use factory_core::{FactoryHome, InProgress, ServiceState, service};
 use sha2::{Digest, Sha256};
 
@@ -297,7 +298,11 @@ pub fn image_build_reason(built: Option<&str>, wanted: &str, forced: bool) -> Op
 /// The recipe label on `image`, or `None` when the image or the label is missing.
 fn built_recipe(runtime: &str, image: &str) -> Option<String> {
     let format = format!("{{{{index .Config.Labels \"{RECIPE_LABEL}\"}}}}");
-    let out = Command::new(runtime)
+    let mut command = Command::new(runtime);
+    for name in snap_overrides() {
+        command.env_remove(name);
+    }
+    let out = command
         .args(["image", "inspect", "--format", &format, image])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -388,7 +393,11 @@ impl Step {
 /// Runs one step in `dir` with the console attached, so build output shows.
 fn run(step: &Step, dir: &Path) -> anyhow::Result<()> {
     println!("== {}", step.label);
-    let status = Command::new(&step.program)
+    let mut command = Command::new(&step.program);
+    for name in snap_overrides() {
+        command.env_remove(name);
+    }
+    let status = command
         .args(&step.args)
         .current_dir(dir)
         .stdin(Stdio::null())
