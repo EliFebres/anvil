@@ -316,9 +316,10 @@ async fn gate_b_regressions_reject_and_a_missing_baseline_pauses() {
     }
     let h = Harness::new(
         ScriptedImplementer::default(),
-        FakeEvalGate::scripted(vec![GateB::Failed(FakeEvalGate::report(&[
-            "rs-grep", "py-cli",
-        ]))]),
+        FakeEvalGate::scripted(vec![
+            GateB::Failed(FakeEvalGate::report(&["rs-grep", "py-cli"])),
+            GateB::Failed(FakeEvalGate::report(&["rs-grep", "py-cli"])),
+        ]),
         FakeSwarm::default(),
         clock(usize::MAX),
     )
@@ -331,6 +332,13 @@ async fn gate_b_regressions_reject_and_a_missing_baseline_pauses() {
     assert!(reason.contains("rs-grep, py-cli"), "{reason}");
     assert!(notes.contains("## gate B: fail"));
     assert_eq!(h.swarm.inputs().len(), 0, "the review never ran");
+    assert_eq!(h.eval.calls(), 2, "one retry after the first failure");
+    let tasks = h.implementer.tasks();
+    assert!(
+        tasks[1].contains("## Previous attempt failed gate B"),
+        "{}",
+        tasks[1]
+    );
 
     let h = Harness::new(
         ScriptedImplementer::default(),
