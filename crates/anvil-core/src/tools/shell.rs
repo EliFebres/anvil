@@ -1,5 +1,3 @@
-//! The `shell` tool and the shell program behind it.
-
 use std::process::Stdio;
 use std::time::Duration;
 

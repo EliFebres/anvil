@@ -91,6 +91,9 @@ enum Command {
         /// deploy/nuc/Containerfile, entrypoint.sh) has not changed.
         #[arg(long)]
         rebuild_image: bool,
+        /// Set by an older factory that pulled this code and handed it the update.
+        #[arg(long, hide = true)]
+        handed_off: bool,
     },
     /// Run the whole worker pipeline once on this machine, against a local bare repository.
     ///
@@ -268,7 +271,11 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             }
             Ok(0)
         }
-        Command::Update { now, rebuild_image } => {
+        Command::Update {
+            now,
+            rebuild_image,
+            handed_off,
+        } => {
             if !cfg!(target_os = "linux") {
                 anyhow::bail!("update needs systemd; run it on the NUC");
             }
@@ -284,6 +291,7 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
                 now,
                 poll: UPDATE_POLL,
                 rebuild_image,
+                handed_off,
             })?;
             Ok(0)
         }

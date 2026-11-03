@@ -15,12 +15,13 @@ use anvil_core::provider::{
     CompletionRequest, Event, EventStream, Provider, ProviderError, StopReason,
 };
 use anvil_core::tools::{
-    PermissionPrompt, PermissionRequest, PromptAnswer, ToolOutcome, ToolRegistry, permissions,
+    DecisionScope, PermissionDecision, PermissionObserver, PermissionPrompt, PermissionRequest,
+    PromptAnswer, ToolOutcome, ToolRegistry, permissions,
 };
 use anvil_telemetry::paths::signals_file;
 use anvil_telemetry::{
-    PermissionAnswer, RecordKind, Recorder, SessionMode, SessionOutcome, StopKind, Tokens,
-    ToolOutcomeKind, WarningClass, append_signals, classify, load_records, session_records,
+    PermissionAnswer, PermissionScope, RecordKind, Recorder, SessionMode, SessionOutcome, StopKind,
+    Tokens, ToolOutcomeKind, WarningClass, append_signals, classify, load_records, session_records,
 };
 use anvil_types::TelemetryConfig;
 use chrono::{Duration, Utc};
@@ -171,6 +172,17 @@ impl SessionTelemetry {
             inner,
             telemetry: self.clone(),
         })
+    }
+
+    /// Records every permission decision of the session, including the
+    /// ones an existing approval made without a prompt and the ones made
+    /// in sub-agent registries. Call it before [`Wiring::registry`].
+    ///
+    /// # Arguments
+    ///
+    /// * `wiring` - The session's wiring; every registry it builds reports here.
+    pub fn observe_permissions(&self, wiring: &Wiring) {
+        wiring.set_permission_observer(Arc::new(self.clone()));
     }
 
     /// A sink that records every event and forwards it downstream.
@@ -387,11 +399,29 @@ impl PermissionPrompt for RecordingPrompt {
         let recorded = match answer {
             PromptAnswer::Yes => PermissionAnswer::Yes,
             PromptAnswer::No => PermissionAnswer::No,
+            PromptAnswer::Session => PermissionAnswer::Session,
             PromptAnswer::Always => PermissionAnswer::Always,
         };
         self.telemetry
             .record(RecordKind::permission(&request.tool, &rule, recorded));
         answer
+    }
+}
+
+impl PermissionObserver for SessionTelemetry {
+    fn decided(&self, decision: &PermissionDecision) {
+        let scope = match decision.scope {
+            DecisionScope::Once => PermissionScope::Once,
+            DecisionScope::Session => PermissionScope::Session,
+            DecisionScope::Rule => PermissionScope::Rule,
+            DecisionScope::Deny => PermissionScope::Deny,
+            DecisionScope::Blocked => PermissionScope::Blocked,
+        };
+        self.record(RecordKind::PermissionDecision {
+            tool: decision.tool.clone(),
+            scope,
+            covered: decision.covered,
+        });
     }
 }
 
@@ -605,6 +635,119 @@ mod tests {
             &r.kind,
             RecordKind::Permission { tool, answer: PermissionAnswer::Yes, .. } if tool == "write_file"
         )));
+    }
+
+    #[tokio::test]
+    async fn each_permission_decision_is_recorded_without_paths_or_contents() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let telemetry = SessionTelemetry::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "fast",
+            None,
+            "fast",
+            BTreeMap::new(),
+            TelemetryConfig::default(),
+        );
+        let secret_name = format!("{MARKER}-file.txt");
+        let secret_text = format!("{MARKER} contents\n");
+        std::fs::write(cwd.path().join(&secret_name), &secret_text).expect("write");
+        let prompt = telemetry.recording(Box::new(StaticPrompt(PromptAnswer::Session)));
+        let mut registry = ToolRegistry::with_builtins(Permissions::empty(), prompt);
+        registry.set_observer(Arc::new(telemetry.clone()));
+        let ctx = ToolContext::new(cwd.path());
+        for (id, new) in [("e1", "first"), ("e2", "second")] {
+            let old = if id == "e1" { MARKER } else { "first" };
+            let call = tool_call(
+                id,
+                "edit_file",
+                serde_json::json!({"path": secret_name, "old": old, "new": new}),
+            );
+            let execution = registry.execute(&call, &ctx).await;
+            assert_eq!(execution.outcome, ToolOutcome::Completed);
+        }
+
+        let records = load_records(&telemetry.project_dir(), None).expect("records");
+        let decisions: Vec<(String, PermissionScope, bool)> = records
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RecordKind::PermissionDecision {
+                    tool,
+                    scope,
+                    covered,
+                } => Some((tool.clone(), *scope, *covered)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            decisions,
+            vec![
+                ("edit_file".to_owned(), PermissionScope::Session, false),
+                ("edit_file".to_owned(), PermissionScope::Session, true),
+            ]
+        );
+        for file in files_under(&telemetry.project_dir()) {
+            let text = std::fs::read_to_string(&file).expect("telemetry file");
+            assert!(!text.contains(MARKER), "{}: {text}", file.display());
+            assert!(!text.contains("file.txt"), "{}: {text}", file.display());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subagent_decision_with_a_shared_approval_reaches_session_telemetry() {
+        use anvil_compat::SubagentEnv;
+
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let telemetry = SessionTelemetry::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "fast",
+            None,
+            "fast",
+            BTreeMap::new(),
+            TelemetryConfig::default(),
+        );
+        let config: anvil_types::AnvilConfig =
+            toml::from_str(anvil_types::config::CONFIG_TEMPLATE).expect("config parses");
+        let wiring = Wiring::new(config).expect("wiring");
+        telemetry.observe_permissions(&wiring);
+        let main = wiring
+            .registry(Box::new(StaticPrompt(PromptAnswer::No)))
+            .expect("registry");
+        main.session_approvals()
+            .lock()
+            .expect("lock")
+            .approve("edit_file", cwd.path())
+            .expect("approve");
+
+        let secret_name = format!("{MARKER}-file.txt");
+        std::fs::write(cwd.path().join(&secret_name), format!("{MARKER}\n")).expect("write");
+        let subagent = SubagentEnv::registry(&wiring.clone()).expect("subagent registry");
+        let call = tool_call(
+            "s1",
+            "edit_file",
+            serde_json::json!({"path": secret_name, "old": MARKER, "new": "done"}),
+        );
+        let execution = subagent.execute(&call, &ToolContext::new(cwd.path())).await;
+        assert_eq!(execution.outcome, ToolOutcome::Completed);
+
+        let records = load_records(&telemetry.project_dir(), None).expect("records");
+        assert!(records.iter().any(|r| matches!(
+            &r.kind,
+            RecordKind::PermissionDecision { tool, scope: PermissionScope::Session, covered: true }
+                if tool == "edit_file"
+        )));
+        for file in files_under(&telemetry.project_dir()) {
+            let text = std::fs::read_to_string(&file).expect("telemetry file");
+            assert!(!text.contains(MARKER), "{}: {text}", file.display());
+            assert!(!text.contains("file.txt"), "{}: {text}", file.display());
+        }
     }
 
     #[tokio::test]

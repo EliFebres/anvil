@@ -1,5 +1,3 @@
-//! The `glob` tool: finds files by pattern, honoring `.gitignore`.
-
 use std::path::Path;
 
 use globset::GlobBuilder;

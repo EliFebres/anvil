@@ -156,16 +156,22 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         }
         Some(Command::Chat) => {
             let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            wiring.allow_tools(&cli.allow_tools)?;
             wiring.load_mcp().await;
             chat::chat(&wiring, cli.yes, ui).await
         }
         Some(Command::Resume { id }) => {
             let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            wiring.allow_tools(&cli.allow_tools)?;
             wiring.load_mcp().await;
             commands::resume(&wiring, &id, cli.yes, ui).await
         }
-        Some(Command::Run { task }) => run(home, cwd, profile, task, cli.yes, ui).await,
-        None if !cli.task.is_empty() => run(home, cwd, profile, cli.task, cli.yes, ui).await,
+        Some(Command::Run { task }) => {
+            run(home, cwd, profile, task, &cli.allow_tools, cli.yes, ui).await
+        }
+        None if !cli.task.is_empty() => {
+            run(home, cwd, profile, cli.task, &cli.allow_tools, cli.yes, ui).await
+        }
         None => anyhow::bail!("nothing to do; pass a task or a subcommand (see --help)"),
     }
 }
@@ -176,11 +182,13 @@ async fn run(
     cwd: &Path,
     profile: Option<&str>,
     words: Vec<String>,
+    allow_tools: &[String],
     yes: bool,
     ui: UiKind,
 ) -> anyhow::Result<i32> {
     let task = words.join(" ");
     let mut wiring = Wiring::new(load_profile(home, cwd, profile)?.config)?;
+    wiring.allow_tools(allow_tools)?;
     wiring.load_mcp().await;
     commands::run_task(&wiring, task, yes, ui).await
 }

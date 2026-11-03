@@ -50,6 +50,7 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
         ui,
         session_info(&wiring, SessionKind::Run, yes, State::Plan),
     );
+    telemetry.observe_permissions(&wiring);
     let mut registry = wiring.registry(telemetry.recording(frontend.prompt(yes)))?;
     frontend.install_tool_hook(
         &mut registry,
@@ -207,6 +208,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
         ui,
         session_info(&wiring, SessionKind::Run, yes, State::Plan),
     );
+    telemetry.observe_permissions(&wiring);
     let mut registry = wiring.registry(telemetry.recording(frontend.prompt(yes)))?;
     frontend.install_tool_hook(
         &mut registry,

@@ -1,13 +1,11 @@
-//! The permission model: `.anvil/permissions.toml`, rule matching, and the
-//! prompt hook the CLI implements.
 //!
 //! A rule is `tool` or `tool:glob`. The glob matches the call's target: the
 //! `path` argument for file tools, the `command` for `shell`. When several
 //! rules match, `deny` wins, then `allow`, then `ask`, then the tool's own
 //! default.
 
-use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use anvil_types::{PermissionRules, Unmatched};
@@ -52,6 +50,22 @@ pub enum PermissionError {
         /// The rule as written.
         rule: String,
         /// Why it is invalid.
+        detail: String,
+    },
+    /// A tool name given to pre-approve or approve a tool is unusable.
+    #[error("invalid tool name `{name}`: {reason}")]
+    InvalidToolName {
+        /// The name as given.
+        name: String,
+        /// Why it is invalid.
+        reason: &'static str,
+    },
+    /// The workspace root of an approval cannot be resolved on disk.
+    #[error("cannot resolve the workspace root {path}: {detail}")]
+    UnresolvableRoot {
+        /// The root as given.
+        path: PathBuf,
+        /// The I/O error text.
         detail: String,
     },
 }
@@ -265,9 +279,22 @@ impl Permissions {
     ///
     /// The decision.
     pub fn decide(&self, tool: &str, target: Option<&str>, default: Decision) -> Decision {
-        self.matched(tool, target)
-            .or(self.unmatched)
-            .unwrap_or(default)
+        self.rule_decision(tool, target).unwrap_or(default)
+    }
+
+    /// What the rules alone say about a call: the matching rules, then the
+    /// rules' own `default`; `None` leaves it to the tool's default.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool name.
+    /// * `target` - The path or command, if the tool has one.
+    ///
+    /// # Returns
+    ///
+    /// The rules' decision, if they make one.
+    pub fn rule_decision(&self, tool: &str, target: Option<&str>) -> Option<Decision> {
+        self.matched(tool, target).or(self.unmatched)
     }
 
     /// The decision of the matching rules alone, if any rule matches.
@@ -396,6 +423,20 @@ pub struct PermissionRequest {
     pub arguments: serde_json::Value,
 }
 
+impl PermissionRequest {
+    /// Whether the prompt should offer `always`, which saves a rule to disk.
+    ///
+    /// Only `shell` offers it: its saved rule is a command prefix, which is
+    /// narrower than the session approval every prompt offers.
+    ///
+    /// # Returns
+    ///
+    /// `true` for `shell`.
+    pub fn offers_always(&self) -> bool {
+        self.tool == "shell"
+    }
+}
+
 /// The user's answer at an `ask` prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptAnswer {
@@ -403,8 +444,253 @@ pub enum PromptAnswer {
     Yes,
     /// Refuse this call.
     No,
+    /// Run it and stop asking about this tool for the rest of the session,
+    /// within the workspace root for path tools.
+    Session,
     /// Run it and record an `allow` rule.
     Always,
+}
+
+/// Tools the user approved for this session, held in memory only.
+///
+/// One instance is shared by every registry of a session, including the
+/// ones sub-agents get, so an approval is never lost between them; a
+/// registry holds its lock while prompting, so two registries never ask at
+/// once and the second sees the first one's `session` answer. An
+/// approval given at a prompt is bound to the workspace root it was given
+/// in, so a registry working in another root still prompts.
+#[derive(Debug, Clone, Default)]
+pub struct SessionApprovals {
+    /// Approved at a prompt, with the canonical workspace roots each tool
+    /// was approved in.
+    session: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// Approved by `--allow-tool` or `permissions.allow_tools`, any target.
+    preapproved: BTreeSet<String>,
+}
+
+impl SessionApprovals {
+    /// Approvals seeded with pre-approved tools.
+    ///
+    /// # Arguments
+    ///
+    /// * `tools` - Tool names from `--allow-tool` and `permissions.allow_tools`.
+    ///
+    /// # Returns
+    ///
+    /// The approvals.
+    ///
+    /// # Errors
+    ///
+    /// [`PermissionError::InvalidToolName`] for an empty name, or one with
+    /// whitespace or a `:`.
+    pub fn preapproved<I, S>(tools: I) -> Result<Self, PermissionError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut preapproved = BTreeSet::new();
+        for tool in tools {
+            let tool = tool.as_ref();
+            validate_tool_name(tool)?;
+            preapproved.insert(tool.to_owned());
+        }
+        Ok(Self {
+            session: BTreeMap::new(),
+            preapproved,
+        })
+    }
+
+    /// Records a `session` answer for a tool in one workspace root.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool name.
+    /// * `root` - The workspace root the call ran in.
+    ///
+    /// # Errors
+    ///
+    /// [`PermissionError::InvalidToolName`] for an invalid name, or
+    /// [`PermissionError::UnresolvableRoot`] when the root cannot be
+    /// resolved on disk. Nothing is recorded in either case.
+    pub fn approve(&mut self, tool: &str, root: &Path) -> Result<(), PermissionError> {
+        validate_tool_name(tool)?;
+        let root =
+            std::fs::canonicalize(root).map_err(|error| PermissionError::UnresolvableRoot {
+                path: root.to_path_buf(),
+                detail: error.to_string(),
+            })?;
+        self.session
+            .entry(tool.to_owned())
+            .or_default()
+            .insert(root);
+        Ok(())
+    }
+
+    /// Whether an existing approval covers the call, so no prompt is needed.
+    ///
+    /// A prompted approval covers only calls in the root it was given in;
+    /// for path tools the target must also resolve, following symlinks,
+    /// to a location inside that root.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool name.
+    /// * `target` - The call's path or command, if any.
+    /// * `root` - The workspace root of this call.
+    /// * `target_is_path` - Whether `target` is a file path to keep inside `root`.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the call may run without asking.
+    pub fn covers(
+        &self,
+        tool: &str,
+        target: Option<&str>,
+        root: &Path,
+        target_is_path: bool,
+    ) -> bool {
+        if self.preapproved.contains(tool) {
+            return true;
+        }
+        let Some(roots) = self.session.get(tool) else {
+            return false;
+        };
+        let Ok(root) = std::fs::canonicalize(root) else {
+            return false;
+        };
+        if !roots.contains(&root) {
+            return false;
+        }
+        if !target_is_path {
+            return true;
+        }
+        target
+            .and_then(|target| resolve_path(&root, target))
+            .is_some_and(|resolved| resolved.starts_with(&root))
+    }
+}
+
+/// Checks a tool name given to [`SessionApprovals`].
+fn validate_tool_name(tool: &str) -> Result<(), PermissionError> {
+    let reason = if tool.is_empty() {
+        "it is empty"
+    } else if tool.chars().any(char::is_whitespace) {
+        "it contains whitespace"
+    } else if tool.contains(':') {
+        "it contains `:`, which separates a rule's tool from its glob"
+    } else {
+        return Ok(());
+    };
+    Err(PermissionError::InvalidToolName {
+        name: tool.to_owned(),
+        reason,
+    })
+}
+
+/// Resolves `target` against `root` the way the file system will, so a
+/// symlink cannot make an outside location look inside the root and a
+/// different spelling of an existing directory (such as other letter case
+/// on Windows) cannot make an inside location look outside.
+///
+/// Components are walked one at a time and every one is checked on disk:
+/// an existing component is replaced by its canonical path (following
+/// symlinks and taking the file system's own spelling) before the next
+/// component (including `..`) is applied. A missing component is kept as
+/// written, which keeps new files resolvable; a later `..` that walks back
+/// out of it lands on a checked path again, so `new/../link` still follows
+/// `link`.
+///
+/// # Arguments
+///
+/// * `root` - Directory relative targets resolve against; should be canonical.
+/// * `target` - The path as the model wrote it.
+///
+/// # Returns
+///
+/// The resolved path, or `None` when it cannot be resolved safely (a
+/// dangling or looping symlink, or an unreadable component).
+pub fn resolve_path(root: &Path, target: &str) -> Option<PathBuf> {
+    let mut resolved = PathBuf::new();
+    for component in root.join(target).components() {
+        match component {
+            Component::Prefix(_) => resolved.push(component),
+            Component::RootDir => {
+                resolved.push(component);
+                // On Windows this turns `C:\` into the `\\?\C:\` form that
+                // a canonical root uses, so prefixes compare equal.
+                resolved = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::Normal(name) => {
+                resolved.push(name);
+                match std::fs::symlink_metadata(&resolved) {
+                    Ok(_) => {
+                        resolved = std::fs::canonicalize(&resolved).ok()?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return None,
+                }
+            }
+        }
+    }
+    Some(resolved)
+}
+
+/// The scope a permission decision ended with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionScope {
+    /// Allowed for this call only, at a prompt.
+    Once,
+    /// Allowed for the rest of the session: a `session` or `always` answer,
+    /// a session approval, or a pre-approved tool.
+    Session,
+    /// Allowed by a permission rule (an `allow` rule or `default = "allow"`).
+    Rule,
+    /// Refused, by the user at a prompt or by a `deny` rule.
+    Deny,
+    /// Refused because the call is on the blocked list and no explicit
+    /// `allow` rule overrides it.
+    Blocked,
+}
+
+/// One permission decision, without paths, commands or arguments.
+///
+/// | how it was decided              | `scope`   | `covered` |
+/// |---------------------------------|-----------|-----------|
+/// | prompt: yes                     | `Once`    | `false`   |
+/// | prompt: session or always       | `Session` | `false`   |
+/// | prompt: no                      | `Deny`    | `false`   |
+/// | session approval / pre-approved | `Session` | `true`    |
+/// | `allow` rule or default         | `Rule`    | `true`    |
+/// | `deny` rule or default          | `Deny`    | `false`   |
+/// | blocked list                    | `Blocked` | `false`   |
+///
+/// `covered` means an existing approval (a session approval, a pre-approved
+/// tool or an `allow` rule) let the call run without a prompt. A refusal is
+/// never covered, so a prompted decision for a tool that already had an
+/// approval stands out as a re-prompt. A tool's built-in `allow` default
+/// (read-only tools) is not a permission decision and is not reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionDecision {
+    /// The tool name.
+    pub tool: String,
+    /// The scope the decision ended with.
+    pub scope: DecisionScope,
+    /// Whether an existing approval covered the call.
+    pub covered: bool,
+}
+
+/// Hears every permission decision. The CLI records them as telemetry.
+pub trait PermissionObserver: Send + Sync {
+    /// Called once per decision.
+    ///
+    /// # Arguments
+    ///
+    /// * `decision` - What was decided.
+    fn decided(&self, decision: &PermissionDecision);
 }
 
 /// Answers `ask` decisions. The CLI implements it with the terminal.
@@ -720,5 +1006,197 @@ mod tests {
             StaticPrompt(PromptAnswer::Yes).ask(&request),
             PromptAnswer::Yes
         );
+    }
+
+    #[test]
+    fn resolve_path_folds_spellings_of_one_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonical");
+        std::fs::create_dir(root.join("src")).expect("mkdir");
+        std::fs::write(root.join("src").join("a.txt"), "x").expect("write");
+        let expected = root.join("src").join("a.txt");
+        let absolute = expected.to_str().expect("utf-8").to_owned();
+        for spelling in ["src/a.txt", "./src/./a.txt", "src/../src/a.txt", &absolute] {
+            assert_eq!(
+                resolve_path(&root, spelling),
+                Some(expected.clone()),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            resolve_path(&root, "new/dir/b.txt"),
+            Some(root.join("new").join("dir").join("b.txt")),
+            "a write target that does not exist yet still resolves"
+        );
+        assert_eq!(
+            resolve_path(&root, "src/new.txt"),
+            Some(root.join("src").join("new.txt")),
+            "a new file under an existing directory resolves under the canonical root"
+        );
+        let outside = resolve_path(&root, "../other.txt").expect("resolves");
+        assert!(!outside.starts_with(&root), "{}", outside.display());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn differently_capitalized_workspace_path_is_inside_the_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(dir.path()).expect("canonical");
+        let root = base.join("Repo");
+        std::fs::create_dir(&root).expect("mkdir");
+        let root = std::fs::canonicalize(&root).expect("canonical root");
+        std::fs::write(root.join("file.txt"), "x").expect("write");
+        let mut approvals = SessionApprovals::default();
+        approvals.approve("edit_file", &root).expect("approve");
+        let lowered = base.join("repo");
+        let existing = lowered.join("file.txt");
+        let existing = existing.to_str().expect("utf-8");
+        let missing = lowered.join("new.txt");
+        let missing = missing.to_str().expect("utf-8");
+        assert_eq!(
+            resolve_path(&root, existing),
+            Some(root.join("file.txt")),
+            "takes the file system's spelling"
+        );
+        assert!(approvals.covers("edit_file", Some(existing), &root, true));
+        assert!(approvals.covers("edit_file", Some(missing), &root, true));
+    }
+
+    /// A workspace with `a.txt`, plus a directory outside it.
+    fn workspace() -> (tempfile::TempDir, PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(dir.path()).expect("canonical");
+        std::fs::write(root.join("a.txt"), "x").expect("write");
+        let outside = tempfile::tempdir().expect("outside");
+        (dir, root, outside)
+    }
+
+    #[test]
+    fn session_approval_covers_only_targets_inside_the_root() {
+        let (_dir, root, _outside) = workspace();
+        let mut approvals = SessionApprovals::default();
+        assert!(!approvals.covers("edit_file", Some("a.txt"), &root, true));
+        approvals.approve("edit_file", &root).expect("approve");
+        let absolute = root.join("c.txt");
+        assert!(approvals.covers("edit_file", Some("a.txt"), &root, true));
+        assert!(approvals.covers("edit_file", Some("./src/b.txt"), &root, true));
+        assert!(approvals.covers("edit_file", absolute.to_str(), &root, true));
+        assert!(!approvals.covers("edit_file", Some("../x.txt"), &root, true));
+        assert!(!approvals.covers("edit_file", Some("/etc/hosts"), &root, true));
+        let sibling = format!("{}-sibling/a", root.display());
+        assert!(!approvals.covers("edit_file", Some(&sibling), &root, true));
+        assert!(!approvals.covers("edit_file", None, &root, true));
+        assert!(!approvals.covers("write_file", Some("a.txt"), &root, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_that_escape_the_root_are_not_covered() {
+        let (_dir, root, outside) = workspace();
+        let outside_dir = std::fs::canonicalize(outside.path()).expect("canonical");
+        std::fs::create_dir(outside_dir.join("deep")).expect("mkdir");
+        std::os::unix::fs::symlink(&outside_dir, root.join("escape")).expect("symlink");
+        std::os::unix::fs::symlink(outside_dir.join("deep"), root.join("deep_link"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(outside_dir.join("gone.txt"), root.join("dangling"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(root.join("a.txt"), root.join("inner")).expect("symlink");
+        let mut approvals = SessionApprovals::default();
+        approvals.approve("edit_file", &root).expect("approve");
+        for escaping in [
+            "escape/x.txt",
+            "escape/new/dir/x.txt",
+            "./escape/../escape/x.txt",
+            "deep_link/../x.txt",
+            "new/../escape/file.txt",
+            "new/deeper/../../escape/file.txt",
+            "dangling",
+        ] {
+            assert!(
+                !approvals.covers("edit_file", Some(escaping), &root, true),
+                "{escaping}"
+            );
+        }
+        assert!(approvals.covers("edit_file", Some("inner"), &root, true));
+        assert!(approvals.covers("edit_file", Some("./inner"), &root, true));
+    }
+
+    #[test]
+    fn session_approval_is_bound_to_the_root_it_was_given_in() {
+        let (_dir, root, other) = workspace();
+        let mut approvals = SessionApprovals::default();
+        approvals.approve("shell", &root).expect("approve");
+        assert!(approvals.covers("shell", Some("ls"), &root, false));
+        assert!(!approvals.covers("shell", Some("ls"), other.path(), false));
+        assert!(!approvals.covers("shell", Some("ls"), Path::new("/no/such/root"), false));
+    }
+
+    #[test]
+    fn preapproved_tools_cover_every_target() {
+        let (_dir, root, _outside) = workspace();
+        let approvals = SessionApprovals::preapproved(["edit_file"]).expect("valid");
+        assert!(approvals.covers("edit_file", Some("/etc/hosts"), &root, true));
+        assert!(approvals.covers("edit_file", None, Path::new("/elsewhere"), true));
+        assert!(!approvals.covers("shell", Some("ls"), &root, false));
+    }
+
+    #[test]
+    fn invalid_tool_names_are_rejected_at_both_boundaries() {
+        let (_dir, root, _outside) = workspace();
+        for bad in ["", " ", "edit file", " edit_file", "shell:cargo *"] {
+            assert!(
+                matches!(
+                    SessionApprovals::preapproved([bad]),
+                    Err(PermissionError::InvalidToolName { .. })
+                ),
+                "{bad:?}"
+            );
+            let mut approvals = SessionApprovals::default();
+            assert!(
+                matches!(
+                    approvals.approve(bad, &root),
+                    Err(PermissionError::InvalidToolName { .. })
+                ),
+                "{bad:?}"
+            );
+            assert!(!approvals.covers(bad, None, &root, false));
+        }
+        let error = SessionApprovals::preapproved(["edit_file", ""]).expect_err("empty");
+        assert_eq!(error.to_string(), "invalid tool name ``: it is empty");
+        let mut approvals = SessionApprovals::default();
+        assert!(matches!(
+            approvals.approve("edit_file", Path::new("/no/such/root")),
+            Err(PermissionError::UnresolvableRoot { .. })
+        ));
+    }
+
+    #[test]
+    fn rule_decision_ignores_the_tool_default() {
+        let perms = parse("allow = [\"edit_file\"]\ndeny = [\"shell:rm *\"]");
+        assert_eq!(
+            perms.rule_decision("edit_file", None),
+            Some(Decision::Allow)
+        );
+        assert_eq!(
+            perms.rule_decision("shell", Some("rm -rf x")),
+            Some(Decision::Deny)
+        );
+        assert_eq!(perms.rule_decision("read_file", Some("a")), None);
+        let defaulted = parse("default = \"ask\"");
+        assert_eq!(
+            defaulted.rule_decision("read_file", Some("a")),
+            Some(Decision::Ask)
+        );
+    }
+
+    #[test]
+    fn only_shell_offers_always() {
+        let request = |tool: &str| PermissionRequest {
+            tool: tool.to_owned(),
+            target: None,
+            arguments: serde_json::json!({}),
+        };
+        assert!(request("shell").offers_always());
+        assert!(!request("edit_file").offers_always());
     }
 }

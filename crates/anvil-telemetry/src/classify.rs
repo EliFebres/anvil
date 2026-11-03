@@ -274,7 +274,7 @@ pub fn permission_friction(history: &[Record]) -> Vec<SignalKind> {
             let entry = prompts.entry(rule_digest).or_insert((tool, 0, false));
             match answer {
                 PermissionAnswer::Yes => entry.1 += 1,
-                PermissionAnswer::Always => entry.2 = true,
+                PermissionAnswer::Session | PermissionAnswer::Always => entry.2 = true,
                 PermissionAnswer::No => {}
             }
         }
@@ -605,6 +605,10 @@ mod tests {
             .extend((0..5).map(|i| answer(&format!("t{i}"), "shell:git *", PermissionAnswer::Yes)));
         history.push(answer("t9", "shell:git *", PermissionAnswer::Always));
         history.extend((0..4).map(|i| answer(&format!("u{i}"), "shell:ls", PermissionAnswer::Yes)));
+        history.extend(
+            (0..5).map(|i| answer(&format!("v{i}"), "shell:make *", PermissionAnswer::Yes)),
+        );
+        history.push(answer("v9", "shell:make *", PermissionAnswer::Session));
         assert_eq!(
             permission_friction(&history),
             vec![SignalKind::PermissionFriction {

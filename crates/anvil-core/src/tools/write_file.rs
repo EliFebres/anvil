@@ -1,5 +1,3 @@
-//! The `write_file` tool.
-
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -34,6 +32,10 @@ impl Tool for WriteFile {
 
     fn access(&self) -> Access {
         Access::Write
+    }
+
+    fn target_is_path(&self) -> bool {
+        true
     }
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> ToolFuture<'a> {

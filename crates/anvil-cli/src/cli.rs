@@ -1,6 +1,6 @@
 //! Command-line definition for `anvil`.
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 /// A CLI coding agent.
 #[derive(Debug, Parser)]
@@ -19,6 +19,11 @@ pub struct Cli {
     /// Chosen automatically with --yes or when a standard stream is not a terminal.
     #[arg(long, global = true)]
     pub plain: bool,
+
+    /// Pre-approve a tool for this session, so it never prompts; repeat for
+    /// more tools. Adds to the config's `permissions.allow_tools`.
+    #[arg(long = "allow-tool", global = true, value_name = "NAME", action = ArgAction::Append)]
+    pub allow_tools: Vec<String>,
 
     /// What to do.
     #[command(subcommand)]
@@ -224,4 +229,36 @@ pub enum ConfigCommand {
     },
     /// Print the merged configuration (project over global) as TOML.
     Show,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allow_tool_repeats_before_or_after_the_subcommand() {
+        let before = Cli::try_parse_from([
+            "anvil",
+            "--allow-tool",
+            "edit_file",
+            "--allow-tool",
+            "write_file",
+            "run",
+            "fix it",
+        ])
+        .expect("parses");
+        assert_eq!(before.allow_tools, vec!["edit_file", "write_file"]);
+        let after = Cli::try_parse_from([
+            "anvil",
+            "chat",
+            "--allow-tool",
+            "edit_file",
+            "--allow-tool",
+            "shell",
+        ])
+        .expect("parses");
+        assert_eq!(after.allow_tools, vec!["edit_file", "shell"]);
+        let none = Cli::try_parse_from(["anvil", "fix it"]).expect("parses");
+        assert!(none.allow_tools.is_empty());
+    }
 }
