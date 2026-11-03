@@ -63,7 +63,7 @@ enum Command {
     Resume,
     /// Install deploy/nuc/factory.service as a systemd user unit and start it (Linux only).
     InstallService,
-    /// Stop the service, pull main, rebuild the binaries and the worker image, and start it again (Linux only).
+    /// Stop the service, pull main, rebuild the binaries (and the worker image when its recipe changed), and start it again (Linux only).
     ///
     /// Builds anvil twice: for the host, and as a static musl binary that the
     /// worker container mounts (checked with ldd). A ticket in progress
@@ -74,6 +74,10 @@ enum Command {
         /// Stop at once; a ticket in progress stays claimed on factory/state.
         #[arg(long)]
         now: bool,
+        /// Rebuild the worker image even when its recipe (rust-toolchain.toml,
+        /// deploy/nuc/Containerfile, entrypoint.sh) has not changed.
+        #[arg(long)]
+        rebuild_image: bool,
     },
     /// Run the whole worker pipeline once on this machine, against a local bare repository.
     ///
@@ -224,7 +228,7 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             }
             Ok(0)
         }
-        Command::Update { now } => {
+        Command::Update { now, rebuild_image } => {
             if !cfg!(target_os = "linux") {
                 anyhow::bail!("update needs systemd; run it on the NUC");
             }
@@ -239,6 +243,7 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
                 config_home: config_home(&home),
                 now,
                 poll: UPDATE_POLL,
+                rebuild_image,
             })?;
             Ok(0)
         }

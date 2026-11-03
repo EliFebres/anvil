@@ -60,7 +60,7 @@ jobs:
       - name: musl-tools
         run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
       - name: worker image
-        run: podman build -q -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc
+        run: podman build -q -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile .
       - name: static anvil
         run: cargo build --release --target x86_64-unknown-linux-musl -p anvil-cli
       - name: factory

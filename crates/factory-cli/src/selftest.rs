@@ -6,7 +6,9 @@
 //! the resolved anvil binary mounted into it, the egress proxy (with an
 //! empty allowlist), the ticket queue on `factory/state`, the worktree,
 //! Gate A, Gate C with an approving reviewer, the push, the state moves and
-//! a squash merge into the bare repository's `main`. Gate B is skipped: the
+//! a squash merge into the bare repository's `main`. Before the pipeline, the
+//! image's toolchain must be the one `rust-toolchain.toml` pins and must
+//! build a one-line crate offline. Gate B is skipped: the
 //! temp repository has no eval baseline and the eval would call models.
 //!
 //! Each step prints `PASS` or `FAIL`. The first failure stops the run; the
@@ -160,6 +162,10 @@ async fn pipeline(
     steps.report(
         "sandbox git: git status and just no-old-name inside the container",
         world.sandbox_git(&parts).await,
+    )?;
+    steps.report(
+        "toolchain: cargo and rustfmt match rust-toolchain.toml and build offline in the container",
+        world.sandbox_toolchain(&parts, &options.repo_root).await,
     )?;
     steps.report(
         "pipeline: claim, sandbox, gate A, gate B (skipped), gate C, push, merge",
@@ -508,6 +514,82 @@ impl World {
         Ok(())
     }
 
+    /// Proves the image's toolchain is the pinned one and works without a
+    /// network: a one-line crate next to a copy of `rust-toolchain.toml`, so
+    /// rustup resolves the pin exactly as it does in a ticket's `/work`.
+    async fn sandbox_toolchain(&self, parts: &Parts, repo_root: &Path) -> anyhow::Result<()> {
+        // Short: the proxy socket path under it has a length limit.
+        let name = "selftest-rust";
+        let path = self.home().work_dir(name);
+        let result = self.run_toolchain_probe(parts, repo_root, &path).await;
+        parts.sandbox.stop_proxy();
+        let _ = std::fs::remove_dir_all(&path);
+        let _ = std::fs::remove_dir_all(self.home().ticket_home(name));
+        result
+    }
+
+    /// Writes the probe crate, checks the versions and builds it for every pinned target.
+    async fn run_toolchain_probe(
+        &self,
+        parts: &Parts,
+        repo_root: &Path,
+        path: &Path,
+    ) -> anyhow::Result<()> {
+        let pin = ToolchainPin::read(repo_root)?;
+        std::fs::create_dir_all(path.join("src"))
+            .with_context(|| format!("creating {}", path.display()))?;
+        std::fs::copy(repo_root.join(TOOLCHAIN_FILE), path.join(TOOLCHAIN_FILE))
+            .with_context(|| format!("copying {TOOLCHAIN_FILE}"))?;
+        std::fs::write(
+            path.join("Cargo.toml"),
+            "[package]\nname = \"toolchain-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .context("writing the probe's Cargo.toml")?;
+        std::fs::write(path.join("src/main.rs"), "fn main() {}\n")
+            .context("writing the probe's main.rs")?;
+        parts.sandbox.prepare(path).await?;
+
+        let mut versions = Vec::new();
+        for program in [
+            &["cargo", "--version"][..],
+            &["rustc", "--version"],
+            &["cargo", "fmt", "--version"],
+        ] {
+            versions.push(self.must_pass(parts, path, program).await?);
+        }
+        check_versions(&pin.channel, &versions[0], &versions[1], &versions[2])?;
+
+        self.must_pass(parts, path, &["cargo", "build", "--offline"])
+            .await?;
+        for target in &pin.targets {
+            self.must_pass(
+                parts,
+                path,
+                &["cargo", "build", "--offline", "--target", target],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Runs one program in the sandbox and returns its output, or fails with it.
+    async fn must_pass(
+        &self,
+        parts: &Parts,
+        path: &Path,
+        program: &[&str],
+    ) -> anyhow::Result<String> {
+        let outcome = self.sandbox_run(parts, path, program).await?;
+        if !outcome.passed {
+            bail!(
+                "`{}` failed inside the sandbox (rebuild the image with `factory update --rebuild-image`):\n{}",
+                program.join(" "),
+                outcome.output_tail
+            );
+        }
+        Ok(outcome.output_tail)
+    }
+
     /// Runs one program in the ticket's clone inside the sandbox.
     async fn sandbox_run(
         &self,
@@ -683,6 +765,145 @@ async fn preflight(
     let readme = std::fs::read_to_string(root.join("README.md")).context("reading README.md")?;
     check_anchor(&script, &readme)?;
     Ok(anvil)
+}
+
+/// The toolchain pin file, at the repository root.
+const TOOLCHAIN_FILE: &str = "rust-toolchain.toml";
+
+/// What `rust-toolchain.toml` pins: the channel and the extra targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolchainPin {
+    /// `toolchain.channel`, such as `1.99.1`.
+    pub channel: String,
+    /// `toolchain.targets`; empty when the file lists none.
+    pub targets: Vec<String>,
+}
+
+impl ToolchainPin {
+    /// Reads and parses `rust-toolchain.toml` under `repo_root`.
+    ///
+    /// # Arguments
+    ///
+    /// * `repo_root` - The repository root.
+    ///
+    /// # Returns
+    ///
+    /// The pin.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be read, is not TOML, or has no string
+    /// `toolchain.channel`.
+    pub fn read(repo_root: &Path) -> anyhow::Result<Self> {
+        let path = repo_root.join(TOOLCHAIN_FILE);
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    /// Parses the text of a `rust-toolchain.toml`.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The file's contents.
+    ///
+    /// # Returns
+    ///
+    /// The pin.
+    ///
+    /// # Errors
+    ///
+    /// When it is not TOML or has no string `toolchain.channel`.
+    pub fn parse(text: &str) -> anyhow::Result<Self> {
+        let table: toml::Table = toml::from_str(text)?;
+        let toolchain = table
+            .get("toolchain")
+            .and_then(toml::Value::as_table)
+            .context("no [toolchain] table")?;
+        let channel = toolchain
+            .get("channel")
+            .and_then(toml::Value::as_str)
+            .context("no string toolchain.channel")?
+            .to_owned();
+        let targets = toolchain
+            .get("targets")
+            .and_then(toml::Value::as_array)
+            .map(|targets| {
+                targets
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(Self { channel, targets })
+    }
+}
+
+/// Checks that the container's cargo, rustc and rustfmt are the pinned toolchain.
+///
+/// rustfmt reports its own version, not Rust's, so it is tied to the pin
+/// through the commit and date it was built from, which must be rustc's.
+/// The two print hashes of different lengths, so one must prefix the other.
+///
+/// # Arguments
+///
+/// * `channel` - The pinned channel, such as `1.99.1`.
+/// * `cargo` - The output of `cargo --version`.
+/// * `rustc` - The output of `rustc --version`.
+/// * `rustfmt` - The output of `cargo fmt --version`.
+///
+/// # Errors
+///
+/// When cargo or rustc is another version, or rustfmt was built from
+/// another commit than rustc.
+pub fn check_versions(
+    channel: &str,
+    cargo: &str,
+    rustc: &str,
+    rustfmt: &str,
+) -> anyhow::Result<()> {
+    let hint = "rebuild the image with `factory update --rebuild-image`";
+    let cargo = version_line(cargo, "cargo ");
+    if !cargo.starts_with(&format!("cargo {channel} ")) {
+        bail!("the container's cargo is `{cargo}`, but rust-toolchain.toml pins {channel}; {hint}");
+    }
+    let rustc = version_line(rustc, "rustc ");
+    if !rustc.starts_with(&format!("rustc {channel} ")) {
+        bail!("the container's rustc is `{rustc}`, but rust-toolchain.toml pins {channel}; {hint}");
+    }
+    let rustfmt = version_line(rustfmt, "rustfmt ");
+    let same_build = match (build_of(rustc), build_of(rustfmt)) {
+        (Some((rustc_hash, rustc_date)), Some((fmt_hash, fmt_date))) => {
+            rustc_date == fmt_date
+                && (rustc_hash.starts_with(fmt_hash) || fmt_hash.starts_with(rustc_hash))
+        }
+        _ => false,
+    };
+    if !same_build {
+        bail!(
+            "the container's rustfmt is `{rustfmt}`, not the build of `{rustc}` that rust-toolchain.toml pins; {hint}"
+        );
+    }
+    Ok(())
+}
+
+/// The first line of `output` that starts with `prefix`, or its first line.
+fn version_line<'a>(output: &'a str, prefix: &str) -> &'a str {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(prefix))
+        .or_else(|| output.lines().next())
+        .unwrap_or("")
+        .trim()
+}
+
+/// The `(hash date)` at the end of a version line.
+fn build_of(line: &str) -> Option<(&str, &str)> {
+    let inside = line.rsplit_once('(')?.1.strip_suffix(')')?;
+    let (hash, date) = inside.split_once(' ')?;
+    (!hash.is_empty() && !date.is_empty()).then_some((hash, date))
 }
 
 /// Checks that the script's `edit_file` call replaces README.md's last line.
@@ -953,6 +1174,50 @@ impl EvalGate for SkippedEvalGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_pin_is_parsed_with_its_targets() {
+        let pin = ToolchainPin::parse(
+            "[toolchain]\nchannel = \"1.99.1\"\ncomponents = [\"rustfmt\"]\ntargets = [\"x86_64-unknown-linux-musl\"]\n",
+        )
+        .expect("parses");
+        assert_eq!(pin.channel, "1.99.1");
+        assert_eq!(pin.targets, ["x86_64-unknown-linux-musl"]);
+        let bare = ToolchainPin::parse("[toolchain]\nchannel = \"1.99.1\"\n").expect("parses");
+        assert!(bare.targets.is_empty());
+        assert!(ToolchainPin::parse("[toolchain]\n").is_err());
+        let shipped = ToolchainPin::read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+            .expect("the repository's pin");
+        assert!(!shipped.channel.is_empty());
+    }
+
+    #[test]
+    fn versions_must_all_be_the_pinned_build() {
+        let cargo = "cargo 1.99.1 (5f94df478 2026-08-27)\n";
+        let rustc = "rustc 1.99.1 (58cf8f9c3 2026-10-13)\n";
+        let rustfmt = "rustfmt 1.10.0-stable (58cf8f9c35 2026-10-13)\n";
+        check_versions("1.99.1", cargo, rustc, rustfmt).expect("the pinned build");
+
+        let error = check_versions("1.99.2", cargo, rustc, rustfmt).expect_err("old cargo");
+        let text = error.to_string();
+        assert!(
+            text.contains("cargo 1.99.1 (5f94df478 2026-08-27)"),
+            "{text}"
+        );
+        assert!(text.contains("pins 1.99.2"), "{text}");
+        assert!(text.contains("--rebuild-image"), "{text}");
+
+        let other_rustc = "rustc 1.98.0 (aaaaaaaaa 2026-09-01)";
+        let error = check_versions("1.99.1", cargo, other_rustc, rustfmt).expect_err("old rustc");
+        assert!(error.to_string().contains("rustc 1.98.0"), "{error}");
+
+        let other_fmt = "rustfmt 1.10.0-stable (aaaaaaaaaa 2026-10-13)";
+        let error = check_versions("1.99.1", cargo, rustc, other_fmt).expect_err("other rustfmt");
+        assert!(error.to_string().contains("aaaaaaaaaa"), "{error}");
+
+        let missing = "error: 'cargo-fmt' is not installed for the toolchain '1.99.1'";
+        assert!(check_versions("1.99.1", cargo, rustc, missing).is_err());
+    }
 
     #[test]
     fn a_step_line_says_pass_with_time_or_fail_with_the_error_chain() {
