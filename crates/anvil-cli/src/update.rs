@@ -90,6 +90,8 @@ impl UpdateOptions {
 struct Release {
     tag_name: String,
     #[serde(default)]
+    published_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
     body: Option<String>,
     #[serde(default)]
     draft: bool,
@@ -209,10 +211,21 @@ async fn list_releases(
         );
     }
     let releases: Vec<Release> = response.json().await.context("parsing the release list")?;
-    Ok(releases
-        .into_iter()
-        .filter(|release| !release.draft && !release.prerelease)
-        .collect())
+    Ok(newest_first(
+        releases
+            .into_iter()
+            .filter(|release| !release.draft && !release.prerelease)
+            .collect(),
+    ))
+}
+
+/// Sorts releases by when they were published, newest first.
+///
+/// GitHub lists same-day releases by tag name, and the tag ends with a
+/// commit's hex sha, so its order says nothing about which one is newer.
+fn newest_first(mut releases: Vec<Release>) -> Vec<Release> {
+    releases.sort_by_key(|release| std::cmp::Reverse(release.published_at));
+    releases
 }
 
 /// The releases newer than the installed one, newest first.
@@ -333,11 +346,24 @@ mod tests {
     fn release(tag: &str, body: &str) -> Release {
         Release {
             tag_name: tag.to_owned(),
+            published_at: None,
             body: Some(body.to_owned()),
             draft: false,
             prerelease: false,
             assets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_newest_published_release_comes_first_whatever_its_tag() {
+        let at = |text: &str| Some(text.parse().expect("timestamp"));
+        let mut older = release("2026-11-03-ff39120", "");
+        older.published_at = at("2026-11-03T17:26:50Z");
+        let mut newer = release("2026-11-03-17fb819", "");
+        newer.published_at = at("2026-11-03T17:50:51Z");
+        let sorted = newest_first(vec![older, newer]);
+        assert_eq!(sorted[0].tag_name, "2026-11-03-17fb819");
+        assert_eq!(sorted[1].tag_name, "2026-11-03-ff39120");
     }
 
     #[test]
