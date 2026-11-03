@@ -14,8 +14,5 @@ acceptance = [
 ]
 evidence = ["01M6D1YE3BHKQKQZ2KD6ZNW135"]
 priority = "p2"
-status = "rejected"
+status = "open"
 origin = "cli"
-claimed_at = "2026-11-03T14:54:05.430840449Z"
-claimed_by = "minipc-NUC14RVH-B"
-note = "gate C: the review swarm asked for changes after all 2 review rounds"
