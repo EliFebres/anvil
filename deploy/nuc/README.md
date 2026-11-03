@@ -48,3 +48,7 @@ Runs the whole worker pipeline once, for real, in a few seconds, and prints `PAS
 ## First run
 
 `main` needs an eval result under `eval/results/` before any ticket can pass Gate B; until the baseline commit reaches `main` the service pauses with "no eval result on main". Run `anvil doctor --fix-github` once so `factory/state` exists with its ruleset, then `factory resume`.
+
+## Things that went wrong once
+
+- `factory update` run from a snap terminal (VS Code's) built and selftested the worker image in the snap's private podman store (`XDG_DATA_HOME=~/snap/code/<rev>/.local/share`) while the systemd service ran a stale image without the musl target, so every `cargo` in the sandbox tried to download it and failed. Every podman call the factory makes now drops a snap's `XDG_*` store variables, and the selftest's "image store" step fails if podman still reads a store under `~/snap/`.

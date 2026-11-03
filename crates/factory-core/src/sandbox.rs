@@ -55,10 +55,9 @@ const PROXY_URL: &str = "http://127.0.0.1:3128";
 /// Variables the host passes through besides the keys, so programs can run at all.
 ///
 /// The `XDG_*` and `CONTAINERS_*` ones locate rootless podman's image store.
-/// Without them `podman run` can read a different store from the shell that
-/// ran `just image` (a snap terminal sets its own `XDG_DATA_HOME`), and run a
-/// stale image. They configure the runtime only: nothing reaches a container
-/// except its `-e` flags.
+/// A snap app's private home is the exception: see [`snap_overrides`]. They
+/// configure the runtime only: nothing reaches a container except its `-e`
+/// flags.
 const PASSTHROUGH_ENV: [&str; 15] = [
     "PATH",
     "HOME",
@@ -347,7 +346,11 @@ impl Sandbox {
             .into_iter()
             .filter_map(|name| (self.keys)(&name).map(|value| (name, value)))
             .collect();
-        for name in PASSTHROUGH_ENV {
+        let dropped = snap_overrides();
+        for name in PASSTHROUGH_ENV
+            .into_iter()
+            .filter(|name| !dropped.contains(name))
+        {
             if let Ok(value) = std::env::var(name) {
                 env.push((name.to_owned(), value));
             }
@@ -1058,6 +1061,10 @@ async fn run_process(invocation: Invocation, deadline: Instant) -> Result<Exit> 
     if let Some(env) = &invocation.env {
         command.env_clear();
         command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    } else {
+        for name in snap_overrides() {
+            command.env_remove(name);
+        }
     }
     if let Some(cwd) = &invocation.cwd {
         command.current_dir(cwd);
@@ -1195,6 +1202,33 @@ fn runtime_word(runtime: ContainerRuntime) -> &'static str {
         ContainerRuntime::None => "the host",
         other => runtime_name(other),
     }
+}
+
+/// The `XDG_*` variables that move rootless podman's store and configuration.
+const STORE_VARS: [&str; 2] = ["XDG_DATA_HOME", "XDG_CONFIG_HOME"];
+
+/// The store variables in this process that point into a snap app's private home.
+///
+/// A terminal inside a snap (VS Code's, for one) sets `XDG_DATA_HOME` to
+/// `~/snap/<app>/<rev>/.local/share`, so podman run from it reads a store
+/// the systemd service never sees: `factory update` would build and selftest
+/// one image while the service runs a stale one. Every podman call the
+/// factory makes removes these, so all of them share the default store.
+///
+/// # Returns
+///
+/// The names to remove from a child's environment; empty outside a snap.
+pub fn snap_overrides() -> Vec<&'static str> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    STORE_VARS
+        .into_iter()
+        .filter(|name| std::env::var(name).is_ok_and(|value| is_snap_private(&value, &home)))
+        .collect()
+}
+
+/// Whether `value` lies under `<home>/snap/`, a snap app's private home.
+fn is_snap_private(value: &str, home: &str) -> bool {
+    !home.is_empty() && Path::new(value).starts_with(Path::new(home).join("snap"))
 }
 
 /// `uid:gid` of this process for `docker --user`; `1000:1000` where unknown.
@@ -1626,5 +1660,14 @@ mod tests {
             build_command(ContainerRuntime::Podman, "localhost/anvil-factory:latest"),
             "podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc"
         );
+    }
+
+    #[test]
+    fn only_a_snap_apps_private_home_is_dropped() {
+        let home = "/home/u";
+        assert!(is_snap_private("/home/u/snap/code/263/.local/share", home));
+        assert!(!is_snap_private("/home/u/.local/share", home));
+        assert!(!is_snap_private("/home/u/snapshots", home));
+        assert!(!is_snap_private("/home/u/snap/x", ""));
     }
 }
