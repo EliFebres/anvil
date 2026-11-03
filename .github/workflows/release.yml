@@ -1,6 +1,7 @@
 name: release
 
-# Every merge to main becomes a release: anvil for Linux and Windows, tagged
+# Every merge to main becomes a release: anvil for Linux (glibc, and static
+# musl, which is what the factory machine runs) and Windows, tagged
 # with the date and the short sha, marked latest. `anvil update` reads the
 # `## SHA256` section of the notes before it swaps a binary in.
 on:
@@ -26,17 +27,31 @@ jobs:
             target: x86_64-unknown-linux-gnu
             asset: anvil-x86_64-unknown-linux-gnu
             binary: anvil
+            out: target/release
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: anvil-x86_64-unknown-linux-musl
+            binary: anvil
+            out: target/x86_64-unknown-linux-musl/release
+            cargo_target: --target x86_64-unknown-linux-musl
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: anvil-x86_64-pc-windows-msvc.exe
             binary: anvil.exe
+            out: target/release
     steps:
       - uses: actions/checkout@v4
       # The version must equal rust-toolchain.toml; anvil-types' tests check it.
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1
+          targets: ${{ matrix.target }}
+      - name: musl-gcc
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y -qq musl-tools
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - name: build
         shell: bash
         env:
@@ -44,9 +59,9 @@ jobs:
           ANVIL_BUILD_SHA: ${{ github.sha }}
           ANVIL_RELEASE_REPO: ${{ github.repository }}
         run: |
-          cargo build --release -p anvil-cli
+          cargo build --release -p anvil-cli ${{ matrix.cargo_target }}
           mkdir -p dist
-          cp "target/release/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+          cp "${{ matrix.out }}/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
