@@ -79,6 +79,8 @@ pub enum RunState {
     Idle,
     /// The pause flag is set.
     Paused,
+    /// The service shut down; nothing rewrites the snapshot until it starts again.
+    Stopped,
 }
 
 /// The service state and, when paused, why.
@@ -550,6 +552,24 @@ impl Board {
         self.save(&mut inner);
     }
 
+    /// Records that the service is shutting down: no next poll, no ticket on
+    /// screen, and the state `stopped`, so the dashboard does not keep
+    /// counting down to a poll that will never come.
+    pub fn stop(&self) {
+        let mut inner = lock(&self.inner);
+        inner.run_going = false;
+        let status = &mut inner.status;
+        status.service.state = RunState::Stopped;
+        status.service.reason = None;
+        status.next_poll_at = None;
+        status.ticket = None;
+        status.implementer_tail.clear();
+        status.usage = None;
+        status.container = None;
+        status.egress = None;
+        self.save(&mut inner);
+    }
+
     /// Applies what the worker reported.
     ///
     /// # Arguments
@@ -888,6 +908,26 @@ mod tests {
         ticket.stages[0].started_at = Some(Utc::now());
         board.start_ticket(ticket);
         board
+    }
+
+    #[test]
+    fn stop_writes_stopped_with_no_next_poll_and_no_ticket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let board = board_with_ticket(dir.path());
+        board.update(|status| status.next_poll_at = Some(Utc::now()));
+        board.stop();
+        let on_disk: Status =
+            serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).expect("file"))
+                .expect("parses");
+        assert_eq!(on_disk.service.state, RunState::Stopped);
+        assert!(on_disk.next_poll_at.is_none());
+        assert!(on_disk.ticket.is_none());
+        assert!(
+            std::fs::read_to_string(dir.path().join("status.json"))
+                .expect("file")
+                .contains("\"state\": \"stopped\""),
+            "serialized in snake case"
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use anvil_tui::layout::fit_text;
 use anvil_tui::widgets::kv_row;
 use anvil_tui::{Depth, LOGO, Shade, Theme};
 use factory_core::Status;
-use factory_core::board::WeekView;
+use factory_core::board::{RunState, WeekView};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -112,7 +112,12 @@ fn draw_center(frame: &mut Frame, area: Rect, status: &Status, logo: bool, theme
         lines.extend(LOGO.iter().map(|row| Line::styled(*row, theme.border())));
         lines.push(Line::raw(""));
     }
-    let empty = if status.queue.is_empty() {
+    let empty = if status.service.state == RunState::Stopped {
+        format!(
+            "{} open · the factory is stopped; systemctl --user start factory",
+            status.queue.len()
+        )
+    } else if status.queue.is_empty() {
         "queue is empty · waiting for tickets".to_owned()
     } else {
         format!("{} open · waiting for the next poll", status.queue.len())
@@ -288,13 +293,23 @@ fn draw_health(frame: &mut Frame, area: Rect, status: &Status, ctx: &Ctx) {
     let health = &status.health;
     let text = theme.fg(Shade::Secondary);
     let dash = || "–".to_owned();
-    let since = status
-        .started_at
-        .map(|at| {
-            let day = at.with_timezone(&ctx.tz).format("%b %-d");
-            format!("running since {day}")
-        })
-        .unwrap_or_else(dash);
+    let stopped = status.service.state == RunState::Stopped;
+    let since = if stopped {
+        "stopped".to_owned()
+    } else {
+        status
+            .started_at
+            .map(|at| {
+                let day = at.with_timezone(&ctx.tz).format("%b %-d");
+                format!("running since {day}")
+            })
+            .unwrap_or_else(dash)
+    };
+    let service_shade = if stopped {
+        Shade::Danger
+    } else {
+        Shade::Success
+    };
     let last_poll = status
         .last_poll
         .as_ref()
@@ -346,7 +361,7 @@ fn draw_health(frame: &mut Frame, area: Rect, status: &Status, ctx: &Ctx) {
         )
     };
     let lines = vec![
-        row("service", since, Shade::Success),
+        row("service", since, service_shade),
         kv_row(
             "last poll",
             vec![Span::styled(last_poll, text)],
