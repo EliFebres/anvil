@@ -1,5 +1,3 @@
-//! The `write_file` tool.
-
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;

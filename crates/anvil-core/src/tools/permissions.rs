@@ -1,5 +1,3 @@
-//! The permission model: `.anvil/permissions.toml`, rule matching, and the
-//! prompt hook the CLI implements.
 //!
 //! A rule is `tool` or `tool:glob`. The glob matches the call's target: the
 //! `path` argument for file tools, the `command` for `shell`. When several
@@ -456,7 +454,9 @@ pub enum PromptAnswer {
 /// Tools the user approved for this session, held in memory only.
 ///
 /// One instance is shared by every registry of a session, including the
-/// ones sub-agents get, so an approval is never lost between them. An
+/// ones sub-agents get, so an approval is never lost between them; a
+/// registry holds its lock while prompting, so two registries never ask at
+/// once and the second sees the first one's `session` answer. An
 /// approval given at a prompt is bound to the workspace root it was given
 /// in, so a registry working in another root still prompts.
 #[derive(Debug, Clone, Default)]
@@ -588,10 +588,13 @@ fn validate_tool_name(tool: &str) -> Result<(), PermissionError> {
 }
 
 /// Resolves `target` against `root` the way the file system will, so a
-/// symlink cannot make an outside location look inside the root.
+/// symlink cannot make an outside location look inside the root and a
+/// different spelling of an existing directory (such as other letter case
+/// on Windows) cannot make an inside location look outside.
 ///
 /// Components are walked one at a time and every one is checked on disk:
-/// an existing symlink is replaced by its canonical target before the next
+/// an existing component is replaced by its canonical path (following
+/// symlinks and taking the file system's own spelling) before the next
 /// component (including `..`) is applied. A missing component is kept as
 /// written, which keeps new files resolvable; a later `..` that walks back
 /// out of it lands on a checked path again, so `new/../link` still follows
@@ -624,10 +627,9 @@ pub fn resolve_path(root: &Path, target: &str) -> Option<PathBuf> {
             Component::Normal(name) => {
                 resolved.push(name);
                 match std::fs::symlink_metadata(&resolved) {
-                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                    Ok(_) => {
                         resolved = std::fs::canonicalize(&resolved).ok()?;
                     }
-                    Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(_) => return None,
                 }
@@ -1026,8 +1028,38 @@ mod tests {
             Some(root.join("new").join("dir").join("b.txt")),
             "a write target that does not exist yet still resolves"
         );
+        assert_eq!(
+            resolve_path(&root, "src/new.txt"),
+            Some(root.join("src").join("new.txt")),
+            "a new file under an existing directory resolves under the canonical root"
+        );
         let outside = resolve_path(&root, "../other.txt").expect("resolves");
         assert!(!outside.starts_with(&root), "{}", outside.display());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn differently_capitalized_workspace_path_is_inside_the_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let base = std::fs::canonicalize(dir.path()).expect("canonical");
+        let root = base.join("Repo");
+        std::fs::create_dir(&root).expect("mkdir");
+        let root = std::fs::canonicalize(&root).expect("canonical root");
+        std::fs::write(root.join("file.txt"), "x").expect("write");
+        let mut approvals = SessionApprovals::default();
+        approvals.approve("edit_file", &root).expect("approve");
+        let lowered = base.join("repo");
+        let existing = lowered.join("file.txt");
+        let existing = existing.to_str().expect("utf-8");
+        let missing = lowered.join("new.txt");
+        let missing = missing.to_str().expect("utf-8");
+        assert_eq!(
+            resolve_path(&root, existing),
+            Some(root.join("file.txt")),
+            "takes the file system's spelling"
+        );
+        assert!(approvals.covers("edit_file", Some(existing), &root, true));
+        assert!(approvals.covers("edit_file", Some(missing), &root, true));
     }
 
     /// A workspace with `a.txt`, plus a directory outside it.

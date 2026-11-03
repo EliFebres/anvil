@@ -1,5 +1,3 @@
-//! The `edit_file` tool: exact-string replacement that refuses ambiguity.
-
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;

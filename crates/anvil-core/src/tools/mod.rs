@@ -6,15 +6,26 @@
 //! output on disk. Nothing here prints; prompting goes through
 //! [`PermissionPrompt`], which the CLI implements.
 
+/// The `edit_file` tool: exact-string replacement that refuses ambiguity.
 pub mod edit_file;
+/// The `glob` tool: finds files by pattern, honoring `.gitignore`.
 pub mod glob;
+/// The `grep` tool: regex search over files, honoring `.gitignore`.
 pub mod grep;
+/// The `list_dir` tool.
 pub mod list_dir;
 mod output;
+/// The permission model: `.anvil/permissions.toml`, rule matching, and the
+/// prompt hook the CLI implements.
 pub mod permissions;
+/// What a file-writing tool call will do, computed before it runs so the
+/// change can be shown and judged.
 pub mod preview;
+/// The `read_file` tool.
 pub mod read_file;
+/// The `shell` tool and the shell program behind it.
 pub mod shell;
+/// The `write_file` tool.
 pub mod write_file;
 
 use std::collections::BTreeMap;
@@ -377,7 +388,8 @@ pub struct ToolRegistry {
     permissions: Mutex<Permissions>,
     /// Who to ask when a rule says `ask`.
     prompt: Box<dyn PermissionPrompt>,
-    /// Session-scoped approvals, shared with sub-agent registries.
+    /// Session-scoped approvals, shared with sub-agent registries; its lock
+    /// is also held across a prompt, so sharing registries never prompt at once.
     approvals: Arc<Mutex<SessionApprovals>>,
     /// Hears every permission decision.
     observer: Option<Arc<dyn PermissionObserver>>,
@@ -409,7 +421,8 @@ impl ToolRegistry {
 
     /// Replaces the session approvals with a shared set, so every registry
     /// of one session (the main one and each sub-agent's) remembers the
-    /// same approvals.
+    /// same approvals. Its lock is held while a prompt is open, so registries
+    /// sharing it ask one at a time and each rechecks after the previous answer.
     ///
     /// # Arguments
     ///
@@ -664,13 +677,10 @@ impl ToolRegistry {
                 ))
             }
             Decision::Ask => {
-                let covered = lock_or_recover(&self.approvals).covers(
-                    name,
-                    target,
-                    root,
-                    tool.target_is_path(),
-                );
-                if covered {
+                // Held across the prompt so a registry sharing these approvals
+                // waits for this answer and then rechecks, instead of prompting too.
+                let mut approvals = lock_or_recover(&self.approvals);
+                if approvals.covers(name, target, root, tool.target_is_path()) {
                     self.observe(name, DecisionScope::Session, true);
                     return None;
                 }
@@ -693,7 +703,7 @@ impl ToolRegistry {
                         ))
                     }
                     PromptAnswer::Session => {
-                        if let Err(error) = lock_or_recover(&self.approvals).approve(name, root) {
+                        if let Err(error) = approvals.approve(name, root) {
                             tracing::warn!(%error, tool = name, "could not keep the session approval");
                         }
                         self.observe(name, DecisionScope::Session, false);
@@ -1186,6 +1196,75 @@ mod tests {
             .execute(&call, &ToolContext::new(bench.dir.path()))
             .await;
         assert_eq!(execution.outcome, ToolOutcome::Completed);
+    }
+
+    /// Waits before answering, so a concurrent call has time to reach its
+    /// own permission check while this prompt is open.
+    struct SlowPrompt(Arc<ScriptedPrompt>);
+
+    impl PermissionPrompt for SlowPrompt {
+        fn ask(&self, request: &PermissionRequest) -> PromptAnswer {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            self.0.ask(request)
+        }
+    }
+
+    #[test]
+    fn concurrent_registries_sharing_approvals_prompt_only_once() {
+        let bench = EditBench::new(vec![], SessionApprovals::default());
+        let first_prompt = Arc::new(ScriptedPrompt::new(vec![PromptAnswer::Session]));
+        let second_prompt = Arc::new(ScriptedPrompt::new(vec![PromptAnswer::Session]));
+        let approvals = bench.registry.session_approvals();
+        let mut first = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(SlowPrompt(Arc::clone(&first_prompt))),
+        )
+        .with_session_approvals(Arc::clone(&approvals));
+        let mut second = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(SlowPrompt(Arc::clone(&second_prompt))),
+        )
+        .with_session_approvals(approvals);
+        for registry in [&mut first, &mut second] {
+            registry.set_observer(Arc::clone(&bench.observer) as Arc<dyn PermissionObserver>);
+        }
+        let start = std::sync::Barrier::new(2);
+        let run = |registry: &ToolRegistry, path: &str| {
+            let args = serde_json::json!({"path": path, "old": "old", "new": "new"});
+            let call = ToolCall {
+                id: path.to_owned(),
+                name: "edit_file".to_owned(),
+                arguments_json: args.to_string(),
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            start.wait();
+            runtime
+                .block_on(registry.execute(&call, &ToolContext::new(bench.dir.path())))
+                .outcome
+        };
+        let (a, b) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| run(&first, "f0.txt"));
+            let b = scope.spawn(|| run(&second, "f1.txt"));
+            (a.join().expect("first"), b.join().expect("second"))
+        });
+        assert_eq!((a, b), (ToolOutcome::Completed, ToolOutcome::Completed));
+        assert_eq!(
+            first_prompt.requests().len() + second_prompt.requests().len(),
+            1,
+            "a session answer in one registry covers the queued call in the other"
+        );
+        let mut decisions = bench.decisions();
+        decisions.sort_by_key(|decision| decision.covered);
+        assert_eq!(
+            decisions,
+            vec![
+                decision(DecisionScope::Session, false),
+                decision(DecisionScope::Session, true)
+            ]
+        );
     }
 
     #[tokio::test]

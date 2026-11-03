@@ -1,5 +1,3 @@
-//! The `list_dir` tool.
-
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
