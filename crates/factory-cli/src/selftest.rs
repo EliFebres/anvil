@@ -166,7 +166,7 @@ async fn pipeline(
         world.configure(&factory, &anvil_bin, options).await,
     )?;
     steps.report(
-        "sandbox git: git status and just no-old-name inside the container",
+        "sandbox tools: git status, just no-old-name and python inside the container",
         world.sandbox_git(&parts).await,
     )?;
     steps.report(
@@ -466,7 +466,9 @@ impl World {
         result
     }
 
-    /// `git status`, `just no-old-name` and a positive control, inside the sandbox.
+    /// `git status`, `just no-old-name`, `python` and a positive control, inside the sandbox.
+    ///
+    /// `python` is the program the `google-docstrings` standing rule runs.
     ///
     /// `just no-old-name` passes when `git grep` finds nothing, so on its own a
     /// grep that silently searched nothing would pass too. A planted untracked
@@ -474,8 +476,9 @@ impl World {
     /// must find a word that is in the repository.
     async fn run_git_in_sandbox(&self, parts: &Parts, path: &Path) -> anyhow::Result<()> {
         parts.sandbox.prepare(path).await?;
-        let must_pass: [&[&str]; 3] = [
+        let must_pass: [&[&str]; 4] = [
             &["git", "status", "--porcelain"],
+            &["python", "--version"],
             &["just", "no-old-name"],
             &[
                 "git",

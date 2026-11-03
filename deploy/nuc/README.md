@@ -52,3 +52,4 @@ Runs the whole worker pipeline once, for real, in a few seconds, and prints `PAS
 ## Things that went wrong once
 
 - `factory update` run from a snap terminal (VS Code's) built and selftested the worker image in the snap's private podman store (`XDG_DATA_HOME=~/snap/code/<rev>/.local/share`) while the systemd service ran a stale image without the musl target, so every `cargo` in the sandbox tried to download it and failed. Every podman call the factory makes now drops a snap's `XDG_*` store variables, and the selftest's "image store" step fails if podman still reads a store under `~/snap/`.
+- The `google-docstrings` standing rule runs `python`, but the worker image had only `python3`, so VERIFY failed three times with "could not run `python`" and the implementer gave up. The image installs `python-is-python3`, and the selftest's "sandbox tools" step runs `python --version` in the container.
