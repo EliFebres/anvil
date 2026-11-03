@@ -278,6 +278,10 @@ async fn review_changes_buy_one_more_round_and_the_second_approval_merges() {
         tasks[1]
     );
     assert!(tasks[1].contains("`max_results` is never applied"));
+    let inputs = h.swarm.inputs();
+    assert!(inputs[0].earlier_findings.is_empty());
+    assert_eq!(inputs[1].earlier_findings.len(), 1);
+    assert!(inputs[1].earlier_findings[0].contains("`max_results` is never applied"));
 }
 
 #[tokio::test]
@@ -312,9 +316,10 @@ async fn gate_b_regressions_reject_and_a_missing_baseline_pauses() {
     }
     let h = Harness::new(
         ScriptedImplementer::default(),
-        FakeEvalGate::scripted(vec![GateB::Failed(FakeEvalGate::report(&[
-            "rs-grep", "py-cli",
-        ]))]),
+        FakeEvalGate::scripted(vec![
+            GateB::Failed(FakeEvalGate::report(&["rs-grep", "py-cli"])),
+            GateB::Failed(FakeEvalGate::report(&["rs-grep", "py-cli"])),
+        ]),
         FakeSwarm::default(),
         clock(usize::MAX),
     )
@@ -327,6 +332,13 @@ async fn gate_b_regressions_reject_and_a_missing_baseline_pauses() {
     assert!(reason.contains("rs-grep, py-cli"), "{reason}");
     assert!(notes.contains("## gate B: fail"));
     assert_eq!(h.swarm.inputs().len(), 0, "the review never ran");
+    assert_eq!(h.eval.calls(), 2, "one retry after the first failure");
+    let tasks = h.implementer.tasks();
+    assert!(
+        tasks[1].contains("## Previous attempt failed gate B"),
+        "{}",
+        tasks[1]
+    );
 
     let h = Harness::new(
         ScriptedImplementer::default(),

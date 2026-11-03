@@ -97,6 +97,9 @@ pub struct ReviewRequest {
     pub changed_files: Vec<String>,
     /// The repository's `CLAUDE.md`, when it has one.
     pub guidelines: Option<String>,
+    /// The blocking findings of earlier rounds, oldest first; the diff
+    /// already addresses them.
+    pub earlier_findings: Vec<String>,
 }
 
 /// A delivered review with what it cost.

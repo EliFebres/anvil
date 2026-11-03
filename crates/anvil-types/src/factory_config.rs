@@ -87,6 +87,9 @@ egress_allow = ["github.com", "index.crates.io", "static.crates.io"]
 [budget]
 wall_clock_minutes = 90
 tokens = 9000000
+# Times the review swarm reviews a ticket; each `changes` verdict but the
+# last buys one more implementer run.
+review_rounds = 2
 
 # Paths the factory never merges on its own: a pull request touching one is
 # labelled `needs-human` and its ticket waits. Globs match repository-relative
@@ -119,6 +122,9 @@ pub const DEFAULT_WALL_CLOCK_MINUTES: u64 = 90;
 
 /// Token budget per ticket when `[budget] tokens` is not set.
 pub const DEFAULT_TOKEN_BUDGET: u64 = 9_000_000;
+
+/// Review rounds per ticket when `[budget] review_rounds` is not set.
+pub const DEFAULT_REVIEW_ROUNDS: u32 = 2;
 
 /// Local time of the daily digest when `[notify] digest_at` is not set.
 pub const DEFAULT_DIGEST_AT: &str = "08:00";
@@ -296,6 +302,9 @@ pub struct BudgetConfig {
     /// Weighted tokens (input, output and a tenth of cached input) the
     /// implementer may use over every attempt.
     pub tokens: u64,
+    /// Times the review swarm reviews a ticket: the first review and one
+    /// more after each `changes` verdict, up to this many.
+    pub review_rounds: u32,
 }
 
 impl Default for BudgetConfig {
@@ -303,6 +312,7 @@ impl Default for BudgetConfig {
         Self {
             wall_clock_minutes: DEFAULT_WALL_CLOCK_MINUTES,
             tokens: DEFAULT_TOKEN_BUDGET,
+            review_rounds: DEFAULT_REVIEW_ROUNDS,
         }
     }
 }

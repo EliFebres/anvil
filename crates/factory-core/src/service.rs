@@ -15,7 +15,7 @@ use crate::board::{
     Board, BudgetView, CiView, Live, PollView, QueuedTicket, RunState, STATUS_VERSION, Stage,
     StageView, Status, TicketView, write_atomic,
 };
-use crate::budget::{MAX_GATE_A_ATTEMPTS, MAX_REVIEW_ROUNDS};
+use crate::budget::MAX_GATE_A_ATTEMPTS;
 use crate::error::{FactoryError, Result};
 use crate::notify::{Event, Notifier};
 use crate::paths::FactoryHome;
@@ -577,7 +577,7 @@ impl Service {
             implementer_run: 0,
             implementer_runs_max: MAX_GATE_A_ATTEMPTS,
             review_round: 0,
-            review_rounds_max: MAX_REVIEW_ROUNDS,
+            review_rounds_max: self.config.budget.review_rounds,
             budget: BudgetView {
                 wall_clock_minutes: self.config.budget.wall_clock_minutes,
                 tokens: self.config.budget.tokens,

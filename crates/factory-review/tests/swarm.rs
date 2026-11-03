@@ -114,6 +114,7 @@ async fn reviewers_from_config_run_concurrently_on_both_protocols() {
             .to_owned(),
         changed_files: vec!["a.rs".to_owned()],
         guidelines: None,
+        earlier_findings: Vec::new(),
     };
     let verdict = factory_review::review(&request, &reviewers).await;
 

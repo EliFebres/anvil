@@ -8,9 +8,6 @@ use anvil_types::BudgetConfig;
 /// Implementer runs allowed to pass Gate A: the first and one retry.
 pub const MAX_GATE_A_ATTEMPTS: u32 = 2;
 
-/// Times the swarm reviews a ticket: once, and once more after `changes`.
-pub const MAX_REVIEW_ROUNDS: u32 = 2;
-
 /// Which budget ran out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudgetExceeded {
@@ -70,6 +67,7 @@ pub struct Budget {
     started: Instant,
     wall_clock: Duration,
     token_limit: u64,
+    review_round_limit: u32,
     tokens_used: u64,
     gate_a_failures: u32,
     review_rounds: u32,
@@ -91,6 +89,7 @@ impl Budget {
             started: now,
             wall_clock: Duration::from_secs(config.wall_clock_minutes * 60),
             token_limit: config.tokens,
+            review_round_limit: config.review_rounds.max(1),
             tokens_used: 0,
             gate_a_failures: 0,
             review_rounds: 0,
@@ -169,12 +168,12 @@ impl Budget {
     ///
     /// # Errors
     ///
-    /// [`BudgetExceeded::ReviewRounds`] on the [`MAX_REVIEW_ROUNDS`]th such review.
+    /// [`BudgetExceeded::ReviewRounds`] on the `[budget] review_rounds`th such review.
     pub fn review_asked_for_changes(&mut self) -> Result<(), BudgetExceeded> {
         self.review_rounds += 1;
-        if self.review_rounds >= MAX_REVIEW_ROUNDS {
+        if self.review_rounds >= self.review_round_limit {
             return Err(BudgetExceeded::ReviewRounds {
-                limit: MAX_REVIEW_ROUNDS,
+                limit: self.review_round_limit,
             });
         }
         Ok(())
@@ -189,6 +188,7 @@ mod tests {
         BudgetConfig {
             wall_clock_minutes: 90,
             tokens: 1000,
+            review_rounds: 2,
         }
     }
 
@@ -246,11 +246,23 @@ mod tests {
         let error = budget
             .review_asked_for_changes()
             .expect_err("second rejects");
+        assert_eq!(error, BudgetExceeded::ReviewRounds { limit: 2 });
+    }
+
+    #[test]
+    fn review_rounds_come_from_the_config() {
+        let mut budget = Budget::new(
+            Instant::now(),
+            &BudgetConfig {
+                review_rounds: 3,
+                ..config()
+            },
+        );
+        budget.review_asked_for_changes().expect("round 2");
+        budget.review_asked_for_changes().expect("round 3");
         assert_eq!(
-            error,
-            BudgetExceeded::ReviewRounds {
-                limit: MAX_REVIEW_ROUNDS
-            }
+            budget.review_asked_for_changes(),
+            Err(BudgetExceeded::ReviewRounds { limit: 3 })
         );
     }
 }

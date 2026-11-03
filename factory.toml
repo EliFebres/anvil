@@ -54,8 +54,9 @@ egress_allow = ["github.com", "index.crates.io", "static.crates.io"]
 # Per-ticket limits. Exceeding one rejects the ticket with the reason. Tokens
 # are weighted like anvil's budgets: cached input counts a tenth.
 [budget]
-wall_clock_minutes = 90
+wall_clock_minutes = 150
 tokens = 9000000
+review_rounds = 3
 
 # Paths the factory never merges on its own: a pull request touching one is
 # labelled `needs-human` and its ticket waits. Globs match repository-relative
