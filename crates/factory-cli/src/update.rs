@@ -493,7 +493,15 @@ fn musl_gcc_present() -> bool {
 }
 
 /// Whether a `systemctl` query exits 0; `false` when systemctl is missing.
-fn systemctl_ok(args: &[&str]) -> bool {
+///
+/// # Arguments
+///
+/// * `args` - The arguments after `systemctl`.
+///
+/// # Returns
+///
+/// `true` when systemctl ran and exited 0.
+pub fn systemctl_ok(args: &[&str]) -> bool {
     Command::new("systemctl")
         .args(args)
         .stdin(Stdio::null())

@@ -8,6 +8,7 @@
 pub mod adapters;
 pub mod install;
 pub mod logging;
+pub mod reopen;
 pub mod selftest;
 pub mod update;
 pub mod watch;
