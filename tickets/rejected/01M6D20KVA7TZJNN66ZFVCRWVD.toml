@@ -13,7 +13,7 @@ acceptance = [
 ]
 evidence = ["01M6D1YE3BHKQKQZ2KD6ZNW135"]
 priority = "p2"
-status = "claimed"
+status = "rejected"
 origin = "cli"
 claimed_at = "2026-11-03T00:13:36.615716530Z"
 claimed_by = "minipc-NUC14RVH-B"
