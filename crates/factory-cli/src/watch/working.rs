@@ -8,8 +8,8 @@ use anvil_tui::layout::{duration_label, fit_text, pad_between, short};
 use anvil_tui::widgets::{progress_bar, status_token};
 use anvil_tui::wrap::wrap;
 use anvil_tui::{Shade, Theme};
-use factory_core::Status;
 use factory_core::board::{Stage, StageView, TailLine, TicketView, UsageView};
+use factory_core::{Status, Tokens};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -138,7 +138,15 @@ fn draw_ticket(frame: &mut Frame, area: Rect, status: &Status, ticket: &TicketVi
     let tokens = status
         .usage
         .as_ref()
-        .map(|usage| usage.input + usage.output + usage.cached)
+        .map(|usage| {
+            // The budget counts weighted tokens (cached input at a tenth), so the bar must too.
+            Tokens {
+                input: usage.input,
+                output: usage.output,
+                cached: usage.cached,
+            }
+            .weighted()
+        })
         .unwrap_or(0);
     let lines = vec![
         Line::styled(fit_text(&ticket.title, width), theme.bold(Shade::Text)),

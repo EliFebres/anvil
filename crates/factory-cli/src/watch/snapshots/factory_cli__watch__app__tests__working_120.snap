@@ -1,5 +1,6 @@
 ---
 source: crates/factory-cli/src/watch/app.rs
+assertion_line: 304
 expression: "draw(&app_for(\"working\"), 120, 38).backend()"
 ---
 " factory · minipc · running          uptime 3d 04:12   next poll in 2:14           today: 1 merged · 0 rejected · $4.71 "
@@ -7,7 +8,7 @@ expression: "draw(&app_for(\"working\"), 120, 38).backend()"
 "│ Permission friction on edit_file                                    │ │ cost so far                            $0.84 │"
 "│ Remember session-scoped approvals per rule digest; stop re-asking … │ │ in · out · cached     44.0k · 11.0k · 357.0k │"
 "│ wall clock 23 / 90 min    ██████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │ │ cache hit                                89% │"
-"│ tokens     412.0k / 6.0M  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │ │       ▂▄▆▇██   ▁▂▃▄                          │"
+"│ tokens     90.7k / 6.0M   █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │ │       ▂▄▆▇██   ▁▂▃▄                          │"
 "╰─────────────────────────────────────────────────────────────────────╯ │    ▃▅███████▅▆█████                          │"
 "╭ pipeline ───────────────────────────────────────────────────────────╮ │ ▄▆█████████████████                          │"
 "│ ● ──── ● ─────── ◔ ──────── ○ ───── ○ ───── ○ ───── ○ ──── ○        │ │ context tokens per turn              turn 19 │"
