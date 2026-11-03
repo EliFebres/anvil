@@ -63,6 +63,9 @@ pub struct UpdateOptions {
     pub poll: Duration,
     /// Rebuild the worker image even when its recipe has not changed.
     pub rebuild_image: bool,
+    /// This process is the freshly built factory an older one handed the
+    /// update to after its pull, so it must not hand off again.
+    pub handed_off: bool,
 }
 
 /// One external command of the rebuild, in order.
@@ -133,6 +136,14 @@ pub fn update(options: &UpdateOptions) -> anyhow::Result<()> {
     } else {
         println!("repo: {before} -> {after}");
     }
+    // The pulled factory.toml may hold settings this binary does not know,
+    // so the new code reads it: build the new factory and let it finish.
+    if let Some(steps) = handoff_steps(before != after, options.handed_off, options.rebuild_image) {
+        for step in steps {
+            run(&step, root)?;
+        }
+        return Ok(());
+    }
 
     let factory = crate::wiring::read_factory(root)?;
     let recipe = recipe_hash(root)?;
@@ -165,6 +176,40 @@ pub fn update(options: &UpdateOptions) -> anyhow::Result<()> {
         println!("{line}");
     }
     Ok(())
+}
+
+/// The steps that hand the rest of an update to the newly pulled factory.
+///
+/// # Arguments
+///
+/// * `pulled` - Whether the pull moved `HEAD`.
+/// * `handed_off` - Whether this process already is the handed-off factory.
+/// * `rebuild_image` - Passed on as `--rebuild-image`.
+///
+/// # Returns
+///
+/// Building `factory-cli`, then its `update --now --handed-off`; `None` when
+/// nothing was pulled or the handoff already happened.
+pub fn handoff_steps(pulled: bool, handed_off: bool, rebuild_image: bool) -> Option<Vec<Step>> {
+    if !pulled || handed_off {
+        return None;
+    }
+    let mut args = vec!["update", "--now", "--handed-off"];
+    if rebuild_image {
+        args.push("--rebuild-image");
+    }
+    Some(vec![
+        Step::new(
+            "build: factory (the new code finishes the update)",
+            "cargo",
+            &["build", "--release", "-p", "factory-cli"],
+        ),
+        Step::new(
+            "handoff: the new factory updates",
+            "target/release/factory",
+            &args,
+        ),
+    ])
 }
 
 /// The build commands, in order: the host binaries, the musl toolchain and
@@ -714,6 +759,19 @@ mod tests {
         );
         assert!(lines[0].contains("gate B"), "{}", lines[0]);
         assert!(lines[0].contains("--now"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn a_pull_hands_the_update_to_the_new_factory_once() {
+        assert_eq!(handoff_steps(false, false, false), None);
+        assert_eq!(handoff_steps(true, true, false), None);
+        let steps = handoff_steps(true, false, true).expect("handoff");
+        assert_eq!(steps[0].args, ["build", "--release", "-p", "factory-cli"]);
+        assert_eq!(steps[1].program, "target/release/factory");
+        assert_eq!(
+            steps[1].args,
+            ["update", "--now", "--handed-off", "--rebuild-image"]
+        );
     }
 
     #[test]
