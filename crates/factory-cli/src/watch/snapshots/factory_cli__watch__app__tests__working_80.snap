@@ -1,5 +1,6 @@
 ---
 source: crates/factory-cli/src/watch/app.rs
+assertion_line: 309
 expression: "draw(&app_for(\"working\"), 80, 24).backend()"
 ---
 " factory · minipc · running                       1 merged · 0 rejected · $4.71 "
@@ -7,7 +8,7 @@ expression: "draw(&app_for(\"working\"), 80, 24).backend()"
 "│ Permission friction on edit_file                                             │"
 "│ Remember session-scoped approvals per rule digest; stop re-asking for the s… │"
 "│ wall clock 23 / 90 min    █████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │"
-"│ tokens     412.0k / 6.0M  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │"
+"│ tokens     90.7k / 6.0M   █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 "╭ pipeline ────────────────────────────────────────────────────────────────────╮"
 "│ ● ───── ● ──────── ◔ ───────── ○ ────── ○ ────── ○ ────── ○ ───── ○          │"
