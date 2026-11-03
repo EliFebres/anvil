@@ -82,6 +82,7 @@ mod tests {
             diff: String::new(),
             changed_files: Vec::new(),
             guidelines: None,
+            earlier_findings: Vec::new(),
         }
     }
 

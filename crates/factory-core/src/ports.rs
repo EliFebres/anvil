@@ -205,6 +205,9 @@ pub struct ReviewInput {
     pub changed_files: Vec<String>,
     /// The repository's `CLAUDE.md`, when it has one.
     pub guidelines: Option<String>,
+    /// The blocking findings of earlier rounds, oldest first, which the
+    /// implementer has since addressed.
+    pub earlier_findings: Vec<String>,
 }
 
 /// A minor finding to post as a review comment.

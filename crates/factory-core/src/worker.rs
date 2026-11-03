@@ -139,6 +139,7 @@ impl TicketWorker {
         deps.implementer.prepare(worktree).await?;
 
         let mut plan_retried = false;
+        let mut earlier_findings: Vec<String> = Vec::new();
         let (minors, review_cost) = loop {
             run.gates.clear();
             // Gate A: implement, commit, scan, check.
@@ -334,6 +335,7 @@ impl TicketWorker {
                 diff: wt.diff_text(&main, "HEAD").await?,
                 changed_files: wt.diff_names(&main, "HEAD").await?,
                 guidelines: deps.repo.show(&main, GUIDELINES_FILE).await.ok(),
+                earlier_findings: earlier_findings.clone(),
             };
             let report = deps.review.review(&input).await?;
             run.add_cost(report.cost_usd);
@@ -371,6 +373,7 @@ impl TicketWorker {
                 return Ok(run.reject(format!("gate C: {exceeded}"), deps.implementer.as_ref()));
             }
             task = render::append_review_findings(&task, &report.findings_markdown);
+            earlier_findings.push(report.findings_markdown);
         };
         let _ = review_cost;
 
