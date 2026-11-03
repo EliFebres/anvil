@@ -387,6 +387,20 @@ impl Sandbox {
         cache_writable: bool,
     ) -> Vec<String> {
         let id = Self::ticket_id(worktree);
+        self.run_args_for(&id, worktree, home, program, anvil, cache_writable)
+    }
+
+    /// [`Self::run_args`] for a ticket id given apart from the worktree, for
+    /// the eval wrapper whose worktree is the harness's `$PWD`.
+    fn run_args_for(
+        &self,
+        id: &str,
+        worktree: &Path,
+        home: &Path,
+        program: &[&str],
+        anvil: Option<&Path>,
+        cache_writable: bool,
+    ) -> Vec<String> {
         let mut args: Vec<String> = ["run", "--rm", "--network", "none", "--init"]
             .iter()
             .map(|s| (*s).to_owned())
@@ -430,7 +444,7 @@ impl Sandbox {
             "-v".to_owned(),
             format!(
                 "{}:{PROXY_MOUNT}",
-                self.config.home.proxy_socket(&id).display()
+                self.config.home.proxy_socket(id).display()
             ),
         ]);
         for name in [
@@ -575,7 +589,8 @@ impl Sandbox {
         let id = Self::ticket_id(worktree);
         let wrapper = self.config.home.eval_wrapper(&id);
         // The harness mounts its fixture copy, not the worktree; the binary comes from the worktree.
-        let args = self.run_args(
+        let args = self.run_args_for(
+            &id,
             Path::new("$PWD"),
             Path::new("$ANVIL_HOME"),
             &[ANVIL_MOUNT],
@@ -584,11 +599,19 @@ impl Sandbox {
         );
         let quoted: Vec<String> = args.iter().map(|arg| shell_quote(arg)).collect();
         let keys: Vec<String> = self.key_names();
+        let dropped = snap_overrides();
+        // Only the set ones: the service runs without most of these
+        // (USERPROFILE, XDG_DATA_HOME, ...), `set -u` stops the script on an
+        // unset one, and podman fails on an empty CONTAINERS_CONF.
         let keep: String = keys
             .iter()
             .map(String::as_str)
-            .chain(PASSTHROUGH_ENV.iter().copied())
-            .map(|name| format!("{name}=\"${{{name}}}\""))
+            .chain(
+                PASSTHROUGH_ENV
+                    .into_iter()
+                    .filter(|name| !dropped.contains(name)),
+            )
+            .map(|name| format!("${{{name}+\"{name}=${name}\"}}"))
             .collect::<Vec<_>>()
             .join(" ");
         let script = format!(
@@ -1537,6 +1560,16 @@ mod tests {
             "{script}"
         );
         assert!(!script.contains("FACTORY_GITHUB_TOKEN"));
+        assert!(
+            script.contains("T9-proxy.sock:/run/factory/proxy.sock"),
+            "the proxy socket is the ticket's, not one named after $PWD: {script}"
+        );
+        assert!(script.contains("factory.ticket=T9"), "{script}");
+        assert!(!script.contains("$PWD-proxy"), "{script}");
+        assert!(
+            script.contains("${USERPROFILE+\"USERPROFILE=$USERPROFILE\"}"),
+            "only set variables pass, and an unset one must not stop `set -u`: {script}"
+        );
     }
 
     #[test]

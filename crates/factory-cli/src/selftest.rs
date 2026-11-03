@@ -169,6 +169,12 @@ async fn pipeline(
         "sandbox tools: git status, just no-old-name and python inside the container",
         world.sandbox_git(&parts).await,
     )?;
+    if world.runtime != ContainerRuntime::None {
+        steps.report(
+            "gate B wrapper: the eval wrapper runs the branch's anvil with the service's bare environment",
+            world.sandbox_eval(&parts, &anvil_bin).await,
+        )?;
+    }
     steps.report(
         "toolchain: cargo and rustfmt match rust-toolchain.toml and build offline in the container",
         world.sandbox_toolchain(&parts, &options.repo_root).await,
@@ -608,6 +614,73 @@ impl World {
     ) -> anyhow::Result<CheckOutcome> {
         let deadline = Instant::now() + Duration::from_secs(60);
         Ok(parts.sandbox.run_check(path, program, deadline).await?)
+    }
+
+    /// Runs `anvil --version` through Gate B's eval wrapper, as the harness
+    /// does: from a fixture folder, with `ANVIL_HOME` set and only what
+    /// systemd gives the service (no `USERPROFILE`, `XDG_DATA_HOME`, ...).
+    async fn sandbox_eval(&self, parts: &Parts, anvil_bin: &Path) -> anyhow::Result<()> {
+        let name = "selftest-eval";
+        let path = self.home().work_dir(name);
+        Git::new(&self.clone_dir())
+            .clone_for_ticket(
+                &path,
+                REMOTE,
+                &format!("factory/{name}"),
+                &format!("{REMOTE}/main"),
+            )
+            .await?;
+        let result = self.run_eval_wrapper(parts, &path, anvil_bin).await;
+        parts.sandbox.stop_proxy();
+        factory_core::git::remove_clone(&path)?;
+        let _ = std::fs::remove_dir_all(self.home().ticket_home(name));
+        result
+    }
+
+    /// The body of [`Self::sandbox_eval`], between the clone and its removal.
+    async fn run_eval_wrapper(
+        &self,
+        parts: &Parts,
+        path: &Path,
+        anvil_bin: &Path,
+    ) -> anyhow::Result<()> {
+        parts.sandbox.prepare(path).await?;
+        let release = path.join("target").join("release");
+        std::fs::create_dir_all(&release)
+            .with_context(|| format!("creating {}", release.display()))?;
+        std::fs::copy(anvil_bin, release.join("anvil"))
+            .with_context(|| format!("copying {} into the clone", anvil_bin.display()))?;
+        let (wrapper, home) = parts.sandbox.eval_anvil(path)?;
+        let fixture = self.home().work_dir("selftest-eval-fixture");
+        std::fs::create_dir_all(&fixture)
+            .with_context(|| format!("creating {}", fixture.display()))?;
+        let mut command = Command::new(&wrapper);
+        command
+            .arg("--version")
+            .env_clear()
+            .env("ANVIL_HOME", &home)
+            .current_dir(&fixture);
+        for name in ["PATH", "HOME", "XDG_RUNTIME_DIR"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        let output = command
+            .output()
+            .await
+            .context("starting the eval wrapper")?;
+        let _ = std::fs::remove_dir_all(&fixture);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() || !stdout.starts_with("anvil ") {
+            bail!(
+                "`{} --version` failed ({}):\n{}{}",
+                wrapper.display(),
+                output.status,
+                stdout,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
     }
 
     /// One pass of the service; it must merge the selftest ticket.
