@@ -1,0 +1,18 @@
+id = "01M6FFNH4WRNFAPFZ3X07PF7M7"
+created_at = "2026-11-03T01:16:36Z"
+kind = "bug"
+title = "factory status says running while the factory service is stopped"
+symptom = "factory status prints 'running' whenever no pause flag is set, without checking that the service process is alive. With factory.service inactive (dead) it still printed 'running', so an operator believes tickets are being worked when nothing is polling the queue."
+repro = "On Linux with the factory installed as a systemd user unit and not paused, run 'systemctl --user stop factory', then run 'factory status'. The first line reads 'running'."
+spec = "factory status reports whether the service is alive as well as whether it is paused. Add a liveness value to the status rendering in factory-core: running, stopped, or unknown. factory-cli determines it: on Linux, 'systemctl --user is-active factory' exiting 0 means running and any other exit means stopped; when systemctl is missing, or on other platforms, it is unknown. factory-core's render takes the liveness as a parameter and runs no commands, so it stays pure and testable. The first line becomes 'running' only when the service is active and not paused; 'STOPPED (start it with systemctl --user start factory)' when inactive, with the pause reason on the next line if a pause flag is also set; 'PAUSED: <reason>' when active and paused; and 'service state unknown' followed by the pause line, if any, when unknown. The rest of the output is unchanged."
+acceptance = [
+    "With the unit inactive and no pause flag, the first line of factory status says STOPPED and names the systemctl command that starts it.",
+    "With the unit active and no pause flag, the first line is exactly 'running', as before.",
+    "With the unit active and a pause flag, the first line is 'PAUSED: <reason>', as before; with the unit inactive and a pause flag, both the stopped line and the pause reason appear.",
+    "Unit tests cover every liveness and pause combination through the pure render function, and no test runs systemctl.",
+    "just check passes.",
+]
+evidence = []
+priority = "p2"
+status = "open"
+origin = "human"
