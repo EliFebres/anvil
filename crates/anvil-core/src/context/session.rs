@@ -405,7 +405,7 @@ mod tests {
         .expect("state");
         log.append(&SessionRecord::Finished {
             status: Status::Incomplete {
-                reason: IncompleteReason::SessionBudget,
+                reason: IncompleteReason::SessionBudget { used: 5, limit: 4 },
             },
         })
         .expect("finished");
@@ -423,7 +423,7 @@ mod tests {
         assert_eq!(
             snapshot.status,
             Some(Status::Incomplete {
-                reason: IncompleteReason::SessionBudget
+                reason: IncompleteReason::SessionBudget { used: 5, limit: 4 }
             })
         );
 

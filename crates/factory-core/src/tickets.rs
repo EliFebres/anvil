@@ -343,6 +343,33 @@ impl TicketQueue {
         Err(FactoryError::UnknownTicket { id: id.to_string() })
     }
 
+    /// The ids of the tickets in `rejected/`, oldest first.
+    ///
+    /// # Returns
+    ///
+    /// The ids; files that are not `<ULID>.toml` are skipped.
+    ///
+    /// # Errors
+    ///
+    /// [`FactoryError::Io`] when the folder exists but cannot be read.
+    pub fn rejected_ids(&self) -> Result<Vec<Ulid>> {
+        let dir = self.git.dir().join(dirs::REJECTED_DIR);
+        if !dir.is_dir() {
+            return Ok(Vec::new());
+        }
+        let entries =
+            std::fs::read_dir(&dir).map_err(|source| FactoryError::io("reading", &dir, source))?;
+        let mut ids: Vec<Ulid> = entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.strip_suffix(".toml")?.parse().ok()
+            })
+            .collect();
+        ids.sort();
+        Ok(ids)
+    }
+
     /// Claims an open ticket: moves it to `claimed/` with the time and the
     /// worker's hostname, commits and pushes.
     ///
@@ -371,6 +398,9 @@ impl TicketQueue {
     }
 
     /// Moves a claimed ticket to its next state, commits and pushes.
+    ///
+    /// A reopen also removes the `<id>.notes.md` beside the old file, so a
+    /// rejected ticket returns to `open/` as if never worked.
     ///
     /// # Arguments
     ///
@@ -465,6 +495,12 @@ impl TicketQueue {
             std::fs::write(&notes_path, notes)
                 .map_err(|source| FactoryError::io("writing", &notes_path, source))?;
             paths.push(self.relative(&notes_path));
+        }
+        let stale_notes = from.with_file_name(format!("{}.notes.md", ticket.id));
+        if ticket.status == TicketStatus::Open && stale_notes.is_file() {
+            std::fs::remove_file(&stale_notes)
+                .map_err(|source| FactoryError::io("removing", &stale_notes, source))?;
+            paths.push(self.relative(&stale_notes));
         }
         paths.dedup();
         self.git.commit_paths(&paths, message).await?;

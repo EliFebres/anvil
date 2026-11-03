@@ -44,6 +44,29 @@ fn the_factory_profile_matches_factory_toml_and_locks_permissions() {
         anvil.providers[reviewer].base_url, anvil.providers[&anvil.roles.coder].base_url,
         "and sits on a different base URL"
     );
+    let budgets = [
+        ("plan", &anvil.limits.plan, 400_000),
+        ("build", &anvil.limits.build, 3_000_000),
+        ("review", &anvil.limits.review, 300_000),
+        ("optimize", &anvil.limits.optimize, 200_000),
+        ("verify", &anvil.limits.verify, 300_000),
+    ];
+    for (state, budget, tokens) in budgets {
+        assert_eq!(budget.max_tokens, tokens, "[limits.{state}] max_tokens");
+    }
+    let states: u64 = budgets.iter().map(|(_, budget, _)| budget.max_tokens).sum();
+    assert!(
+        states <= anvil.limits.session_tokens,
+        "the per-state budgets fit inside the session cap"
+    );
+    assert!(
+        anvil
+            .prompt
+            .notes
+            .iter()
+            .any(|note| note.contains("no pipes")),
+        "the profile tells the model its shell rules"
+    );
     let rules = anvil.permissions.expect("the profile sets permissions");
     assert_eq!(rules.unmatched, Some(Unmatched::Deny));
     for tool in [
@@ -69,13 +92,12 @@ fn the_factory_profile_matches_factory_toml_and_locks_permissions() {
 #[test]
 fn the_container_files_are_consistent() {
     let containerfile = read("deploy/nuc/Containerfile");
-    assert!(containerfile.contains("FROM docker.io/library/rust:1-bookworm"));
     for tool in [
         "socat",
         "python3-pytest",
         "python3-pandas",
         "ripgrep",
-        "rustfmt clippy",
+        "musl-tools",
     ] {
         assert!(
             containerfile.contains(tool),
@@ -114,4 +136,93 @@ fn the_container_files_are_consistent() {
         !unit.contains("EnvironmentFile"),
         "secrets never come from the unit"
     );
+}
+
+/// The worker image's Rust is the pinned toolchain, read from
+/// rust-toolchain.toml at build time: the container cannot download another,
+/// and it must format exactly like the host and CI.
+#[test]
+fn the_worker_image_installs_the_pinned_toolchain() {
+    let pinned: toml::Table = toml::from_str(&read("rust-toolchain.toml")).expect("parses");
+    let toolchain = &pinned["toolchain"];
+    let containerfile = read("deploy/nuc/Containerfile");
+    let from = containerfile
+        .lines()
+        .find(|line| line.starts_with("FROM "))
+        .expect("a FROM line");
+    assert!(
+        !from.contains("rust:"),
+        "the toolchain comes from rust-toolchain.toml, not a rust base image: {from}"
+    );
+    let copy = containerfile
+        .find("COPY rust-toolchain.toml ")
+        .expect("the Containerfile copies rust-toolchain.toml");
+    let install = containerfile
+        .find("sh.rustup.rs")
+        .expect("the Containerfile installs rustup");
+    assert!(
+        copy < install,
+        "the pin is copied before the install reads it"
+    );
+    assert!(
+        containerfile.contains("--default-toolchain \"$channel\""),
+        "the installed toolchain is the pin's channel"
+    );
+    assert!(containerfile.contains("RUSTUP_AUTO_INSTALL=0"));
+
+    let components: Vec<&str> = toolchain["components"]
+        .as_array()
+        .expect("components")
+        .iter()
+        .map(|c| c.as_str().expect("a component name"))
+        .collect();
+    assert!(
+        containerfile.contains(&format!("--component {}", components.join(","))),
+        "the image must install exactly the pinned components {components:?}"
+    );
+    for target in toolchain["targets"].as_array().expect("targets") {
+        let target = target.as_str().expect("a target name");
+        assert!(
+            containerfile.contains(&format!("--target {target}")),
+            "the image must add {target}, or rustup downloads it inside the offline container"
+        );
+    }
+}
+
+/// Every place that builds the image uses the repository root as the
+/// context, which the Containerfile needs for rust-toolchain.toml, and the
+/// ignore file keeps target/ out of it.
+#[test]
+fn every_image_build_uses_the_repository_root_as_context() {
+    let ignore = read(".dockerignore");
+    let lines: Vec<&str> = ignore
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .collect();
+    assert_eq!(
+        lines,
+        ["*", "!rust-toolchain.toml", "!deploy/nuc/entrypoint.sh"]
+    );
+    let containerfile = read("deploy/nuc/Containerfile");
+    assert!(containerfile.contains("COPY deploy/nuc/entrypoint.sh /entrypoint.sh"));
+    for file in [
+        "justfile",
+        "deploy/nuc/bootstrap.sh",
+        ".github/workflows/ci.yml",
+    ] {
+        let text = read(file);
+        let builds: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("build") && line.contains("deploy/nuc/Containerfile"))
+            .collect();
+        assert!(!builds.is_empty(), "{file} builds the image");
+        for line in builds {
+            assert!(
+                line.trim_end()
+                    .trim_end_matches(')')
+                    .ends_with("-f deploy/nuc/Containerfile ."),
+                "{file}: {line}"
+            );
+        }
+    }
 }

@@ -6,6 +6,7 @@ use anvil_tui::layout::{fit_parts, fit_text, pad_between, spans_width};
 use anvil_tui::widgets::panel;
 use anvil_tui::{Shade, Theme};
 use chrono::{DateTime, FixedOffset, Utc};
+use factory_core::board::RunState;
 use factory_core::{OutcomeKind, OutcomeRecord, Status};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -130,7 +131,9 @@ pub fn draw_lines(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
 }
 
 /// The top bar on the raised surface: name, host, state, uptime, the next
-/// poll, and today's totals at the right.
+/// poll, and today's totals at the right. A stopped service, or one whose
+/// snapshot has gone stale, shows that in place of the state, with no
+/// uptime or countdown: neither means anything once nothing is running.
 pub fn top_bar(status: &Status, ctx: &Ctx, width: usize) -> Line<'static> {
     let theme = ctx.theme;
     let muted = theme.fg(Shade::Muted);
@@ -148,15 +151,17 @@ pub fn top_bar(status: &Status, ctx: &Ctx, width: usize) -> Line<'static> {
         Span::styled(format!(" · {} · ", status.host), muted),
     ];
     let state_room = width.saturating_sub(spans_width(&left) + today.chars().count() + 2);
-    left.extend(state_spans(status, ctx, state_room));
+    let down = down_spans(status, ctx, state_room);
+    let alive = down.is_none();
+    left.extend(down.unwrap_or_else(|| state_spans(status, ctx, state_room)));
     let mut middle = Vec::new();
-    if let Some(started) = status.started_at {
+    if let Some(started) = status.started_at.filter(|_| alive) {
         middle.push(Span::styled(
             format!("uptime {}", fmt::uptime((ctx.now - started).num_seconds())),
             muted,
         ));
     }
-    if let Some(next) = status.next_poll_at {
+    if let Some(next) = status.next_poll_at.filter(|_| alive) {
         middle.push(Span::styled(
             format!(
                 "   next poll in {}",
@@ -165,14 +170,7 @@ pub fn top_bar(status: &Status, ctx: &Ctx, width: usize) -> Line<'static> {
             muted,
         ));
     }
-    let mut right = Vec::new();
-    if let Some(age) = stale_secs(status, ctx.now) {
-        right.push(Span::styled(
-            format!("status {} old · ", fmt::stage_length(age)),
-            theme.fg(Shade::Danger),
-        ));
-    }
-    right.push(Span::styled(today, muted));
+    let right = vec![Span::styled(today, muted)];
     let spans = fit_parts(left, middle, right, width);
     Line::from(spans).style(theme.on_surface(Style::new()))
 }
@@ -190,6 +188,27 @@ fn stale_secs(status: &Status, now: DateTime<Utc>) -> Option<i64> {
             .is_some_and(|next| (now - next).num_seconds() > STALE_POLL_SECS)
     };
     late.then_some(age)
+}
+
+/// `stopped · since <time>` when the service wrote that it shut down, or
+/// `not responding · last update <time> (<age> ago)` when its snapshot is
+/// stale (a crash or a hang writes nothing); `None` while it is alive.
+fn down_spans(status: &Status, ctx: &Ctx, room: usize) -> Option<Vec<Span<'static>>> {
+    let written = status.written_at?;
+    let text = if status.service.state == RunState::Stopped {
+        format!("stopped · since {}", fmt::clock(written, ctx.tz))
+    } else {
+        let age = stale_secs(status, ctx.now)?;
+        format!(
+            "not responding · last update {} ({} ago)",
+            fmt::clock(written, ctx.tz),
+            fmt::stage_length(age)
+        )
+    };
+    Some(vec![Span::styled(
+        fit_text(&text, room.max(7)),
+        ctx.theme.bold(Shade::Danger),
+    )])
 }
 
 /// The state word and what goes with it: `running`, `running · pausing

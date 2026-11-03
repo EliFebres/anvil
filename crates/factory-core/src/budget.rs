@@ -19,9 +19,9 @@ pub enum BudgetExceeded {
         /// The limit.
         limit: Duration,
     },
-    /// The implementer used more tokens than allowed.
+    /// The implementer used more weighted tokens than allowed.
     Tokens {
-        /// Tokens used so far.
+        /// Weighted tokens used so far.
         used: u64,
         /// The limit.
         limit: u64,
@@ -47,7 +47,10 @@ impl fmt::Display for BudgetExceeded {
                 limit.as_secs() / 60
             ),
             BudgetExceeded::Tokens { used, limit } => {
-                write!(f, "token budget exceeded: {used} used, {limit} allowed")
+                write!(
+                    f,
+                    "token budget exceeded: {used} weighted tokens used, {limit} allowed"
+                )
             }
             BudgetExceeded::Attempts { limit } => write!(
                 f,
@@ -99,7 +102,7 @@ impl Budget {
         self.started + self.wall_clock
     }
 
-    /// Tokens used so far.
+    /// Weighted tokens used so far.
     pub fn tokens_used(&self) -> u64 {
         self.tokens_used
     }

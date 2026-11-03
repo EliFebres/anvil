@@ -119,6 +119,55 @@ pub fn parse(log: &str) -> Tail {
     tail
 }
 
+/// Rewrites captured implementer output with one line per tool call, as the
+/// TUI shows it collapsed: `<status> <tool>  <args>`.
+///
+/// anvil's line renderer draws a tool's spinner frames and its final line
+/// after carriage returns, never a newline, so a captured run would otherwise
+/// put every frame of one call on a single line. Only text after a carriage
+/// return is read as a tool line, so the model's own text, such as a
+/// Markdown list starting with `- `, passes through untouched.
+///
+/// # Arguments
+///
+/// * `output` - The run's stdout and stderr as captured.
+///
+/// # Returns
+///
+/// The output with each tool call on its own line; a call that never ended
+/// shows as running (`..`).
+pub fn collapse(output: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    let mut running: Option<(String, String)> = None;
+    for line in output.lines() {
+        let mut segments = line.split('\r');
+        let first = segments.next().unwrap_or_default();
+        if !line.contains('\r') || !first.trim().is_empty() {
+            lines.push(first.trim_end().to_owned());
+        }
+        for segment in segments {
+            if let Some(tool) = spinner(segment) {
+                running = Some(tool);
+            } else if let Some((name, args, mark)) = finished(segment) {
+                running = None;
+                lines.push(tool_line(short_mark(mark), &name, &args));
+            } else if !segment.trim().is_empty() {
+                lines.push(segment.trim_end().to_owned());
+            }
+        }
+    }
+    if let Some((name, args)) = running {
+        lines.push(tool_line("..", &name, &args));
+    }
+    lines.join("\n")
+}
+
+/// One collapsed tool call: the status padded to the TUI's width, then the
+/// tool and its arguments.
+fn tool_line(status: &str, name: &str, args: &str) -> String {
+    format!("{status:<6} {name}  {args}").trim_end().to_owned()
+}
+
 /// `<frame> <tool> <args>`: a tool that is running.
 fn spinner(text: &str) -> Option<(String, String)> {
     let (frame, rest) = text.split_once(' ')?;
@@ -180,6 +229,47 @@ mod tests {
 50000\te\t== REVIEW (round 2)
 50100\te\t- read_file crates/b.rs
 ";
+
+    #[test]
+    fn collapse_writes_one_line_per_tool_call() {
+        // As captured from a real run: stdout first, then stderr, where each
+        // tool's spinner frames and its end share one newline.
+        let output = "\
+I'll look first.
+- a Markdown item, not a spinner
+session 01M6EZ1F6J18MNMKVRGYHMKS81
+== BUILD
+\r| grep TicketsConfig\r  grep TicketsConfig .. ok: crates/anvil-types/src/config.rs:416
+\r| shell cargo test 2>&1 | tail -n 25\r  shell cargo test 2>&1 | tail -n 25 .. denied by rule: denied by a permission rule
+\r| shell cargo test -p anvil-types\r/ shell cargo test -p anvil-types\r- shell cargo test -p anvil-types\r\\ shell cargo test -p anvil-types\r| shell cargo test -p anvil-types\r  shell cargo test -p anvil-types .. failed: exit 101
+\r| shell cargo build\r/ shell cargo build
+
+incomplete: the build state used its token budget
+";
+        assert_eq!(
+            collapse(output),
+            "\
+I'll look first.
+- a Markdown item, not a spinner
+session 01M6EZ1F6J18MNMKVRGYHMKS81
+== BUILD
+ok     grep  TicketsConfig
+denied shell  cargo test 2>&1 | tail -n 25
+failed shell  cargo test -p anvil-types
+
+incomplete: the build state used its token budget
+..     shell  cargo build"
+        );
+    }
+
+    #[test]
+    fn collapse_leaves_output_without_carriage_returns_alone() {
+        let output = "   Compiling anvil v0.1.0\n\nerror[E0308]: mismatched types\n  |\n";
+        assert_eq!(
+            collapse(output),
+            "   Compiling anvil v0.1.0\n\nerror[E0308]: mismatched types\n  |"
+        );
+    }
 
     #[test]
     fn tools_get_their_status_and_duration_and_the_running_one_comes_last() {

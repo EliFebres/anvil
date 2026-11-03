@@ -189,6 +189,7 @@ pub(crate) fn build_body(
             }
         }
     }
+    mark_last_block(&mut messages);
     let mut body = json!({
         "model": model,
         "max_tokens": max_tokens,
@@ -223,6 +224,28 @@ pub(crate) fn build_body(
         body["thinking"] = json!({"type": "adaptive", "display": "summarized"});
     }
     Ok(body)
+}
+
+/// Puts a cache breakpoint on the last block of the final message that can
+/// carry one, so each turn reads the whole conversation so far from the cache.
+fn mark_last_block(messages: &mut [Value]) {
+    let Some(blocks) = messages
+        .last_mut()
+        .and_then(|message| message["content"].as_array_mut())
+    else {
+        return;
+    };
+    // Thinking blocks reject `cache_control`; the breakpoint still covers them
+    // when it sits on a later block, and an earlier one is the best we can do.
+    let cacheable = blocks.iter_mut().rev().find(|block| {
+        !matches!(
+            block["type"].as_str(),
+            Some("thinking" | "redacted_thinking")
+        )
+    });
+    if let Some(block) = cacheable {
+        block["cache_control"] = json!({"type": "ephemeral"});
+    }
 }
 
 /// What is known about one content block while it streams.
@@ -565,6 +588,109 @@ mod tests {
         assert_eq!(body["tools"][1]["input_schema"], json!({"type": "object"}));
     }
 
+    /// Every `cache_control` value anywhere in `value`, as JSON paths.
+    fn breakpoints(value: &Value, path: &str, found: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    let here = format!("{path}.{key}");
+                    if key == "cache_control" {
+                        found.push(here);
+                    } else {
+                        breakpoints(child, &here, found);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    breakpoints(child, &format!("{path}[{index}]"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn breakpoints_of(body: &Value) -> Vec<String> {
+        let mut found = Vec::new();
+        breakpoints(body, "", &mut found);
+        found
+    }
+
+    #[test]
+    fn body_has_exactly_three_cache_breakpoints() {
+        let body = build_body("m", 100, true, &request()).expect("builds");
+        assert_eq!(
+            breakpoints_of(&body),
+            [
+                ".messages[2].content[0].cache_control",
+                ".system[0].cache_control",
+                ".tools[1].cache_control",
+            ]
+        );
+    }
+
+    #[test]
+    fn message_breakpoint_moves_to_the_newest_message_each_turn() {
+        let mut request = request();
+        let first = build_body("m", 100, false, &request).expect("builds");
+        request.messages.push(Message::Assistant {
+            text: "again".to_owned(),
+            reasoning: Vec::new(),
+            tool_calls: vec![ToolCall {
+                id: "toolu_2".to_owned(),
+                name: "glob".to_owned(),
+                arguments_json: "{}".to_owned(),
+            }],
+        });
+        request.messages.push(Message::ToolResults {
+            results: vec![
+                ToolResult {
+                    call_id: "toolu_2".to_owned(),
+                    content: "a".to_owned(),
+                    is_error: false,
+                },
+                ToolResult {
+                    call_id: "toolu_3".to_owned(),
+                    content: "b".to_owned(),
+                    is_error: false,
+                },
+            ],
+        });
+        let second = build_body("m", 100, false, &request).expect("builds");
+        assert!(
+            breakpoints_of(&first).contains(&".messages[2].content[0].cache_control".to_owned())
+        );
+        let moved = breakpoints_of(&second);
+        assert_eq!(moved.len(), 3);
+        assert!(moved.contains(&".messages[4].content[1].cache_control".to_owned()));
+        assert!(
+            second["messages"][2]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn message_breakpoint_skips_trailing_thinking_blocks() {
+        let request = CompletionRequest {
+            messages: vec![
+                Message::user("hi"),
+                Message::Assistant {
+                    text: String::new(),
+                    reasoning: vec![ReasoningBlock {
+                        text: "t".to_owned(),
+                        signature: Some("s".to_owned()),
+                        redacted_data: None,
+                    }],
+                    tool_calls: Vec::new(),
+                },
+            ],
+            ..CompletionRequest::default()
+        };
+        let body = build_body("m", 1, true, &request).expect("builds");
+        assert!(breakpoints_of(&body).is_empty());
+    }
+
     #[test]
     fn body_thinking_only_when_supports_reasoning() {
         let with = build_body("m", 1, true, &request()).expect("builds");
@@ -605,7 +731,8 @@ mod tests {
         assert_eq!(
             body["messages"][2],
             json!({"role": "user", "content": [{
-                "type": "tool_result", "tool_use_id": "toolu_1", "content": "nope", "is_error": true
+                "type": "tool_result", "tool_use_id": "toolu_1", "content": "nope", "is_error": true,
+                "cache_control": {"type": "ephemeral"}
             }]})
         );
     }

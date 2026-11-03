@@ -53,7 +53,12 @@ pub const ANVIL_MOUNT: &str = "/usr/local/bin/anvil";
 const PROXY_URL: &str = "http://127.0.0.1:3128";
 
 /// Variables the host passes through besides the keys, so programs can run at all.
-const PASSTHROUGH_ENV: [&str; 9] = [
+///
+/// The `XDG_*` and `CONTAINERS_*` ones locate rootless podman's image store.
+/// A snap app's private home is the exception: see [`snap_overrides`]. They
+/// configure the runtime only: nothing reaches a container except its `-e`
+/// flags.
+const PASSTHROUGH_ENV: [&str; 15] = [
     "PATH",
     "HOME",
     "USERPROFILE",
@@ -63,6 +68,12 @@ const PASSTHROUGH_ENV: [&str; 9] = [
     "LANG",
     "TERM",
     "CARGO_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_RUNTIME_DIR",
+    "CONTAINERS_CONF",
+    "CONTAINERS_STORAGE_CONF",
+    "CONTAINERS_REGISTRIES_CONF",
 ];
 
 /// Lines of output kept from a run.
@@ -335,7 +346,11 @@ impl Sandbox {
             .into_iter()
             .filter_map(|name| (self.keys)(&name).map(|value| (name, value)))
             .collect();
-        for name in PASSTHROUGH_ENV {
+        let dropped = snap_overrides();
+        for name in PASSTHROUGH_ENV
+            .into_iter()
+            .filter(|name| !dropped.contains(name))
+        {
             if let Ok(value) = std::env::var(name) {
                 env.push((name.to_owned(), value));
             }
@@ -343,6 +358,10 @@ impl Sandbox {
         if !self.containerized() {
             env.push(("ANVIL_HOME".to_owned(), home.to_string_lossy().into_owned()));
         }
+        // `just check` formats before checking when it sees this, so a
+        // formatting-only difference can never reject a ticket. A container
+        // gets it from `run_args` too, since only key names are forwarded.
+        env.push(("ANVIL_PROFILE".to_owned(), PROFILE.to_owned()));
         env
     }
 
@@ -368,6 +387,20 @@ impl Sandbox {
         cache_writable: bool,
     ) -> Vec<String> {
         let id = Self::ticket_id(worktree);
+        self.run_args_for(&id, worktree, home, program, anvil, cache_writable)
+    }
+
+    /// [`Self::run_args`] for a ticket id given apart from the worktree, for
+    /// the eval wrapper whose worktree is the harness's `$PWD`.
+    fn run_args_for(
+        &self,
+        id: &str,
+        worktree: &Path,
+        home: &Path,
+        program: &[&str],
+        anvil: Option<&Path>,
+        cache_writable: bool,
+    ) -> Vec<String> {
         let mut args: Vec<String> = ["run", "--rm", "--network", "none", "--init"]
             .iter()
             .map(|s| (*s).to_owned())
@@ -401,6 +434,8 @@ impl Sandbox {
             format!("{}:{HOME_MOUNT}", home.display()),
             "-e".to_owned(),
             format!("ANVIL_HOME={HOME_MOUNT}"),
+            "-e".to_owned(),
+            format!("ANVIL_PROFILE={PROFILE}"),
             "-v".to_owned(),
             format!(
                 "{}:{CACHE_MOUNT}{cache_mode}",
@@ -409,7 +444,7 @@ impl Sandbox {
             "-v".to_owned(),
             format!(
                 "{}:{PROXY_MOUNT}",
-                self.config.home.proxy_socket(&id).display()
+                self.config.home.proxy_socket(id).display()
             ),
         ]);
         for name in [
@@ -554,7 +589,8 @@ impl Sandbox {
         let id = Self::ticket_id(worktree);
         let wrapper = self.config.home.eval_wrapper(&id);
         // The harness mounts its fixture copy, not the worktree; the binary comes from the worktree.
-        let args = self.run_args(
+        let args = self.run_args_for(
+            &id,
             Path::new("$PWD"),
             Path::new("$ANVIL_HOME"),
             &[ANVIL_MOUNT],
@@ -563,11 +599,19 @@ impl Sandbox {
         );
         let quoted: Vec<String> = args.iter().map(|arg| shell_quote(arg)).collect();
         let keys: Vec<String> = self.key_names();
+        let dropped = snap_overrides();
+        // Only the set ones: the service runs without most of these
+        // (USERPROFILE, XDG_DATA_HOME, ...), `set -u` stops the script on an
+        // unset one, and podman fails on an empty CONTAINERS_CONF.
         let keep: String = keys
             .iter()
             .map(String::as_str)
-            .chain(PASSTHROUGH_ENV.iter().copied())
-            .map(|name| format!("{name}=\"${{{name}}}\""))
+            .chain(
+                PASSTHROUGH_ENV
+                    .into_iter()
+                    .filter(|name| !dropped.contains(name)),
+            )
+            .map(|name| format!("${{{name}+\"{name}=${name}\"}}"))
             .collect::<Vec<_>>()
             .join(" ");
         let script = format!(
@@ -581,8 +625,23 @@ impl Sandbox {
         Ok((wrapper, home))
     }
 
-    /// Runs a program in the worktree and reports pass or fail with its output tail.
-    async fn run_check(
+    /// Runs a program in the worktree, inside the container when there is
+    /// one, and reports pass or fail with its output tail.
+    ///
+    /// # Arguments
+    ///
+    /// * `worktree` - The ticket's clone, mounted as `/work`.
+    /// * `program` - The program and its arguments.
+    /// * `deadline` - When to kill it.
+    ///
+    /// # Returns
+    ///
+    /// Passed when it exited 0, with the tail of its output.
+    ///
+    /// # Errors
+    ///
+    /// When the ticket home cannot be written or the program cannot start.
+    pub async fn run_check(
         &self,
         worktree: &Path,
         program: &[&str],
@@ -659,7 +718,8 @@ impl Implementer for Sandbox {
             } else {
                 match exit.code {
                     Some(0) => ImplementerStatus::Done,
-                    Some(2) => ImplementerStatus::Incomplete(incomplete_reason(&exit.output)),
+                    // 3 is "incomplete after a denied tool call": still a stop with a reason.
+                    Some(2 | 3) => ImplementerStatus::Incomplete(incomplete_reason(&exit.output)),
                     code => ImplementerStatus::Failed { code },
                 }
             };
@@ -1024,6 +1084,10 @@ async fn run_process(invocation: Invocation, deadline: Instant) -> Result<Exit> 
     if let Some(env) = &invocation.env {
         command.env_clear();
         command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    } else {
+        for name in snap_overrides() {
+            command.env_remove(name);
+        }
     }
     if let Some(cwd) = &invocation.cwd {
         command.current_dir(cwd);
@@ -1163,6 +1227,33 @@ fn runtime_word(runtime: ContainerRuntime) -> &'static str {
     }
 }
 
+/// The `XDG_*` variables that move rootless podman's store and configuration.
+const STORE_VARS: [&str; 2] = ["XDG_DATA_HOME", "XDG_CONFIG_HOME"];
+
+/// The store variables in this process that point into a snap app's private home.
+///
+/// A terminal inside a snap (VS Code's, for one) sets `XDG_DATA_HOME` to
+/// `~/snap/<app>/<rev>/.local/share`, so podman run from it reads a store
+/// the systemd service never sees: `factory update` would build and selftest
+/// one image while the service runs a stale one. Every podman call the
+/// factory makes removes these, so all of them share the default store.
+///
+/// # Returns
+///
+/// The names to remove from a child's environment; empty outside a snap.
+pub fn snap_overrides() -> Vec<&'static str> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    STORE_VARS
+        .into_iter()
+        .filter(|name| std::env::var(name).is_ok_and(|value| is_snap_private(&value, &home)))
+        .collect()
+}
+
+/// Whether `value` lies under `<home>/snap/`, a snap app's private home.
+fn is_snap_private(value: &str, home: &str) -> bool {
+    !home.is_empty() && Path::new(value).starts_with(Path::new(home).join("snap"))
+}
+
 /// `uid:gid` of this process for `docker --user`; `1000:1000` where unknown.
 #[cfg(unix)]
 fn current_uid_gid() -> String {
@@ -1205,20 +1296,29 @@ fn combine(out: &[u8], err: &[u8]) -> String {
     text
 }
 
-/// The last lines of output.
+/// The last lines of output, with each tool call collapsed to one line.
 fn tail(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
+    let collapsed = crate::tail::collapse(text);
+    let lines: Vec<&str> = collapsed.lines().collect();
     let start = lines.len().saturating_sub(TAIL_LINES);
     lines[start..].join("\n")
 }
 
-/// The reason anvil printed on its last `incomplete:` line, or `unknown`.
+/// The reason anvil printed on its last `incomplete:` or
+/// `incomplete after a denied tool call:` line, or `unknown`.
 fn incomplete_reason(output: &str) -> String {
+    const DENIED: &str = "incomplete after a denied tool call:";
     output
         .lines()
         .rev()
-        .find_map(|line| line.trim().strip_prefix("incomplete:"))
-        .map(|reason| reason.trim().to_owned())
+        .find_map(|line| {
+            let line = line.trim();
+            if let Some(reason) = line.strip_prefix(DENIED) {
+                return Some(format!("{} (after a denied tool call)", reason.trim()));
+            }
+            line.strip_prefix("incomplete:")
+                .map(|reason| reason.trim().to_owned())
+        })
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
@@ -1324,7 +1424,9 @@ mod tests {
             text.contains("-v /h/.factory/work/T1:/work -w /work"),
             "{text}"
         );
-        assert!(text.contains("-v /h/.factory/work/T1-home:/anvil-home -e ANVIL_HOME=/anvil-home"));
+        assert!(text.contains(
+            "-v /h/.factory/work/T1-home:/anvil-home -e ANVIL_HOME=/anvil-home -e ANVIL_PROFILE=factory"
+        ));
         assert!(
             text.contains(&format!("-v {CACHE_VOLUME}:{CACHE_MOUNT}:ro")),
             "{text}"
@@ -1363,7 +1465,12 @@ mod tests {
             ),
             "{mounted}"
         );
-        for (name, value) in sandbox.environment(Path::new("/h/.factory/work/T1-home")) {
+        let environment = sandbox.environment(Path::new("/h/.factory/work/T1-home"));
+        assert!(
+            environment.contains(&("ANVIL_PROFILE".to_owned(), "factory".to_owned())),
+            "{environment:?}"
+        );
+        for (name, value) in environment {
             assert!(
                 !["FACTORY_GITHUB_TOKEN", "GITHUB_TOKEN", "WEBHOOK_URL"].contains(&name.as_str()),
                 "{name}={value}"
@@ -1453,6 +1560,16 @@ mod tests {
             "{script}"
         );
         assert!(!script.contains("FACTORY_GITHUB_TOKEN"));
+        assert!(
+            script.contains("T9-proxy.sock:/run/factory/proxy.sock"),
+            "the proxy socket is the ticket's, not one named after $PWD: {script}"
+        );
+        assert!(script.contains("factory.ticket=T9"), "{script}");
+        assert!(!script.contains("$PWD-proxy"), "{script}");
+        assert!(
+            script.contains("${USERPROFILE+\"USERPROFILE=$USERPROFILE\"}"),
+            "only set variables pass, and an unset one must not stop `set -u`: {script}"
+        );
     }
 
     #[test]
@@ -1518,6 +1635,12 @@ mod tests {
             "token budget"
         );
         assert_eq!(incomplete_reason("nothing"), "unknown");
+        assert_eq!(
+            incomplete_reason(
+                "x\nincomplete after a denied tool call: the build state used its token budget\n"
+            ),
+            "the build state used its token budget (after a denied tool call)"
+        );
         assert_eq!(combine(b"a", b"b"), "a\nb");
         assert_eq!(shell_quote("a b"), "'a b'");
         assert_eq!(shell_quote("plain-arg:1"), "plain-arg:1");
@@ -1570,5 +1693,14 @@ mod tests {
             build_command(ContainerRuntime::Podman, "localhost/anvil-factory:latest"),
             "podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc"
         );
+    }
+
+    #[test]
+    fn only_a_snap_apps_private_home_is_dropped() {
+        let home = "/home/u";
+        assert!(is_snap_private("/home/u/snap/code/263/.local/share", home));
+        assert!(!is_snap_private("/home/u/.local/share", home));
+        assert!(!is_snap_private("/home/u/snapshots", home));
+        assert!(!is_snap_private("/home/u/snap/x", ""));
     }
 }

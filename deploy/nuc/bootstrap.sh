@@ -108,7 +108,7 @@ verify_static() {
 
 build_image() {
     log "image: localhost/anvil-factory:latest"
-    (cd "$REPO_DIR" && podman build -q -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc)
+    (cd "$REPO_DIR" && podman build -q -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile .)
 }
 
 install_service() {

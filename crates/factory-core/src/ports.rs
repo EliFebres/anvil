@@ -37,6 +37,18 @@ impl Tokens {
         self.input + self.output + self.cached
     }
 
+    /// Tokens weighted by what they cost: cached input counts a tenth.
+    ///
+    /// This mirrors anvil's `Usage::weighted`, which its budgets count and
+    /// this crate cannot depend on, so the ticket budget agrees with them.
+    ///
+    /// # Returns
+    ///
+    /// `input + output + cached / 10`.
+    pub fn weighted(self) -> u64 {
+        self.input + self.output + self.cached / 10
+    }
+
     /// Adds another count.
     pub fn add(&mut self, other: Tokens) {
         self.input += other.input;
@@ -59,6 +71,40 @@ pub enum ImplementerStatus {
     },
     /// The deadline passed and the run was killed.
     Timeout,
+}
+
+impl ImplementerStatus {
+    /// Whether anvil stopped because a state or the session used its budget.
+    ///
+    /// # Returns
+    ///
+    /// True for an incomplete run whose reason is anvil's
+    /// `the <state> state used its token|turn budget` or
+    /// `the session used its token budget`.
+    pub fn is_budget_stop(&self) -> bool {
+        let Self::Incomplete(reason) = self else {
+            return false;
+        };
+        reason.contains("used its token budget") || reason.contains("used its turn budget")
+    }
+
+    /// The anvil state whose budget ran out, such as `plan`.
+    ///
+    /// # Returns
+    ///
+    /// The state's name when the run stopped on a per-state budget, `None`
+    /// otherwise (the session budget included).
+    pub fn budget_state(&self) -> Option<&str> {
+        if !self.is_budget_stop() {
+            return None;
+        }
+        let Self::Incomplete(reason) = self else {
+            return None;
+        };
+        let (before, _) = reason.split_once(" state used its ")?;
+        let (_, state) = before.rsplit_once("the ")?;
+        (!state.is_empty() && !state.contains(' ')).then_some(state)
+    }
 }
 
 /// What one implementer run produced.
@@ -450,4 +496,40 @@ pub trait Worker: Send + Sync {
         queue: &'a TicketQueue,
         progress: Progress,
     ) -> BoxFuture<'a, Result<Outcome>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// anvil's own wording, from `IncompleteReason`'s Display in anvil-core:
+    /// the factory reads it from the output, so a change there must show here.
+    #[test]
+    fn budget_stops_name_their_state() {
+        let stop = |reason: &str| ImplementerStatus::Incomplete(reason.to_owned());
+        let plan = stop("the plan state used its token budget (400100 of 400000 weighted tokens)");
+        assert!(plan.is_budget_stop());
+        assert_eq!(plan.budget_state(), Some("plan"));
+        let turns = stop("the build state used its turn budget (after a denied tool call)");
+        assert_eq!(turns.budget_state(), Some("build"));
+        let session =
+            stop("the session used its token budget (4500100 of 4500000 weighted tokens)");
+        assert!(session.is_budget_stop());
+        assert_eq!(session.budget_state(), None);
+        let review = stop("the reviewer requested changes 3 times; giving up");
+        assert!(!review.is_budget_stop());
+        assert_eq!(review.budget_state(), None);
+        assert!(!ImplementerStatus::Done.is_budget_stop());
+    }
+
+    #[test]
+    fn weighted_tokens_count_cached_input_at_a_tenth() {
+        let tokens = Tokens {
+            input: 151_527,
+            output: 25_794,
+            cached: 1_767_875,
+        };
+        assert_eq!(tokens.total(), 1_945_196);
+        assert_eq!(tokens.weighted(), 354_108);
+    }
 }

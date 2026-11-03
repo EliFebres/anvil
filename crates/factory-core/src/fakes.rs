@@ -409,6 +409,19 @@ impl ScriptedRun {
         }
     }
 
+    /// A run that stops early with `reason` and writes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `reason` - What anvil printed after `incomplete:`.
+    /// * `tokens` - Input tokens used.
+    pub fn incomplete(reason: &str, tokens: u64) -> Self {
+        let mut run = Self::done(&[], tokens);
+        run.outcome.status = ImplementerStatus::Incomplete(reason.to_owned());
+        run.outcome.output_tail = format!("incomplete: {reason}");
+        run
+    }
+
     /// A run that writes a skill file: the default happy path.
     pub fn default_edit() -> Self {
         Self::done(
@@ -426,6 +439,7 @@ impl ScriptedRun {
 pub struct ScriptedImplementer {
     runs: Mutex<VecDeque<ScriptedRun>>,
     checks: Mutex<VecDeque<bool>>,
+    check_rewrites: Vec<(String, String)>,
     builds: Mutex<VecDeque<bool>>,
     denied: Vec<String>,
     tasks: Mutex<Vec<String>>,
@@ -444,6 +458,15 @@ impl ScriptedImplementer {
     /// Sets the Gate A results; an exhausted script passes.
     pub fn with_checks(mut self, checks: Vec<bool>) -> Self {
         self.checks = Mutex::new(checks.into());
+        self
+    }
+
+    /// Files a passing Gate A rewrites in the worktree, as its `cargo fmt` does.
+    pub fn with_check_rewrites(mut self, files: &[(&str, &str)]) -> Self {
+        self.check_rewrites = files
+            .iter()
+            .map(|(path, content)| ((*path).to_owned(), (*content).to_owned()))
+            .collect();
         self
     }
 
@@ -514,11 +537,21 @@ impl Implementer for ScriptedImplementer {
 
     fn check<'a>(
         &'a self,
-        _worktree: &'a Path,
+        worktree: &'a Path,
         _deadline: Instant,
     ) -> BoxFuture<'a, Result<CheckOutcome>> {
         self.check_count.fetch_add(1, Ordering::SeqCst);
         let passed = lock(&self.checks).pop_front().unwrap_or(true);
+        if passed {
+            for (path, content) in &self.check_rewrites {
+                let full = worktree.join(path);
+                if let Err(source) = std::fs::write(&full, content) {
+                    return Box::pin(std::future::ready(Err(FactoryError::io(
+                        "writing", &full, source,
+                    ))));
+                }
+            }
+        }
         Box::pin(std::future::ready(Ok(CheckOutcome {
             passed,
             output_tail: if passed {

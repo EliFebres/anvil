@@ -6,6 +6,10 @@ use anvil_types::Ticket;
 /// The standing instruction every task ends with.
 pub const INSTRUCTION: &str = "Add or update tests for every acceptance item; do not touch files outside the crates the spec names unless a shared type in anvil-types must change, and if so say why in the PR body.";
 
+/// The line every task ends with: Gate A runs `just check`, so the
+/// implementer should run it first.
+pub const CHECK_INSTRUCTION: &str = "Before finishing, run `just check` and fix anything it reports; the factory rejects a branch that fails it.";
+
 /// Lines of command output kept in a task or a note.
 pub const TAIL_LINES: usize = 80;
 
@@ -17,8 +21,8 @@ pub const TAIL_LINES: usize = 80;
 ///
 /// # Returns
 ///
-/// Markdown: title, symptom, reproduction, spec, the acceptance checklist and
-/// [`INSTRUCTION`].
+/// Markdown: title, symptom, reproduction, spec, the acceptance checklist,
+/// [`INSTRUCTION`] and, last, [`CHECK_INSTRUCTION`].
 pub fn task(ticket: &Ticket) -> String {
     let mut text = format!(
         "# {}\n\n## Symptom\n\n{}\n",
@@ -35,7 +39,7 @@ pub fn task(ticket: &Ticket) -> String {
     for item in &ticket.acceptance {
         text.push_str(&format!("- [ ] {}\n", item.trim()));
     }
-    text.push_str(&format!("\n{INSTRUCTION}\n"));
+    text.push_str(&format!("\n{INSTRUCTION}\n\n{CHECK_INSTRUCTION}\n"));
     text
 }
 
@@ -49,6 +53,17 @@ pub fn append_check_failure(task: &str, output: &str) -> String {
     format!(
         "{task}\n## Previous attempt failed `just check`\n\nFix these before anything else; the same checks run again.\n\n```\n{}\n```\n",
         tail(output)
+    )
+}
+
+/// Appends a note that the previous attempt ran out of budget while planning.
+///
+/// # Arguments
+///
+/// * `task` - The task so far.
+pub fn append_plan_retry(task: &str) -> String {
+    format!(
+        "{task}\n## Previous attempt ran out of budget while planning\n\nIt read too much. Find the code with `grep`, read only the lines around each hit with `read_file` offset and limit, and write the plan as soon as you know which files change.\n"
     )
 }
 
@@ -229,6 +244,12 @@ mod tests {
             pr: None,
             note: None,
         }
+    }
+
+    #[test]
+    fn task_ends_with_the_check_instruction() {
+        let text = task(&sample());
+        assert!(text.ends_with(&format!("{CHECK_INSTRUCTION}\n")), "{text}");
     }
 
     #[test]

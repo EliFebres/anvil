@@ -145,6 +145,11 @@ impl Service {
         self.board.snapshot()
     }
 
+    /// Marks the dashboard snapshot `stopped`; called once on shutdown.
+    pub fn mark_stopped(&self) {
+        self.board.stop();
+    }
+
     /// The queue.
     pub fn queue(&self) -> &TicketQueue {
         &self.queue

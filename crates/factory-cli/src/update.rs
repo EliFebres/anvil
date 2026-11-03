@@ -18,18 +18,32 @@ use std::time::Duration;
 use anvil_types::factory_config::{DEFAULT_ANVIL_BIN, IMPLEMENTER_TARGET};
 use anvil_types::{ContainerRuntime, FactoryConfig};
 use anyhow::Context;
+use factory_core::sandbox::snap_overrides;
 use factory_core::{FactoryHome, InProgress, ServiceState, service};
+use sha2::{Digest, Sha256};
 
 use crate::install::{InstallOptions, UNIT_NAME, install};
 
 /// The pause reason the update sets while it waits.
 pub const PAUSE_REASON: &str = "factory update";
 
-/// Where the worker image is built from.
-const IMAGE_DIR: &str = "deploy/nuc";
+/// The worker image's build context: the repository root, so the recipe can
+/// read `rust-toolchain.toml` (`.dockerignore` lets in only what it copies).
+const IMAGE_CONTEXT: &str = ".";
 
 /// The image recipe.
 const CONTAINERFILE: &str = "deploy/nuc/Containerfile";
+
+/// Every file that decides what the image contains, relative to the
+/// repository root; their hash is the image's recipe label.
+pub const RECIPE_FILES: [&str; 3] = [
+    "rust-toolchain.toml",
+    CONTAINERFILE,
+    "deploy/nuc/entrypoint.sh",
+];
+
+/// The image label that holds the recipe hash it was built from.
+pub const RECIPE_LABEL: &str = "factory.recipe";
 
 /// The apt package that provides `musl-gcc`, which the C parts of the TLS
 /// stack need for the musl target.
@@ -47,6 +61,8 @@ pub struct UpdateOptions {
     pub now: bool,
     /// How often the state file is read while waiting.
     pub poll: Duration,
+    /// Rebuild the worker image even when its recipe has not changed.
+    pub rebuild_image: bool,
 }
 
 /// One external command of the rebuild, in order.
@@ -119,7 +135,18 @@ pub fn update(options: &UpdateOptions) -> anyhow::Result<()> {
     }
 
     let factory = crate::wiring::read_factory(root)?;
-    for step in rebuild_steps(&factory, musl_gcc_present()) {
+    let recipe = recipe_hash(root)?;
+    let reason = runtime_program(factory.worker.runtime).and_then(|program| {
+        let built = built_recipe(program, &factory.worker.image);
+        image_build_reason(built.as_deref(), &recipe, options.rebuild_image)
+    });
+    match (&reason, factory.worker.runtime) {
+        (_, ContainerRuntime::None) => println!("image: none (the worker runs on the host)"),
+        (None, _) => println!("image: up to date (recipe {})", short(&recipe)),
+        (Some(why), _) => println!("image: rebuilding ({why})"),
+    }
+    let image = reason.map(|_| recipe);
+    for step in rebuild_steps(&factory, musl_gcc_present(), image.as_deref()) {
         run(&step, root)?;
     }
     verify_static(root)?;
@@ -141,18 +168,24 @@ pub fn update(options: &UpdateOptions) -> anyhow::Result<()> {
 }
 
 /// The build commands, in order: the host binaries, the musl toolchain and
-/// the static anvil for the container, then the worker image unless the
-/// worker runs on the host.
+/// the static anvil for the container, then the worker image when a recipe
+/// hash says to build it and the worker does not run on the host.
 ///
 /// # Arguments
 ///
 /// * `factory` - `factory.toml`, which names the runtime and the image tag.
 /// * `have_musl_gcc` - Whether `musl-gcc` is installed; when not, apt installs it.
+/// * `image_recipe` - The recipe hash to build the image with and label it
+///   by, or `None` to leave the image as it is.
 ///
 /// # Returns
 ///
 /// The steps; `cargo build` first.
-pub fn rebuild_steps(factory: &FactoryConfig, have_musl_gcc: bool) -> Vec<Step> {
+pub fn rebuild_steps(
+    factory: &FactoryConfig,
+    have_musl_gcc: bool,
+    image_recipe: Option<&str>,
+) -> Vec<Step> {
     let mut steps = vec![Step::new(
         "build: anvil and factory (release)",
         "cargo",
@@ -182,10 +215,9 @@ pub fn rebuild_steps(factory: &FactoryConfig, have_musl_gcc: bool) -> Vec<Step> 
             "anvil-cli",
         ],
     ));
-    let runtime = match factory.worker.runtime {
-        ContainerRuntime::Podman => "podman",
-        ContainerRuntime::Docker => "docker",
-        ContainerRuntime::None => return steps,
+    let (Some(runtime), Some(recipe)) = (runtime_program(factory.worker.runtime), image_recipe)
+    else {
+        return steps;
     };
     steps.push(Step::new(
         &format!("image: {}", factory.worker.image),
@@ -195,12 +227,105 @@ pub fn rebuild_steps(factory: &FactoryConfig, have_musl_gcc: bool) -> Vec<Step> 
             "-q",
             "-t",
             &factory.worker.image,
+            "--label",
+            &format!("{RECIPE_LABEL}={recipe}"),
             "-f",
             CONTAINERFILE,
-            IMAGE_DIR,
+            IMAGE_CONTEXT,
         ],
     ));
     steps
+}
+
+/// The hash of everything that decides the worker image's contents.
+///
+/// Each of [`RECIPE_FILES`] contributes its path, its length and its bytes,
+/// so moving content from one file to another changes the hash too.
+///
+/// # Arguments
+///
+/// * `root` - The repository root.
+///
+/// # Returns
+///
+/// The SHA-256, as lowercase hex.
+///
+/// # Errors
+///
+/// When one of the files cannot be read.
+pub fn recipe_hash(root: &Path) -> anyhow::Result<String> {
+    let mut hasher = Sha256::new();
+    for relative in RECIPE_FILES {
+        let path = root.join(relative);
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        hasher.update(relative.as_bytes());
+        hasher.update([0]);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Why the image must be built, or `None` when it is up to date.
+///
+/// # Arguments
+///
+/// * `built` - The recipe label on the existing image; `None` when the image
+///   or its label is missing.
+/// * `wanted` - The recipe hash of the working tree.
+/// * `forced` - `factory update --rebuild-image`.
+///
+/// # Returns
+///
+/// The reason, for the console, or `None` to skip the build.
+pub fn image_build_reason(built: Option<&str>, wanted: &str, forced: bool) -> Option<String> {
+    match built {
+        _ if forced => Some("--rebuild-image".to_owned()),
+        None => Some("no image with a recipe label".to_owned()),
+        Some(built) if built != wanted => Some(format!(
+            "recipe changed: {} -> {}",
+            short(built),
+            short(wanted)
+        )),
+        Some(_) => None,
+    }
+}
+
+/// The recipe label on `image`, or `None` when the image or the label is missing.
+fn built_recipe(runtime: &str, image: &str) -> Option<String> {
+    let format = format!("{{{{index .Config.Labels \"{RECIPE_LABEL}\"}}}}");
+    let mut command = Command::new(runtime);
+    for name in snap_overrides() {
+        command.env_remove(name);
+    }
+    let out = command
+        .args(["image", "inspect", "--format", &format, image])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    let label = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    // Go templates print `<no value>` for a missing key.
+    (!label.is_empty() && label != "<no value>").then_some(label)
+}
+
+/// The container runtime's program, or `None` when the worker runs on the host.
+fn runtime_program(runtime: ContainerRuntime) -> Option<&'static str> {
+    match runtime {
+        ContainerRuntime::Podman => Some("podman"),
+        ContainerRuntime::Docker => Some("docker"),
+        ContainerRuntime::None => None,
+    }
+}
+
+/// The first 12 characters of a hash, for the console.
+fn short(hash: &str) -> &str {
+    hash.get(..12).unwrap_or(hash)
 }
 
 /// The selftest the update runs after the rebuild, with the new binary.
@@ -268,7 +393,11 @@ impl Step {
 /// Runs one step in `dir` with the console attached, so build output shows.
 fn run(step: &Step, dir: &Path) -> anyhow::Result<()> {
     println!("== {}", step.label);
-    let status = Command::new(&step.program)
+    let mut command = Command::new(&step.program);
+    for name in snap_overrides() {
+        command.env_remove(name);
+    }
+    let status = command
         .args(&step.args)
         .current_dir(dir)
         .stdin(Stdio::null())
@@ -373,7 +502,15 @@ fn musl_gcc_present() -> bool {
 }
 
 /// Whether a `systemctl` query exits 0; `false` when systemctl is missing.
-fn systemctl_ok(args: &[&str]) -> bool {
+///
+/// # Arguments
+///
+/// * `args` - The arguments after `systemctl`.
+///
+/// # Returns
+///
+/// `true` when systemctl ran and exited 0.
+pub fn systemctl_ok(args: &[&str]) -> bool {
     Command::new("systemctl")
         .args(args)
         .stdin(Stdio::null())
@@ -409,7 +546,7 @@ mod tests {
 
     #[test]
     fn the_rebuild_builds_the_binaries_then_the_image_for_the_configured_runtime() {
-        let steps = rebuild_steps(&config(ContainerRuntime::Podman), true);
+        let steps = rebuild_steps(&config(ContainerRuntime::Podman), true, Some("abc"));
         assert_eq!(steps.len(), 4);
         assert_eq!(steps[0].program, "cargo");
         assert_eq!(steps[0].args[..3], ["build", "--release", "-p"]);
@@ -438,16 +575,18 @@ mod tests {
                 "-q",
                 "-t",
                 "localhost/test:latest",
+                "--label",
+                "factory.recipe=abc",
                 "-f",
-                CONTAINERFILE,
-                IMAGE_DIR
+                "deploy/nuc/Containerfile",
+                "."
             ]
         );
         assert_eq!(
-            rebuild_steps(&config(ContainerRuntime::Docker), true)[3].program,
+            rebuild_steps(&config(ContainerRuntime::Docker), true, Some("abc"))[3].program,
             "docker"
         );
-        let on_host = rebuild_steps(&config(ContainerRuntime::None), true);
+        let on_host = rebuild_steps(&config(ContainerRuntime::None), true, Some("abc"));
         assert_eq!(on_host.len(), 3);
         assert_eq!(
             on_host[2].args[2..4],
@@ -456,8 +595,15 @@ mod tests {
     }
 
     #[test]
+    fn an_up_to_date_image_is_not_rebuilt() {
+        let steps = rebuild_steps(&config(ContainerRuntime::Podman), true, None);
+        assert_eq!(steps.len(), 3);
+        assert!(steps.iter().all(|step| step.program != "podman"));
+    }
+
+    #[test]
     fn a_missing_musl_gcc_is_installed_before_the_target_is_added() {
-        let steps = rebuild_steps(&config(ContainerRuntime::Podman), false);
+        let steps = rebuild_steps(&config(ContainerRuntime::Podman), false, Some("abc"));
         assert_eq!(steps.len(), 5);
         assert_eq!(steps[1].program, "sudo");
         assert_eq!(
@@ -470,6 +616,46 @@ mod tests {
             ["--target", "x86_64-unknown-linux-musl"]
         );
         assert_eq!(steps[4].program, "podman");
+    }
+
+    #[test]
+    fn the_image_is_built_when_missing_changed_or_forced() {
+        let wanted = "def4560000000000";
+        assert_eq!(image_build_reason(Some(wanted), wanted, false), None);
+        assert_eq!(
+            image_build_reason(Some(wanted), wanted, true).as_deref(),
+            Some("--rebuild-image")
+        );
+        assert_eq!(
+            image_build_reason(None, wanted, false).as_deref(),
+            Some("no image with a recipe label")
+        );
+        assert_eq!(
+            image_build_reason(Some("abc1230000000000"), wanted, false).as_deref(),
+            Some("recipe changed: abc123000000 -> def456000000")
+        );
+    }
+
+    #[test]
+    fn the_recipe_hash_changes_with_every_input_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for relative in RECIPE_FILES {
+            let path = dir.path().join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&path, relative).expect("write");
+        }
+        let first = recipe_hash(dir.path()).expect("hash");
+        assert_eq!(first.len(), 64);
+        assert_eq!(first, recipe_hash(dir.path()).expect("hash"), "stable");
+        let mut seen = vec![first];
+        for relative in RECIPE_FILES {
+            std::fs::write(dir.path().join(relative), "changed").expect("write");
+            let hash = recipe_hash(dir.path()).expect("hash");
+            assert!(!seen.contains(&hash), "{relative} must change the hash");
+            seen.push(hash);
+        }
+        std::fs::remove_file(dir.path().join(RECIPE_FILES[0])).expect("rm");
+        assert!(recipe_hash(dir.path()).is_err());
     }
 
     #[test]

@@ -57,8 +57,10 @@ summarizer = "runpod"
 # max_retries = 4              # on HTTP 429 and 5xx, with exponential backoff
 # session_tokens = 2000000     # abort the session once this many tokens are used
 #
-# Per-state budgets (plan, build, review, optimize, verify), summed over every
-# visit to the state. Exceeding one ends the session as incomplete.
+# Token budgets count input plus output plus cached input at a tenth, which is
+# roughly what is paid. Per-state budgets (plan, build, review, optimize,
+# verify) are summed over every visit to the state. Exceeding one ends the
+# session as incomplete.
 # [limits.build]
 # max_turns = 100
 # max_tokens = 1000000
@@ -71,6 +73,11 @@ summarizer = "runpod"
 # Where `anvil ticket submit` pushes the `tickets/<id>` branch.
 # [tickets]
 # remote = "origin"
+
+# Lines added to the coder's system prompt, one instruction each. Profiles use
+# this to explain their own rules.
+# [prompt]
+# notes = ["Shell commands are a single program with arguments."]
 "#;
 
 /// The provider entries and roles `anvil setup` adds to `~/.anvil/config.toml`.
@@ -136,8 +143,10 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # max_retries = 4              # on HTTP 429 and 5xx, with exponential backoff
 # session_tokens = 2000000     # abort the session once this many tokens are used
 #
-# Per-state budgets (plan, build, review, optimize, verify), summed over every
-# visit to the state. Exceeding one ends the session as incomplete.
+# Token budgets count input plus output plus cached input at a tenth, which is
+# roughly what is paid. Per-state budgets (plan, build, review, optimize,
+# verify) are summed over every visit to the state. Exceeding one ends the
+# session as incomplete.
 # [limits.build]
 # max_turns = 100
 # max_tokens = 1000000
@@ -323,7 +332,8 @@ pub struct Roles {
 pub struct StateBudget {
     /// Model completions allowed in the state, summed over every visit.
     pub max_turns: u32,
-    /// Tokens (input, output and cached) allowed in the state, summed over every visit.
+    /// Weighted tokens (input, output and a tenth of cached input) allowed in
+    /// the state, summed over every visit.
     pub max_tokens: u64,
 }
 
@@ -344,7 +354,8 @@ pub struct LimitsConfig {
     pub request_timeout_s: u64,
     /// How many times a request is retried on HTTP 429 or 5xx before giving up.
     pub max_retries: u32,
-    /// Tokens (input, output and cached) a session may consume before it aborts.
+    /// Weighted tokens (input, output and a tenth of cached input) a session
+    /// may consume before it aborts.
     pub session_tokens: u64,
     /// Budget of the Plan state.
     pub plan: StateBudget,
@@ -424,6 +435,14 @@ impl Default for TicketsConfig {
     }
 }
 
+/// Lines a profile adds to the coder's system prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct PromptConfig {
+    /// One instruction per entry, shown under a "Profile notes" heading.
+    pub notes: Vec<String>,
+}
+
 /// What a call gets when no permission rule matches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -478,6 +497,9 @@ pub struct AnvilConfig {
     /// Where submitted tickets go.
     #[serde(default)]
     pub tickets: TicketsConfig,
+    /// Extra lines for the coder's system prompt.
+    #[serde(default)]
+    pub prompt: PromptConfig,
     /// Tool permission rules that replace the project's `.anvil/permissions.toml`.
     /// Normally set by a profile, not by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -68,7 +68,7 @@ How a ticket moves:
 
 1. `anvil ticket submit` pushes it on a `tickets/<id>` branch. That push is the only thing that ever leaves your machine toward the factory.
 2. The service polls, copies the ticket onto the `factory/state` branch, and claims the highest-priority oldest one when `main` is green.
-3. A worker makes a worktree on `factory/<id>` and runs `anvil --yes --profile factory` inside a container with no network, except an allowlisting proxy for the providers, GitHub and the crate registry.
+3. A worker makes a standalone local clone (`git clone --local`, so the container sees a complete repository) on `factory/<id>` and runs `anvil --yes --profile factory` inside a container with no network, except an allowlisting proxy for the providers, GitHub and the crate registry.
 4. Three gates: `just check` (one retry with the failure appended), the eval harness against the newest result on `main`, and the review swarm (several models, each with one stance: correctness, safety, style, simplicity; none may share a base URL with the coder).
 5. A pull request opens with the gate output, the eval table and every verdict. Green CI squash-merges it. A change to a protected path or a new dependency is labelled `needs-human` and the ticket waits.
 
