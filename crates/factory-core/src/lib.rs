@@ -36,7 +36,7 @@ pub mod usage;
 pub mod worker;
 
 pub use board::{Board, Live, Stage, Status, StatusReader, write_atomic};
-pub use budget::{Budget, BudgetExceeded, MAX_GATE_A_ATTEMPTS, MAX_REVIEW_ROUNDS};
+pub use budget::{Budget, BudgetExceeded, MAX_GATE_A_ATTEMPTS};
 pub use error::{FactoryError, Result};
 pub use git::Git;
 pub use github::{GitHub, Pull};
