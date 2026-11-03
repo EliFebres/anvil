@@ -330,6 +330,40 @@ mod tests {
     }
 
     #[test]
+    fn stopped_120() {
+        insta::assert_snapshot!(draw(&app_for("stopped"), 120, 38).backend());
+    }
+
+    #[test]
+    fn stopped_80() {
+        insta::assert_snapshot!(draw(&app_for("stopped"), 80, 24).backend());
+    }
+
+    #[test]
+    fn an_idle_snapshot_long_past_its_poll_says_not_responding() {
+        let status = load("idle");
+        let next = status.next_poll_at.expect("next_poll_at");
+        let fresh = rows(&draw(&app_for("idle"), 120, 38));
+        assert!(fresh[0].contains("idle"), "{}", fresh[0]);
+        assert!(fresh[0].contains("next poll in"), "{}", fresh[0]);
+
+        let mut app = App::new(
+            Theme::mono(),
+            FixedOffset::east_opt(0).expect("utc"),
+            next + chrono::Duration::minutes(30),
+        );
+        app.handle(WatchMsg::Status {
+            status: Some(Box::new(status)),
+            pause_flag: None,
+            read_error: None,
+        });
+        let top = &rows(&draw(&app, 120, 38))[0];
+        assert!(top.contains("not responding · last update"), "{top}");
+        assert!(!top.contains("next poll"), "{top}");
+        assert!(!top.contains("idle"), "{top}");
+    }
+
+    #[test]
     fn p_on_the_working_screen_pauses_after_the_ticket_at_once() {
         let mut app = app_for("working");
         assert!(!rows(&draw(&app, 120, 38))[0].contains("pausing"));

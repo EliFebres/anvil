@@ -283,8 +283,33 @@ async fn run(
         repo = loaded.factory.github.repo,
         "factory running"
     );
-    service.run_forever().await?;
+    tokio::select! {
+        result = service.run_forever() => result?,
+        signal = shutdown_signal() => {
+            signal.context("listening for the shutdown signal")?;
+            // The snapshot would otherwise keep counting down to a poll that
+            // never comes, and `factory watch` would show the factory as idle.
+            service.mark_stopped();
+            tracing::info!("factory stopped");
+        }
+    }
     Ok(0)
+}
+
+/// Resolves on SIGTERM (what `systemctl stop` sends) or Ctrl-C.
+#[cfg(unix)]
+async fn shutdown_signal() -> std::io::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        _ = terminate.recv() => Ok(()),
+        result = tokio::signal::ctrl_c() => result,
+    }
+}
+
+/// Resolves on Ctrl-C.
+#[cfg(not(unix))]
+async fn shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 /// `factory status`.
