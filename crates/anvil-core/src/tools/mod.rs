@@ -1256,7 +1256,11 @@ mod tests {
         let first = registry.execute(&write("w1", "a.txt"), &ctx).await;
         assert_eq!(first.outcome, ToolOutcome::Completed);
         let inside = registry.execute(&write("w2", "new/../b.txt"), &ctx).await;
-        assert_eq!(inside.outcome, ToolOutcome::Completed, "in-root spelling stays covered");
+        assert_eq!(
+            inside.outcome,
+            ToolOutcome::Completed,
+            "in-root spelling stays covered"
+        );
         let escaping = registry
             .execute(&write("w3", "new/../escape/file.txt"), &ctx)
             .await;
@@ -1264,7 +1268,10 @@ mod tests {
         assert!(!outside.path().join("file.txt").exists());
         let requests = prompt.requests();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[1].target.as_deref(), Some("new/../escape/file.txt"));
+        assert_eq!(
+            requests[1].target.as_deref(),
+            Some("new/../escape/file.txt")
+        );
     }
 
     /// The decisions an `echo` registry with `rules` reports for `text`.
