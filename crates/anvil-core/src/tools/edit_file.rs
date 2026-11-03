@@ -42,6 +42,10 @@ impl Tool for EditFile {
         Access::Write
     }
 
+    fn target_is_path(&self) -> bool {
+        true
+    }
+
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: EditFileArgs = match parse_args(args) {

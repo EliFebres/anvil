@@ -36,6 +36,10 @@ impl Tool for WriteFile {
         Access::Write
     }
 
+    fn target_is_path(&self) -> bool {
+        true
+    }
+
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let args: WriteFileArgs = match parse_args(args) {

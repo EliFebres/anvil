@@ -125,8 +125,27 @@ pub enum PermissionAnswer {
     Yes,
     /// Declined.
     No,
+    /// Allowed for the rest of the session, kept in memory.
+    Session,
     /// Allowed and saved as a rule.
     Always,
+}
+
+/// The scope a permission decision ended with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionScope {
+    /// Allowed for one call, at a prompt.
+    Once,
+    /// Allowed for the rest of the session: a session or always answer, a
+    /// session approval or a pre-approved tool.
+    Session,
+    /// Allowed by a permission rule.
+    Rule,
+    /// Refused, by the user or by a `deny` rule.
+    Deny,
+    /// Refused by the blocked list.
+    Blocked,
 }
 
 /// A warning's class; the message itself is never recorded.
@@ -279,6 +298,18 @@ pub enum RecordKind {
         rule_digest: String,
         /// The answer.
         answer: PermissionAnswer,
+    },
+    /// A permission decision: a prompt answer, or a standing approval, rule
+    /// or block that decided without one. It holds no path, command, rule
+    /// or argument, so a re-prompt after a session approval shows up as a
+    /// prompted decision where a `covered` one was expected.
+    PermissionDecision {
+        /// The tool name.
+        tool: String,
+        /// The scope the decision ended with.
+        scope: PermissionScope,
+        /// Whether the call was decided without a prompt.
+        covered: bool,
     },
     /// The reviewer answered. The change requests themselves are not
     /// recorded: the reviewer reads the diff and quotes it, so its text is
@@ -511,6 +542,7 @@ impl RecordKind {
             Self::ToolCall { .. } => "tool_call",
             Self::ToolResult { .. } => "tool_result",
             Self::Permission { .. } => "permission",
+            Self::PermissionDecision { .. } => "permission_decision",
             Self::Review { .. } => "review",
             Self::Check { .. } => "check",
             Self::Compacted { .. } => "compacted",
@@ -636,6 +668,34 @@ mod tests {
         let json = serde_json::to_string(&record).expect("json");
         assert!(!json.contains("parse_args"));
         assert!(!json.contains("lib.rs"));
+    }
+
+    #[test]
+    fn permission_decision_serializes_tool_scope_and_coverage_only() {
+        let record = RecordKind::PermissionDecision {
+            tool: "edit_file".to_owned(),
+            scope: PermissionScope::Session,
+            covered: true,
+        };
+        let json = serde_json::to_value(&record).expect("json");
+        let mut fields: Vec<&str> = json
+            .as_object()
+            .map(|object| object.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        fields.sort_unstable();
+        assert_eq!(fields, vec!["covered", "event", "scope", "tool"], "{json}");
+        assert_eq!(json["event"], "permission_decision");
+        assert_eq!(record.tag(), "permission_decision");
+        let back: RecordKind = serde_json::from_value(json).expect("round trip");
+        assert_eq!(back, record);
+        for (scope, text) in [
+            (PermissionScope::Once, "once"),
+            (PermissionScope::Rule, "rule"),
+            (PermissionScope::Deny, "deny"),
+            (PermissionScope::Blocked, "blocked"),
+        ] {
+            assert_eq!(serde_json::to_value(scope).expect("json"), text);
+        }
     }
 
     #[test]

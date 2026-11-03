@@ -32,8 +32,9 @@ use crate::provider::types::{ToolCall, ToolResult, ToolSpec};
 
 pub use output::{OutputStats, digest};
 pub use permissions::{
-    Decision, PermissionError, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
-    ScriptedPrompt, StaticPrompt,
+    Decision, DecisionScope, PermissionDecision, PermissionError, PermissionObserver,
+    PermissionPrompt, PermissionRequest, Permissions, PromptAnswer, ScriptedPrompt,
+    SessionApprovals, StaticPrompt,
 };
 pub use shell::Shell;
 
@@ -136,6 +137,16 @@ pub trait Tool: Send + Sync {
             .or_else(|| args.get("command"))
             .and_then(Value::as_str)
             .map(str::to_owned)
+    }
+
+    /// Whether [`Tool::target`] is a file path, so a session approval for
+    /// this tool only covers targets that resolve inside the workspace root.
+    ///
+    /// # Returns
+    ///
+    /// `false` by default; `true` for tools that write files.
+    fn target_is_path(&self) -> bool {
+        false
     }
 
     /// Why this call must not run even if a prompt would allow it.
@@ -366,6 +377,10 @@ pub struct ToolRegistry {
     permissions: Mutex<Permissions>,
     /// Who to ask when a rule says `ask`.
     prompt: Box<dyn PermissionPrompt>,
+    /// Session-scoped approvals, shared with sub-agent registries.
+    approvals: Arc<Mutex<SessionApprovals>>,
+    /// Hears every permission decision.
+    observer: Option<Arc<dyn PermissionObserver>>,
     /// Runs around every allowed call.
     hook: Option<Arc<dyn ToolHook>>,
 }
@@ -386,8 +401,46 @@ impl ToolRegistry {
             tools: BTreeMap::new(),
             permissions: Mutex::new(permissions),
             prompt,
+            approvals: Arc::new(Mutex::new(SessionApprovals::default())),
+            observer: None,
             hook: None,
         }
+    }
+
+    /// Replaces the session approvals with a shared set, so every registry
+    /// of one session (the main one and each sub-agent's) remembers the
+    /// same approvals.
+    ///
+    /// # Arguments
+    ///
+    /// * `approvals` - The session's approvals.
+    ///
+    /// # Returns
+    ///
+    /// The registry.
+    pub fn with_session_approvals(mut self, approvals: Arc<Mutex<SessionApprovals>>) -> Self {
+        self.approvals = approvals;
+        self
+    }
+
+    /// The session approvals this registry consults.
+    ///
+    /// # Returns
+    ///
+    /// The shared handle.
+    pub fn session_approvals(&self) -> Arc<Mutex<SessionApprovals>> {
+        Arc::clone(&self.approvals)
+    }
+
+    /// Installs the observer that hears every permission decision,
+    /// replacing any previous one.
+    ///
+    /// # Arguments
+    ///
+    /// * `observer` - The observer; it receives only the tool name, the
+    ///   scope and whether the call was decided without a prompt.
+    pub fn set_observer(&mut self, observer: Arc<dyn PermissionObserver>) {
+        self.observer = Some(observer);
     }
 
     /// Installs the hook that runs around every allowed call, replacing any
@@ -515,7 +568,7 @@ impl ToolRegistry {
             }
         };
         let target = tool.target(&args);
-        if let Some(outcome) = self.check_permission(tool, &args, target.as_deref()) {
+        if let Some(outcome) = self.check_permission(tool, &args, target.as_deref(), &ctx.cwd) {
             return Execution::finished(call, outcome.0, outcome.1);
         }
         if let Some(hook) = &self.hook
@@ -571,12 +624,14 @@ impl ToolRegistry {
         execution
     }
 
-    /// Applies the blocked list and the rules; `None` means the call may run.
+    /// Applies the blocked list, the rules and the session approvals; `None`
+    /// means the call may run.
     fn check_permission(
         &self,
         tool: &dyn Tool,
         args: &Value,
         target: Option<&str>,
+        root: &Path,
     ) -> Option<(ToolOutput, ToolOutcome)> {
         let name = tool.name();
         let mut permissions = lock_or_recover(&self.permissions);
@@ -584,6 +639,7 @@ impl ToolRegistry {
             && !permissions.explicitly_allowed(name, target)
         {
             tracing::info!(tool = name, ?target, reason, "blocked tool call");
+            self.observe(name, DecisionScope::Blocked, false);
             return Some((
                 ToolOutput::error(format!(
                     "{reason}; blocked unless an `allow` rule in .anvil/permissions.toml covers it"
@@ -591,39 +647,79 @@ impl ToolRegistry {
                 ToolOutcome::Blocked,
             ));
         }
-        match permissions.decide(name, target, tool.access().default_decision()) {
-            Decision::Allow => None,
+        let by_rule = permissions.rule_decision(name, target);
+        match by_rule.unwrap_or(tool.access().default_decision()) {
+            Decision::Allow => {
+                if by_rule.is_some() {
+                    self.observe(name, DecisionScope::Rule, true);
+                }
+                None
+            }
             Decision::Deny => {
                 tracing::info!(tool = name, ?target, "denied by permission rule");
+                self.observe(name, DecisionScope::Deny, false);
                 Some((
                     ToolOutput::error("denied by a permission rule".to_owned()),
                     ToolOutcome::DeniedByRule,
                 ))
             }
             Decision::Ask => {
+                let covered = lock_or_recover(&self.approvals).covers(
+                    name,
+                    target,
+                    root,
+                    tool.target_is_path(),
+                );
+                if covered {
+                    self.observe(name, DecisionScope::Session, true);
+                    return None;
+                }
                 let request = PermissionRequest {
                     tool: name.to_owned(),
                     target: target.map(str::to_owned),
                     arguments: args.clone(),
                 };
                 match self.prompt.ask(&request) {
-                    PromptAnswer::Yes => None,
+                    PromptAnswer::Yes => {
+                        self.observe(name, DecisionScope::Once, false);
+                        None
+                    }
                     PromptAnswer::No => {
+                        self.observe(name, DecisionScope::Deny, false);
                         tracing::info!(tool = name, ?target, "declined by user");
                         Some((
                             ToolOutput::error("the user declined this call".to_owned()),
                             ToolOutcome::DeclinedByUser,
                         ))
                     }
+                    PromptAnswer::Session => {
+                        if let Err(error) = lock_or_recover(&self.approvals).approve(name, root) {
+                            tracing::warn!(%error, tool = name, "could not keep the session approval");
+                        }
+                        self.observe(name, DecisionScope::Session, false);
+                        None
+                    }
                     PromptAnswer::Always => {
                         let rule = permissions::always_rule(name, target);
                         if let Err(error) = permissions.add_allow(&rule) {
                             tracing::warn!(%error, rule, "could not save the permission rule");
                         }
+                        self.observe(name, DecisionScope::Session, false);
                         None
                     }
                 }
             }
+        }
+    }
+
+    /// Tells the observer, if any, about one decision.
+    fn observe(&self, tool: &str, scope: DecisionScope, covered: bool) {
+        if let Some(observer) = &self.observer {
+            observer.decided(&PermissionDecision {
+                tool: tool.to_owned(),
+                scope,
+                covered,
+            });
         }
     }
 }
@@ -916,6 +1012,333 @@ mod tests {
             .await;
         assert_eq!(execution.outcome, ToolOutcome::Failed);
         assert!(execution.result.content.contains("invalid arguments"));
+    }
+
+    /// Lets a test keep a handle on the prompt the registry owns.
+    struct SharedPrompt(Arc<ScriptedPrompt>);
+
+    impl PermissionPrompt for SharedPrompt {
+        fn ask(&self, request: &PermissionRequest) -> PromptAnswer {
+            self.0.ask(request)
+        }
+    }
+
+    /// Keeps every decision it hears.
+    #[derive(Default)]
+    struct RecordingObserver(Mutex<Vec<PermissionDecision>>);
+
+    impl PermissionObserver for RecordingObserver {
+        fn decided(&self, decision: &PermissionDecision) {
+            lock_or_recover(&self.0).push(decision.clone());
+        }
+    }
+
+    /// A workspace with five small files and a builtin registry that answers
+    /// with `answers`.
+    struct EditBench {
+        dir: tempfile::TempDir,
+        prompt: Arc<ScriptedPrompt>,
+        observer: Arc<RecordingObserver>,
+        registry: ToolRegistry,
+    }
+
+    impl EditBench {
+        fn new(answers: Vec<PromptAnswer>, approvals: SessionApprovals) -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::create_dir(dir.path().join("sub")).expect("mkdir");
+            for i in 0..5 {
+                std::fs::write(dir.path().join(format!("f{i}.txt")), "old\n").expect("write");
+            }
+            let prompt = Arc::new(ScriptedPrompt::new(answers));
+            let observer = Arc::new(RecordingObserver::default());
+            let mut registry = ToolRegistry::with_builtins(
+                Permissions::empty(),
+                Box::new(SharedPrompt(Arc::clone(&prompt))),
+            )
+            .with_session_approvals(Arc::new(Mutex::new(approvals)));
+            registry.set_observer(Arc::clone(&observer) as Arc<dyn PermissionObserver>);
+            Self {
+                dir,
+                prompt,
+                observer,
+                registry,
+            }
+        }
+
+        async fn edit(&self, path: &str) -> ToolOutcome {
+            let args = serde_json::json!({"path": path, "old": "old", "new": "new"});
+            let call = ToolCall {
+                id: "e1".to_owned(),
+                name: "edit_file".to_owned(),
+                arguments_json: args.to_string(),
+            };
+            self.registry
+                .execute(&call, &ToolContext::new(self.dir.path()))
+                .await
+                .outcome
+        }
+
+        fn decisions(&self) -> Vec<PermissionDecision> {
+            lock_or_recover(&self.observer.0).clone()
+        }
+    }
+
+    fn decision(scope: DecisionScope, covered: bool) -> PermissionDecision {
+        PermissionDecision {
+            tool: "edit_file".to_owned(),
+            scope,
+            covered,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_approval_stops_later_edit_prompts_inside_the_root() {
+        let bench = EditBench::new(vec![PromptAnswer::Session], SessionApprovals::default());
+        assert_eq!(bench.edit("f0.txt").await, ToolOutcome::Completed);
+        let absolute = bench.dir.path().join("f2.txt");
+        for path in [
+            "./f1.txt",
+            absolute.to_str().expect("utf-8"),
+            "sub/../f3.txt",
+            "f4.txt",
+        ] {
+            assert_eq!(bench.edit(path).await, ToolOutcome::Completed, "{path}");
+        }
+        assert_eq!(bench.prompt.requests().len(), 1);
+        let mut expected = vec![decision(DecisionScope::Session, false)];
+        expected.extend(std::iter::repeat_n(
+            decision(DecisionScope::Session, true),
+            4,
+        ));
+        assert_eq!(bench.decisions(), expected);
+    }
+
+    #[tokio::test]
+    async fn edit_outside_the_root_still_prompts_after_a_session_approval() {
+        let bench = EditBench::new(
+            vec![PromptAnswer::Session, PromptAnswer::No],
+            SessionApprovals::default(),
+        );
+        assert_eq!(bench.edit("f0.txt").await, ToolOutcome::Completed);
+        assert_eq!(
+            bench.edit("../outside.txt").await,
+            ToolOutcome::DeclinedByUser
+        );
+        let requests = bench.prompt.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].target.as_deref(), Some("../outside.txt"));
+        assert_eq!(
+            bench.decisions(),
+            vec![
+                decision(DecisionScope::Session, false),
+                decision(DecisionScope::Deny, false)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn preapproved_tool_never_prompts() {
+        let bench = EditBench::new(
+            vec![],
+            SessionApprovals::preapproved(["edit_file"]).expect("valid"),
+        );
+        for i in 0..5 {
+            assert_eq!(
+                bench.edit(&format!("f{i}.txt")).await,
+                ToolOutcome::Completed
+            );
+        }
+        assert!(bench.prompt.requests().is_empty());
+        assert!(
+            bench
+                .decisions()
+                .iter()
+                .all(|d| *d == decision(DecisionScope::Session, true))
+        );
+    }
+
+    #[tokio::test]
+    async fn retried_call_after_a_session_approval_does_not_prompt() {
+        let bench = EditBench::new(vec![PromptAnswer::Session], SessionApprovals::default());
+        assert_eq!(bench.edit("f0.txt").await, ToolOutcome::Completed);
+        // The same call again: `old` is gone now, so the tool fails, but
+        // the permission check must pass without asking.
+        assert_eq!(bench.edit("f0.txt").await, ToolOutcome::Failed);
+        assert_eq!(bench.prompt.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_approvals_carry_over_to_a_second_registry() {
+        let bench = EditBench::new(vec![PromptAnswer::Session], SessionApprovals::default());
+        assert_eq!(bench.edit("f0.txt").await, ToolOutcome::Completed);
+        let second = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(StaticPrompt(PromptAnswer::No)),
+        )
+        .with_session_approvals(bench.registry.session_approvals());
+        let call = ToolCall {
+            id: "e2".to_owned(),
+            name: "edit_file".to_owned(),
+            arguments_json: serde_json::json!({"path": "f1.txt", "old": "old", "new": "new"})
+                .to_string(),
+        };
+        let execution = second
+            .execute(&call, &ToolContext::new(bench.dir.path()))
+            .await;
+        assert_eq!(execution.outcome, ToolOutcome::Completed);
+    }
+
+    #[tokio::test]
+    async fn once_answer_is_reported_and_prompts_again() {
+        let bench = EditBench::new(
+            vec![PromptAnswer::Yes, PromptAnswer::Yes],
+            SessionApprovals::default(),
+        );
+        assert_eq!(bench.edit("f0.txt").await, ToolOutcome::Completed);
+        assert_eq!(bench.edit("f1.txt").await, ToolOutcome::Completed);
+        assert_eq!(bench.prompt.requests().len(), 2);
+        assert_eq!(
+            bench.decisions(),
+            vec![
+                decision(DecisionScope::Once, false),
+                decision(DecisionScope::Once, false)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn approvals_shared_with_a_registry_in_another_root_still_prompt() {
+        let bench = EditBench::new(vec![PromptAnswer::Session], SessionApprovals::default());
+        assert_eq!(bench.edit("f0.txt").await, ToolOutcome::Completed);
+        let other = tempfile::tempdir().expect("other workspace");
+        std::fs::write(other.path().join("f0.txt"), "old\n").expect("write");
+        let other_prompt = Arc::new(ScriptedPrompt::new(vec![PromptAnswer::No]));
+        let second = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(SharedPrompt(Arc::clone(&other_prompt))),
+        )
+        .with_session_approvals(bench.registry.session_approvals());
+        let call = ToolCall {
+            id: "e2".to_owned(),
+            name: "edit_file".to_owned(),
+            arguments_json: serde_json::json!({"path": "f0.txt", "old": "old", "new": "new"})
+                .to_string(),
+        };
+        let execution = second.execute(&call, &ToolContext::new(other.path())).await;
+        assert_eq!(execution.outcome, ToolOutcome::DeclinedByUser);
+        assert_eq!(
+            other_prompt.requests().len(),
+            1,
+            "the second workspace prompts"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_through_a_symlink_after_a_missing_dir_still_prompts() {
+        let dir = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).expect("symlink");
+        let prompt = Arc::new(ScriptedPrompt::new(vec![
+            PromptAnswer::Session,
+            PromptAnswer::No,
+        ]));
+        let registry = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(SharedPrompt(Arc::clone(&prompt))),
+        );
+        let ctx = ToolContext::new(dir.path());
+        let write = |id: &str, path: &str| ToolCall {
+            id: id.to_owned(),
+            name: "write_file".to_owned(),
+            arguments_json: serde_json::json!({"path": path, "content": "hi"}).to_string(),
+        };
+        let first = registry.execute(&write("w1", "a.txt"), &ctx).await;
+        assert_eq!(first.outcome, ToolOutcome::Completed);
+        let inside = registry.execute(&write("w2", "new/../b.txt"), &ctx).await;
+        assert_eq!(inside.outcome, ToolOutcome::Completed, "in-root spelling stays covered");
+        let escaping = registry
+            .execute(&write("w3", "new/../escape/file.txt"), &ctx)
+            .await;
+        assert_eq!(escaping.outcome, ToolOutcome::DeclinedByUser);
+        assert!(!outside.path().join("file.txt").exists());
+        let requests = prompt.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].target.as_deref(), Some("new/../escape/file.txt"));
+    }
+
+    /// The decisions an `echo` registry with `rules` reports for `text`.
+    async fn echo_decisions(rules: &str, text: &str) -> (ToolOutcome, Vec<PermissionDecision>) {
+        let observer = Arc::new(RecordingObserver::default());
+        let mut registry = make_registry(rules, vec![]);
+        registry.set_observer(Arc::clone(&observer) as Arc<dyn PermissionObserver>);
+        let args = serde_json::json!({ "text": text }).to_string();
+        let outcome = registry
+            .execute(&call(&args), &ToolContext::new("."))
+            .await
+            .outcome;
+        let decisions = lock_or_recover(&observer.0).clone();
+        (outcome, decisions)
+    }
+
+    fn echo_decision(scope: DecisionScope, covered: bool) -> PermissionDecision {
+        PermissionDecision {
+            tool: "echo".to_owned(),
+            scope,
+            covered,
+        }
+    }
+
+    #[tokio::test]
+    async fn rule_and_blocked_outcomes_are_reported_too() {
+        assert_eq!(
+            echo_decisions("allow = [\"echo\"]", "hi").await,
+            (
+                ToolOutcome::Completed,
+                vec![echo_decision(DecisionScope::Rule, true)]
+            )
+        );
+        assert_eq!(
+            echo_decisions("default = \"allow\"", "hi").await,
+            (
+                ToolOutcome::Completed,
+                vec![echo_decision(DecisionScope::Rule, true)]
+            )
+        );
+        assert_eq!(
+            echo_decisions("deny = [\"echo\"]", "hi").await,
+            (
+                ToolOutcome::DeniedByRule,
+                vec![echo_decision(DecisionScope::Deny, false)]
+            )
+        );
+        assert_eq!(
+            echo_decisions("", "nuke it").await,
+            (
+                ToolOutcome::Blocked,
+                vec![echo_decision(DecisionScope::Blocked, false)]
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_tools_built_in_default_is_not_a_reported_decision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "x\n").expect("write");
+        let observer = Arc::new(RecordingObserver::default());
+        let mut registry = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(StaticPrompt(PromptAnswer::No)),
+        );
+        registry.set_observer(Arc::clone(&observer) as Arc<dyn PermissionObserver>);
+        let read = ToolCall {
+            id: "r1".to_owned(),
+            name: "read_file".to_owned(),
+            arguments_json: serde_json::json!({"path": "a.txt"}).to_string(),
+        };
+        let execution = registry.execute(&read, &ToolContext::new(dir.path())).await;
+        assert_eq!(execution.outcome, ToolOutcome::Completed);
+        assert!(lock_or_recover(&observer.0).is_empty());
     }
 
     #[test]

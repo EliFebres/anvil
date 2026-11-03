@@ -80,6 +80,7 @@ impl Answer {
         match self {
             Answer::Permission(PromptAnswer::Yes) => "allow".to_owned(),
             Answer::Permission(PromptAnswer::No) => "deny".to_owned(),
+            Answer::Permission(PromptAnswer::Session) => "session".to_owned(),
             Answer::Permission(PromptAnswer::Always) => "always".to_owned(),
             Answer::Memory(MemoryAnswer::Keep) => "keep".to_owned(),
             Answer::Memory(MemoryAnswer::Drop) => "drop".to_owned(),
@@ -193,10 +194,15 @@ impl Modal {
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         match self {
-            Modal::Permission { .. } => match key.code {
+            Modal::Permission { request, .. } => match key.code {
                 KeyCode::Char('y' | 'Y') if plain => Some(Answer::Permission(PromptAnswer::Yes)),
+                KeyCode::Char('s' | 'S') if plain => {
+                    Some(Answer::Permission(PromptAnswer::Session))
+                }
                 KeyCode::Char('n' | 'N') if plain => Some(Answer::Permission(PromptAnswer::No)),
-                KeyCode::Char('a' | 'A') if plain => Some(Answer::Permission(PromptAnswer::Always)),
+                KeyCode::Char('a' | 'A') if plain && request.offers_always() => {
+                    Some(Answer::Permission(PromptAnswer::Always))
+                }
                 KeyCode::Esc => Some(Answer::Permission(PromptAnswer::No)),
                 code => {
                     self.scroll_key(code);
@@ -415,7 +421,7 @@ impl Modal {
                         .unwrap_or(DEFAULT_TIMEOUT_S);
                     format!("timeout {timeout}s · {cap}")
                 } else {
-                    cap
+                    format!("{cap} · s: workspace only")
                 }
             }
             Modal::Memory { .. } => "kept facts load into every session in this repo".to_owned(),
@@ -426,11 +432,16 @@ impl Modal {
     /// The choices and the safe answer, laid out over `width`.
     fn choices_line(&self, width: usize, theme: &Theme) -> Line<'static> {
         let (choices, escape): (Vec<Choice>, &str) = match self {
-            Modal::Permission { .. } => (
-                vec![
+            Modal::Permission { request, .. } => {
+                let mut choices = vec![
                     Choice {
                         key: "y",
-                        label: "allow",
+                        label: "once",
+                        shade: Shade::Success,
+                    },
+                    Choice {
+                        key: "s",
+                        label: "session",
                         shade: Shade::Success,
                     },
                     Choice {
@@ -438,14 +449,16 @@ impl Modal {
                         label: "deny",
                         shade: Shade::Danger,
                     },
-                    Choice {
+                ];
+                if request.offers_always() {
+                    choices.push(Choice {
                         key: "a",
                         label: "always",
                         shade: Shade::Success,
-                    },
-                ],
-                "esc = deny",
-            ),
+                    });
+                }
+                (choices, "esc = deny")
+            }
             Modal::Memory { .. } => (
                 vec![
                     Choice {
@@ -476,6 +489,9 @@ impl Modal {
                 theme.fg(Shade::Text),
             ));
             used += choice.key.width() + 1 + choice.label.width();
+        }
+        if used + 1 + escape.width() > width {
+            return Line::from(spans);
         }
         let gap = width.saturating_sub(used + escape.width()).max(1);
         spans.push(Span::raw(" ".repeat(gap)));
@@ -559,11 +575,48 @@ mod tests {
             press(&mut modal, KeyCode::Char('a')),
             Some(Answer::Permission(PromptAnswer::Always))
         );
+        assert_eq!(
+            press(&mut modal, KeyCode::Char('s')),
+            Some(Answer::Permission(PromptAnswer::Session))
+        );
         assert_eq!(modal.question().as_deref(), Some("allow shell cargo test?"));
         assert_eq!(modal.context(), "shell wants to run");
         assert_eq!(modal.limits(), "timeout 300s · output cap 30 KiB");
         modal.reply(Answer::Permission(PromptAnswer::Always));
         assert_eq!(rx.try_recv(), Ok(PromptAnswer::Always));
+    }
+
+    fn edit_permission() -> Modal {
+        let (tx, _rx) = oneshot::channel();
+        Modal::permission(
+            PermissionRequest {
+                tool: "edit_file".to_owned(),
+                target: Some("src/a.rs".to_owned()),
+                arguments: serde_json::json!({"path": "src/a.rs", "old": "a", "new": "b"}),
+            },
+            None,
+            tx,
+        )
+    }
+
+    #[test]
+    fn edit_file_offers_once_session_and_deny_only() {
+        let mut modal = edit_permission();
+        assert_eq!(press(&mut modal, KeyCode::Char('a')), None);
+        assert_eq!(
+            press(&mut modal, KeyCode::Char('s')),
+            Some(Answer::Permission(PromptAnswer::Session))
+        );
+        assert_eq!(modal.limits(), "output cap 30 KiB · s: workspace only");
+        let text: String = modal
+            .choices_line(50, &Theme::truecolor())
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(text.starts_with("y once   s session   n deny"), "{text:?}");
+        assert!(!text.contains("always"), "{text:?}");
+        assert_eq!(Answer::Permission(PromptAnswer::Session).label(), "session");
     }
 
     #[test]
@@ -602,9 +655,19 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(text.width(), 50);
-        assert!(text.starts_with("y allow   n deny   a always"), "{text:?}");
+        assert!(
+            text.starts_with("y once   s session   n deny   a always"),
+            "{text:?}"
+        );
         assert!(text.ends_with("esc = deny"), "{text:?}");
         assert_eq!(line.spans[0].style.fg, Some(theme.success));
-        assert_eq!(line.spans[3].style.fg, Some(theme.danger));
+        assert_eq!(line.spans[6].style.fg, Some(theme.danger));
+        let narrow: String = modal
+            .choices_line(40, &theme)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(!narrow.contains("esc"), "{narrow:?}");
     }
 }
