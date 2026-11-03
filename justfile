@@ -37,7 +37,7 @@ no-old-name:
 
 # Build the factory's worker image (needs podman; the NUC does this in bootstrap.sh).
 image:
-    podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile deploy/nuc
+    podman build -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile .
 
 # Print the Ticket JSON Schema.
 schema:
