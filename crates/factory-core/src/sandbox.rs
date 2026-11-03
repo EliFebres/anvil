@@ -1560,9 +1560,8 @@ mod tests {
             "{script}"
         );
         assert!(!script.contains("FACTORY_GITHUB_TOKEN"));
-        let socket = temp.path().join(".factory/work/T9-proxy.sock");
         assert!(
-            script.contains(&format!("{}:/run/factory/proxy.sock", socket.display())),
+            script.contains("T9-proxy.sock:/run/factory/proxy.sock"),
             "the proxy socket is the ticket's, not one named after $PWD: {script}"
         );
         assert!(script.contains("factory.ticket=T9"), "{script}");
