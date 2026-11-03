@@ -26,6 +26,28 @@ const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 16384;
 /// Replies tried before a reviewer gives up on malformed JSON.
 pub const MAX_ATTEMPTS: u32 = 2;
 
+/// Waits before each retry of a request that failed transiently (a 5xx or
+/// 429 status, or no response at all): a provider's brief outage must not
+/// count as a review that asked for changes.
+#[cfg(not(test))]
+const TRANSIENT_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::from_secs(5),
+    std::time::Duration::from_secs(20),
+    std::time::Duration::from_secs(60),
+];
+/// No waiting in tests.
+#[cfg(test)]
+const TRANSIENT_DELAYS: [std::time::Duration; 3] = [std::time::Duration::ZERO; 3];
+
+/// Whether an error is worth sending the same request again.
+fn is_transient(error: &ReviewError) -> bool {
+    match error {
+        ReviewError::Transport { .. } => true,
+        ReviewError::Http { status, .. } => *status == 429 || *status >= 500,
+        _ => false,
+    }
+}
+
 /// How much of an error body is kept in the error.
 const BODY_HEAD: usize = 500;
 
@@ -211,7 +233,7 @@ impl ModelReviewer {
         };
         let mut last_error = String::new();
         for attempt in 1..=MAX_ATTEMPTS {
-            let (text, used) = self.complete(&turns).await?;
+            let (text, used) = self.complete_retrying(&turns).await?;
             usage.add(used);
             match parse_review(&text) {
                 Ok(review) => return Ok(Reviewed { review, usage }),
@@ -239,6 +261,21 @@ impl ModelReviewer {
             attempts: MAX_ATTEMPTS,
             detail: last_error,
         })
+    }
+
+    /// [`Self::complete`], sent again after each of [`TRANSIENT_DELAYS`] while
+    /// it fails transiently.
+    async fn complete_retrying(&self, turns: &[Turn]) -> Result<(String, Usage), ReviewError> {
+        for delay in TRANSIENT_DELAYS {
+            match self.complete(turns).await {
+                Err(error) if is_transient(&error) => {
+                    tracing::warn!(reviewer = %self.id, %error, ?delay, "review request failed; retrying");
+                    tokio::time::sleep(delay).await;
+                }
+                other => return other,
+            }
+        }
+        self.complete(turns).await
     }
 
     /// One non-streaming completion: the reply text and its usage.
@@ -689,6 +726,46 @@ mod tests {
             matches!(&error, ReviewError::Malformed { attempts: 2, .. }),
             "{error}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_brief_server_error_is_retried_and_a_client_error_is_not() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("down"))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(openai_reply(r#"{"verdict":"approve","findings":[]}"#)),
+            )
+            .mount(&server)
+            .await;
+        reviewer(Protocol::Openai, &server.uri())
+            .review(&request())
+            .await
+            .expect("approved after two 500s");
+        assert_eq!(server.received_requests().await.expect("recorded").len(), 3);
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let error = reviewer(Protocol::Anthropic, &server.uri())
+            .review(&request())
+            .await
+            .expect_err("401 fails");
+        assert!(
+            matches!(&error, ReviewError::Http { status: 401, .. }),
+            "{error}"
+        );
+        assert_eq!(server.received_requests().await.expect("recorded").len(), 1);
     }
 
     #[tokio::test]
