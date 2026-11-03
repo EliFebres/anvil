@@ -13,7 +13,8 @@ acceptance = [
 ]
 evidence = ["01M6D1YE3BHKQKQZ2KD6ZNW135"]
 priority = "p2"
-status = "claimed"
+status = "rejected"
 origin = "cli"
 claimed_at = "2026-11-03T12:53:48.753066553Z"
 claimed_by = "minipc-NUC14RVH-B"
+note = "gate B: 20 eval task(s) regressed against main: md-fix-readme-links, py-argparse-subcommand, py-cli-flag-lines, py-dedupe-formatters, py-fix-failing-pytest, py-google-docstrings, py-pandas-add-column, py-pandas-monthly-summary, py-resolve-type-errors, py-streamlit-metric-picker, py-test-for-bug, rs-clap-subcommand, rs-cli-flag-count, rs-dedupe-sums, rs-doc-comments, rs-fix-failing-test, rs-test-for-bug, rs-thiserror-enum, sh-dry-run-flag, sh-quote-backup-script"
