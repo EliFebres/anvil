@@ -74,6 +74,34 @@ How a ticket moves:
 
 `factory run` is the loop (`--once` for a single pass), `factory status` shows the queue and the last ten outcomes, `factory pause` and `factory resume` toggle the flag it checks between tickets, `factory review <pr>` runs the swarm by hand, `factory env <NAME>` says where a secret came from without printing it, and `factory update` waits for the ticket in progress, stops the service, pulls `main`, rebuilds the binaries and the worker image, and starts it again (`--now` skips the wait). Per-ticket budgets (wall clock, tokens) and the protected paths live in `factory.toml`.
 
+#### `factory watch`
+
+`factory watch` is a full-screen dashboard of what the service is doing, redrawn every 2 seconds. It only reads `~/.factory/status.json`, which the service writes, so it works over SSH and never touches the service except through the pause flag. The top bar shows the host, the state, uptime, the next poll and today's totals; the rest of the screen depends on whether a ticket is in progress.
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/factory-watch-working.png" alt="factory watch while a ticket is in progress: the ticket with its wall-clock and token budget bars, the pipeline from claim to merge, the implementer's latest tool calls, resources, the open queue and recent outcomes">
+      <p align="center"><b>Working a ticket.</b> The budgets, the pipeline stage, the implementer's latest tool calls, and what the run costs so far.</p>
+    </td>
+    <td width="50%">
+      <img src="docs/factory-watch-idle.png" alt="factory watch while idle: an empty queue, the state of main and the baseline, the last 7 days of merged and rejected tickets, service health, tickets waiting on a human and recent outcomes">
+      <p align="center"><b>Idle.</b> The last 7 days, service health, and the tickets that are waiting on you.</p>
+    </td>
+  </tr>
+</table>
+
+| key | what it does |
+|---|---|
+| `p` / `r` | Pause after the current ticket, or resume. The same flag as `factory pause` and `factory resume`. |
+| `l` | Show the service's full log (its systemd journal) in a pager. |
+| `Enter` | Open the ticket in progress, or the most recent one when idle. |
+| `o` | Open the ticket's pull request in the browser (while working). |
+| `d` | Run `anvil doctor` (while idle). |
+| `q`, `Esc` or `Ctrl+C` | Quit the dashboard. The service keeps running. |
+
+`factory watch --once` prints the screen once as plain text and exits, for scripts and logs. `factory watch --file <path>` shows another status file instead of the service's; the pause keys then only change the screen.
+
 ### The eval harness
 
 `crates/eval` scores a model or an anvil build against a fixed task set under `eval/`. `eval run` writes a result file, `eval compare` shows two side by side, `eval gate` exits 2 on a regression, and `eval baseline` runs every task three times on the coder role and commits the result that the factory gates against.
@@ -130,7 +158,8 @@ The factory is meant for a small always-on machine. `deploy/nuc/bootstrap.sh` do
 ```sh
 factory run --once     # one pass, for a first look
 factory run            # the service loop
-factory status
+factory status         # the queue and the last ten outcomes
+factory watch          # the live dashboard
 ```
 
 Secrets come from `~/.factory/env` (mode 600). The service needs `FACTORY_GITHUB_TOKEN`, a `factory.toml` at the repository root, and an eval result on `main` to gate against; until the baseline commit lands it pauses and says so. `anvil doctor --fix-github` creates the `factory/state` branch and the branch protection it expects.
