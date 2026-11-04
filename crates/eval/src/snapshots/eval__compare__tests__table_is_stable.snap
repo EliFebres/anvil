@@ -13,7 +13,14 @@ pass rate              66.7%                    66.7%
 tokens                 10,350                   10,350
 cost (USD)             0.0900                   n/a
 cost per passed task   0.0450                   n/a
+input / task mean      1050                     1050                     +0.0%
+input / task median    1050                     1050                     +0.0%
+uncached / task        1000                     1000                     +0.0%
+input / passed task    1575                     1575                     +0.0%
+tool calls / task      5.7                      5.7                      +0.0%
+cost per task          0.0100                   0.0100                   +0.0%
 
+input tokens / passed task: +0.0%
 flipped: 1 fixed, 1 regressed
   fixed:     rs-thiserror-enum
   regressed: py-fix-failing-pytest

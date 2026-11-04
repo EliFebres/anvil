@@ -27,6 +27,15 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Every prompt token the model read: uncached plus cached input.
+    ///
+    /// # Returns
+    ///
+    /// Input and cached added together.
+    pub fn prompt(self) -> u64 {
+        self.input.saturating_add(self.cached)
+    }
+
     /// Every token counted.
     ///
     /// # Returns
@@ -121,6 +130,9 @@ pub struct AttemptRecord {
     pub model: Option<String>,
     /// Tokens over every provider the run used.
     pub tokens: Usage,
+    /// Tool calls the session made; 0 in results written before it was recorded.
+    #[serde(default)]
+    pub tool_calls: u32,
     /// Cost in USD, when every provider used has a price.
     pub cost_usd: Option<f64>,
     /// Wall time of the anvil run.
@@ -275,6 +287,78 @@ fn ratio(part: usize, whole: usize) -> f64 {
         0.0
     } else {
         part as f64 / whole as f64
+    }
+}
+
+/// What a run spent per attempt, computed from its attempts on demand so
+/// results written before these numbers existed can still be compared.
+///
+/// "Per task" means per attempt: each attempt is one task run once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Efficiency {
+    /// Mean prompt tokens (uncached plus cached input) per attempt.
+    pub input_mean: f64,
+    /// Median prompt tokens per attempt.
+    pub input_median: f64,
+    /// Mean uncached input tokens per attempt.
+    pub uncached_input_mean: f64,
+    /// Prompt tokens over every attempt divided by passed attempts.
+    pub input_per_passed: Option<f64>,
+    /// Mean tool calls per attempt.
+    pub tool_calls_mean: f64,
+    /// Mean cost per attempt, when every attempt could be priced.
+    pub cost_per_attempt: Option<f64>,
+}
+
+impl Efficiency {
+    /// Computes the per-attempt figures of a set of task results.
+    ///
+    /// # Arguments
+    ///
+    /// * `tasks` - The task results.
+    ///
+    /// # Returns
+    ///
+    /// The figures; all zero (and `None` where undefined) when there are no
+    /// attempts.
+    pub fn of(tasks: &[TaskResult]) -> Efficiency {
+        let attempts: Vec<&AttemptRecord> = tasks.iter().flat_map(|t| &t.attempts).collect();
+        let count = attempts.len();
+        let mut prompts: Vec<u64> = attempts.iter().map(|a| a.tokens.prompt()).collect();
+        prompts.sort_unstable();
+        let prompt_sum: u64 = prompts.iter().sum();
+        let passed = attempts.iter().filter(|a| a.passed).count();
+        let cost: Option<f64> = attempts.iter().map(|a| a.cost_usd).sum();
+        Efficiency {
+            input_mean: mean(prompt_sum, count),
+            input_median: median(&prompts),
+            uncached_input_mean: mean(attempts.iter().map(|a| a.tokens.input).sum(), count),
+            input_per_passed: (passed > 0).then(|| prompt_sum as f64 / passed as f64),
+            tool_calls_mean: mean(
+                attempts.iter().map(|a| u64::from(a.tool_calls)).sum(),
+                count,
+            ),
+            cost_per_attempt: cost.filter(|_| count > 0).map(|c| c / count as f64),
+        }
+    }
+}
+
+/// `sum / count`, or 0 when `count` is 0.
+fn mean(sum: u64, count: usize) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        sum as f64 / count as f64
+    }
+}
+
+/// The median of sorted values, or 0 when there are none.
+fn median(sorted: &[u64]) -> f64 {
+    debug_assert!(sorted.is_sorted(), "median needs sorted values");
+    match sorted.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => sorted[n / 2] as f64,
+        n => (sorted[n / 2 - 1] + sorted[n / 2]) as f64 / 2.0,
     }
 }
 
@@ -446,6 +530,21 @@ impl fmt::Display for RunResult {
         writeln!(f, "tokens                {}", thousands(t.tokens.total()))?;
         writeln!(f, "cost (USD)            {}", money(t.cost_usd))?;
         writeln!(f, "cost per passed task  {}", money(t.cost_per_passed_task))?;
+        let e = Efficiency::of(&self.tasks);
+        writeln!(
+            f,
+            "input tok / task      mean {}, median {}",
+            thousands(e.input_mean as u64),
+            thousands(e.input_median as u64)
+        )?;
+        writeln!(
+            f,
+            "input tok / passed    {}",
+            e.input_per_passed
+                .map_or_else(|| "n/a".to_owned(), |v| thousands(v as u64))
+        )?;
+        writeln!(f, "tool calls / task     {:.1}", e.tool_calls_mean)?;
+        writeln!(f, "cost per task         {}", money(e.cost_per_attempt))?;
         writeln!(f, "wall                  {}", duration(t.wall_ms))
     }
 }
@@ -536,6 +635,7 @@ pub(crate) mod samples {
                 output: 100,
                 cached: 50,
             },
+            tool_calls: if passed { 4 } else { 9 },
             cost_usd: Some(0.01),
             anvil_ms: 1500,
             check_ms: 200,
@@ -667,6 +767,33 @@ mod tests {
             vec![task("a", &[true, false]), task("b", &[true, true])],
         );
         insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn efficiency_takes_means_medians_and_per_pass_figures() {
+        let mut t = task("t", &[true, false, true, false]);
+        for (attempt, input) in t.attempts.iter_mut().zip([100, 400, 200, 300]) {
+            attempt.tokens = Usage {
+                input,
+                output: 7,
+                cached: 0,
+            };
+        }
+        let even = Efficiency::of(std::slice::from_ref(&t));
+        assert_eq!(even.input_mean, 250.0);
+        assert_eq!(even.input_median, 250.0);
+        assert_eq!(even.input_per_passed, Some(500.0));
+        assert_eq!(even.tool_calls_mean, 6.5);
+        assert_eq!(even.cost_per_attempt, Some(0.01));
+
+        t.attempts.pop();
+        assert_eq!(Efficiency::of(std::slice::from_ref(&t)).input_median, 200.0);
+
+        let failing = task("f", &[false, false]);
+        assert_eq!(Efficiency::of(&[failing]).input_per_passed, None);
+        let empty = Efficiency::of(&[]);
+        assert_eq!(empty.input_mean, 0.0);
+        assert_eq!(empty.cost_per_attempt, None);
     }
 
     #[test]

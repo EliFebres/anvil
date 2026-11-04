@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::results::{RunResult, money, percent, thousands};
+use crate::results::{Efficiency, RunResult, money, percent, thousands};
 
 /// Which tasks changed verdict between two runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +67,8 @@ pub struct RunSummary {
     pub cost_usd: Option<f64>,
     /// Cost per passing task, when known.
     pub cost_per_passed_task: Option<f64>,
+    /// What the run spent per attempt.
+    pub efficiency: Efficiency,
 }
 
 impl From<&RunResult> for RunSummary {
@@ -79,6 +81,7 @@ impl From<&RunResult> for RunSummary {
             tokens: run.totals.tokens.total(),
             cost_usd: run.totals.cost_usd,
             cost_per_passed_task: run.totals.cost_per_passed_task,
+            efficiency: Efficiency::of(&run.tasks),
         }
     }
 }
@@ -204,7 +207,55 @@ impl fmt::Display for Comparison {
             money(self.a.cost_per_passed_task),
             money(self.b.cost_per_passed_task),
         )?;
+        let (ea, eb) = (&self.a.efficiency, &self.b.efficiency);
+        let mut efficiency = |label: &str, a: Option<f64>, b: Option<f64>, digits: usize| {
+            let shown =
+                |v: Option<f64>| v.map_or_else(|| "n/a".to_owned(), |v| format!("{v:.digits$}"));
+            writeln!(
+                f,
+                "{label:<name_width$}  {:<col$}  {:<col$}  {}",
+                shown(a),
+                shown(b),
+                change(a, b)
+            )
+        };
+        efficiency(
+            "input / task mean",
+            Some(ea.input_mean),
+            Some(eb.input_mean),
+            0,
+        )?;
+        efficiency(
+            "input / task median",
+            Some(ea.input_median),
+            Some(eb.input_median),
+            0,
+        )?;
+        efficiency(
+            "uncached / task",
+            Some(ea.uncached_input_mean),
+            Some(eb.uncached_input_mean),
+            0,
+        )?;
+        efficiency(
+            "input / passed task",
+            ea.input_per_passed,
+            eb.input_per_passed,
+            0,
+        )?;
+        efficiency(
+            "tool calls / task",
+            Some(ea.tool_calls_mean),
+            Some(eb.tool_calls_mean),
+            1,
+        )?;
+        efficiency("cost per task", ea.cost_per_attempt, eb.cost_per_attempt, 4)?;
         writeln!(f)?;
+        writeln!(
+            f,
+            "input tokens / passed task: {}",
+            change(ea.input_per_passed, eb.input_per_passed)
+        )?;
         writeln!(
             f,
             "flipped: {} fixed, {} regressed",
@@ -221,6 +272,14 @@ impl fmt::Display for Comparison {
             writeln!(f, "  not in second run: {}", self.flips.missing.join(", "))?;
         }
         Ok(())
+    }
+}
+
+/// The relative change from `a` to `b` as `-31.2%`, or `n/a`.
+fn change(a: Option<f64>, b: Option<f64>) -> String {
+    match (a, b) {
+        (Some(a), Some(b)) if a > 0.0 => format!("{:+.1}%", (b - a) / a * 100.0),
+        _ => "n/a".to_owned(),
     }
 }
 

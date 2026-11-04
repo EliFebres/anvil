@@ -181,6 +181,7 @@ impl AnvilRunner {
             provider: usage.coder_provider,
             model: usage.coder_model,
             tokens: usage.total,
+            tool_calls: usage.tool_calls,
             cost_usd,
             anvil_ms,
             stderr_tail: tail(&stderr, STDERR_TAIL_LINES),
