@@ -6,9 +6,11 @@
 //! move is reported on the [`EventSink`]. Nothing here prints.
 
 pub mod checks;
+pub mod complete_step;
 pub mod diff;
 pub mod events;
 pub mod gate;
+pub mod plan;
 pub mod prompts;
 pub mod state;
 pub mod turn;
@@ -197,15 +199,20 @@ impl AgentLoop {
     pub fn new(
         config: LoopConfig,
         providers: LoopProviders,
-        registry: ToolRegistry,
+        mut registry: ToolRegistry,
         mut ctx: ToolContext,
         gate: Box<dyn PlanGate>,
         events: EventSink,
     ) -> Self {
         ctx.session_dir = Some(config.session_dir.clone());
+        registry.register(Box::new(complete_step::CompleteStep));
         let session_glob = format!("{}/**", ctx.display_path(&config.session_dir));
-        for tool in ["write_file", "edit_file"] {
-            let rule = format!("{tool}:{session_glob}");
+        let rules = [
+            format!("write_file:{session_glob}"),
+            format!("edit_file:{session_glob}"),
+            complete_step::COMPLETE_STEP.to_owned(),
+        ];
+        for rule in rules {
             if let Err(error) = registry.permissions().allow_unsaved(&rule) {
                 tracing::warn!(%error, rule, "could not allow session folder writes");
             }
@@ -506,7 +513,7 @@ impl AgentLoop {
     async fn run_build(&mut self) -> StateOutcome {
         let intro = self.pending_feedback.take().unwrap_or_else(|| {
             format!(
-                "The plan above was approved. Implement it now without reading it back; its file is `{}`. Tick a step's checkbox there in the same turn as the step's last edit, never in a turn of its own.",
+                "The plan above was approved. Implement it now without reading it back; its file is `{}`.",
                 self.plan_path()
             )
         });
@@ -589,6 +596,7 @@ impl AgentLoop {
         match verdict {
             ReviewVerdict::Approve { notes } => {
                 self.review_notes = notes;
+                self.complete_open_steps();
                 match self.lane {
                     Lane::Checked { .. } => StateOutcome::ApprovedAfterCheck,
                     Lane::Full | Lane::CheckFirst => StateOutcome::ReviewApproved,
@@ -605,6 +613,23 @@ impl AgentLoop {
                 ));
                 StateOutcome::ReviewChanges(items)
             }
+        }
+    }
+
+    /// Ticks every plan step the model left open. An approved change means
+    /// the plan is done, so this never costs a model turn.
+    fn complete_open_steps(&self) {
+        let path = self.config.session_dir.join(PLAN_FILE);
+        let Ok(plan) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let ticked = plan::tick_all(&plan);
+        if ticked == plan {
+            return;
+        }
+        match std::fs::write(&path, ticked) {
+            Ok(()) => self.events.emit(LoopEvent::PlanUpdated { path }),
+            Err(error) => self.warn(format!("cannot write {}: {error}", path.display())),
         }
     }
 
@@ -1733,6 +1758,69 @@ mod tests {
             e,
             LoopEvent::ToolFinished { outcome: ToolOutcome::Completed, name, .. } if name == "edit_file"
         )));
+    }
+
+    #[tokio::test]
+    async fn complete_step_ticks_without_prompting_and_approval_ticks_the_rest() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![ToolCall {
+                    id: "done-1".to_owned(),
+                    name: "complete_step".to_owned(),
+                    arguments_json: "{\"step\": 1}".to_owned(),
+                }]),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("addressed"),
+            ],
+            vec![changes(), approve()],
+        );
+        let agent = h.default_agent(CheckCommand::Command("exit 0".to_owned()), "");
+        let plan_path = h.session_dir().join(PLAN_FILE);
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        let events = h.drain();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            LoopEvent::ToolFinished { outcome: ToolOutcome::Completed, name, .. } if name == "complete_step"
+        )));
+        let updates = events
+            .iter()
+            .filter(|e| matches!(e, LoopEvent::PlanUpdated { .. }))
+            .count();
+        assert_eq!(updates, 1, "the back-fill is announced once");
+        let plan = std::fs::read_to_string(plan_path).expect("plan");
+        assert_eq!(plan, "# Plan\n\n1. [x] Write hello.txt\n2. [x] Check it\n");
+        // Plan, two build turns and one rework turn: none was spent on step 2's box.
+        assert_eq!(h.coder.calls(), 4);
+        let build = &h.coder.requests()[1];
+        assert!(build.tools.iter().any(|tool| tool.name == "complete_step"));
+        assert!(
+            h.coder.requests()[0]
+                .tools
+                .iter()
+                .all(|tool| tool.name != "complete_step"),
+            "Plan is read-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_change_leaves_open_steps_open() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("b1"),
+                FakeProvider::text_turn("b2"),
+                FakeProvider::text_turn("b3"),
+                FakeProvider::text_turn("b4"),
+            ],
+            vec![changes(), changes(), changes(), changes()],
+        );
+        let agent = h.default_agent(CheckCommand::Command("exit 0".to_owned()), "");
+        let plan_path = h.session_dir().join(PLAN_FILE);
+        agent.run().await;
+        let plan = std::fs::read_to_string(plan_path).expect("plan");
+        assert!(plan.contains("1. [ ] Write hello.txt"), "{plan}");
     }
 
     /// A tool turn whose usage reports a large prompt, to drive compaction.

@@ -1,0 +1,19 @@
+---
+source: crates/anvil-core/src/agent/complete_step.rs
+expression: CompleteStep.schema()
+---
+{
+  "description": "Arguments of the `complete_step` tool.",
+  "properties": {
+    "step": {
+      "description": "The number of the finished step, as written in the plan.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "step"
+  ],
+  "type": "object"
+}

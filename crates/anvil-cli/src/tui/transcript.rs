@@ -312,7 +312,8 @@ impl Transcript {
             LoopEvent::TextDelta(text) => self.append_text(text),
             LoopEvent::ReasoningDelta(_)
             | LoopEvent::Transition { .. }
-            | LoopEvent::PlanWritten { .. } => {}
+            | LoopEvent::PlanWritten { .. }
+            | LoopEvent::PlanUpdated { .. } => {}
             LoopEvent::TurnFinished { .. } => self.close_model(),
             LoopEvent::StateEntered { state, visit } => {
                 self.close_model();

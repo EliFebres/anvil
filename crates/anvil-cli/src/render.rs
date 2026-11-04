@@ -114,6 +114,7 @@ impl<O: Write, E: Write> Renderer<O, E> {
             }
             LoopEvent::Transition { .. }
             | LoopEvent::TurnFinished { .. }
+            | LoopEvent::PlanUpdated { .. }
             | LoopEvent::ProposedEdit { .. } => {}
             LoopEvent::ToolStarted { call } => {
                 self.end_line();

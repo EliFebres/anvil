@@ -379,6 +379,7 @@ impl SessionTelemetry {
             | LoopEvent::TextDelta(_)
             | LoopEvent::ReasoningDelta(_)
             | LoopEvent::PlanWritten { .. }
+            | LoopEvent::PlanUpdated { .. }
             | LoopEvent::CheckStarted { .. }
             | LoopEvent::ProposedEdit { .. }
             | LoopEvent::Finished { .. } => return None,

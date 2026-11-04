@@ -66,6 +66,11 @@ pub enum LoopEvent {
         /// Where.
         path: PathBuf,
     },
+    /// anvil marked plan steps done in the plan file without a model turn.
+    PlanUpdated {
+        /// The plan file.
+        path: PathBuf,
+    },
     /// The reviewer answered.
     ReviewVerdict {
         /// The verdict.

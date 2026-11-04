@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anvil_core::agent::LoopEvent;
+use anvil_core::agent::complete_step::COMPLETE_STEP;
 use anvil_core::provider::ToolCall;
 use crossterm::event::{Event, EventStream};
 use crossterm::execute;
@@ -131,10 +132,17 @@ impl PlanWatch {
                 }
                 None
             }
+            LoopEvent::ToolStarted { call } if call.name == COMPLETE_STEP => {
+                if let Some(plan) = &self.plan {
+                    self.edits.insert(call.id.clone(), plan.clone());
+                }
+                None
+            }
             LoopEvent::PlanWritten { path } => {
                 self.plan = Some(path.clone());
                 plan_message(path)
             }
+            LoopEvent::PlanUpdated { path } => plan_message(path),
             LoopEvent::ToolFinished { call_id, .. } => {
                 let edited = self.edits.remove(call_id)?;
                 let plan = self.plan.as_ref()?;
@@ -333,6 +341,48 @@ mod tests {
         assert!(watch.observe(&finished("e2")).is_none());
         match watch.observe(&finished("e1")) {
             Some(UiMsg::Plan { text, .. }) => assert_eq!(text, "- [x] a\n"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_watch_rereads_after_complete_step_and_after_anvil_ticks_the_rest() {
+        let dir = tempfile::tempdir().expect("dir");
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "1. [ ] a\n2. [ ] b\n").expect("write");
+        let mut watch = PlanWatch::new(dir.path().to_path_buf());
+        watch.observe(&LoopEvent::PlanWritten {
+            path: plan_path.clone(),
+        });
+        let step = ToolCall {
+            id: "s1".to_owned(),
+            name: COMPLETE_STEP.to_owned(),
+            arguments_json: "{\"step\": 1}".to_owned(),
+        };
+        assert!(
+            watch
+                .observe(&LoopEvent::ToolStarted { call: step })
+                .is_none()
+        );
+        std::fs::write(&plan_path, "1. [x] a\n2. [ ] b\n").expect("write");
+        let finished = LoopEvent::ToolFinished {
+            call_id: "s1".to_owned(),
+            name: COMPLETE_STEP.to_owned(),
+            outcome: anvil_core::tools::ToolOutcome::Completed,
+            preview: String::new(),
+            stats: anvil_core::tools::OutputStats {
+                bytes: 0,
+                truncated: false,
+                digest: 0,
+            },
+        };
+        match watch.observe(&finished) {
+            Some(UiMsg::Plan { text, .. }) => assert_eq!(text, "1. [x] a\n2. [ ] b\n"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        std::fs::write(&plan_path, "1. [x] a\n2. [x] b\n").expect("write");
+        match watch.observe(&LoopEvent::PlanUpdated { path: plan_path }) {
+            Some(UiMsg::Plan { text, .. }) => assert_eq!(text, "1. [x] a\n2. [x] b\n"),
             other => panic!("unexpected: {other:?}"),
         }
     }
