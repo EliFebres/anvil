@@ -22,7 +22,11 @@ input / task median    1050                     1050                     +0.0%
 uncached / task        1000                     1000                     +0.0%
 input / passed task    1575                     1575                     +0.0%
 tool calls / task      5.7                      5.7                      +0.0%
+2+ call turns / task   0.0                      1.0                      n/a
 cost per task          0.0100                   0.0100                   +0.0%
+state                  turns/task (1 call, 2+ calls, text, verdict; context/turn)
+  build                -  |  2.0 (1.0, 1.0, 0.0, 0.0; 1,000)  n/a
+  review               -  |  1.0 (0.0, 0.0, 0.0, 1.0; 300)  n/a
 
 input tokens / passed task: +0.0%
 flipped: 1 fixed, 1 regressed

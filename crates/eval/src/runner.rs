@@ -15,7 +15,7 @@ use crate::check::{self, CheckResult, forward_slashes};
 use crate::error::EvalError;
 use crate::git;
 use crate::results::{
-    AttemptRecord, AttemptStatus, RunResult, SCHEMA_VERSION, TaskResult, Totals, Usage,
+    AttemptRecord, AttemptStatus, RunResult, SCHEMA_VERSION, StateTurns, TaskResult, Totals, Usage,
 };
 use crate::task::{Task, copy_fixture, load_tasks};
 
@@ -36,6 +36,8 @@ pub struct AttemptOutcome {
     pub tool_calls: u32,
     /// Model turns over every provider.
     pub turns: u32,
+    /// Turns per loop state.
+    pub turns_by_state: BTreeMap<String, StateTurns>,
     /// Cost in USD, when every provider used has a price.
     pub cost_usd: Option<f64>,
     /// Wall time of the run.
@@ -63,6 +65,7 @@ impl AttemptOutcome {
             tokens: Usage::default(),
             tool_calls: 0,
             turns: 0,
+            turns_by_state: BTreeMap::new(),
             cost_usd: Some(0.0),
             anvil_ms: 0,
             stderr_tail: String::new(),
@@ -205,6 +208,7 @@ impl EvalRunner for FakeRunner {
                 },
                 tool_calls: 3,
                 turns: 2,
+                turns_by_state: BTreeMap::new(),
                 cost_usd: Some(0.0012),
                 anvil_ms: 10,
                 stderr_tail: "done".to_owned(),
@@ -494,6 +498,7 @@ fn record_of(
         tokens: outcome.tokens,
         tool_calls: outcome.tool_calls,
         turns: outcome.turns,
+        turns_by_state: outcome.turns_by_state,
         cost_usd: outcome.cost_usd,
         anvil_ms: outcome.anvil_ms,
         check_ms: check.check_ms,

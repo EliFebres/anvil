@@ -292,7 +292,7 @@ fn write_efficiency(
     a: &Efficiency,
     b: &Efficiency,
 ) -> fmt::Result {
-    let rows: [(&str, Option<f64>, Option<f64>, usize); 10] = [
+    let rows: Vec<(&str, Option<f64>, Option<f64>, usize)> = vec![
         (
             "attempts",
             Some(a.attempts as f64),
@@ -337,6 +337,12 @@ fn write_efficiency(
             Some(b.tool_calls_mean),
             1,
         ),
+        (
+            "2+ call turns / task",
+            Some(a.multi_call_turns_mean),
+            Some(b.multi_call_turns_mean),
+            1,
+        ),
         ("cost per task", a.cost_per_attempt, b.cost_per_attempt, 4),
     ];
     for (label, a, b, digits) in rows {
@@ -350,7 +356,71 @@ fn write_efficiency(
             change(a, b)
         )?;
     }
+    write_states(f, name_width, a, b)
+}
+
+/// The loop states in the order a session visits them; others sort after.
+const STATE_ORDER: [&str; 6] = ["plan", "build", "review", "optimize", "verify", "memory"];
+
+/// Writes turns per task for each loop state, split into one-call, 2+ call,
+/// text and verdict turns, with the prompt tokens per turn of that state.
+fn write_states(
+    f: &mut fmt::Formatter<'_>,
+    name_width: usize,
+    a: &Efficiency,
+    b: &Efficiency,
+) -> fmt::Result {
+    let mut states: Vec<&String> = a.by_state.keys().chain(b.by_state.keys()).collect();
+    states.sort_by_key(|state| {
+        let rank = STATE_ORDER.iter().position(|known| known == state);
+        (rank.unwrap_or(STATE_ORDER.len()), state.as_str())
+    });
+    states.dedup();
+    if states.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        f,
+        "{:<name_width$}  turns/task (1 call, 2+ calls, text, verdict; context/turn)",
+        "state"
+    )?;
+    for state in states {
+        let total = |e: &Efficiency| {
+            e.by_state
+                .get(state)
+                .map(|s| f64::from(s.total()) / e.attempts.max(1) as f64)
+        };
+        writeln!(
+            f,
+            "{:<name_width$}  {}  |  {}  {}",
+            format!("  {state}"),
+            state_cell(a, state),
+            state_cell(b, state),
+            change(total(a), total(b))
+        )?;
+    }
     Ok(())
+}
+
+/// `6.1 (3.0, 2.0, 1.1, 0.0; 8,400)` for one state of one run, or `-`.
+fn state_cell(e: &Efficiency, state: &str) -> String {
+    let Some(s) = e.by_state.get(state) else {
+        return "-".to_owned();
+    };
+    let per = |n: u32| f64::from(n) / e.attempts.max(1) as f64;
+    let context = match s.total() {
+        0 => 0,
+        turns => s.prompt_tokens / u64::from(turns),
+    };
+    format!(
+        "{:.1} ({:.1}, {:.1}, {:.1}, {:.1}; {})",
+        per(s.total()),
+        per(s.one_call),
+        per(s.multi_call),
+        per(s.text),
+        per(s.verdict),
+        thousands(context)
+    )
 }
 
 /// The relative change from `a` to `b` as `-31.2%`, or `n/a`.
@@ -445,6 +515,15 @@ mod tests {
         );
         b.totals.cost_usd = None;
         b.totals.cost_per_passed_task = None;
+        let mut build = crate::results::StateTurns::default();
+        build.count("build", 1, 900);
+        build.count("build", 2, 1100);
+        let mut review = crate::results::StateTurns::default();
+        review.count("review", 0, 300);
+        for attempt in b.tasks.iter_mut().flat_map(|t| &mut t.attempts) {
+            attempt.turns_by_state =
+                [("review".to_owned(), review), ("build".to_owned(), build)].into();
+        }
         insta::assert_snapshot!(compare(&a, &b).to_string());
     }
 }

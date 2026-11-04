@@ -1,6 +1,7 @@
 //! Run results: the JSON written to `eval/results/` and read back by
 //! `compare` and `gate`.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -56,6 +57,62 @@ impl Usage {
         self.input = self.input.saturating_add(other.input);
         self.output = self.output.saturating_add(other.output);
         self.cached = self.cached.saturating_add(other.cached);
+    }
+}
+
+/// The turns one loop state took, split by what each turn did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateTurns {
+    /// Turns that made exactly one tool call.
+    pub one_call: u32,
+    /// Turns that made two or more tool calls.
+    pub multi_call: u32,
+    /// Turns that made no tool call outside review and verify.
+    pub text: u32,
+    /// Review and verify turns that made no tool call: a verdict.
+    pub verdict: u32,
+    /// Prompt tokens (uncached plus cached) these turns read.
+    pub prompt_tokens: u64,
+}
+
+impl StateTurns {
+    /// Every turn counted.
+    ///
+    /// # Returns
+    ///
+    /// The sum of the four kinds.
+    pub fn total(&self) -> u32 {
+        self.one_call + self.multi_call + self.text + self.verdict
+    }
+
+    /// Counts one turn of `state` that made `calls` tool calls.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The loop state the turn ran in.
+    /// * `calls` - The tool calls it made.
+    /// * `prompt_tokens` - The prompt tokens it read.
+    pub fn count(&mut self, state: &str, calls: u32, prompt_tokens: u64) {
+        match calls {
+            0 if state == "review" || state == "verify" => self.verdict += 1,
+            0 => self.text += 1,
+            1 => self.one_call += 1,
+            _ => self.multi_call += 1,
+        }
+        self.prompt_tokens = self.prompt_tokens.saturating_add(prompt_tokens);
+    }
+
+    /// Adds `other` into `self`.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counts to add.
+    pub fn add(&mut self, other: &StateTurns) {
+        self.one_call += other.one_call;
+        self.multi_call += other.multi_call;
+        self.text += other.text;
+        self.verdict += other.verdict;
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
     }
 }
 
@@ -136,6 +193,10 @@ pub struct AttemptRecord {
     /// Model turns over every provider; 0 in results written before it was recorded.
     #[serde(default)]
     pub turns: u32,
+    /// Turns per loop state (`plan`, `build`, ...); empty in results written
+    /// before it was recorded.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub turns_by_state: BTreeMap<String, StateTurns>,
     /// Cost in USD, when every provider used has a price.
     pub cost_usd: Option<f64>,
     /// Wall time of the anvil run.
@@ -318,6 +379,11 @@ pub struct Efficiency {
     pub input_per_passed: Option<f64>,
     /// Mean tool calls per attempt.
     pub tool_calls_mean: f64,
+    /// Mean turns per attempt that made two or more tool calls.
+    pub multi_call_turns_mean: f64,
+    /// Turns per loop state summed over every attempt; divide by `attempts`
+    /// for a per-task figure.
+    pub by_state: BTreeMap<String, StateTurns>,
     /// Mean cost per attempt, when every attempt could be priced.
     pub cost_per_attempt: Option<f64>,
 }
@@ -342,6 +408,11 @@ impl Efficiency {
         let passed = attempts.iter().filter(|a| a.passed).count();
         let cost: Option<f64> = attempts.iter().map(|a| a.cost_usd).sum();
         let turns: u64 = attempts.iter().map(|a| u64::from(a.turns)).sum();
+        let mut by_state: BTreeMap<String, StateTurns> = BTreeMap::new();
+        for (state, counted) in attempts.iter().flat_map(|a| &a.turns_by_state) {
+            by_state.entry(state.clone()).or_default().add(counted);
+        }
+        let multi_call: u64 = by_state.values().map(|s| u64::from(s.multi_call)).sum();
         Efficiency {
             attempts: count,
             pass_rate: ratio(passed, count),
@@ -355,6 +426,8 @@ impl Efficiency {
                 attempts.iter().map(|a| u64::from(a.tool_calls)).sum(),
                 count,
             ),
+            multi_call_turns_mean: mean(multi_call, count),
+            by_state,
             cost_per_attempt: cost.filter(|_| count > 0).map(|c| c / count as f64),
         }
     }
@@ -661,6 +734,7 @@ pub(crate) mod samples {
             },
             tool_calls: if passed { 4 } else { 9 },
             turns: if passed { 3 } else { 7 },
+            turns_by_state: BTreeMap::new(),
             cost_usd: Some(0.01),
             anvil_ms: 1500,
             check_ms: 200,
@@ -813,6 +887,21 @@ mod tests {
 
         t.attempts.pop();
         assert_eq!(Efficiency::of(std::slice::from_ref(&t)).input_median, 200.0);
+
+        let mut build = StateTurns::default();
+        build.count("build", 3, 100);
+        build.count("build", 1, 50);
+        let mut review = StateTurns::default();
+        review.count("review", 0, 20);
+        for attempt in &mut t.attempts {
+            attempt.turns_by_state =
+                BTreeMap::from([("build".to_owned(), build), ("review".to_owned(), review)]);
+        }
+        let states = Efficiency::of(std::slice::from_ref(&t));
+        assert_eq!(states.multi_call_turns_mean, 1.0);
+        assert_eq!(states.by_state["build"].total(), 6);
+        assert_eq!(states.by_state["build"].prompt_tokens, 450);
+        assert_eq!(states.by_state["review"].verdict, 3);
 
         let failing = task("f", &[false, false]);
         assert_eq!(Efficiency::of(&[failing]).input_per_passed, None);
