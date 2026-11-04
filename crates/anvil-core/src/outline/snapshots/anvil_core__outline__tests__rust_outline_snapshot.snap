@@ -1,0 +1,17 @@
+---
+source: crates/anvil-core/src/outline/mod.rs
+expression: "render_file(\"sample.rs\", RUST, DEFAULT_DEPTH)"
+---
+sample.rs (49 lines)
+3-4 imports (2)
+8-10 pub struct Counter  // Counts things by name.
+12-22 impl Counter
+  14-16 pub fn increment(&mut self, name: &str)  // Adds one to `name`.
+  19-21 pub fn get(&self, name: &str) -> u32  // How many times `name` was counted.
+24-28 impl fmt::Display for Counter
+  25-27 fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result
+31-34 pub trait Count  // What a counter can do.
+  33-33 fn count(&mut self, name: &str);  // Counts one thing.
+37-42 pub enum Kind  // The kinds of thing counted.
+44-49 mod helpers
+  46-48 pub fn double(n: u32) -> u32  // Doubles a number.

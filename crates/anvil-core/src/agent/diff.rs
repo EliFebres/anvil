@@ -12,6 +12,10 @@ use tokio::process::Command;
 /// Bytes of diff kept before the text is cut for the reviewer.
 pub const MAX_DIFF_BYTES: usize = 200 * 1024;
 
+/// Changed lines below which a diff is small: it skips the simplification
+/// pass, and on the first build its checks run before the review.
+pub const SMALL_DIFF_LINES: usize = 50;
+
 /// Name of the private index file inside the session folder.
 const INDEX_FILE: &str = "git-index";
 
@@ -53,6 +57,31 @@ pub async fn diff_since(cwd: &Path, session_dir: &Path, baseline: &str) -> Optio
     let index = session_dir.join(INDEX_FILE);
     let diff = git(cwd, &index, &["diff", "--no-color", baseline, &current]).await?;
     Some(cap(diff))
+}
+
+/// Counts the added and removed lines of a unified diff.
+///
+/// # Arguments
+///
+/// * `diff` - A unified diff, as [`diff_since`] returns it.
+///
+/// # Returns
+///
+/// Lines starting with `+` or `-` inside hunks; the `---`/`+++` file
+/// headers before a file's first hunk are not counted.
+pub fn changed_lines(diff: &str) -> usize {
+    let mut in_hunk = false;
+    let mut count = 0;
+    for line in diff.lines() {
+        if line.starts_with("diff ") {
+            in_hunk = false;
+        } else if line.starts_with("@@") {
+            in_hunk = true;
+        } else if in_hunk && (line.starts_with('+') || line.starts_with('-')) {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// The files that differ between a snapshot and the working tree now.
@@ -142,6 +171,13 @@ fn cap(mut diff: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_lines_counts_hunk_lines_only() {
+        let diff = "diff --git a/x.sql b/x.sql\n--- a/x.sql\n+++ b/x.sql\n@@ -1,3 +1,3 @@\n keep\n--- old comment\n+new\n+++ added\ndiff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+y\n";
+        assert_eq!(changed_lines(diff), 4);
+        assert_eq!(changed_lines(""), 0);
+    }
 
     fn git_sync(cwd: &Path, args: &[&str]) -> bool {
         std::process::Command::new("git")

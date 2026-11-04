@@ -854,6 +854,7 @@ mod tests {
             "glob",
             "grep",
             "list_dir",
+            "outline",
         ] {
             assert_eq!(
                 perms.decide(tool, Some("crates/x/src/lib.rs"), Decision::Ask),

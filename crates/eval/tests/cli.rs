@@ -25,6 +25,7 @@ fn attempt(index: u32, passed: bool) -> AttemptRecord {
         },
         tool_calls: 2,
         turns: 2,
+        turns_by_state: Default::default(),
         cost_usd: Some(0.001),
         anvil_ms: 1,
         check_ms: 1,
@@ -61,6 +62,7 @@ fn result(sha: &str, outcomes: &[(&str, &[bool])]) -> RunResult {
         tags: Vec::new(),
         tasks,
         totals,
+        work_dir: None,
     }
 }
 

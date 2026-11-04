@@ -14,6 +14,8 @@ pub mod glob;
 pub mod grep;
 /// The `list_dir` tool.
 pub mod list_dir;
+/// The `outline` tool: a file's or directory's structure without the bodies.
+pub mod outline;
 mod output;
 /// The permission model: `.anvil/permissions.toml`, rule matching, and the
 /// prompt hook the CLI implements.
@@ -148,6 +150,15 @@ pub trait Tool: Send + Sync {
             .or_else(|| args.get("command"))
             .and_then(Value::as_str)
             .map(str::to_owned)
+    }
+
+    /// Every target a permission rule must allow before the call runs.
+    ///
+    /// The default is the single [`Tool::target`]; a tool that acts on
+    /// several paths in one call lists each, so a rule cannot be sidestepped
+    /// by batching.
+    fn targets(&self, args: &Value) -> Vec<Option<String>> {
+        vec![self.target(args)]
     }
 
     /// Whether [`Tool::target`] is a file path, so a session approval for
@@ -485,6 +496,7 @@ impl ToolRegistry {
         registry.register(Box::new(grep::Grep));
         registry.register(Box::new(shell::ShellTool));
         registry.register(Box::new(list_dir::ListDir));
+        registry.register(Box::new(outline::Outline));
         registry
     }
 
@@ -580,9 +592,10 @@ impl ToolRegistry {
                 );
             }
         };
-        let target = tool.target(&args);
-        if let Some(outcome) = self.check_permission(tool, &args, target.as_deref(), &ctx.cwd) {
-            return Execution::finished(call, outcome.0, outcome.1);
+        for target in tool.targets(&args) {
+            if let Some(outcome) = self.check_permission(tool, &args, target.as_deref(), &ctx.cwd) {
+                return Execution::finished(call, outcome.0, outcome.1);
+            }
         }
         if let Some(hook) = &self.hook
             && let HookDecision::Block { reason } = hook.before(call, &args, ctx).await
@@ -866,6 +879,19 @@ mod tests {
             .await;
         assert_eq!(execution.outcome, ToolOutcome::DeniedByRule);
         assert_eq!(execution.result.content, "denied by a permission rule");
+    }
+
+    #[tokio::test]
+    async fn a_deny_rule_on_one_path_blocks_a_batched_read() {
+        let mut registry = make_registry("deny = [\"read_file:.env\"]", vec![]);
+        registry.register(Box::new(read_file::ReadFile));
+        let read = ToolCall {
+            id: "r1".to_owned(),
+            name: "read_file".to_owned(),
+            arguments_json: r#"{"files": [{"path": "Cargo.toml"}, {"path": ".env"}]}"#.to_owned(),
+        };
+        let execution = registry.execute(&read, &ToolContext::new(".")).await;
+        assert_eq!(execution.outcome, ToolOutcome::DeniedByRule);
     }
 
     #[tokio::test]
@@ -1440,13 +1466,14 @@ mod tests {
                 "glob",
                 "grep",
                 "list_dir",
+                "outline",
                 "read_file",
                 "shell",
                 "write_file"
             ]
         );
         let specs = registry.specs();
-        assert_eq!(specs.len(), 7);
+        assert_eq!(specs.len(), 8);
         for spec in &specs {
             assert_eq!(spec.parameters["type"], "object", "{}", spec.name);
             assert!(spec.parameters.get("$schema").is_none());

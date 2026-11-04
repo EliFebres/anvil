@@ -1,0 +1,11 @@
+---
+source: crates/anvil-core/src/outline/mod.rs
+expression: "render_file(\"sample.py\", PYTHON, DEFAULT_DEPTH)"
+---
+sample.py (31 lines)
+3-4 imports (2)
+7-20 class Inventory:  // Items and how many of each are in stock.
+  10-11 def __init__(self):
+  13-16 def total(self):  // Every item counted.
+  18-20 def add(self, name, count=1):  // Adds `count` of `name`.
+23-31 def load(path: Path) -> Inventory:  // Reads an inventory from a JSON file.

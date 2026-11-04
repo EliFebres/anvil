@@ -12,7 +12,7 @@ use anvil_types::ProviderConfig;
 use serde::Deserialize;
 
 use crate::error::EvalError;
-use crate::results::Usage;
+use crate::results::{StateTurns, Usage};
 
 /// The file anvil writes signals to; it holds no usage.
 const SIGNALS_FILE: &str = "signals.jsonl";
@@ -41,6 +41,38 @@ pub struct SessionUsage {
     pub turns: u32,
     /// How many `tool_call` records were counted.
     pub tool_calls: u32,
+    /// Every turn in order, with the tool calls that followed it.
+    pub turn_log: Vec<TurnTrace>,
+}
+
+/// One model turn as telemetry recorded it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnTrace {
+    /// The loop state it ran in; `unknown` when the record had none.
+    pub state: String,
+    /// The tool calls it made.
+    pub calls: u32,
+    /// Prompt tokens it read.
+    pub prompt_tokens: u64,
+}
+
+impl SessionUsage {
+    /// Turns per loop state, split by what each turn did.
+    ///
+    /// # Returns
+    ///
+    /// One entry per state that took a turn.
+    pub fn turns_by_state(&self) -> BTreeMap<String, StateTurns> {
+        let mut states: BTreeMap<String, StateTurns> = BTreeMap::new();
+        for turn in &self.turn_log {
+            states.entry(turn.state.clone()).or_default().count(
+                &turn.state,
+                turn.calls,
+                turn.prompt_tokens,
+            );
+        }
+        states
+    }
 }
 
 /// The fields of a telemetry record the harness reads.
@@ -54,6 +86,8 @@ struct UsageRecord {
     model: Option<String>,
     #[serde(default)]
     tokens: Option<Usage>,
+    #[serde(default)]
+    state: Option<String>,
 }
 
 /// Sums the usage of one session from a telemetry folder.
@@ -80,12 +114,17 @@ pub fn read_session_usage(
     if !telemetry_dir.is_dir() {
         return Ok(usage);
     }
-    let entries = std::fs::read_dir(telemetry_dir)
-        .map_err(|source| EvalError::io("reading", telemetry_dir, source))?;
-    for entry in entries {
-        let path = entry
-            .map_err(|source| EvalError::io("reading", telemetry_dir, source))?
-            .path();
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(telemetry_dir)
+        .map_err(|source| EvalError::io("reading", telemetry_dir, source))?
+    {
+        let entry = entry.map_err(|source| EvalError::io("reading", telemetry_dir, source))?;
+        paths.push(entry.path());
+    }
+    // Files are named by date, so name order is time order, which a tool call
+    // needs to find the turn it belongs to.
+    paths.sort();
+    for path in paths {
         let is_log = path.extension().is_some_and(|ext| ext == "jsonl")
             && path.file_name().is_some_and(|name| name != SIGNALS_FILE);
         if !is_log {
@@ -113,6 +152,9 @@ impl SessionUsage {
         }
         if record.event == "tool_call" {
             self.tool_calls += 1;
+            if let Some(turn) = self.turn_log.last_mut() {
+                turn.calls += 1;
+            }
             return;
         }
         let is_usage = record.event == "turn" || record.event == "compacted";
@@ -123,6 +165,11 @@ impl SessionUsage {
         let model = record.model.unwrap_or_default();
         if record.event == "turn" {
             self.turns += 1;
+            self.turn_log.push(TurnTrace {
+                state: record.state.unwrap_or_else(|| "unknown".to_owned()),
+                calls: 0,
+                prompt_tokens: tokens.prompt(),
+            });
             if self.coder_provider.is_none() {
                 self.coder_provider = Some(provider.clone());
                 self.coder_model = Some(model.clone());
@@ -247,6 +294,45 @@ mod tests {
         assert_eq!(all.total.input, 1205);
         let missing = read_session_usage(&dir.path().join("nope"), None).expect("reads");
         assert_eq!(missing, SessionUsage::default());
+    }
+
+    #[test]
+    fn tool_calls_belong_to_the_turn_before_them() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let turn = |state: &str| {
+            line(
+                "turn",
+                SESSION,
+                "fast",
+                "m1",
+                "{\"input\":10,\"output\":1,\"cached\":5}",
+            )
+            .replace("\"state\":\"build\"", &format!("\"state\":\"{state}\""))
+        };
+        let call = line("tool_call", SESSION, "", "", "null");
+        let log = [
+            turn("plan"),
+            call.clone(),
+            call.clone(),
+            turn("plan"),
+            turn("build"),
+            call.clone(),
+            turn("review"),
+            turn("verify"),
+            call,
+        ]
+        .join("\n");
+        std::fs::write(dir.path().join("2026-10-30.jsonl"), log).expect("write");
+
+        let usage = read_session_usage(dir.path(), Some(SESSION)).expect("reads");
+        let states = usage.turns_by_state();
+        let plan = states["plan"];
+        assert_eq!((plan.multi_call, plan.text, plan.total()), (1, 1, 2));
+        assert_eq!(plan.prompt_tokens, 30);
+        assert_eq!(states["build"].one_call, 1);
+        assert_eq!(states["review"].verdict, 1);
+        assert_eq!(states["verify"].one_call, 1);
+        assert_eq!(usage.tool_calls, 4);
     }
 
     #[test]

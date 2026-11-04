@@ -1,0 +1,12 @@
+---
+source: crates/anvil-core/src/outline/mod.rs
+expression: "format!(\"{}{}\", render_file(\"Cargo.toml\", toml, DEFAULT_DEPTH),\nrender_file(\"README.md\", markdown, 3))"
+---
+Cargo.toml (6 lines)
+2-4 [package]  // The package.
+5-6 [[bin]]
+README.md (13 lines)
+1-13 # Title
+  5-12 ## Install
+    9-12 ### Linux
+  13-13 ## Use

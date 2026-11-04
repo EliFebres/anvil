@@ -15,6 +15,7 @@ const TOOLS: &[&str] = &[
     "grep",
     "shell",
     "list_dir",
+    "outline",
     "skill",
     "delegate",
 ];

@@ -78,6 +78,7 @@ pub async fn baseline(options: BaselineOptions) -> Result<PathBuf, EvalError> {
         parallel: options.parallel.unwrap_or(factory.eval.parallel),
         provider: Some(coder),
         progress: options.progress,
+        keep: false,
     };
     let result = run_with(&run_options, runner).await?;
     let path = result.write(&options.repo_root.join(RESULTS_DIR))?;

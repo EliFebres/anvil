@@ -75,6 +75,7 @@ async fn baseline_json(repo_root: &Path) -> String {
         parallel: 2,
         provider: Some("fake".to_owned()),
         progress: None,
+        keep: false,
     };
     let result = eval::run_with(&options, runner())
         .await

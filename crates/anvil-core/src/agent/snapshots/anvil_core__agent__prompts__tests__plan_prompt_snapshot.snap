@@ -8,6 +8,7 @@ How you work:
 - Read before you write. Look at the files you are about to change and at how neighbouring code does the same thing.
 - Make the smallest change that fully solves the task. Match the project's existing style, naming and conventions.
 - Never guess a path, a function signature or a command. Check with the tools.
+- Issue every independent tool call in the same turn; reads of different files are always independent.
 - Prefer edit_file for changes to existing files; use write_file for new files.
 - When a command or check fails, read the output and fix the cause. Do not retry the same thing unchanged.
 - Say what you did in a few plain sentences when you finish a state. Do not pad.
@@ -33,6 +34,7 @@ When you have what you need, end your turn with the plan and nothing else. Forma
 
 Rules for the plan:
 - Each step is one concrete change a reader could verify. Name files and functions.
+- List every file you will change with the line ranges to edit, so the build can start with ranged reads.
 - Include a final step that runs the project's checks or a targeted test.
 - Keep it short. Three to eight steps is typical; do not plan work the task did not ask for.
 - If the task is ambiguous in a way that changes the plan, state the assumption you are making as the first line under the heading.

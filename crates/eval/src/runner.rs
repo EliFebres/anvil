@@ -15,7 +15,7 @@ use crate::check::{self, CheckResult, forward_slashes};
 use crate::error::EvalError;
 use crate::git;
 use crate::results::{
-    AttemptRecord, AttemptStatus, RunResult, SCHEMA_VERSION, TaskResult, Totals, Usage,
+    AttemptRecord, AttemptStatus, RunResult, SCHEMA_VERSION, StateTurns, TaskResult, Totals, Usage,
 };
 use crate::task::{Task, copy_fixture, load_tasks};
 
@@ -36,6 +36,8 @@ pub struct AttemptOutcome {
     pub tool_calls: u32,
     /// Model turns over every provider.
     pub turns: u32,
+    /// Turns per loop state.
+    pub turns_by_state: BTreeMap<String, StateTurns>,
     /// Cost in USD, when every provider used has a price.
     pub cost_usd: Option<f64>,
     /// Wall time of the run.
@@ -63,6 +65,7 @@ impl AttemptOutcome {
             tokens: Usage::default(),
             tool_calls: 0,
             turns: 0,
+            turns_by_state: BTreeMap::new(),
             cost_usd: Some(0.0),
             anvil_ms: 0,
             stderr_tail: String::new(),
@@ -205,6 +208,7 @@ impl EvalRunner for FakeRunner {
                 },
                 tool_calls: 3,
                 turns: 2,
+                turns_by_state: BTreeMap::new(),
                 cost_usd: Some(0.0012),
                 anvil_ms: 10,
                 stderr_tail: "done".to_owned(),
@@ -246,6 +250,8 @@ pub struct RunOptions {
     pub provider: Option<String>,
     /// Called after every attempt.
     pub progress: Option<ProgressFn>,
+    /// Keep the attempt directories after the run instead of deleting them.
+    pub keep: bool,
 }
 
 impl std::fmt::Debug for RunOptions {
@@ -256,6 +262,7 @@ impl std::fmt::Debug for RunOptions {
             .field("tags", &self.tags)
             .field("repeat", &self.repeat)
             .field("parallel", &self.parallel)
+            .field("keep", &self.keep)
             .field("provider", &self.provider)
             .field("progress", &self.progress.is_some())
             .finish()
@@ -264,7 +271,7 @@ impl std::fmt::Debug for RunOptions {
 
 /// What every attempt of a run shares.
 struct Shared {
-    run_root: tempfile::TempDir,
+    run_root: PathBuf,
     bash: PathBuf,
     python: PathBuf,
     runner: Arc<dyn EvalRunner>,
@@ -279,7 +286,6 @@ impl Shared {
     fn env(&self, task: &Task, index: u32) -> Vec<(String, String)> {
         let target = self
             .run_root
-            .path()
             .join("cargo-target")
             .join(format!("{}-{index}", task.name));
         vec![
@@ -322,7 +328,7 @@ pub async fn run_with(
         .tempdir()
         .map_err(|source| EvalError::io("creating", &std::env::temp_dir(), source))?;
     let shared = Arc::new(Shared {
-        run_root,
+        run_root: run_root.path().to_path_buf(),
         bash: check::find_bash()?,
         python: check::find_python()?,
         runner,
@@ -338,6 +344,12 @@ pub async fn run_with(
     };
 
     let records = fan_out(options, &shared, &tasks).await;
+    let work_dir = if options.keep {
+        Some(run_root.keep())
+    } else {
+        drop(run_root);
+        None
+    };
     let task_results: Vec<TaskResult> = tasks
         .iter()
         .map(|task| TaskResult {
@@ -368,6 +380,7 @@ pub async fn run_with(
         tags: options.tags.clone(),
         tasks: task_results,
         totals,
+        work_dir,
     })
 }
 
@@ -435,10 +448,7 @@ async fn one_attempt(
 ) -> (String, AttemptRecord) {
     let permit = semaphore.acquire_owned().await;
     let clock = Instant::now();
-    let work_dir = shared
-        .run_root
-        .path()
-        .join(format!("{}-{index}", task.name));
+    let work_dir = shared.run_root.join(format!("{}-{index}", task.name));
     let env = shared.env(&task, index);
     let outcome = match prepare(&task, &work_dir).await {
         Ok(()) => {
@@ -494,6 +504,7 @@ fn record_of(
         tokens: outcome.tokens,
         tool_calls: outcome.tool_calls,
         turns: outcome.turns,
+        turns_by_state: outcome.turns_by_state,
         cost_usd: outcome.cost_usd,
         anvil_ms: outcome.anvil_ms,
         check_ms: check.check_ms,

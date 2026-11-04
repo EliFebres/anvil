@@ -738,6 +738,52 @@ mod tests {
     }
 
     #[test]
+    fn body_carries_several_calls_and_their_results_in_one_message_each() {
+        let call = |id: &str| ToolCall {
+            id: id.to_owned(),
+            name: "glob".to_owned(),
+            arguments_json: "{}".to_owned(),
+        };
+        let result = |id: &str| ToolResult {
+            call_id: id.to_owned(),
+            content: "a".to_owned(),
+            is_error: false,
+        };
+        let request = CompletionRequest {
+            system: String::new(),
+            messages: vec![
+                Message::user("go"),
+                Message::Assistant {
+                    text: String::new(),
+                    reasoning: Vec::new(),
+                    tool_calls: vec![call("t1"), call("t2")],
+                },
+                Message::ToolResults {
+                    results: vec![result("t1"), result("t2")],
+                },
+            ],
+            tools: Vec::new(),
+            max_output_tokens: None,
+        };
+        let body = build_body("m", 1, false, &request).expect("builds");
+        let uses: Vec<&Value> = body["messages"][1]["content"]
+            .as_array()
+            .expect("blocks")
+            .iter()
+            .map(|block| &block["id"])
+            .collect();
+        assert_eq!(uses, [&json!("t1"), &json!("t2")]);
+        let answers: Vec<&Value> = body["messages"][2]["content"]
+            .as_array()
+            .expect("blocks")
+            .iter()
+            .map(|block| &block["tool_use_id"])
+            .collect();
+        assert_eq!(answers, [&json!("t1"), &json!("t2")]);
+        assert_eq!(body["messages"].as_array().map(Vec::len), Some(3));
+    }
+
+    #[test]
     fn body_invalid_tool_arguments_is_malformed() {
         let mut request = request();
         if let Message::Assistant { tool_calls, .. } = &mut request.messages[1] {

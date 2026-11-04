@@ -101,6 +101,7 @@ impl HarnessGate {
             parallel: self.parallel,
             provider: Some(self.coder.clone()),
             progress: None,
+            keep: false,
         };
         let candidate = eval::run_with(&options, runner)
             .await
@@ -218,6 +219,7 @@ mod tests {
             parallel: 1,
             provider: Some("fake".to_owned()),
             progress: None,
+            keep: false,
         };
         let runner = FakeRunner::scripted(&[
             ("pass-when-done", &[false]),

@@ -55,6 +55,7 @@ allow = [
   "glob",
   "grep",
   "list_dir",
+  "outline",
   "shell:cargo",
   "shell:cargo *",
   "shell:just",

@@ -40,6 +40,10 @@ enum Command {
         /// Attempts at once; default: [eval] parallel in factory.toml.
         #[arg(long)]
         parallel: Option<u32>,
+        /// Keep every attempt's working copy (with its .anvil/ telemetry and
+        /// session log) under /tmp instead of deleting it; prints the path.
+        #[arg(long)]
+        keep: bool,
     },
     /// Print two result files side by side with the tasks that flipped.
     Compare {
@@ -104,6 +108,7 @@ async fn dispatch(cli: Cli) -> Result<u8, EvalError> {
             tags,
             repeat,
             parallel,
+            keep,
         } => {
             let repo_root = repo_root().await?;
             let options = RunOptions {
@@ -114,12 +119,16 @@ async fn dispatch(cli: Cli) -> Result<u8, EvalError> {
                 provider,
                 progress: Some(progress_printer()),
                 repo_root: repo_root.clone(),
+                keep,
             };
             let anvil = anvil_options(&repo_root, anvil_bin)?;
             let result = eval::run(&options, anvil).await?;
             let path = result.write(&repo_root.join(RESULTS_DIR))?;
             print!("\n{result}");
             println!("wrote {}", path.display());
+            if let Some(dir) = &result.work_dir {
+                println!("kept {}", dir.display());
+            }
             Ok(EXIT_OK)
         }
         Command::Compare { a, b } => {

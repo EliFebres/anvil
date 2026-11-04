@@ -1,0 +1,13 @@
+---
+source: crates/anvil-core/src/outline/mod.rs
+expression: "render_file(\"sample.ts\", TYPESCRIPT, DEFAULT_DEPTH)"
+---
+sample.ts (39 lines)
+1-2 imports (2)
+5-8 interface User  // A user of the service.
+11-23 class UserStore  // Where users are kept.
+  15-17 put(user: User): void  // Adds or replaces a user.
+  20-22 get(id: string): User | undefined  // The user with this id, if any.
+26-32 async function loadUsers(path: string): Promise<UserStore>  // Loads users from a JSON file.
+35-35 const describe = (user: User): string => `${user.name} (${user.id})`;  // Formats a user for display.
+37-37 type UserId = User["id"];

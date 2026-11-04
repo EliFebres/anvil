@@ -175,6 +175,7 @@ impl AnvilRunner {
         let telemetry_dir = attempt.work_dir.join(CONFIG_DIR).join("telemetry");
         let usage = telemetry::read_session_usage(&telemetry_dir, session.as_deref())?;
         let cost_usd = telemetry::cost(&self.providers, &usage);
+        let turns_by_state = usage.turns_by_state();
         Ok(AttemptOutcome {
             status,
             session,
@@ -183,6 +184,7 @@ impl AnvilRunner {
             tokens: usage.total,
             tool_calls: usage.tool_calls,
             turns: usage.turns,
+            turns_by_state,
             cost_usd,
             anvil_ms,
             stderr_tail: tail(&stderr, STDERR_TAIL_LINES),

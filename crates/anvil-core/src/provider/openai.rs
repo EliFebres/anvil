@@ -518,6 +518,54 @@ mod tests {
     }
 
     #[test]
+    fn body_carries_several_calls_in_one_assistant_message_and_answers_each() {
+        let call = |id: &str| ToolCall {
+            id: id.to_owned(),
+            name: "glob".to_owned(),
+            arguments_json: "{}".to_owned(),
+        };
+        let result = |id: &str| ToolResult {
+            call_id: id.to_owned(),
+            content: "a".to_owned(),
+            is_error: false,
+        };
+        let request = CompletionRequest {
+            system: String::new(),
+            messages: vec![
+                Message::user("go"),
+                Message::Assistant {
+                    text: String::new(),
+                    reasoning: Vec::new(),
+                    tool_calls: vec![call("t1"), call("t2")],
+                },
+                Message::ToolResults {
+                    results: vec![result("t1"), result("t2")],
+                },
+            ],
+            tools: Vec::new(),
+            max_output_tokens: None,
+        };
+        let body = build_body("m", None, &request);
+        let messages = body["messages"].as_array().expect("messages");
+        assert_eq!(
+            messages.len(),
+            4,
+            "one assistant turn, one tool message per result"
+        );
+        let ids: Vec<&Value> = messages[1]["tool_calls"]
+            .as_array()
+            .expect("calls")
+            .iter()
+            .map(|call| &call["id"])
+            .collect();
+        assert_eq!(ids, [&json!("t1"), &json!("t2")]);
+        assert_eq!(messages[2]["role"], json!("tool"));
+        assert_eq!(messages[2]["tool_call_id"], json!("t1"));
+        assert_eq!(messages[3]["role"], json!("tool"));
+        assert_eq!(messages[3]["tool_call_id"], json!("t2"));
+    }
+
+    #[test]
     fn body_omits_tools_and_system_when_empty() {
         let body = build_body("m", None, &CompletionRequest::default());
         assert!(body.get("tools").is_none());
