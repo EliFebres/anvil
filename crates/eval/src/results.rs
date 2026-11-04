@@ -479,6 +479,9 @@ pub struct RunResult {
     pub tasks: Vec<TaskResult>,
     /// The totals.
     pub totals: Totals,
+    /// The kept attempt directories (`--keep`); never written to the file.
+    #[serde(skip)]
+    pub work_dir: Option<PathBuf>,
 }
 
 impl RunResult {
@@ -775,6 +778,7 @@ pub(crate) mod samples {
             tags: Vec::new(),
             tasks,
             totals,
+            work_dir: None,
         }
     }
 }

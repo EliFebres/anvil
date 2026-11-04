@@ -62,6 +62,7 @@ fn result(sha: &str, outcomes: &[(&str, &[bool])]) -> RunResult {
         tags: Vec::new(),
         tasks,
         totals,
+        work_dir: None,
     }
 }
 

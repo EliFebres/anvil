@@ -28,6 +28,7 @@ fn options(tags: &[&str]) -> RunOptions {
         parallel: 2,
         provider: Some("fake".to_owned()),
         progress: None,
+        keep: false,
     }
 }
 

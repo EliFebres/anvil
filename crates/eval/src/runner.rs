@@ -250,6 +250,8 @@ pub struct RunOptions {
     pub provider: Option<String>,
     /// Called after every attempt.
     pub progress: Option<ProgressFn>,
+    /// Keep the attempt directories after the run instead of deleting them.
+    pub keep: bool,
 }
 
 impl std::fmt::Debug for RunOptions {
@@ -260,6 +262,7 @@ impl std::fmt::Debug for RunOptions {
             .field("tags", &self.tags)
             .field("repeat", &self.repeat)
             .field("parallel", &self.parallel)
+            .field("keep", &self.keep)
             .field("provider", &self.provider)
             .field("progress", &self.progress.is_some())
             .finish()
@@ -268,7 +271,7 @@ impl std::fmt::Debug for RunOptions {
 
 /// What every attempt of a run shares.
 struct Shared {
-    run_root: tempfile::TempDir,
+    run_root: PathBuf,
     bash: PathBuf,
     python: PathBuf,
     runner: Arc<dyn EvalRunner>,
@@ -283,7 +286,6 @@ impl Shared {
     fn env(&self, task: &Task, index: u32) -> Vec<(String, String)> {
         let target = self
             .run_root
-            .path()
             .join("cargo-target")
             .join(format!("{}-{index}", task.name));
         vec![
@@ -326,7 +328,7 @@ pub async fn run_with(
         .tempdir()
         .map_err(|source| EvalError::io("creating", &std::env::temp_dir(), source))?;
     let shared = Arc::new(Shared {
-        run_root,
+        run_root: run_root.path().to_path_buf(),
         bash: check::find_bash()?,
         python: check::find_python()?,
         runner,
@@ -342,6 +344,12 @@ pub async fn run_with(
     };
 
     let records = fan_out(options, &shared, &tasks).await;
+    let work_dir = if options.keep {
+        Some(run_root.keep())
+    } else {
+        drop(run_root);
+        None
+    };
     let task_results: Vec<TaskResult> = tasks
         .iter()
         .map(|task| TaskResult {
@@ -372,6 +380,7 @@ pub async fn run_with(
         tags: options.tags.clone(),
         tasks: task_results,
         totals,
+        work_dir,
     })
 }
 
@@ -439,10 +448,7 @@ async fn one_attempt(
 ) -> (String, AttemptRecord) {
     let permit = semaphore.acquire_owned().await;
     let clock = Instant::now();
-    let work_dir = shared
-        .run_root
-        .path()
-        .join(format!("{}-{index}", task.name));
+    let work_dir = shared.run_root.join(format!("{}-{index}", task.name));
     let env = shared.env(&task, index);
     let outcome = match prepare(&task, &work_dir).await {
         Ok(()) => {

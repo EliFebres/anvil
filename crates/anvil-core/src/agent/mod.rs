@@ -515,7 +515,7 @@ impl AgentLoop {
     async fn run_build(&mut self) -> StateOutcome {
         let intro = self.pending_feedback.take().unwrap_or_else(|| {
             format!(
-                "The plan was approved. Implement it now. The plan file is `{}`; tick each step's checkbox there as you finish it.",
+                "The plan above was approved. Implement it now without reading it back; its file is `{}`. Tick a step's checkbox there in the same turn as the step's last edit, never in a turn of its own.",
                 self.plan_path()
             )
         });
@@ -799,14 +799,12 @@ impl AgentLoop {
             if execution.outcome.is_denial() {
                 self.denial_seen = true;
             }
-            if matches!(call.name.as_str(), "read_file" | "write_file" | "edit_file")
-                && let Some(path) = serde_json::from_str::<serde_json::Value>(&call.arguments_json)
-                    .ok()
-                    .and_then(|args| args.get("path").and_then(|p| p.as_str()).map(str::to_owned))
-            {
-                self.touched.insert(self.ctx.resolve(&path));
-                if call.name != "read_file" {
-                    self.written.insert(path);
+            if matches!(call.name.as_str(), "read_file" | "write_file" | "edit_file") {
+                for path in file_paths(&call.arguments_json) {
+                    self.touched.insert(self.ctx.resolve(&path));
+                    if call.name != "read_file" {
+                        self.written.insert(path);
+                    }
                 }
             }
             self.events.emit(LoopEvent::ToolFinished {
@@ -994,6 +992,22 @@ fn tail_lines(text: &str, count: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(count);
     lines[start..].join("\n")
+}
+
+/// The file paths a `read_file`, `write_file` or `edit_file` call names:
+/// `path`, plus every `files[].path` of a multi-file read.
+fn file_paths(arguments_json: &str) -> Vec<String> {
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments_json) else {
+        return Vec::new();
+    };
+    let single = args.get("path").and_then(|p| p.as_str()).map(str::to_owned);
+    let listed = args
+        .get("files")
+        .and_then(|files| files.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|file| file.get("path").and_then(|p| p.as_str()).map(str::to_owned));
+    single.into_iter().chain(listed).collect()
 }
 
 /// The first line, cut to 120 characters.
@@ -1974,7 +1988,8 @@ mod tests {
                 FakeProvider::tool_turn(vec![ToolCall {
                     id: "r".to_owned(),
                     name: "read_file".to_owned(),
-                    arguments_json: serde_json::json!({"path": "crates/a/src/lib.rs"}).to_string(),
+                    arguments_json: serde_json::json!({"files": [{"path": "crates/a/src/lib.rs"}]})
+                        .to_string(),
                 }]),
                 FakeProvider::text_turn("built"),
                 FakeProvider::text_turn("simplified"),
@@ -1996,6 +2011,12 @@ mod tests {
                 .system
                 .contains("# Instructions from crates/a/CLAUDE.md")
         );
+        assert_eq!(
+            file_paths(r#"{"files": [{"path": "a.rs"}, {"path": "b/c.rs", "offset": 3}]}"#),
+            ["a.rs", "b/c.rs"]
+        );
+        assert_eq!(file_paths(r#"{"path": "x"}"#), ["x"]);
+        assert!(file_paths("{").is_empty());
         let base = requests[2].system.find("You are anvil").expect("base");
         let repo = requests[2].system.find("repo rules").expect("repo");
         let nested = requests[2].system.find("crate rules").expect("nested");

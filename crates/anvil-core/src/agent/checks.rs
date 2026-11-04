@@ -65,7 +65,11 @@ impl CheckCommand {
 /// Picks the check command from the project files.
 ///
 /// Order: a `justfile` with a `check` recipe, then `Cargo.toml`
-/// (`cargo test`), `pyproject.toml` (`pytest`), `package.json` (`npm test`).
+/// (`cargo test`), `pyproject.toml` (pytest), `package.json` (`npm test`),
+/// then pytest's own evidence: `pytest.ini`, `conftest.py`, or a `test_*.py`
+/// file at the root or under `tests/`. Pytest runs as `python -m pytest`
+/// (`python3` outside Windows), which puts the project root on `sys.path`;
+/// bare `pytest` does not when `tests/` has no `__init__.py`.
 ///
 /// # Arguments
 ///
@@ -80,13 +84,41 @@ pub fn detect(cwd: &Path) -> Option<String> {
     }
     let candidates = [
         ("Cargo.toml", "cargo test"),
-        ("pyproject.toml", "pytest"),
+        ("pyproject.toml", PYTEST),
         ("package.json", "npm test"),
     ];
     candidates
         .into_iter()
         .find(|(file, _)| cwd.join(file).is_file())
         .map(|(_, command)| command.to_owned())
+        .or_else(|| has_pytest_tests(cwd).then(|| PYTEST.to_owned()))
+}
+
+/// How pytest is run: through the interpreter, so the project root is importable.
+const PYTEST: &str = if cfg!(windows) {
+    "python -m pytest"
+} else {
+    "python3 -m pytest"
+};
+
+/// Whether the project carries pytest tests without a `pyproject.toml`.
+fn has_pytest_tests(cwd: &Path) -> bool {
+    if ["pytest.ini", "conftest.py"]
+        .iter()
+        .any(|name| cwd.join(name).is_file())
+    {
+        return true;
+    }
+    [cwd.to_path_buf(), cwd.join("tests")]
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("test_") && name.ends_with(".py") && entry.path().is_file()
+        })
 }
 
 /// Whether a `justfile` or `Justfile` defines a `check` recipe.
@@ -113,7 +145,7 @@ mod tests {
         std::fs::write(dir.path().join("package.json"), "{}").expect("write");
         assert_eq!(detect(dir.path()).as_deref(), Some("npm test"));
         std::fs::write(dir.path().join("pyproject.toml"), "").expect("write");
-        assert_eq!(detect(dir.path()).as_deref(), Some("pytest"));
+        assert_eq!(detect(dir.path()).as_deref(), Some(PYTEST));
         std::fs::write(dir.path().join("Cargo.toml"), "").expect("write");
         assert_eq!(detect(dir.path()).as_deref(), Some("cargo test"));
         std::fs::write(dir.path().join("justfile"), "fmt:\n    cargo fmt\n").expect("write");
@@ -124,6 +156,28 @@ mod tests {
         );
         std::fs::write(dir.path().join("justfile"), "check:\n    cargo test\n").expect("write");
         assert_eq!(detect(dir.path()).as_deref(), Some("just check"));
+    }
+
+    #[test]
+    fn detects_pytest_from_tests_without_pyproject() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("tests")).expect("mkdir");
+        std::fs::write(dir.path().join("tests/helpers.py"), "").expect("write");
+        assert_eq!(detect(dir.path()), None, "no test module yet");
+        std::fs::write(dir.path().join("tests/test_slugify.py"), "").expect("write");
+        assert_eq!(detect(dir.path()).as_deref(), Some(PYTEST));
+        std::fs::remove_file(dir.path().join("tests/test_slugify.py")).expect("remove");
+        std::fs::write(dir.path().join("test_app.py"), "").expect("write");
+        assert_eq!(detect(dir.path()).as_deref(), Some(PYTEST), "root module");
+        std::fs::remove_file(dir.path().join("test_app.py")).expect("remove");
+        std::fs::write(dir.path().join("conftest.py"), "").expect("write");
+        assert_eq!(detect(dir.path()).as_deref(), Some(PYTEST), "conftest");
+        std::fs::write(dir.path().join("package.json"), "{}").expect("write");
+        assert_eq!(
+            detect(dir.path()).as_deref(),
+            Some("npm test"),
+            "a manifest wins over test files"
+        );
     }
 
     #[test]
