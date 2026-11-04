@@ -1,0 +1,24 @@
+# The factory as a systemd user service. `factory install-service` copies this
+# file to ~/.config/systemd/user/factory.service and enables it; run
+# `loginctl enable-linger $USER` once so it starts without a login session.
+#
+# Secrets are not here: the service loads ~/.factory/env itself (mode 600).
+# stderr goes to journald (`journalctl --user -u factory -f`); the JSON log is
+# ~/.factory/logs/factory.jsonl.
+
+[Unit]
+Description=anvil factory: works tickets into reviewed pull requests
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/factory-repo
+ExecStart=%h/.local/bin/factory run
+Restart=on-failure
+RestartSec=30
+Environment=FACTORY_LOG=info
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

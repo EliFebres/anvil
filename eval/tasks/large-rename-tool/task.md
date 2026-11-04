@@ -1,0 +1,1 @@
+Rename the built-in `list_dir` tool to `list_directory`: the name the model sees, every place that refers to it by name (registry tests, snapshots, permission rules, the factory profile in `deploy/`, the Claude Code name mapping in anvil-compat, which maps `LS`), and any test that uses it as an example tool name. The Rust module and type may keep their names.

@@ -1,0 +1,76 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[workspace.dependencies]
+# Workspace crates
+anvil-types = { path = "crates/anvil-types" }
+anvil-core = { path = "crates/anvil-core" }
+anvil-compat = { path = "crates/anvil-compat" }
+anvil-memory = { path = "crates/anvil-memory" }
+anvil-telemetry = { path = "crates/anvil-telemetry" }
+anvil-tui = { path = "crates/anvil-tui" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1"
+toml_edit = "0.25"
+dotenvy = "0.15"
+serde-saphyr = "2.0"
+regex = "1"
+schemars = { version = "1.2", features = ["chrono04"] }
+base64 = "0.23"
+
+# Errors
+thiserror = "2.0"
+anyhow = "1.0"
+
+# CLI
+clap = { version = "4.6", features = ["derive"] }
+rustyline = "19.0"
+
+# Terminal UI
+ratatui = { version = "0.30", features = ["crossterm_0_29"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+unicode-width = "0.2"
+similar = "2.7"
+
+# Async + HTTP (rustls only; no OpenSSL)
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "signal"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "charset", "http2", "stream", "system-proxy"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio-stream = { version = "0.1", default-features = false }
+
+# File walking and searching (no external ripgrep needed)
+ignore = "0.4"
+globset = "0.4"
+grep = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+
+# Identifiers and time
+ulid = { version = "3.0", features = ["serde"] }
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Testing
+insta = { version = "1.49", features = ["json", "filters"] }
+tempfile = "3.27"
+wiremock = "0.6"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"

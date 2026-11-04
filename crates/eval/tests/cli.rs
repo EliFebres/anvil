@@ -24,6 +24,7 @@ fn attempt(index: u32, passed: bool) -> AttemptRecord {
             cached: 0,
         },
         tool_calls: 2,
+        turns: 2,
         cost_usd: Some(0.001),
         anvil_ms: 1,
         check_ms: 1,

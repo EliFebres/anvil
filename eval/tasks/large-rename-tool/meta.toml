@@ -1,0 +1,4 @@
+tags = ["rust", "large"]
+timeout_s = 1800
+max_tokens = 3000000
+fixture = "anvil-23c8a77"

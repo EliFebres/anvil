@@ -14,5 +14,7 @@ cost per passed task  0.0600
 input tok / task      mean 1,050, median 1,050
 input tok / passed    3,150
 tool calls / task     7.3
+turns / task          5.7
+context / turn        185
 cost per task         0.0100
 wall                  2m05s
