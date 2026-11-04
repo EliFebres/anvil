@@ -1,0 +1,27 @@
+---
+source: crates/anvil-core/src/tools/outline.rs
+expression: Outline.schema()
+---
+{
+  "description": "Arguments of the `outline` tool.",
+  "properties": {
+    "depth": {
+      "default": null,
+      "description": "Nesting levels to show; 1 shows top-level items only. Default 2.",
+      "format": "uint",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "path": {
+      "description": "File or directory, relative to the project root or absolute.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "type": "object"
+}

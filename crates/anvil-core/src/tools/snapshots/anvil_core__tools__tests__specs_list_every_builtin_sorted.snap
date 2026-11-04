@@ -112,6 +112,33 @@ expression: specs
     }
   },
   {
+    "name": "outline",
+    "description": "Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.",
+    "parameters": {
+      "description": "Arguments of the `outline` tool.",
+      "properties": {
+        "depth": {
+          "default": null,
+          "description": "Nesting levels to show; 1 shows top-level items only. Default 2.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "File or directory, relative to the project root or absolute.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "read_file",
     "description": "Reads a UTF-8 text file and returns its lines prefixed with 1-based line numbers. Use offset and limit to page through large files.",
     "parameters": {

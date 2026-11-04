@@ -14,6 +14,8 @@ pub mod glob;
 pub mod grep;
 /// The `list_dir` tool.
 pub mod list_dir;
+/// The `outline` tool: a file's or directory's structure without the bodies.
+pub mod outline;
 mod output;
 /// The permission model: `.anvil/permissions.toml`, rule matching, and the
 /// prompt hook the CLI implements.
@@ -485,6 +487,7 @@ impl ToolRegistry {
         registry.register(Box::new(grep::Grep));
         registry.register(Box::new(shell::ShellTool));
         registry.register(Box::new(list_dir::ListDir));
+        registry.register(Box::new(outline::Outline));
         registry
     }
 
@@ -1440,13 +1443,14 @@ mod tests {
                 "glob",
                 "grep",
                 "list_dir",
+                "outline",
                 "read_file",
                 "shell",
                 "write_file"
             ]
         );
         let specs = registry.specs();
-        assert_eq!(specs.len(), 7);
+        assert_eq!(specs.len(), 8);
         for spec in &specs {
             assert_eq!(spec.parameters["type"], "object", "{}", spec.name);
             assert!(spec.parameters.get("$schema").is_none());

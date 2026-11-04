@@ -6,5 +6,6 @@
 
 pub mod agent;
 pub mod context;
+pub mod outline;
 pub mod provider;
 pub mod tools;
