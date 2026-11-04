@@ -143,9 +143,6 @@ struct UsageRecord {
     /// `session_ended` and `memory_skipped`: a fixed tag.
     #[serde(default)]
     reason: Option<String>,
-    /// `session_ended`: set when the review round cap stopped the session.
-    #[serde(default)]
-    review_cap_hit: Option<bool>,
 }
 
 /// Sums the usage of one session from a telemetry folder.
@@ -262,9 +259,10 @@ impl SessionUsage {
                 }
             },
             "memory_skipped" => self.memory_skip_reason = record.reason.clone(),
+            // The reason tag survives a `denied` outcome, which would
+            // otherwise hide that the cap was what stopped the session.
             "session_ended" => {
-                self.review_cap_hit |= record.review_cap_hit.unwrap_or(false)
-                    || record.reason.as_deref() == Some(REVIEW_CAP_REASON);
+                self.review_cap_hit |= record.reason.as_deref() == Some(REVIEW_CAP_REASON);
             }
             _ => return false,
         }
@@ -456,7 +454,7 @@ mod tests {
             turn("verify"),
             record("\"event\":\"memory_skipped\",\"reason\":\"uneventful_small_diff\""),
             record(
-                "\"event\":\"session_ended\",\"outcome\":\"denied\",\"reason\":\"shell\",\"review_cap_hit\":true",
+                "\"event\":\"session_ended\",\"outcome\":\"denied\",\"reason\":\"review_rounds_exhausted\"",
             ),
         ]);
         assert_eq!(

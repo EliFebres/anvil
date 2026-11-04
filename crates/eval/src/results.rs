@@ -699,7 +699,19 @@ impl fmt::Display for RunResult {
             .max(4);
         writeln!(f, "{:<width$}  result    status", "task")?;
         for task in &self.tasks {
-            let statuses: Vec<String> = task.attempts.iter().map(|a| a.status.label()).collect();
+            let statuses: Vec<String> = task
+                .attempts
+                .iter()
+                .map(|a| {
+                    let capped = a.overheads.as_ref().is_some_and(|o| o.review_cap_hit);
+                    // A capped attempt whose check passed must not read as a plain pass.
+                    format!(
+                        "{}{}",
+                        a.status.label(),
+                        if capped { "[review-cap]" } else { "" }
+                    )
+                })
+                .collect();
             writeln!(
                 f,
                 "{:<width$}  {:<8}  {}",
@@ -1066,6 +1078,20 @@ mod tests {
             ],
         );
         insta::assert_snapshot!(result.to_string());
+    }
+
+    #[test]
+    fn a_review_cap_hit_shows_in_the_summary_even_when_the_check_passed() {
+        let mut capped = task("py-capped", &[true]);
+        capped.attempts[0].status = AttemptStatus::Denied;
+        capped.attempts[0].overheads = Some(Overheads {
+            review_rounds: 4,
+            review_cap_hit: true,
+            ..Overheads::default()
+        });
+        let text = run("fe92bc2", "m1", vec![capped]).to_string();
+        assert!(text.contains("PASS 1/1  denied[review-cap]"), "{text}");
+        assert!(text.contains("review cap hits       1"), "{text}");
     }
 
     #[test]
