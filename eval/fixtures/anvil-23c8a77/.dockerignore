@@ -1,0 +1,5 @@
+# The worker image's build context is the repository root
+# (deploy/nuc/Containerfile); only these files go into it.
+*
+!rust-toolchain.toml
+!deploy/nuc/entrypoint.sh

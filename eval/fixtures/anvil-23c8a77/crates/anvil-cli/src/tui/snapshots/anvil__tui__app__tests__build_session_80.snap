@@ -1,0 +1,28 @@
+---
+source: crates/anvil-cli/src/tui/app.rs
+expression: terminal.backend()
+---
+"BUILD ──────────────────────────────────────────────────────────────────────────"
+"                                                                                "
+"you  rename helper b to beta in src/lib.rs                                      "
+"                                                                                "
+"Renaming b to beta and updating its one caller.                                 "
+"                                                                                "
+"ok     edit_file  src/lib.rs                                                40ms"
+"▌ src/lib.rs:4-11                                                               "
+"▌       1                                                                       "
+"▌   }                                                                           "
+"▌                                                                               "
+"▌ - fn b() {}                                                                   "
+"▌ + fn beta() {}                                                                "
+"▌                                                                               "
+"▌   pub fn c() {                                                                "
+"▌ -     b();                                                                    "
+"▌ +     beta();                                                                 "
+"▌   }                                                                           "
+"                                                                                "
+"Done; cargo check passes.█                                                      "
+" BUILD · main (test-model)                        ctx 0% · in 0 · out 0 · 00:00 "
+"╭──────────────────────────────────────────────────────────────────────────────╮"
+"│build >                                                                       │"
+"╰──────────────────────────────────────────────────────────────────────────────╯"

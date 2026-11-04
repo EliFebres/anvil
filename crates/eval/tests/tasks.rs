@@ -21,9 +21,9 @@ fn tasks_dir() -> PathBuf {
 }
 
 #[test]
-fn twenty_tasks_load_with_the_promised_language_mix() {
+fn twenty_three_tasks_load_with_the_promised_language_mix() {
     let tasks = load_tasks(&tasks_dir(), &[]).expect("every task loads");
-    assert_eq!(tasks.len(), 20, "{:?}", names(&tasks));
+    assert_eq!(tasks.len(), 23, "{:?}", names(&tasks));
     let mut by_language: BTreeMap<&str, usize> = BTreeMap::new();
     for task in &tasks {
         let language = task
@@ -32,7 +32,9 @@ fn twenty_tasks_load_with_the_promised_language_mix() {
             .first()
             .expect("the first tag is the language");
         *by_language.entry(language.as_str()).or_default() += 1;
+        let large = task.meta.tags.iter().any(|tag| tag == "large");
         let prefix = match language.as_str() {
+            _ if large => "large-",
             "python" => "py-",
             "rust" => "rs-",
             "shell" => "sh-",
@@ -51,7 +53,18 @@ fn twenty_tasks_load_with_the_promised_language_mix() {
         );
     }
     assert_eq!(by_language["python"], 10);
-    assert_eq!(by_language["rust"], 7);
+    assert_eq!(by_language["rust"], 10, "7 small, 3 large");
+    let large: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| t.meta.tags.iter().any(|tag| tag == "large"))
+        .collect();
+    assert_eq!(large.len(), 3);
+    assert!(
+        large
+            .iter()
+            .all(|t| t.meta.fixture.as_deref() == Some("anvil-23c8a77")),
+        "the large tasks share the vendored repository"
+    );
     assert_eq!(by_language["shell"], 2);
     assert_eq!(by_language["markdown"], 1);
 }

@@ -1,0 +1,1 @@
+Find where anvil-core matches permission rules against a tool call and add one `tracing::trace!` line there that records the tool name, the target and the resulting decision. Keep the existing behavior and tests unchanged.

@@ -82,3 +82,8 @@ anvil prints no usage, so the harness reads the attempt's `.anvil/telemetry/*.js
 | sh-quote-backup-script | fix unquoted variables so names with spaces work |
 | sh-dry-run-flag | add `--dry-run` to a cleanup script |
 | md-fix-readme-links | repoint five relative links at renamed files |
+| large-permission-trace | find where permission rules are matched and add a `trace!` line |
+| large-ticket-component | add a validated `component` field to the Ticket schema everywhere |
+| large-rename-tool | rename the `list_dir` tool across anvil-core, anvil-compat and `deploy/` |
+
+The three `large-*` tasks (tag `large`) start from `eval/fixtures/anvil-23c8a77/`, a copy of this repository at that commit without the factory, review and eval crates (about 50k lines). They name it with `fixture = "anvil-23c8a77"` in `meta.toml` instead of carrying a `fixture/` folder. They are what the factory does day to day: find the right place in a large codebase, change a shared type and every user of it, rename across crates. `eval compare` reports small and large tasks separately when a run has large ones.

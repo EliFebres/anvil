@@ -1,4 +1,8 @@
 //! Task folders: `fixture/`, `task.md`, `check.sh` and `meta.toml`.
+//!
+//! A task may instead name a shared fixture under `eval/fixtures/` in its
+//! `meta.toml`, so several tasks can start from one large vendored codebase
+//! without each carrying a copy.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -22,6 +26,9 @@ pub const CHECK_FILE: &str = "check.sh";
 /// Tags, timeout and token cap.
 pub const META_FILE: &str = "meta.toml";
 
+/// Shared fixtures, as a sibling of the tasks folder: `eval/fixtures/<name>`.
+pub const SHARED_FIXTURES_DIR: &str = "fixtures";
+
 /// The longest prompt accepted; it travels as one command-line argument.
 pub const MAX_PROMPT_BYTES: usize = 8 * 1024;
 
@@ -35,6 +42,10 @@ pub struct TaskMeta {
     pub timeout_s: u64,
     /// Session token budget handed to anvil.
     pub max_tokens: u64,
+    /// A shared fixture under `eval/fixtures/` to start from instead of the
+    /// task's own `fixture/` folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<String>,
 }
 
 /// One loaded task.
@@ -48,6 +59,8 @@ pub struct Task {
     pub prompt: String,
     /// The contents of `meta.toml`.
     pub meta: TaskMeta,
+    /// The folder the task starts from: `fixture/`, or the shared fixture.
+    pub fixture: PathBuf,
 }
 
 impl Task {
@@ -80,14 +93,9 @@ impl Task {
         if !is_kebab_case(&name) {
             return Err(invalid(format!("name `{name}` is not kebab-case")));
         }
-        for part in [FIXTURE_DIR, TASK_FILE, CHECK_FILE, META_FILE] {
+        for part in [TASK_FILE, CHECK_FILE, META_FILE] {
             if !dir.join(part).exists() {
                 return Err(invalid(format!("missing {part}")));
-            }
-        }
-        for owned in [".git", ".anvil"] {
-            if dir.join(FIXTURE_DIR).join(owned).exists() {
-                return Err(invalid(format!("fixture must not contain {owned}")));
             }
         }
         let prompt_path = dir.join(TASK_FILE);
@@ -118,11 +126,39 @@ impl Task {
                 "tags must hold at least one non-empty tag".to_owned(),
             ));
         }
+        let fixture = match &meta.fixture {
+            Some(shared) => {
+                if !is_kebab_case(shared) {
+                    return Err(invalid(format!(
+                        "shared fixture `{shared}` is not kebab-case"
+                    )));
+                }
+                if dir.join(FIXTURE_DIR).exists() {
+                    return Err(invalid(format!(
+                        "has both {FIXTURE_DIR}/ and the shared fixture `{shared}`"
+                    )));
+                }
+                dir.parent()
+                    .and_then(Path::parent)
+                    .map(|eval| eval.join(SHARED_FIXTURES_DIR).join(shared))
+                    .ok_or_else(|| invalid("cannot locate eval/fixtures".to_owned()))?
+            }
+            None => dir.join(FIXTURE_DIR),
+        };
+        if !fixture.is_dir() {
+            return Err(invalid(format!("missing {}", fixture.display())));
+        }
+        for owned in [".git", ".anvil"] {
+            if fixture.join(owned).exists() {
+                return Err(invalid(format!("fixture must not contain {owned}")));
+            }
+        }
         Ok(Task {
             name,
             dir: dir.to_owned(),
             prompt,
             meta,
+            fixture,
         })
     }
 
@@ -130,9 +166,9 @@ impl Task {
     ///
     /// # Returns
     ///
-    /// `<dir>/fixture`.
+    /// `<dir>/fixture`, or `eval/fixtures/<name>` for a shared fixture.
     pub fn fixture_dir(&self) -> PathBuf {
-        self.dir.join(FIXTURE_DIR)
+        self.fixture.clone()
     }
 
     /// The check script.
@@ -282,6 +318,30 @@ mod tests {
         assert!(task.matches(&[]));
         assert!(task.matches(&["flag".to_owned()]));
         assert!(!task.matches(&["rs".to_owned()]));
+    }
+
+    #[test]
+    fn a_task_can_start_from_a_shared_fixture() {
+        let eval = tempfile::tempdir().expect("tmp");
+        let tasks = eval.path().join("tasks");
+        let shared = eval.path().join(SHARED_FIXTURES_DIR).join("big-repo");
+        std::fs::create_dir_all(&shared).expect("shared");
+        let meta = format!("{META}fixture = \"big-repo\"\n");
+        let dir = write_task(&tasks, "large-thing", &meta);
+        std::fs::remove_dir_all(dir.join(FIXTURE_DIR)).expect("rm own fixture");
+        assert_eq!(Task::load(&dir).expect("loads").fixture_dir(), shared);
+
+        std::fs::create_dir(dir.join(FIXTURE_DIR)).expect("own fixture");
+        assert!(reason_of(Task::load(&dir)).contains("both"));
+        std::fs::remove_dir(dir.join(FIXTURE_DIR)).expect("rm");
+
+        let missing = write_task(
+            &tasks,
+            "large-missing",
+            &format!("{META}fixture = \"nope\"\n"),
+        );
+        std::fs::remove_dir_all(missing.join(FIXTURE_DIR)).expect("rm own fixture");
+        assert!(reason_of(Task::load(&missing)).contains("missing"));
     }
 
     #[test]
