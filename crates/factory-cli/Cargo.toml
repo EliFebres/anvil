@@ -3,6 +3,8 @@ name = "factory-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "The factory binary: the unattended improvement service. Argument parsing and wiring only."
 
 # The library holds the wiring so the tests can run the service in-process

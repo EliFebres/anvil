@@ -3,6 +3,8 @@ name = "anvil-tui"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "The palette and small layout helpers both full-screen UIs draw with: anvil's TUI and factory watch."
 
 [dependencies]

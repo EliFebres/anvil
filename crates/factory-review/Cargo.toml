@@ -3,6 +3,8 @@ name = "factory-review"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Multi-model review for the factory: four stances, aggregated into one verdict."
 
 [lib]

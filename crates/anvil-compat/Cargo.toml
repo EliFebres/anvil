@@ -3,6 +3,8 @@ name = "anvil-compat"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Claude Code compatibility for anvil: SKILL.md, CLAUDE.md, commands, agents, hooks, MCP client."
 
 [dependencies]

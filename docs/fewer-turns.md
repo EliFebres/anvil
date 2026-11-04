@@ -20,7 +20,7 @@ Each model turn re-sends the whole conversation, so a session costs roughly turn
 
 ### How a turn is classified
 
-A tool call belongs to the `turn` record before it. A turn with one call is "1 call", with two or more "2+ calls", with none "text", or "verdict" when it has none and the state is review or verify. Context per turn is input plus cached prompt tokens. `eval` records this per attempt as `turns_by_state` (commit 59365c5) and `eval compare` prints it per state and per group.
+A tool call belongs to the `turn` record before it. A turn with one call is "1 call", with two or more "2+ calls", with none "text", or "verdict" when it has none and the state is review or verify. Context per turn is input plus cached prompt tokens. `eval` records this per attempt as `turns_by_state` and `eval compare` prints it per state and per group.
 
 ## Where the turns went before
 
@@ -51,18 +51,20 @@ Two things the breakdown settled before any code changed:
 
 ## What changed
 
-Commits on the branch, in order:
+The changes, in the order they were made:
 
-| commit | change | files |
-|---|---|---|
-| 59365c5 | eval records `turns_by_state` per attempt; `compare` prints a per-state table per group | `crates/eval/src/{telemetry,results,compare}.rs` |
-| bf875c0 | base prompt: "Issue every independent tool call in the same turn; reads of different files are always independent." Tests pin the plumbing | `crates/anvil-core/prompts/base.md`, `agent/mod.rs`, `provider/anthropic.rs` |
-| 2c5b739 | `outline` tool: functions, types and headings with line ranges via tree-sitter. A plain tool with a good description; no prompt text says when to use it | `crates/anvil-core/src/outline/`, `tools/outline.rs` |
-| 27518dd | `read_file` takes `files: [{path, offset?, limit?}]` (up to 20) in one call; each file gets an equal share of the output cap | `tools/read_file.rs` |
-| 2242179 | `grep` returns 3 lines of context around each match and the enclosing item's signature, so a hit rarely needs a follow-up read | `tools/grep.rs` |
-| 1213b4b | loop lanes by diff size: under 50 changed lines skips Optimize; a small first build with a check command runs the checks before Review and the reviewer sees the diff and the check output together, so its approval ends the run (Build, Verify, Review, Done). Larger diffs keep the full loop | `agent/{mod,state,diff}.rs`, `prompts/review.md` |
-| fa1797d | plan prompt: list every file to change with the line ranges to edit | `prompts/plan.md` |
-| d9305eb | build intro no longer points the model at `plan.md`; it says the plan above is approved and that a checkbox tick belongs in the same turn as the step's last edit. `checks::detect` finds pytest from `tests/test_*.py`, a root `test_*.py`, `conftest.py` or `pytest.ini`, and runs it as `python3 -m pytest` (bare `pytest` cannot import the project root when `tests/` has no `__init__.py`). `eval run --keep` keeps the attempt directories. `read_file` `files[]` paths count for nested `CLAUDE.md` discovery. A test pins several OpenAI tool calls in one assistant message | `agent/mod.rs`, `agent/checks.rs`, `prompts/build.md`, `crates/eval/src/{main,runner,results}.rs` |
+| change | files |
+|---|---|
+| eval records `turns_by_state` per attempt; `compare` prints a per-state table per group | `crates/eval/src/{telemetry,results,compare}.rs` |
+| base prompt: "Issue every independent tool call in the same turn; reads of different files are always independent." Tests pin the plumbing | `crates/anvil-core/prompts/base.md`, `agent/mod.rs`, `provider/anthropic.rs` |
+| `outline` tool: functions, types and headings with line ranges via tree-sitter. A plain tool with a good description; no prompt text says when to use it | `crates/anvil-core/src/outline/`, `tools/outline.rs` |
+| `read_file` takes `files: [{path, offset?, limit?}]` (up to 20) in one call; each file gets an equal share of the output cap | `tools/read_file.rs` |
+| `grep` returns 3 lines of context around each match and the enclosing item's signature, so a hit rarely needs a follow-up read | `tools/grep.rs` |
+| loop lanes by diff size: under 50 changed lines skips Optimize; a small first build with a check command runs the checks before Review and the reviewer sees the diff and the check output together, so its approval ends the run (Build, Verify, Review, Done). Larger diffs keep the full loop | `agent/{mod,state,diff}.rs`, `prompts/review.md` |
+| plan prompt: list every file to change with the line ranges to edit | `prompts/plan.md` |
+| build intro no longer points the model at `plan.md`; it says the plan above is approved and that a checkbox tick belongs in the same turn as the step's last edit | `agent/mod.rs`, `prompts/build.md` |
+| `checks::detect` finds pytest from `tests/test_*.py`, a root `test_*.py`, `conftest.py` or `pytest.ini`, and runs it as `python3 -m pytest` (bare `pytest` cannot import the project root when `tests/` has no `__init__.py`) | `agent/checks.rs` |
+| `eval run --keep` keeps the attempt directories; `read_file` `files[]` paths count for nested `CLAUDE.md` discovery; a test pins several OpenAI tool calls in one assistant message | `crates/eval/src/{main,runner,results}.rs`, `agent/mod.rs`, `provider/openai.rs` |
 
 Not done, on purpose: stale-result stubbing, prompt text about `outline`, context budgets, BM25 memory, removing the memory turn, running tool calls concurrently (one turn either way).
 

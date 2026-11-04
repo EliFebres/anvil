@@ -3,6 +3,8 @@ name = "anvil-telemetry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Usage recording, failure classification and ticket drafting for anvil."
 
 [dependencies]

@@ -3,6 +3,8 @@ name = "anvil-cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "The anvil binary: a CLI coding agent. Argument parsing and wiring only."
 
 [[bin]]

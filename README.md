@@ -155,6 +155,10 @@ Secrets come from `~/.factory/env` (mode 600). The service needs `FACTORY_GITHUB
 
 `CLAUDE.md` is the contract: conventions, which crate may depend on which, and what every check enforces.
 
+## License
+
+MIT or Apache-2.0, at your option: see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE). Contributions are accepted under the same terms.
+
 ## Development
 
 ```sh
