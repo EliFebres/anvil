@@ -123,6 +123,24 @@ enum ModelEnd {
     Interrupted(StateOutcome),
 }
 
+/// How much of the loop the current build still needs, by the size of its diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Lane {
+    /// The whole loop: review, simplification pass, checks.
+    Full,
+    /// A small diff: review, then checks, no simplification pass.
+    Small,
+    /// A small first build with a check command: checks before the review.
+    CheckFirst,
+    /// The checks passed before the review; the reviewer sees this output.
+    Checked {
+        /// The check command.
+        command: String,
+        /// The last lines it printed.
+        tail: String,
+    },
+}
+
 /// One run of the loop.
 pub struct AgentLoop {
     config: LoopConfig,
@@ -153,6 +171,8 @@ pub struct AgentLoop {
     baseline: Option<String>,
     /// What to tell the model when Build is entered again.
     pending_feedback: Option<String>,
+    /// The path the last finished build takes through review and checks.
+    lane: Lane,
     last_text: String,
 }
 
@@ -234,6 +254,7 @@ impl AgentLoop {
             plan: None,
             baseline: None,
             pending_feedback: None,
+            lane: Lane::Full,
             last_text: String::new(),
         }
     }
@@ -498,12 +519,27 @@ impl AgentLoop {
                 self.plan_path()
             )
         });
-        match self
+        if let ModelEnd::Interrupted(outcome) = self
             .run_model_state(State::Build, Some(intro), self.all_tools())
             .await
         {
-            ModelEnd::Finished(_) => StateOutcome::Finished,
-            ModelEnd::Interrupted(outcome) => outcome,
+            return outcome;
+        }
+        let small = self
+            .diff_lines()
+            .await
+            .is_some_and(|lines| lines < diff::SMALL_DIFF_LINES);
+        let first_build = self.rounds == Rounds::default();
+        let has_check = self.config.check.resolve(&self.config.cwd).is_some();
+        self.lane = match (small, first_build && has_check) {
+            (false, _) => Lane::Full,
+            (true, true) => Lane::CheckFirst,
+            (true, false) => Lane::Small,
+        };
+        if self.lane == Lane::CheckFirst {
+            StateOutcome::BuiltSmall
+        } else {
+            StateOutcome::Finished
         }
     }
 
@@ -513,11 +549,16 @@ impl AgentLoop {
             return StateOutcome::Stop(reason);
         }
         let diff = self.session_diff().await;
-        let brief = format!(
+        let mut brief = format!(
             "# Task\n\n{}\n\n# Plan\n\n{}\n\n# Diff\n\n```diff\n{diff}\n```",
             self.config.task,
             self.plan.as_deref().unwrap_or("(no plan)")
         );
+        if let Lane::Checked { command, tail } = &self.lane {
+            brief.push_str(&format!(
+                "\n\n# Check\n\n`{command}` passed:\n\n```\n{tail}\n```"
+            ));
+        }
         let mut messages = vec![Message::user(brief)];
         let mut verdict = None;
         for attempt in 0..2 {
@@ -554,7 +595,11 @@ impl AgentLoop {
             verdict: verdict.clone(),
         });
         match verdict {
-            ReviewVerdict::Approve => StateOutcome::ReviewApproved,
+            ReviewVerdict::Approve => match self.lane {
+                Lane::Checked { .. } => StateOutcome::ApprovedAfterCheck,
+                Lane::Small | Lane::CheckFirst => StateOutcome::ApprovedSmall,
+                Lane::Full => StateOutcome::ReviewApproved,
+            },
             ReviewVerdict::Changes { items } => {
                 let list = items
                     .iter()
@@ -572,6 +617,11 @@ impl AgentLoop {
     /// Verify: the change checks first, then the project's checks, or
     /// have the model write a test.
     async fn run_verify(&mut self) -> StateOutcome {
+        let before_review = self.lane == Lane::CheckFirst;
+        if before_review {
+            // Whatever happens next goes through the regular small-diff path.
+            self.lane = Lane::Small;
+        }
         if let Some(outcome) = self.run_change_checks().await {
             return outcome;
         }
@@ -593,6 +643,10 @@ impl AgentLoop {
             passed,
             output_tail: tail.clone(),
         });
+        if passed && before_review {
+            self.lane = Lane::Checked { command, tail };
+            return StateOutcome::CheckedBeforeReview;
+        }
         if passed {
             return StateOutcome::VerifyPassed;
         }
@@ -808,6 +862,13 @@ impl AgentLoop {
             }
             error => StateOutcome::ProviderFailed(error),
         }
+    }
+
+    /// Lines the session's diff adds or removes, or `None` without git.
+    async fn diff_lines(&self) -> Option<usize> {
+        let baseline = self.baseline.as_ref()?;
+        let diff = diff::diff_since(&self.config.cwd, &self.config.session_dir, baseline).await?;
+        Some(diff::changed_lines(&diff))
     }
 
     /// The diff for the reviewer, or the touched-file list without git.
@@ -1067,6 +1128,16 @@ mod tests {
             out
         }
 
+        /// Makes the project a git repository, so the loop can measure its diff.
+        fn git_init(&self) {
+            let status = std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(self.dir.path())
+                .status()
+                .expect("git runs");
+            assert!(status.success());
+        }
+
         fn states(&mut self) -> Vec<State> {
             self.drain()
                 .into_iter()
@@ -1076,6 +1147,105 @@ mod tests {
                 })
                 .collect()
         }
+    }
+
+    fn write_lines(path: &str, lines: usize) -> ToolCall {
+        let content: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+        ToolCall {
+            id: format!("w-{path}"),
+            name: "write_file".to_owned(),
+            arguments_json: serde_json::json!({"path": path, "content": content}).to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_small_diff_checks_first_and_one_review_ends_the_run() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![write_call("a.txt")]),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+        );
+        h.git_init();
+        let agent = h.default_agent(
+            CheckCommand::Command("echo all-green".to_owned()),
+            "allow = [\"write_file\"]",
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+        assert_eq!(
+            h.states(),
+            [State::Plan, State::Build, State::Verify, State::Review]
+        );
+        assert_eq!(h.coder.requests().len(), 3, "no simplification pass");
+        let brief = format!("{:?}", h.reviewer.requests()[0].messages);
+        assert!(brief.contains("# Check"), "{brief}");
+        assert!(brief.contains("all-green"), "{brief}");
+    }
+
+    #[tokio::test]
+    async fn a_small_diff_whose_first_check_fails_takes_the_short_regular_path() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![write_call("a.txt")]),
+                FakeProvider::text_turn("built"),
+                FakeProvider::tool_turn(vec![write_call("fixed.txt")]),
+                FakeProvider::text_turn("fixed"),
+            ],
+            vec![approve()],
+        );
+        h.git_init();
+        let agent = h.default_agent(
+            CheckCommand::Command("test -f fixed.txt".to_owned()),
+            "allow = [\"write_file\"]",
+        );
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        assert_eq!(result.rounds.verify, 1);
+        assert_eq!(
+            h.states(),
+            [
+                State::Plan,
+                State::Build,
+                State::Verify,
+                State::Build,
+                State::Review,
+                State::Verify
+            ]
+        );
+        let brief = format!("{:?}", h.reviewer.requests()[0].messages);
+        assert!(!brief.contains("# Check"), "{brief}");
+    }
+
+    #[tokio::test]
+    async fn a_large_diff_runs_the_full_loop() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![write_lines("big.txt", diff::SMALL_DIFF_LINES)]),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("nothing to simplify"),
+            ],
+            vec![approve()],
+        );
+        h.git_init();
+        let agent = h.default_agent(
+            CheckCommand::Command("exit 0".to_owned()),
+            "allow = [\"write_file\"]",
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+        assert_eq!(
+            h.states(),
+            [
+                State::Plan,
+                State::Build,
+                State::Review,
+                State::Optimize,
+                State::Verify
+            ]
+        );
     }
 
     #[tokio::test]

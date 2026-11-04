@@ -7,6 +7,12 @@
 //!           ^                              |
 //!           +------------------------------+ (verify fails, max 2 rounds)
 //! ```
+//!
+//! A diff under 50 lines takes shorter paths. On the first build with a
+//! check command, the checks run before the review and the reviewer sees
+//! their output, so its approval ends the run: `Build -> Verify -> Review ->
+//! Done`. Otherwise a small diff skips the simplification pass: `Build ->
+//! Review -> Verify -> Done`.
 
 use std::fmt;
 
@@ -211,8 +217,16 @@ impl fmt::Display for Status {
 pub enum StateOutcome {
     /// The state finished its work.
     Finished,
+    /// Build finished a diff small enough to check before the review.
+    BuiltSmall,
+    /// The checks passed before the review, which will see their output.
+    CheckedBeforeReview,
     /// The reviewer approved the diff.
     ReviewApproved,
+    /// The reviewer approved a small diff; the simplification pass is skipped.
+    ApprovedSmall,
+    /// The reviewer approved a small diff whose checks already passed.
+    ApprovedAfterCheck,
     /// The reviewer wants changes.
     ReviewChanges(Vec<String>),
     /// Verification passed.
@@ -260,7 +274,11 @@ pub fn transition(state: State, outcome: StateOutcome, rounds: &mut Rounds) -> S
         (_, StateOutcome::ProviderFailed(error)) => Step::Finish(Status::ProviderError { error }),
         (State::Plan, StateOutcome::Finished) => Step::Next(State::Build),
         (State::Build, StateOutcome::Finished) => Step::Next(State::Review),
+        (State::Build, StateOutcome::BuiltSmall) => Step::Next(State::Verify),
+        (State::Verify, StateOutcome::CheckedBeforeReview) => Step::Next(State::Review),
         (State::Review, StateOutcome::ReviewApproved) => Step::Next(State::Optimize),
+        (State::Review, StateOutcome::ApprovedSmall) => Step::Next(State::Verify),
+        (State::Review, StateOutcome::ApprovedAfterCheck) => Step::Finish(Status::Done),
         (State::Review, StateOutcome::ReviewChanges(_)) => {
             if rounds.review < MAX_REVIEW_ROUNDS {
                 rounds.review += 1;
@@ -326,6 +344,46 @@ mod tests {
             Step::Finish(Status::Done)
         );
         assert_eq!(rounds, Rounds::default());
+    }
+
+    #[test]
+    fn a_small_diff_checks_first_and_the_approval_ends_the_run() {
+        let mut rounds = Rounds::default();
+        assert_eq!(
+            transition(State::Build, StateOutcome::BuiltSmall, &mut rounds),
+            Step::Next(State::Verify)
+        );
+        assert_eq!(
+            transition(
+                State::Verify,
+                StateOutcome::CheckedBeforeReview,
+                &mut rounds
+            ),
+            Step::Next(State::Review)
+        );
+        assert_eq!(
+            transition(State::Review, StateOutcome::ApprovedAfterCheck, &mut rounds),
+            Step::Finish(Status::Done)
+        );
+        assert_eq!(rounds, Rounds::default());
+    }
+
+    #[test]
+    fn a_small_diff_without_an_early_check_skips_optimize() {
+        let mut rounds = Rounds::default();
+        assert_eq!(
+            transition(State::Review, StateOutcome::ApprovedSmall, &mut rounds),
+            Step::Next(State::Verify)
+        );
+        assert_eq!(
+            transition(
+                State::Verify,
+                StateOutcome::VerifyFailed("boom".to_owned()),
+                &mut rounds
+            ),
+            Step::Next(State::Build)
+        );
+        assert_eq!(rounds.verify, 1);
     }
 
     #[test]
