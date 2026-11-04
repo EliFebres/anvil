@@ -152,6 +152,15 @@ pub trait Tool: Send + Sync {
             .map(str::to_owned)
     }
 
+    /// Every target a permission rule must allow before the call runs.
+    ///
+    /// The default is the single [`Tool::target`]; a tool that acts on
+    /// several paths in one call lists each, so a rule cannot be sidestepped
+    /// by batching.
+    fn targets(&self, args: &Value) -> Vec<Option<String>> {
+        vec![self.target(args)]
+    }
+
     /// Whether [`Tool::target`] is a file path, so a session approval for
     /// this tool only covers targets that resolve inside the workspace root.
     ///
@@ -583,9 +592,10 @@ impl ToolRegistry {
                 );
             }
         };
-        let target = tool.target(&args);
-        if let Some(outcome) = self.check_permission(tool, &args, target.as_deref(), &ctx.cwd) {
-            return Execution::finished(call, outcome.0, outcome.1);
+        for target in tool.targets(&args) {
+            if let Some(outcome) = self.check_permission(tool, &args, target.as_deref(), &ctx.cwd) {
+                return Execution::finished(call, outcome.0, outcome.1);
+            }
         }
         if let Some(hook) = &self.hook
             && let HookDecision::Block { reason } = hook.before(call, &args, ctx).await
@@ -869,6 +879,19 @@ mod tests {
             .await;
         assert_eq!(execution.outcome, ToolOutcome::DeniedByRule);
         assert_eq!(execution.result.content, "denied by a permission rule");
+    }
+
+    #[tokio::test]
+    async fn a_deny_rule_on_one_path_blocks_a_batched_read() {
+        let mut registry = make_registry("deny = [\"read_file:.env\"]", vec![]);
+        registry.register(Box::new(read_file::ReadFile));
+        let read = ToolCall {
+            id: "r1".to_owned(),
+            name: "read_file".to_owned(),
+            arguments_json: r#"{"files": [{"path": "Cargo.toml"}, {"path": ".env"}]}"#.to_owned(),
+        };
+        let execution = registry.execute(&read, &ToolContext::new(".")).await;
+        assert_eq!(execution.outcome, ToolOutcome::DeniedByRule);
     }
 
     #[tokio::test]

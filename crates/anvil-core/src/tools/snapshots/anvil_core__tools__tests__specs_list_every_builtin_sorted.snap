@@ -140,10 +140,55 @@ expression: specs
   },
   {
     "name": "read_file",
-    "description": "Reads a UTF-8 text file and returns its lines prefixed with 1-based line numbers. Use offset and limit to page through large files.",
+    "description": "Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.",
     "parameters": {
+      "$defs": {
+        "FileRange": {
+          "description": "One file or line range in a multi-file read.",
+          "properties": {
+            "limit": {
+              "default": null,
+              "description": "Maximum number of lines to return. Default 2000.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": null,
+              "description": "First line to return, counting from 1. Default 1.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "Path of the file, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
       "description": "Arguments of the `read_file` tool.",
       "properties": {
+        "files": {
+          "description": "Several files or line ranges to read in one call, instead of `path`.",
+          "items": {
+            "$ref": "#/$defs/FileRange"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "limit": {
           "default": null,
           "description": "Maximum number of lines to return. Default 2000.",
@@ -165,13 +210,14 @@ expression: specs
           ]
         },
         "path": {
-          "description": "Path of the file, relative to the project root or absolute.",
-          "type": "string"
+          "default": null,
+          "description": "Path of one file, relative to the project root or absolute. Omit when\npassing `files`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "path"
-      ],
       "type": "object"
     }
   },
