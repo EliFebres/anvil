@@ -35,6 +35,7 @@ expression: result
             "output": 100,
             "cached": 50
           },
+          "tool_calls": 4,
           "cost_usd": 0.01,
           "anvil_ms": 1500,
           "check_ms": 200,
@@ -58,6 +59,7 @@ expression: result
             "output": 100,
             "cached": 50
           },
+          "tool_calls": 9,
           "cost_usd": 0.01,
           "anvil_ms": 1500,
           "check_ms": 200,
@@ -88,6 +90,7 @@ expression: result
             "output": 100,
             "cached": 50
           },
+          "tool_calls": 4,
           "cost_usd": 0.01,
           "anvil_ms": 1500,
           "check_ms": 200,
@@ -110,6 +113,7 @@ expression: result
             "output": 100,
             "cached": 50
           },
+          "tool_calls": 4,
           "cost_usd": 0.01,
           "anvil_ms": 1500,
           "check_ms": 200,
