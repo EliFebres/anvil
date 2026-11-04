@@ -8,7 +8,7 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 
 ## What it is
 
-**`anvil`, the CLI harness.** A coding agent for your own projects. Point it at a repository, give it a task, and it plans, builds, reviews, optimizes and verifies the change with a real tool set (shell, files, search) under a permission model you control. It reads Claude Code's conventions (`CLAUDE.md`, `SKILL.md`, `.claude/commands`, `.claude/agents`, hooks, MCP servers), so an existing Claude Code setup works as is. It remembers standing rules and facts across sessions, and it records what it does (sizes, tokens, latencies, outcomes), never what it works on.
+**`anvil`, the CLI harness.** A coding agent for your own projects. Point it at a repository, give it a task, and it plans, builds, reviews and verifies the change with a real tool set (shell, files, search) under a permission model you control. It reads Claude Code's conventions (`CLAUDE.md`, `SKILL.md`, `.claude/commands`, `.claude/agents`, hooks, MCP servers), so an existing Claude Code setup works as is. It remembers standing rules and facts across sessions, and it records what it does (sizes, tokens, latencies, outcomes), never what it works on.
 
 **`factory`, the Dark Factory.** A service that works on anvil itself without anyone watching. It takes tickets that anvil's own telemetry drafted, implements each one on a branch inside a network-isolated container, runs the checks, scores the change against a fixed eval set, has several other models review it, and merges through a pull request when everything is green. Anything risky waits for a human.
 
@@ -18,7 +18,7 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 
 | command | what happens |
 |---|---|
-| `anvil "<task>"` or `anvil run <task>` | One task through the state machine: `plan` (you approve the plan) → `build` → `review` (a second model) → `optimize` → `verify` (the project's checks and your rules). Exit code 0 when done, 2 when incomplete. |
+| `anvil "<task>"` or `anvil run <task>` | One task through the state machine: `plan` (you approve the plan) → `build` → `review` (a second model) → `verify` (the project's checks and your rules). Exit code 0 when done, 2 when incomplete. |
 | `anvil chat` | A conversation with tools, outside the state machine. `/plan`, `/build` and `/review` switch the prompt and tool set; `rule: <text>` saves a standing rule on the spot; `/compact`, `/model <name>`, `/cost`, `/ticket <text>`, `/help`. |
 | `anvil resume <id>` | Continue a saved session from where it stopped. `anvil sessions` lists them. |
 | `anvil --yes ...` | Unattended: approve the plan, allow every asked tool call, keep every proposed memory. The factory and the eval harness run it this way. |

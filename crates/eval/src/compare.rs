@@ -432,6 +432,8 @@ fn write_overheads(
 }
 
 /// The loop states in the order a session visits them; others sort after.
+// `optimize` is a state the loop no longer has; results recorded while it
+// existed still print it in its old place.
 const STATE_ORDER: [&str; 6] = ["plan", "build", "review", "optimize", "verify", "memory"];
 
 /// Writes turns per task for each loop state, split into one-call, 2+ call,

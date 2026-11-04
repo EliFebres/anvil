@@ -7,7 +7,12 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "verdict", rename_all = "lowercase")]
 pub enum ReviewVerdict {
     /// Ship it.
-    Approve,
+    Approve {
+        /// Remarks that do not block the change: style, standing rules,
+        /// possible simplifications. Shown to the user, never sent to Build.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<String>,
+    },
     /// Send it back with these requests.
     Changes {
         /// Specific, actionable requests.
@@ -92,7 +97,14 @@ mod tests {
         let text = "Looks fine overall.\n\n```json\n{\"verdict\": \"approve\"}\n```\n";
         assert_eq!(
             parse_verdict::<ReviewVerdict>(text),
-            Some(ReviewVerdict::Approve)
+            Some(ReviewVerdict::Approve { notes: Vec::new() })
+        );
+        let text = "Fine.\n```json\n{\"verdict\": \"approve\", \"notes\": [\"[minimal-comments] a.rs: one comment restates the code\"]}\n```";
+        assert_eq!(
+            parse_verdict::<ReviewVerdict>(text),
+            Some(ReviewVerdict::Approve {
+                notes: vec!["[minimal-comments] a.rs: one comment restates the code".to_owned()]
+            })
         );
         let text = "Two issues.\n```json\n{\"verdict\":\"changes\",\"items\":[\"a\",\"b\"]}\n```";
         assert_eq!(
@@ -108,7 +120,7 @@ mod tests {
         let text = "```json\n{\"verdict\": \"changes\"}\n```\nOn reflection:\n```json\n{\"verdict\": \"approve\"}\n```";
         assert_eq!(
             parse_verdict::<ReviewVerdict>(text),
-            Some(ReviewVerdict::Approve)
+            Some(ReviewVerdict::Approve { notes: Vec::new() })
         );
         let text = "verdict: {\"verdict\": \"pass\"} done";
         assert_eq!(

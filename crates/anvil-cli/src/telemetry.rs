@@ -353,7 +353,7 @@ impl SessionTelemetry {
                 stats.digest,
             ),
             LoopEvent::ReviewVerdict { verdict } => match verdict {
-                ReviewVerdict::Approve => RecordKind::review(true, &[]),
+                ReviewVerdict::Approve { .. } => RecordKind::review(true, &[]),
                 ReviewVerdict::Changes { items } => RecordKind::review(false, items),
             },
             LoopEvent::CheckFinished {
@@ -783,7 +783,6 @@ mod tests {
             FakeProvider::tool_turn(vec![read, unknown]),
             FakeProvider::text_turn("built"),
             FakeProvider::text_turn("addressed the review"),
-            FakeProvider::text_turn("nothing to simplify"),
         ]));
         let reviewer = Arc::new(FakeProvider::new(vec![
             FakeProvider::text_turn(&format!(

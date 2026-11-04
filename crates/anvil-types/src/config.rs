@@ -58,9 +58,9 @@ summarizer = "runpod"
 # session_tokens = 2000000     # abort the session once this many tokens are used
 #
 # Token budgets count input plus output plus cached input at a tenth, which is
-# roughly what is paid. Per-state budgets (plan, build, review, optimize,
-# verify) are summed over every visit to the state. Exceeding one ends the
-# session as incomplete.
+# roughly what is paid. Per-state budgets (plan, build, review, verify) are
+# summed over every visit to the state. Exceeding one ends the session as
+# incomplete.
 # [limits.build]
 # max_turns = 100
 # max_tokens = 1000000
@@ -144,9 +144,9 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # session_tokens = 2000000     # abort the session once this many tokens are used
 #
 # Token budgets count input plus output plus cached input at a tenth, which is
-# roughly what is paid. Per-state budgets (plan, build, review, optimize,
-# verify) are summed over every visit to the state. Exceeding one ends the
-# session as incomplete.
+# roughly what is paid. Per-state budgets (plan, build, review, verify) are
+# summed over every visit to the state. Exceeding one ends the session as
+# incomplete.
 # [limits.build]
 # max_turns = 100
 # max_tokens = 1000000
@@ -363,8 +363,6 @@ pub struct LimitsConfig {
     pub build: StateBudget,
     /// Budget of the Review state.
     pub review: StateBudget,
-    /// Budget of the Optimize state.
-    pub optimize: StateBudget,
     /// Budget of the Verify state.
     pub verify: StateBudget,
 }
@@ -378,7 +376,6 @@ impl Default for LimitsConfig {
             plan: StateBudget::default(),
             build: StateBudget::default(),
             review: StateBudget::default(),
-            optimize: StateBudget::default(),
             verify: StateBudget::default(),
         }
     }

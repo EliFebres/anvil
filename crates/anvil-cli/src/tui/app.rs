@@ -847,7 +847,6 @@ mod tests {
             FakeProvider::tool_turn(vec![write]),
             FakeProvider::text_turn("Built it.\n"),
             FakeProvider::text_turn("Addressed the review.\n"),
-            FakeProvider::text_turn("Nothing to simplify.\n"),
             FakeProvider::text_turn("Verified.\n"),
             FakeProvider::text_turn("Done.\n"),
         ]));

@@ -146,7 +146,12 @@ impl<O: Write, E: Write> Renderer<O, E> {
             LoopEvent::ReviewVerdict { verdict } => {
                 self.end_line();
                 match verdict {
-                    ReviewVerdict::Approve => self.err_line("review: approved"),
+                    ReviewVerdict::Approve { notes } => {
+                        self.err_line("review: approved");
+                        for note in notes {
+                            self.err_line(&format!("  note: {note}"));
+                        }
+                    }
                     ReviewVerdict::Changes { items } => {
                         self.err_line("review: changes requested");
                         for item in items {
@@ -388,6 +393,26 @@ mod tests {
                 summary_path: PathBuf::from("summary.md"),
             },
         ]
+    }
+
+    #[tokio::test]
+    async fn approval_notes_follow_the_verdict_line() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(LoopEvent::ReviewVerdict {
+            verdict: ReviewVerdict::Approve {
+                notes: vec!["a.rs: `total` could fold into `sum`".to_owned()],
+            },
+        })
+        .expect("open channel");
+        drop(tx);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        render_to(rx, false, &mut out, &mut err).await;
+        let err = String::from_utf8(err).expect("utf-8 stderr");
+        assert!(
+            err.contains("review: approved\n  note: a.rs: `total` could fold into `sum`\n"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

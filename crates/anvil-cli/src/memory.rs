@@ -458,7 +458,6 @@ mod tests {
         let coder = Arc::new(FakeProvider::new(vec![
             FakeProvider::text_turn(plan),
             FakeProvider::text_turn("built"),
-            FakeProvider::text_turn("nothing to simplify"),
         ]));
         let reviewer = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
             "```json\n{\"verdict\": \"approve\"}\n```",
