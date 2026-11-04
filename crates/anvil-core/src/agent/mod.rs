@@ -1167,6 +1167,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_call_of_one_turn_runs_and_answers_in_one_message() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![write_call("a.txt"), write_call("b.txt")]),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("nothing to simplify"),
+            ],
+            vec![approve()],
+        );
+        let agent = h.default_agent(
+            CheckCommand::Command("exit 0".to_owned()),
+            "allow = [\"write_file\"]",
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+        assert!(h.dir.path().join("a.txt").exists());
+        assert!(h.dir.path().join("b.txt").exists());
+        let next = &h.coder.requests()[2];
+        let Some(Message::ToolResults { results }) = next.messages.last() else {
+            panic!("the turn after the calls ends with their results");
+        };
+        let ids: Vec<&str> = results.iter().map(|r| r.call_id.as_str()).collect();
+        assert_eq!(ids, ["w-a.txt", "w-b.txt"]);
+    }
+
+    #[tokio::test]
     async fn review_changes_loop_back_until_the_cap() {
         let mut h = Harness::new(
             vec![
