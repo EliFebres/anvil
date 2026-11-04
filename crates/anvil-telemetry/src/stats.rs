@@ -60,6 +60,18 @@ pub struct ProviderStats {
     pub cost: Option<f64>,
 }
 
+impl ProviderStats {
+    /// Prompt tokens (uncached plus cached input) per turn: how much context
+    /// each completion re-sent.
+    ///
+    /// # Returns
+    ///
+    /// The mean, or `None` without turns.
+    pub fn context_per_turn(&self) -> Option<u64> {
+        (self.turns > 0).then(|| (self.input + self.cached) / self.turns as u64)
+    }
+}
+
 /// Calls and failures of one tool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolStats {
@@ -82,6 +94,8 @@ pub struct Stats {
     pub done: usize,
     /// Runs that ended any other way.
     pub failed: usize,
+    /// Completions over every provider, compactions included.
+    pub turns: usize,
     /// Token use per provider.
     pub providers: BTreeMap<String, ProviderStats>,
     /// The most called tools, most calls first.
@@ -161,6 +175,7 @@ impl Stats {
                 None => stats.failed += 1,
             }
         }
+        stats.turns = stats.providers.values().map(|p| p.turns).sum();
         for (name, entry) in &mut stats.providers {
             entry.cost = prices
                 .get(name)
@@ -211,18 +226,28 @@ impl fmt::Display for Stats {
             )?,
             None => writeln!(f, "completion rate: n/a")?,
         }
+        if self.sessions > 0 {
+            writeln!(
+                f,
+                "turns per session: {:.1}",
+                self.turns as f64 / self.sessions as f64
+            )?;
+        }
         writeln!(
             f,
-            "\nprovider        turns   input      output     cached     cost"
+            "\nprovider        turns   input      output     cached     ctx/turn   cost"
         )?;
         for (name, p) in &self.providers {
             let cost = p
                 .cost
                 .map(|cost| format!("${cost:.2}"))
                 .unwrap_or_else(|| "n/a".to_owned());
+            let context = p
+                .context_per_turn()
+                .map_or_else(|| "n/a".to_owned(), |c| c.to_string());
             writeln!(
                 f,
-                "{name:<15} {:<7} {:<10} {:<10} {:<10} {cost}",
+                "{name:<15} {:<7} {:<10} {:<10} {:<10} {context:<10} {cost}",
                 p.turns, p.input, p.output, p.cached
             )?;
         }
@@ -394,6 +419,11 @@ mod tests {
         assert_eq!(slow.turns, 2);
         assert_eq!(slow.input, 15);
         assert_eq!(slow.cost, None);
+        assert_eq!(stats.turns, 3);
+        assert_eq!(
+            slow.context_per_turn(),
+            Some((slow.input + slow.cached) / 2)
+        );
         assert_eq!(stats.tools[0].name, "glob");
         assert_eq!(stats.tools[0].calls, 2);
         assert_eq!(stats.tools[1].failures, 1);
@@ -404,6 +434,8 @@ mod tests {
         );
         let text = stats.to_string();
         assert!(text.contains("completion rate: 33%"));
+        assert!(text.contains("turns per session: 0.8"), "{text}");
+        assert!(text.contains("ctx/turn"));
         assert!(text.contains("$3.00"));
         assert!(text.contains("provider_error:http"));
     }

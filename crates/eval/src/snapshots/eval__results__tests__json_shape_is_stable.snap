@@ -35,6 +35,8 @@ expression: result
             "output": 100,
             "cached": 50
           },
+          "tool_calls": 4,
+          "turns": 3,
           "cost_usd": 0.01,
           "anvil_ms": 1500,
           "check_ms": 200,
@@ -58,6 +60,8 @@ expression: result
             "output": 100,
             "cached": 50
           },
+          "tool_calls": 9,
+          "turns": 7,
           "cost_usd": 0.01,
           "anvil_ms": 1500,
           "check_ms": 200,
@@ -88,6 +92,8 @@ expression: result
             "output": 100,
             "cached": 50
           },
+          "tool_calls": 4,
+          "turns": 3,
           "cost_usd": 0.01,
           "anvil_ms": 1500,
           "check_ms": 200,
@@ -110,6 +116,8 @@ expression: result
             "output": 100,
             "cached": 50
           },
+          "tool_calls": 4,
+          "turns": 3,
           "cost_usd": 0.01,
           "anvil_ms": 1500,
           "check_ms": 200,

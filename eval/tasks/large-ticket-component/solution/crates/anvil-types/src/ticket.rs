@@ -1,0 +1,492 @@
+//! The ticket: the unit of work handed from anvil to the factory.
+
+use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use ulid::Ulid;
+
+use crate::boundary;
+use crate::error::ValidationError;
+
+/// Maximum length of a ticket title, in characters.
+pub const MAX_TITLE_CHARS: usize = 80;
+
+/// What kind of improvement a ticket asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketKind {
+    /// A new or changed tool.
+    Tool,
+    /// A new or changed skill.
+    Skill,
+    /// A prompt change.
+    Prompt,
+    /// A change to the agent loop itself.
+    Loop,
+    /// A change to cross-project memory.
+    Memory,
+    /// A change to a model or provider.
+    Model,
+    /// Something that is simply broken.
+    Bug,
+}
+
+/// How urgently a ticket should be worked.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    /// Blocks normal use; work it first.
+    P0,
+    /// Important, not blocking.
+    P1,
+    /// Nice to have.
+    P2,
+}
+
+/// Where a ticket is in its lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketStatus {
+    /// Drafted by anvil in `tickets/draft/`, not yet submitted.
+    Draft,
+    /// Waiting in `tickets/open/`.
+    Open,
+    /// A factory worker has taken it.
+    Claimed,
+    /// A pull request exists and is under review.
+    InReview,
+    /// Parked for a human: a protected path, or a kind the factory cannot work yet.
+    Waiting,
+    /// Merged to trunk.
+    Merged,
+    /// Closed without merging.
+    Rejected,
+}
+
+/// Where tickets live in the repository, one folder per state, on the
+/// [`dirs::STATE_BRANCH`] branch.
+pub mod dirs {
+    use super::TicketStatus;
+
+    /// The branch that carries ticket state. Code never goes here; ticket
+    /// files never go to `main`.
+    pub const STATE_BRANCH: &str = "factory/state";
+
+    /// The folder that holds every state folder.
+    pub const TICKETS_DIR: &str = "tickets";
+
+    /// Submitted tickets waiting for the factory.
+    pub const OPEN_DIR: &str = "tickets/open";
+
+    /// Tickets a worker has taken, including those with an open pull request.
+    pub const CLAIMED_DIR: &str = "tickets/claimed";
+
+    /// Tickets parked for a human.
+    pub const WAITING_DIR: &str = "tickets/waiting";
+
+    /// Tickets whose pull request merged.
+    pub const MERGED_DIR: &str = "tickets/merged";
+
+    /// Tickets the factory gave up on; `<id>.notes.md` sits next to each.
+    pub const REJECTED_DIR: &str = "tickets/rejected";
+
+    /// Every committed state folder.
+    pub const ALL: [&str; 5] = [OPEN_DIR, CLAIMED_DIR, WAITING_DIR, MERGED_DIR, REJECTED_DIR];
+
+    /// The folder a ticket in `status` lives in.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The ticket status.
+    ///
+    /// # Returns
+    ///
+    /// The repository-relative folder, or `None` for drafts, which are never
+    /// committed.
+    pub fn dir_for(status: TicketStatus) -> Option<&'static str> {
+        match status {
+            TicketStatus::Draft => None,
+            TicketStatus::Open => Some(OPEN_DIR),
+            TicketStatus::Claimed | TicketStatus::InReview => Some(CLAIMED_DIR),
+            TicketStatus::Waiting => Some(WAITING_DIR),
+            TicketStatus::Merged => Some(MERGED_DIR),
+            TicketStatus::Rejected => Some(REJECTED_DIR),
+        }
+    }
+}
+
+/// Who created the ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketOrigin {
+    /// Drafted by anvil's own telemetry.
+    Cli,
+    /// Drafted by the factory, for example from a failed review.
+    Factory,
+    /// Written by a person.
+    Human,
+}
+
+/// Reference to one event in anvil's own telemetry store.
+///
+/// Carries the id only, never the event content, so a ticket can point at
+/// evidence without leaking what the user was working on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct TelemetryRef(#[schemars(with = "String")] pub Ulid);
+
+/// Longest `component` accepted, in characters.
+pub const MAX_COMPONENT_CHARS: usize = 64;
+
+/// A request for the factory to improve anvil.
+///
+/// Tickets are stored as `tickets/open/<id>.toml`. Call [`Ticket::validate`]
+/// after deserializing; serde checks the shape, the validator checks the
+/// data boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Ticket {
+    /// Unique, time-ordered id. Also the file stem.
+    #[schemars(with = "String")]
+    pub id: Ulid,
+    /// When the ticket was created, RFC 3339.
+    pub created_at: DateTime<Utc>,
+    /// What kind of improvement is wanted.
+    pub kind: TicketKind,
+    /// One line, at most [`MAX_TITLE_CHARS`] characters.
+    pub title: String,
+    /// What went wrong or what was missing, in plain words.
+    pub symptom: String,
+    /// A synthetic reproduction. Never project code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repro: Option<String>,
+    /// The interface wanted: CLI flags, tool JSON schema, skill name and trigger.
+    pub spec: String,
+    /// The crate or area the ticket concerns, such as `anvil-core`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    /// Checks the factory must make pass.
+    pub acceptance: Vec<String>,
+    /// Ids into anvil's telemetry, not content.
+    #[serde(default)]
+    pub evidence: Vec<TelemetryRef>,
+    /// How urgent the ticket is.
+    pub priority: Priority,
+    /// Where the ticket is in its lifecycle.
+    pub status: TicketStatus,
+    /// Who created it.
+    pub origin: TicketOrigin,
+    /// When a factory worker claimed it. Set from `claimed` on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// The hostname of the worker that claimed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
+    /// The pull request number, once one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<u64>,
+    /// Why the ticket is where it is: the reason it waits for a human or was rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl Ticket {
+    /// Checks the ticket's invariants and the anvil/factory data boundary.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` when the title is 1 to [`MAX_TITLE_CHARS`] characters, the
+    /// symptom and spec are non-empty, there is at least one acceptance check,
+    /// neither `spec` nor `repro` names a path outside the monorepo or holds
+    /// more than [`boundary::MAX_CODE_LINES`] lines of code, and the fields
+    /// the status implies are present: `claimed_at` and `claimed_by` from
+    /// `claimed` on, `pr` when merged, `note` when waiting or rejected.
+    ///
+    /// # Errors
+    ///
+    /// The first [`ValidationError`] found, in field order.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.check_status_fields()?;
+        let title_len = self.title.chars().count();
+        if title_len == 0 {
+            return Err(ValidationError::EmptyField { field: "title" });
+        }
+        if title_len > MAX_TITLE_CHARS {
+            return Err(ValidationError::TitleTooLong {
+                len: title_len,
+                max: MAX_TITLE_CHARS,
+            });
+        }
+        if self.symptom.trim().is_empty() {
+            return Err(ValidationError::EmptyField { field: "symptom" });
+        }
+        if self.spec.trim().is_empty() {
+            return Err(ValidationError::EmptyField { field: "spec" });
+        }
+        if let Some(component) = &self.component {
+            let valid = (1..=MAX_COMPONENT_CHARS).contains(&component.len())
+                && component
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            if !valid {
+                return Err(ValidationError::InvalidComponent {
+                    component: component.clone(),
+                });
+            }
+        }
+        if self.acceptance.is_empty() {
+            return Err(ValidationError::EmptyAcceptance);
+        }
+        boundary::check_text("spec", &self.spec)?;
+        if let Some(repro) = &self.repro {
+            boundary::check_text("repro", repro)?;
+        }
+        Ok(())
+    }
+
+    /// Fails when a field the status implies is missing.
+    fn check_status_fields(&self) -> Result<(), ValidationError> {
+        let missing = |field: &'static str| ValidationError::MissingForStatus {
+            field,
+            status: self.status,
+        };
+        let claimed = matches!(
+            self.status,
+            TicketStatus::Claimed
+                | TicketStatus::InReview
+                | TicketStatus::Waiting
+                | TicketStatus::Merged
+                | TicketStatus::Rejected
+        );
+        if claimed && self.status != TicketStatus::Waiting {
+            if self.claimed_at.is_none() {
+                return Err(missing("claimed_at"));
+            }
+            if self.claimed_by.as_deref().is_none_or(str::is_empty) {
+                return Err(missing("claimed_by"));
+            }
+        }
+        match self.status {
+            TicketStatus::InReview | TicketStatus::Merged if self.pr.is_none() => {
+                Err(missing("pr"))
+            }
+            TicketStatus::Waiting | TicketStatus::Rejected
+                if self
+                    .note
+                    .as_deref()
+                    .is_none_or(|note| note.trim().is_empty()) =>
+            {
+                Err(missing("note"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Ticket {
+        Ticket {
+            id: Ulid::from_string("01J9Z6Q4K8XW2R3T5V7Y9B1D3F").expect("valid ulid literal"),
+            created_at: "2026-10-30T10:00:00Z".parse().expect("valid rfc3339"),
+            kind: TicketKind::Tool,
+            title: "Add a `grep` tool with a max-results flag".to_owned(),
+            symptom: "The agent reads whole files to find one symbol.".to_owned(),
+            repro: Some("```\nanvil run \"find callers of foo\"\n```".to_owned()),
+            spec: "Tool `grep` with `pattern`, `path`, `max_results` (default 50).".to_owned(),
+            component: None,
+            acceptance: vec!["cargo test -p anvil-core passes".to_owned()],
+            evidence: vec![TelemetryRef(
+                Ulid::from_string("01J9Z6Q4K8XW2R3T5V7Y9B1D3G").expect("valid ulid literal"),
+            )],
+            priority: Priority::P1,
+            status: TicketStatus::Open,
+            origin: TicketOrigin::Cli,
+            claimed_at: None,
+            claimed_by: None,
+            pr: None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn sample_is_valid() {
+        sample().validate().expect("sample ticket validates");
+    }
+
+    #[test]
+    fn status_implies_fields() {
+        let mut ticket = sample();
+        ticket.status = TicketStatus::Claimed;
+        assert_eq!(
+            ticket.validate(),
+            Err(ValidationError::MissingForStatus {
+                field: "claimed_at",
+                status: TicketStatus::Claimed
+            })
+        );
+        ticket.claimed_at = Some(ticket.created_at);
+        ticket.claimed_by = Some("nuc".to_owned());
+        ticket.validate().expect("claimed with both fields");
+        ticket.status = TicketStatus::Merged;
+        assert!(matches!(
+            ticket.validate(),
+            Err(ValidationError::MissingForStatus { field: "pr", .. })
+        ));
+        ticket.pr = Some(12);
+        ticket.validate().expect("merged with a pr");
+        ticket.status = TicketStatus::Rejected;
+        assert!(matches!(
+            ticket.validate(),
+            Err(ValidationError::MissingForStatus { field: "note", .. })
+        ));
+        ticket.note = Some("gate A failed twice".to_owned());
+        ticket.validate().expect("rejected with a note");
+        let mut waiting = sample();
+        waiting.status = TicketStatus::Waiting;
+        waiting.note = Some("model tickets wait for `anvil serve`".to_owned());
+        waiting.validate().expect("waiting needs only a note");
+    }
+
+    #[test]
+    fn folders_follow_the_status() {
+        assert_eq!(dirs::dir_for(TicketStatus::Draft), None);
+        assert_eq!(dirs::dir_for(TicketStatus::Open), Some("tickets/open"));
+        assert_eq!(
+            dirs::dir_for(TicketStatus::Claimed),
+            Some("tickets/claimed")
+        );
+        assert_eq!(
+            dirs::dir_for(TicketStatus::InReview),
+            Some("tickets/claimed")
+        );
+        assert_eq!(
+            dirs::dir_for(TicketStatus::Waiting),
+            Some("tickets/waiting")
+        );
+        assert_eq!(dirs::dir_for(TicketStatus::Merged), Some("tickets/merged"));
+        assert_eq!(
+            dirs::dir_for(TicketStatus::Rejected),
+            Some("tickets/rejected")
+        );
+        assert!(dirs::ALL.iter().all(|dir| dir.starts_with("tickets/")));
+    }
+
+    #[test]
+    fn optional_fields_are_omitted_when_unset() {
+        let text = toml::to_string(&sample()).expect("serializes");
+        for field in ["claimed_at", "claimed_by", "pr", "note"] {
+            let key = format!(
+                "
+{field} = "
+            );
+            assert!(!text.contains(&key), "{field} in {text}");
+        }
+    }
+
+    #[test]
+    fn toml_round_trip() {
+        let ticket = sample();
+        let text = toml::to_string_pretty(&ticket).expect("serializes to toml");
+        let back: Ticket = toml::from_str(&text).expect("parses back");
+        assert_eq!(back, ticket);
+    }
+
+    #[test]
+    fn json_round_trip() {
+        let ticket = sample();
+        let text = serde_json::to_string(&ticket).expect("serializes to json");
+        let back: Ticket = serde_json::from_str(&text).expect("parses back");
+        assert_eq!(back, ticket);
+    }
+
+    #[test]
+    fn id_and_timestamp_serialize_as_strings() {
+        let text = toml::to_string(&sample()).expect("serializes");
+        assert!(
+            text.contains("id = \"01J9Z6Q4K8XW2R3T5V7Y9B1D3F\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("created_at = \"2026-10-30T10:00:00Z\""),
+            "{text}"
+        );
+        assert!(
+            text.contains("evidence = [\"01J9Z6Q4K8XW2R3T5V7Y9B1D3G\"]"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn enums_use_snake_case_spellings() {
+        let json = |v: &dyn erased::Ser| v.json();
+        assert_eq!(json(&TicketStatus::InReview), "\"in_review\"");
+        assert_eq!(json(&Priority::P0), "\"p0\"");
+        assert_eq!(json(&TicketKind::Loop), "\"loop\"");
+        assert_eq!(json(&TicketOrigin::Factory), "\"factory\"");
+    }
+
+    /// Tiny object-safe shim so one closure can serialize several enum types.
+    mod erased {
+        pub trait Ser {
+            fn json(&self) -> String;
+        }
+        impl<T: serde::Serialize> Ser for T {
+            fn json(&self) -> String {
+                serde_json::to_string(self).expect("enum serializes")
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        let mut text = toml::to_string(&sample()).expect("serializes");
+        text.push_str("\nassignee = \"someone\"\n");
+        assert!(toml::from_str::<Ticket>(&text).is_err());
+    }
+
+    #[test]
+    fn title_limit_is_eighty_characters() {
+        let mut ticket = sample();
+        ticket.title = "x".repeat(MAX_TITLE_CHARS);
+        ticket.validate().expect("80 characters is allowed");
+        ticket.title.push('x');
+        assert_eq!(
+            ticket.validate(),
+            Err(ValidationError::TitleTooLong { len: 81, max: 80 })
+        );
+    }
+
+    #[test]
+    fn empty_required_fields_are_rejected() {
+        let mut ticket = sample();
+        ticket.symptom = "   ".to_owned();
+        assert_eq!(
+            ticket.validate(),
+            Err(ValidationError::EmptyField { field: "symptom" })
+        );
+        let mut ticket = sample();
+        ticket.acceptance.clear();
+        assert_eq!(ticket.validate(), Err(ValidationError::EmptyAcceptance));
+    }
+
+    #[test]
+    fn boundary_applies_to_spec_and_repro() {
+        let mut ticket = sample();
+        ticket.spec = "read C:\\Users\\someone\\project\\main.rs".to_owned();
+        assert!(matches!(
+            ticket.validate(),
+            Err(ValidationError::OutsidePath { field: "spec", .. })
+        ));
+        let mut ticket = sample();
+        ticket.repro = Some("see /home/someone/project".to_owned());
+        assert!(matches!(
+            ticket.validate(),
+            Err(ValidationError::OutsidePath { field: "repro", .. })
+        ));
+    }
+}

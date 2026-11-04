@@ -2,7 +2,8 @@
 //!
 //! anvil prints no usage; it appends one JSON object per line to
 //! `<cwd>/.anvil/telemetry/<UTC date>.jsonl`. The harness reads the `turn`
-//! and `compacted` records of one session and sums their `tokens`.
+//! and `compacted` records of one session and sums their `tokens`, and counts
+//! its `tool_call` records.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -38,6 +39,8 @@ pub struct SessionUsage {
     pub coder_model: Option<String>,
     /// How many `turn` records were counted.
     pub turns: u32,
+    /// How many `tool_call` records were counted.
+    pub tool_calls: u32,
 }
 
 /// The fields of a telemetry record the harness reads.
@@ -106,6 +109,10 @@ impl SessionUsage {
     /// Adds one record if it belongs to the session and carries tokens.
     fn absorb(&mut self, record: UsageRecord, session: Option<&str>) {
         if session.is_some_and(|wanted| record.session != wanted) {
+            return;
+        }
+        if record.event == "tool_call" {
+            self.tool_calls += 1;
             return;
         }
         let is_usage = record.event == "turn" || record.event == "compacted";
@@ -230,6 +237,7 @@ mod tests {
             }
         );
         assert_eq!(usage.turns, 1);
+        assert_eq!(usage.tool_calls, 1);
         assert_eq!(usage.coder_provider.as_deref(), Some("fast"));
         assert_eq!(usage.coder_model.as_deref(), Some("m1"));
         assert_eq!(usage.by_provider["summ"].tokens.input, 200);

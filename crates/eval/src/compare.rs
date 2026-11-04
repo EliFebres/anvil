@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::results::{RunResult, money, percent, thousands};
+use crate::results::{Efficiency, RunResult, TaskResult, money, percent, thousands};
 
 /// Which tasks changed verdict between two runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +67,8 @@ pub struct RunSummary {
     pub cost_usd: Option<f64>,
     /// Cost per passing task, when known.
     pub cost_per_passed_task: Option<f64>,
+    /// What the run spent per attempt.
+    pub efficiency: Efficiency,
 }
 
 impl From<&RunResult> for RunSummary {
@@ -79,6 +81,7 @@ impl From<&RunResult> for RunSummary {
             tokens: run.totals.tokens.total(),
             cost_usd: run.totals.cost_usd,
             cost_per_passed_task: run.totals.cost_per_passed_task,
+            efficiency: Efficiency::of(&run.tasks),
         }
     }
 }
@@ -105,6 +108,23 @@ pub struct Comparison {
     pub rows: Vec<CompareRow>,
     /// Which tasks flipped.
     pub flips: Flips,
+    /// The figures split into small and large tasks, when either run has a
+    /// task tagged [`LARGE_TAG`]; empty otherwise.
+    pub groups: Vec<Group>,
+}
+
+/// The tag that puts a task in the large group.
+pub const LARGE_TAG: &str = "large";
+
+/// One group of tasks in both runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Group {
+    /// `small` or `large`.
+    pub name: &'static str,
+    /// The first run's figures for the group.
+    pub a: Efficiency,
+    /// The second run's figures for the group.
+    pub b: Efficiency,
 }
 
 /// Compares two results.
@@ -137,6 +157,7 @@ pub fn compare(a: &RunResult, b: &RunResult) -> Comparison {
         b: RunSummary::from(b),
         rows,
         flips: Flips::between(a, b),
+        groups: groups(a, b),
     }
 }
 
@@ -204,7 +225,21 @@ impl fmt::Display for Comparison {
             money(self.a.cost_per_passed_task),
             money(self.b.cost_per_passed_task),
         )?;
+        write_efficiency(f, name_width, col, &self.a.efficiency, &self.b.efficiency)?;
+        for group in &self.groups {
+            writeln!(f)?;
+            writeln!(f, "{} tasks", group.name)?;
+            write_efficiency(f, name_width, col, &group.a, &group.b)?;
+        }
         writeln!(f)?;
+        writeln!(
+            f,
+            "input tokens / passed task: {}",
+            change(
+                self.a.efficiency.input_per_passed,
+                self.b.efficiency.input_per_passed
+            )
+        )?;
         writeln!(
             f,
             "flipped: {} fixed, {} regressed",
@@ -221,6 +256,108 @@ impl fmt::Display for Comparison {
             writeln!(f, "  not in second run: {}", self.flips.missing.join(", "))?;
         }
         Ok(())
+    }
+}
+
+/// Small and large groups, or none when neither run has a large task.
+fn groups(a: &RunResult, b: &RunResult) -> Vec<Group> {
+    let is_large = |task: &&TaskResult| task.tags.iter().any(|tag| tag == LARGE_TAG);
+    let split = |run: &RunResult| -> (Vec<TaskResult>, Vec<TaskResult>) {
+        run.tasks.iter().cloned().partition(|task| !is_large(&task))
+    };
+    let (a_small, a_large) = split(a);
+    let (b_small, b_large) = split(b);
+    if a_large.is_empty() && b_large.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        Group {
+            name: "small",
+            a: Efficiency::of(&a_small),
+            b: Efficiency::of(&b_small),
+        },
+        Group {
+            name: "large",
+            a: Efficiency::of(&a_large),
+            b: Efficiency::of(&b_large),
+        },
+    ]
+}
+
+/// Writes the per-attempt figures of two runs, with the change between them.
+fn write_efficiency(
+    f: &mut fmt::Formatter<'_>,
+    name_width: usize,
+    col: usize,
+    a: &Efficiency,
+    b: &Efficiency,
+) -> fmt::Result {
+    let rows: [(&str, Option<f64>, Option<f64>, usize); 10] = [
+        (
+            "attempts",
+            Some(a.attempts as f64),
+            Some(b.attempts as f64),
+            0,
+        ),
+        (
+            "pass rate %",
+            Some(a.pass_rate * 100.0),
+            Some(b.pass_rate * 100.0),
+            1,
+        ),
+        ("turns / task", Some(a.turns_mean), Some(b.turns_mean), 1),
+        ("context / turn", a.context_per_turn, b.context_per_turn, 0),
+        (
+            "input / task mean",
+            Some(a.input_mean),
+            Some(b.input_mean),
+            0,
+        ),
+        (
+            "input / task median",
+            Some(a.input_median),
+            Some(b.input_median),
+            0,
+        ),
+        (
+            "uncached / task",
+            Some(a.uncached_input_mean),
+            Some(b.uncached_input_mean),
+            0,
+        ),
+        (
+            "input / passed task",
+            a.input_per_passed,
+            b.input_per_passed,
+            0,
+        ),
+        (
+            "tool calls / task",
+            Some(a.tool_calls_mean),
+            Some(b.tool_calls_mean),
+            1,
+        ),
+        ("cost per task", a.cost_per_attempt, b.cost_per_attempt, 4),
+    ];
+    for (label, a, b, digits) in rows {
+        let shown =
+            |v: Option<f64>| v.map_or_else(|| "n/a".to_owned(), |v| format!("{v:.digits$}"));
+        writeln!(
+            f,
+            "{label:<name_width$}  {:<col$}  {:<col$}  {}",
+            shown(a),
+            shown(b),
+            change(a, b)
+        )?;
+    }
+    Ok(())
+}
+
+/// The relative change from `a` to `b` as `-31.2%`, or `n/a`.
+fn change(a: Option<f64>, b: Option<f64>) -> String {
+    match (a, b) {
+        (Some(a), Some(b)) if a > 0.0 => format!("{:+.1}%", (b - a) / a * 100.0),
+        _ => "n/a".to_owned(),
     }
 }
 
@@ -266,6 +403,24 @@ mod tests {
                 .map(|r| r.a.clone()),
             Some(None)
         );
+    }
+
+    #[test]
+    fn large_tagged_tasks_get_their_own_group() {
+        let small = || task("py-small", &[true, true, true]);
+        let a = run("aaa", "m1", vec![small()]);
+        assert!(compare(&a, &a).groups.is_empty());
+
+        let mut large = task("large-rename", &[true, false, false]);
+        large.tags.push(LARGE_TAG.to_owned());
+        let b = run("bbb", "m1", vec![small(), large]);
+        let comparison = compare(&a, &b);
+        let names: Vec<&str> = comparison.groups.iter().map(|g| g.name).collect();
+        assert_eq!(names, ["small", "large"]);
+        assert_eq!(comparison.groups[0].b.attempts, 3);
+        assert_eq!(comparison.groups[1].a.attempts, 0);
+        assert!((comparison.groups[1].b.pass_rate - 1.0 / 3.0).abs() < 1e-9);
+        assert!(comparison.to_string().contains("large tasks"));
     }
 
     #[test]

@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: nothing here pushes, tags or comments.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      # The version must equal rust-toolchain.toml; anvil-types' tests check it.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test --all
+      - name: scan-keys
+        run: cargo run -q -p anvil-cli -- scan-keys
+      - name: no-old-name
+        shell: bash
+        # The old program name may survive only in the legacy migration module and its test.
+        # git grep is on every runner; ripgrep is missing on windows-latest. The
+        # step runs under `bash -e`, so the no-match exit is negated, not tested.
+        run: |
+          ! git grep -i -I -E --untracked 'f[o]rge' -- . ':!crates/anvil-cli/src/legacy.rs' ':!crates/anvil-cli/tests/legacy.rs'
+
+  # The whole worker pipeline, for real: the worker image, the static anvil
+  # mounted into it, the egress proxy, worktrees, gates and the merge, against
+  # a local bare repository and a scripted provider. podman is preinstalled.
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: musl-tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+      - name: worker image
+        run: podman build -q -t localhost/anvil-factory:latest -f deploy/nuc/Containerfile .
+      - name: static anvil
+        run: cargo build --release --target x86_64-unknown-linux-musl -p anvil-cli
+      - name: factory
+        run: cargo build -p factory-cli
+      - name: factory selftest
+        run: target/debug/factory selftest
+
+  # One status check named `ci` for branch protection to require.
+  ci:
+    needs: [check, selftest]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: every leg passed
+        run: |
+          test "${{ needs.check.result }}" = "success"
+          test "${{ needs.selftest.result }}" = "success"
