@@ -18,7 +18,7 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 
 | command | what happens |
 |---|---|
-| `anvil "<task>"` or `anvil run <task>` | One task through the state machine: `plan` (you approve the plan) → `build` → `review` (a second model) → `verify` (the project's checks and your rules). Exit code 0 when done, 2 when incomplete. |
+| `anvil "<task>"` or `anvil run <task>` | One task through the state machine: `plan` (you approve the plan, which ends with a `Check:` command) → `build` → `verify` (your rules, the project's checks and the plan's check, with no model turn) → `review` (a second model, which sees the check output). A project with no check command at all is reviewed first and then verified by the model. Exit code 0 when done, 2 when incomplete. |
 | `anvil chat` | A conversation with tools, outside the state machine. `/plan`, `/build` and `/review` switch the prompt and tool set; `rule: <text>` saves a standing rule on the spot; `/compact`, `/model <name>`, `/cost`, `/ticket <text>`, `/help`. |
 | `anvil resume <id>` | Continue a saved session from where it stopped. `anvil sessions` lists them. |
 | `anvil --yes ...` | Unattended: approve the plan, allow every asked tool call, keep every proposed memory. The factory and the eval harness run it this way. |

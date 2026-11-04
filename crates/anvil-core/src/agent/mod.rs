@@ -24,13 +24,14 @@ use std::time::Duration;
 use anvil_types::LimitsConfig;
 use serde::{Deserialize, Serialize};
 
-pub use checks::{ChangeCheckFailure, ChangeChecks, CheckCommand};
+pub use checks::{ChangeCheckFailure, ChangeChecks, CheckCommand, CheckSource};
 pub use events::{EventSink, LoopEvent};
 pub use gate::{AutoApprove, PlanDecision, PlanGate, ScriptedGate};
 pub use prompts::{Instruction, PromptSection};
 pub use state::{IncompleteReason, Rounds, State, Status};
 pub use verdict::{ReviewVerdict, VerifyVerdict};
 
+use self::plan::PlanCheck;
 use self::prompts::{PromptInputs, system_prompt};
 use self::state::{StateOutcome, Step, transition};
 use self::turn::{Turn, complete_turn};
@@ -54,6 +55,9 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Lines of check output shown to the model after a failure.
 const CHECK_TAIL_LINES: usize = 80;
+
+/// The tool whose permission rules cover a check command a plan declares.
+const SHELL_TOOL: &str = "shell";
 
 /// Settings for one run.
 #[derive(Debug, Clone)]
@@ -128,16 +132,14 @@ enum ModelEnd {
 /// The order the current build takes through review and checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Lane {
-    /// Review, then checks.
+    /// No check command: review, then the model verifies by hand.
     Full,
-    /// A small first build with a check command: checks before the review.
+    /// There is a check command: it runs before the review.
     CheckFirst,
-    /// The checks passed before the review; the reviewer sees this output.
+    /// The checks passed before the review; the reviewer sees their output.
     Checked {
-        /// The check command.
-        command: String,
-        /// The last lines it printed.
-        tail: String,
+        /// Each command that ran, with the last lines it printed.
+        runs: Vec<(String, String)>,
     },
 }
 
@@ -167,6 +169,9 @@ pub struct AgentLoop {
     /// Paths read or written, for instruction file discovery.
     touched: BTreeSet<PathBuf>,
     plan: Option<String>,
+    /// The command the approved plan's `Check:` line declared, when the
+    /// permission rules allow it.
+    plan_check: Option<String>,
     /// Git tree of the working tree at session start.
     baseline: Option<String>,
     /// What to tell the model when Build is entered again.
@@ -261,6 +266,7 @@ impl AgentLoop {
             plan: None,
             baseline: None,
             pending_feedback: None,
+            plan_check: None,
             review_notes: Vec::new(),
             lane: Lane::Full,
             last_text: String::new(),
@@ -296,6 +302,10 @@ impl AgentLoop {
         agent.conversation = Conversation::from_messages(snapshot.messages);
         agent.baseline = snapshot.baseline;
         agent.plan = std::fs::read_to_string(snapshot.dir.join(PLAN_FILE)).ok();
+        agent.plan_check = agent
+            .plan
+            .as_deref()
+            .and_then(|plan| agent.usable_plan_check(plan));
         let (start, note) = match (snapshot.last_state, snapshot.status) {
             (_, Some(status)) => (
                 State::Build,
@@ -417,13 +427,64 @@ impl AgentLoop {
             &self.touched,
         );
         instructions.extend(self.config.extra_instructions.iter().cloned());
+        let mut sections = self.config.sections.clone();
+        if state == State::Plan {
+            sections.push(self.check_section());
+        }
         system_prompt(&PromptInputs {
             state,
             instructions: &instructions,
-            sections: &self.config.sections,
+            sections: &sections,
             tools,
             task: &self.config.task,
         })
+    }
+
+    /// Tells the planner whether a check command was detected, so its
+    /// `Check:` line can say `auto` or must supply one.
+    fn check_section(&self) -> PromptSection {
+        let text = match self.config.check.resolve(&self.config.cwd) {
+            Some(command) => format!(
+                "anvil detected this project's check command: `{command}`. It runs after the build without you. End the plan with `Check: auto`, or with a command of your own only when `{command}` cannot exercise the change."
+            ),
+            None => "anvil found no check command for this project, so `Check: auto` would check nothing. End the plan with a `Check:` line that gives a command.".to_owned(),
+        };
+        PromptSection {
+            heading: "Check command".to_owned(),
+            text,
+        }
+    }
+
+    /// The command of the plan's `Check:` line, when it gives one that the
+    /// permission rules let anvil run.
+    fn usable_plan_check(&self, plan: &str) -> Option<String> {
+        let command = match plan::check_line(plan) {
+            PlanCheck::Command(command) => command,
+            PlanCheck::Auto | PlanCheck::Missing => return None,
+        };
+        let args = serde_json::json!({ "command": command });
+        match self.registry.permit(SHELL_TOOL, &args, &self.config.cwd) {
+            Ok(()) => Some(command),
+            Err(reason) => {
+                self.warn(format!("the plan's check command will not run: {reason}"));
+                None
+            }
+        }
+    }
+
+    /// The check commands Verify runs, in order: the detected or configured
+    /// one, then the plan's own when it is a different command.
+    fn check_commands(&self) -> Vec<(CheckSource, String)> {
+        let detected = self.config.check.resolve(&self.config.cwd);
+        let declared = self
+            .plan_check
+            .clone()
+            .filter(|command| Some(command) != detected.as_ref());
+        detected
+            .map(|command| (CheckSource::Detected, command))
+            .into_iter()
+            .chain(declared.map(|command| (CheckSource::Plan, command)))
+            .collect()
     }
 
     /// Compacts the conversation when the next request would be too large.
@@ -498,7 +559,10 @@ impl AgentLoop {
             self.events.emit(LoopEvent::PlanWritten { path });
             self.plan = Some(plan.clone());
             match self.gate.review(&plan) {
-                PlanDecision::Approve => return StateOutcome::Finished,
+                PlanDecision::Approve => {
+                    self.plan_check = self.usable_plan_check(&plan);
+                    return StateOutcome::Finished;
+                }
                 PlanDecision::Revise(feedback) => {
                     intro = Some(format!(
                         "The user wants the plan revised:\n{feedback}\n\nEnd your turn with the full revised plan."
@@ -523,19 +587,13 @@ impl AgentLoop {
         {
             return outcome;
         }
-        let small = self
-            .diff_lines()
-            .await
-            .is_some_and(|lines| lines < diff::SMALL_DIFF_LINES);
-        let first_build = self.rounds == Rounds::default();
-        let has_check = self.config.check.resolve(&self.config.cwd).is_some();
-        self.lane = if small && first_build && has_check {
-            Lane::CheckFirst
-        } else {
+        self.lane = if self.check_commands().is_empty() {
             Lane::Full
+        } else {
+            Lane::CheckFirst
         };
         if self.lane == Lane::CheckFirst {
-            StateOutcome::BuiltSmall
+            StateOutcome::ReadyToCheck
         } else {
             StateOutcome::Finished
         }
@@ -553,10 +611,11 @@ impl AgentLoop {
             self.rounds.review + 1,
             self.plan.as_deref().unwrap_or("(no plan)")
         );
-        if let Lane::Checked { command, tail } = &self.lane {
-            brief.push_str(&format!(
-                "\n\n# Check\n\n`{command}` passed:\n\n```\n{tail}\n```"
-            ));
+        if let Lane::Checked { runs } = &self.lane {
+            brief.push_str("\n\n# Check");
+            for (command, tail) in runs {
+                brief.push_str(&format!("\n\n`{command}` passed:\n\n```\n{tail}\n```"));
+            }
         }
         let mut messages = vec![Message::user(brief)];
         let mut verdict = None;
@@ -633,24 +692,46 @@ impl AgentLoop {
         }
     }
 
-    /// Verify: the change checks first, then the project's checks, or
-    /// have the model write a test.
+    /// Verify: the change checks first, then every check command, or have
+    /// the model write a test when there is none.
     async fn run_verify(&mut self) -> StateOutcome {
         let before_review = self.lane == Lane::CheckFirst;
         if before_review {
-            // Whatever happens next goes through the regular path.
+            // A failure below goes back to Build, which picks the lane again.
             self.lane = Lane::Full;
         }
         if let Some(outcome) = self.run_change_checks().await {
             return outcome;
         }
-        let Some(command) = self.config.check.resolve(&self.config.cwd) else {
+        let commands = self.check_commands();
+        if commands.is_empty() {
             return self.run_model_verify().await;
-        };
+        }
+        let mut runs = Vec::with_capacity(commands.len());
+        for (source, command) in commands {
+            let (passed, tail) = self.run_check(source, &command).await;
+            if !passed {
+                self.pending_feedback = Some(format!(
+                    "Verification failed. `{command}` exited with an error:\n```\n{tail}\n```\nFix the cause, then end your turn with what you changed."
+                ));
+                return StateOutcome::VerifyFailed(tail);
+            }
+            runs.push((command, tail));
+        }
+        if before_review {
+            self.lane = Lane::Checked { runs };
+            return StateOutcome::CheckedBeforeReview;
+        }
+        StateOutcome::VerifyPassed
+    }
+
+    /// Runs one check command and reports it; returns whether it passed and
+    /// the last lines it printed.
+    async fn run_check(&self, source: CheckSource, command: &str) -> (bool, String) {
         self.events.emit(LoopEvent::CheckStarted {
-            command: command.clone(),
+            command: command.to_owned(),
         });
-        let (passed, tail) = match shell::run_command(&self.ctx, &command, CHECK_TIMEOUT).await {
+        let (passed, tail) = match shell::run_command(&self.ctx, command, CHECK_TIMEOUT).await {
             Ok(run) => (
                 run.succeeded(),
                 tail_lines(&run.into_output().content, CHECK_TAIL_LINES),
@@ -658,21 +739,12 @@ impl AgentLoop {
             Err(error) => (false, format!("could not run `{command}`: {error}")),
         };
         self.events.emit(LoopEvent::CheckFinished {
-            command: command.clone(),
+            command: command.to_owned(),
+            source,
             passed,
             output_tail: tail.clone(),
         });
-        if passed && before_review {
-            self.lane = Lane::Checked { command, tail };
-            return StateOutcome::CheckedBeforeReview;
-        }
-        if passed {
-            return StateOutcome::VerifyPassed;
-        }
-        self.pending_feedback = Some(format!(
-            "Verification failed. `{command}` exited with an error:\n```\n{tail}\n```\nFix the cause, then end your turn with what you changed."
-        ));
-        StateOutcome::VerifyFailed(tail)
+        (passed, tail)
     }
 
     /// Runs the checks supplied from outside the loop on the changed files.
@@ -709,6 +781,7 @@ impl AgentLoop {
             .join("\n\n");
         self.events.emit(LoopEvent::CheckFinished {
             command: label,
+            source: CheckSource::Standing,
             passed,
             output_tail: report.clone(),
         });
@@ -879,13 +952,6 @@ impl AgentLoop {
             }
             error => StateOutcome::ProviderFailed(error),
         }
-    }
-
-    /// Lines the session's diff adds or removes, or `None` without git.
-    async fn diff_lines(&self) -> Option<usize> {
-        let baseline = self.baseline.as_ref()?;
-        let diff = diff::diff_since(&self.config.cwd, &self.config.session_dir, baseline).await?;
-        Some(diff::changed_lines(&diff))
     }
 
     /// The diff for the reviewer, or the touched-file list without git.
@@ -1224,7 +1290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_small_diff_whose_first_check_fails_takes_the_short_regular_path() {
+    async fn a_failed_first_check_is_fixed_and_checked_again_before_the_review() {
         let mut h = Harness::new(
             vec![
                 FakeProvider::text_turn(PLAN),
@@ -1250,16 +1316,16 @@ mod tests {
                 State::Build,
                 State::Verify,
                 State::Build,
-                State::Review,
-                State::Verify
+                State::Verify,
+                State::Review
             ]
         );
         let brief = format!("{:?}", h.reviewer.requests()[0].messages);
-        assert!(!brief.contains("# Check"), "{brief}");
+        assert!(brief.contains("# Check"), "{brief}");
     }
 
     #[tokio::test]
-    async fn a_large_diff_runs_the_full_loop() {
+    async fn a_large_diff_checks_first_too() {
         let mut h = Harness::new(
             vec![
                 FakeProvider::text_turn(PLAN),
@@ -1276,8 +1342,204 @@ mod tests {
         assert_eq!(agent.run().await.status, Status::Done);
         assert_eq!(
             h.states(),
-            [State::Plan, State::Build, State::Review, State::Verify]
+            [State::Plan, State::Build, State::Verify, State::Review]
         );
+    }
+
+    /// A plan that ends with the given `Check:` line.
+    fn plan_with_check(check: &str) -> Script {
+        FakeProvider::text_turn(&format!(
+            "# Plan\n\n1. [ ] Write hello.txt\n\nCheck: {check}\n"
+        ))
+    }
+
+    fn states_in(events: &[LoopEvent]) -> Vec<State> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LoopEvent::StateEntered { state, .. } => Some(*state),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn check_events(events: &[LoopEvent]) -> Vec<(CheckSource, String, bool)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LoopEvent::CheckFinished {
+                    command,
+                    source,
+                    passed,
+                    ..
+                } => Some((*source, command.clone(), *passed)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_plan_declared_check_runs_with_no_model_turn_in_verify() {
+        let mut h = Harness::new(
+            vec![
+                plan_with_check("test -f hello.txt && echo plan-check-ok"),
+                FakeProvider::tool_turn(vec![write_call("hello.txt")]),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+        );
+        // An empty project: nothing is detected, so the plan's command is the only check.
+        let agent = h.default_agent(CheckCommand::Detect, "allow = [\"write_file\", \"shell\"]");
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        let events = h.drain();
+        assert_eq!(
+            states_in(&events),
+            [State::Plan, State::Build, State::Verify, State::Review]
+        );
+        assert_eq!(
+            h.coder.calls(),
+            3,
+            "plan and two build turns; none in verify"
+        );
+        assert!(!result.spend.contains_key(&State::Verify));
+        assert_eq!(
+            check_events(&events),
+            [(
+                CheckSource::Plan,
+                "test -f hello.txt && echo plan-check-ok".to_owned(),
+                true
+            )]
+        );
+        let brief = format!("{:?}", h.reviewer.requests()[0].messages);
+        assert!(brief.contains("# Check"), "{brief}");
+        assert!(brief.contains("plan-check-ok"), "{brief}");
+        let plan_system = &h.coder.requests()[0].system;
+        assert!(plan_system.contains("# Check command"), "{plan_system}");
+        assert!(
+            plan_system.contains("found no check command"),
+            "{plan_system}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_plan_declared_check_sends_its_output_to_build() {
+        let mut h = Harness::new(
+            vec![
+                plan_with_check("test -f fixed.txt"),
+                FakeProvider::tool_turn(vec![write_call("hello.txt")]),
+                FakeProvider::text_turn("built"),
+                FakeProvider::tool_turn(vec![write_call("fixed.txt")]),
+                FakeProvider::text_turn("fixed"),
+            ],
+            vec![approve()],
+        );
+        let agent = h.default_agent(CheckCommand::None, "allow = [\"write_file\", \"shell\"]");
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        let events = h.drain();
+        assert_eq!(result.rounds.verify, 1);
+        assert_eq!(
+            states_in(&events),
+            [
+                State::Plan,
+                State::Build,
+                State::Verify,
+                State::Build,
+                State::Verify,
+                State::Review
+            ]
+        );
+        let rebuild = &h.coder.requests()[3];
+        assert!(rebuild.messages.iter().any(|m| matches!(
+            m,
+            Message::User { text } if text.contains("Verification failed") && text.contains("test -f fixed.txt")
+        )));
+        let checks = check_events(&events);
+        assert_eq!(
+            checks.iter().map(|check| check.2).collect::<Vec<_>>(),
+            [false, true]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_detected_check_and_a_plan_declared_one_both_run() {
+        let mut h = Harness::new(
+            vec![
+                plan_with_check("`echo from-the-plan`"),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+        );
+        let agent = h.default_agent(
+            CheckCommand::Command("echo detected-ok".to_owned()),
+            "allow = [\"shell\"]",
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+        assert_eq!(
+            check_events(&h.drain()),
+            [
+                (CheckSource::Detected, "echo detected-ok".to_owned(), true),
+                (CheckSource::Plan, "echo from-the-plan".to_owned(), true)
+            ]
+        );
+        let brief = format!("{:?}", h.reviewer.requests()[0].messages);
+        assert!(
+            brief.contains("detected-ok") && brief.contains("from-the-plan"),
+            "{brief}"
+        );
+        let plan_system = &h.coder.requests()[0].system;
+        assert!(
+            plan_system.contains("detected this project's check command: `echo detected-ok`"),
+            "{plan_system}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_auto_and_a_repeat_of_the_detected_command_run_it_once() {
+        for check in ["auto", "echo detected-ok"] {
+            let mut h = Harness::new(
+                vec![plan_with_check(check), FakeProvider::text_turn("built")],
+                vec![approve()],
+            );
+            let agent = h.default_agent(
+                CheckCommand::Command("echo detected-ok".to_owned()),
+                "allow = [\"shell\"]",
+            );
+            assert_eq!(agent.run().await.status, Status::Done);
+            assert_eq!(
+                check_events(&h.drain()),
+                [(CheckSource::Detected, "echo detected-ok".to_owned(), true)],
+                "Check: {check}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_plan_check_the_permission_rules_refuse_is_not_run() {
+        let mut h = Harness::new(
+            vec![
+                plan_with_check("echo never-runs"),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("```json\n{\"verdict\": \"pass\"}\n```"),
+            ],
+            vec![approve()],
+        );
+        // No rule allows `shell` and the prompt answers no.
+        let agent = h.default_agent(CheckCommand::None, "");
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        let events = h.drain();
+        assert_eq!(
+            states_in(&events),
+            [State::Plan, State::Build, State::Review, State::Verify],
+            "without a usable check the model verifies after the review"
+        );
+        assert!(check_events(&events).is_empty());
+        assert!(events.iter().any(|e| matches!(
+            e,
+            LoopEvent::Warning(text) if text.contains("the plan's check command will not run")
+        )));
     }
 
     #[tokio::test]
@@ -1294,7 +1556,7 @@ mod tests {
         assert_eq!(result.status, Status::Done);
         assert_eq!(
             h.states(),
-            vec![State::Plan, State::Build, State::Review, State::Verify]
+            vec![State::Plan, State::Build, State::Verify, State::Review]
         );
         let plan = std::fs::read_to_string(h.session_dir().join(PLAN_FILE)).expect("plan");
         assert!(plan.starts_with("# Plan\n"), "{plan}");
@@ -1447,8 +1709,11 @@ mod tests {
         );
         assert_eq!(result.rounds.review, 3);
         let states = h.states();
-        assert_eq!(states.len(), 9);
-        assert_eq!(states[1..], [State::Build, State::Review].repeat(4));
+        assert_eq!(states.len(), 13);
+        assert_eq!(
+            states[1..],
+            [State::Build, State::Verify, State::Review].repeat(4)
+        );
         let second_build = &h.coder.requests()[2];
         assert!(second_build.messages.iter().any(|m| matches!(
             m,
@@ -1478,9 +1743,11 @@ mod tests {
         assert_eq!(result.rounds.verify, 2);
         let states = h.states();
         assert_eq!(states[0], State::Plan);
+        assert_eq!(states[1..], [State::Build, State::Verify].repeat(3));
         assert_eq!(
-            states[1..],
-            [State::Build, State::Review, State::Verify].repeat(3)
+            h.reviewer.calls(),
+            0,
+            "a failing check never reaches review"
         );
         let rebuild = &h.coder.requests()[2];
         assert!(rebuild.messages.iter().any(|m| matches!(
@@ -2040,7 +2307,7 @@ mod tests {
         );
         let second = agent.run().await;
         assert_eq!(second.status, Status::Done);
-        assert_eq!(h.states(), vec![State::Build, State::Review, State::Verify]);
+        assert_eq!(h.states(), vec![State::Build, State::Verify, State::Review]);
         let request = &resumed_coder.requests()[0];
         assert!(request.messages.len() > 5, "saved conversation restored");
         assert!(request.messages.iter().any(|m| matches!(

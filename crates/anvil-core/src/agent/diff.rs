@@ -12,8 +12,7 @@ use tokio::process::Command;
 /// Bytes of diff kept before the text is cut for the reviewer.
 pub const MAX_DIFF_BYTES: usize = 200 * 1024;
 
-/// Changed lines below which a diff is small: on the first build its checks
-/// run before the review.
+/// Changed lines below which a diff counts as small.
 pub const SMALL_DIFF_LINES: usize = 50;
 
 /// Name of the private index file inside the session folder.

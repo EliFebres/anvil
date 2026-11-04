@@ -37,7 +37,7 @@ pub struct Cli {
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Work on a task: plan, build, review, verify.
+    /// Work on a task: plan, build, verify, review.
     Run {
         /// The task.
         #[arg(required = true, trailing_var_arg = true)]

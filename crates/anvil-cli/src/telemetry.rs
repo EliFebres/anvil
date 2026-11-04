@@ -10,7 +10,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anvil_core::agent::{EventSink, IncompleteReason, LoopEvent, ReviewVerdict, Status};
+use anvil_core::agent::{
+    CheckSource, EventSink, IncompleteReason, LoopEvent, ReviewVerdict, Status,
+};
 use anvil_core::provider::{
     CompletionRequest, Event, EventStream, Provider, ProviderError, StopReason,
 };
@@ -20,8 +22,9 @@ use anvil_core::tools::{
 };
 use anvil_telemetry::paths::signals_file;
 use anvil_telemetry::{
-    PermissionAnswer, PermissionScope, RecordKind, Recorder, SessionMode, SessionOutcome, StopKind,
-    Tokens, ToolOutcomeKind, WarningClass, append_signals, classify, load_records, session_records,
+    CheckOrigin, PermissionAnswer, PermissionScope, RecordKind, Recorder, SessionMode,
+    SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass, append_signals, classify,
+    load_records, session_records,
 };
 use anvil_types::TelemetryConfig;
 use chrono::{Duration, Utc};
@@ -357,8 +360,18 @@ impl SessionTelemetry {
                 ReviewVerdict::Changes { items } => RecordKind::review(false, items),
             },
             LoopEvent::CheckFinished {
-                command, passed, ..
-            } => RecordKind::check(command, *passed),
+                command,
+                source,
+                passed,
+                ..
+            } => {
+                let origin = match source {
+                    CheckSource::Detected => CheckOrigin::Detected,
+                    CheckSource::Plan => CheckOrigin::Plan,
+                    CheckSource::Standing => CheckOrigin::Standing,
+                };
+                RecordKind::check(command, origin, *passed)
+            }
             LoopEvent::Compacted {
                 dropped_messages,
                 usage,

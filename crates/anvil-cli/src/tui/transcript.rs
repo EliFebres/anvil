@@ -384,6 +384,7 @@ impl Transcript {
                 command,
                 passed,
                 output_tail,
+                ..
             } => {
                 let status = if *passed {
                     CheckStatus::Passed
@@ -1753,6 +1754,7 @@ mod tests {
         transcript.apply(
             &LoopEvent::CheckFinished {
                 command: "cargo test".to_owned(),
+                source: anvil_core::agent::CheckSource::Detected,
                 passed: false,
                 output_tail: "boom".to_owned(),
             },

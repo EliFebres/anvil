@@ -169,6 +169,7 @@ impl<O: Write, E: Write> Renderer<O, E> {
                 command,
                 passed,
                 output_tail,
+                ..
             } => {
                 if passed {
                     self.err_line(&format!("`{command}` passed"));
@@ -284,7 +285,7 @@ pub fn state_title(state: State) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use anvil_core::agent::Status;
+    use anvil_core::agent::{CheckSource, Status};
     use anvil_core::provider::{StopReason, Usage};
     use anvil_core::tools::OutputStats;
 
@@ -367,6 +368,7 @@ mod tests {
             },
             LoopEvent::CheckFinished {
                 command: "cargo test".to_owned(),
+                source: CheckSource::Detected,
                 passed: false,
                 output_tail: "boom".to_owned(),
             },

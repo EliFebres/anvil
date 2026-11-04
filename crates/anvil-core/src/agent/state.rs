@@ -8,9 +8,11 @@
 //!           +-------------------+ (verify fails, max 2 rounds)
 //! ```
 //!
-//! On the first build of a diff under 50 lines with a check command, the
+//! When there is a check command, detected or declared by the plan, the
 //! checks run before the review and the reviewer sees their output, so its
-//! approval ends the run: `Build -> Verify -> Review -> Done`.
+//! approval ends the run: `Build -> Verify -> Review -> Done`. The order
+//! above is what is left for a project with no check command, where the
+//! model verifies by hand after the review.
 
 use std::fmt;
 
@@ -215,13 +217,13 @@ impl fmt::Display for Status {
 pub enum StateOutcome {
     /// The state finished its work.
     Finished,
-    /// Build finished a diff small enough to check before the review.
-    BuiltSmall,
+    /// Build finished and there is a check command to run before the review.
+    ReadyToCheck,
     /// The checks passed before the review, which will see their output.
     CheckedBeforeReview,
     /// The reviewer approved the diff; its checks have not run yet.
     ReviewApproved,
-    /// The reviewer approved a small diff whose checks already passed.
+    /// The reviewer approved a diff whose checks already passed.
     ApprovedAfterCheck,
     /// The reviewer wants changes.
     ReviewChanges(Vec<String>),
@@ -270,7 +272,7 @@ pub fn transition(state: State, outcome: StateOutcome, rounds: &mut Rounds) -> S
         (_, StateOutcome::ProviderFailed(error)) => Step::Finish(Status::ProviderError { error }),
         (State::Plan, StateOutcome::Finished) => Step::Next(State::Build),
         (State::Build, StateOutcome::Finished) => Step::Next(State::Review),
-        (State::Build, StateOutcome::BuiltSmall) => Step::Next(State::Verify),
+        (State::Build, StateOutcome::ReadyToCheck) => Step::Next(State::Verify),
         (State::Verify, StateOutcome::CheckedBeforeReview) => Step::Next(State::Review),
         (State::Review, StateOutcome::ReviewApproved) => Step::Next(State::Verify),
         (State::Review, StateOutcome::ApprovedAfterCheck) => Step::Finish(Status::Done),
@@ -337,10 +339,10 @@ mod tests {
     }
 
     #[test]
-    fn a_small_diff_checks_first_and_the_approval_ends_the_run() {
+    fn checks_run_first_and_the_approval_ends_the_run() {
         let mut rounds = Rounds::default();
         assert_eq!(
-            transition(State::Build, StateOutcome::BuiltSmall, &mut rounds),
+            transition(State::Build, StateOutcome::ReadyToCheck, &mut rounds),
             Step::Next(State::Verify)
         );
         assert_eq!(

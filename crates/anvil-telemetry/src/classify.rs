@@ -180,6 +180,7 @@ pub fn verify_loop_exhausted(session: &[Record]) -> Vec<SignalKind> {
             program,
             command_digest,
             passed: false,
+            ..
         } = &record.kind
         {
             let entry = failures.entry(command_digest).or_insert((0, program));
@@ -383,7 +384,7 @@ mod tests {
     use chrono::{Duration, Utc};
 
     use super::*;
-    use crate::record::{StopKind, Tokens};
+    use crate::record::{CheckOrigin, StopKind, Tokens};
 
     fn record(session: &str, kind: RecordKind) -> Record {
         Record {
@@ -518,9 +519,18 @@ mod tests {
     #[test]
     fn verify_loop_exhausted_from_repeated_checks_or_the_outcome() {
         let repeated = vec![
-            record("s", RecordKind::check("cargo test", false)),
-            record("s", RecordKind::check("cargo clippy", true)),
-            record("s", RecordKind::check("cargo test", false)),
+            record(
+                "s",
+                RecordKind::check("cargo test", CheckOrigin::Detected, false),
+            ),
+            record(
+                "s",
+                RecordKind::check("cargo clippy", CheckOrigin::Detected, true),
+            ),
+            record(
+                "s",
+                RecordKind::check("cargo test", CheckOrigin::Detected, false),
+            ),
             ended("s", SessionOutcome::Done),
         ];
         assert_eq!(
@@ -530,7 +540,10 @@ mod tests {
             }]
         );
         let outcome_only = vec![
-            record("s", RecordKind::check("pytest", false)),
+            record(
+                "s",
+                RecordKind::check("pytest", CheckOrigin::Detected, false),
+            ),
             ended("s", incomplete(VERIFY_EXHAUSTED)),
         ];
         assert_eq!(
@@ -540,8 +553,14 @@ mod tests {
             }]
         );
         let different = vec![
-            record("s", RecordKind::check("cargo test", false)),
-            record("s", RecordKind::check("cargo clippy", false)),
+            record(
+                "s",
+                RecordKind::check("cargo test", CheckOrigin::Detected, false),
+            ),
+            record(
+                "s",
+                RecordKind::check("cargo clippy", CheckOrigin::Detected, false),
+            ),
             ended("s", SessionOutcome::Done),
         ];
         assert!(verify_loop_exhausted(&different).is_empty());

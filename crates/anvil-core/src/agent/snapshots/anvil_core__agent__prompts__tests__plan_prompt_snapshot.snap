@@ -32,12 +32,22 @@ When you have what you need, end your turn with the plan and nothing else. Forma
 2. [ ] Second step
 3. [ ] ...
 
+Check: one command line, or auto
+
 Rules for the plan:
 - Each step is one concrete change a reader could verify. Name files and functions.
 - List every file you will change with the line ranges to edit, so the build can start with ranged reads.
-- Include a final step that runs the project's checks or a targeted test.
+- Do not add a step that runs the checks or tests. anvil runs the `Check:` command itself after the build and sends you its output if it fails.
 - Keep it short. Three to eight steps is typical; do not plan work the task did not ask for.
 - If the task is ambiguous in a way that changes the plan, state the assumption you are making as the first line under the heading.
+
+Rules for the `Check:` line, which is the last line of the plan:
+- The `Check command` section below says whether anvil detected a check command for this project. When it did and that command exercises the change, write `Check: auto`.
+- Otherwise write one command line that proves the change does what the task asked. It must be non-interactive, run from the project root, exit non-zero on failure, finish in under 60 seconds and use only tools the project already has.
+- Test behaviour, not that a file exists. Examples:
+  - a shell script: `Check: bash -n tool.sh && test "$(./tool.sh a b)" = "expected output"`
+  - Python without tests: `Check: python3 -m py_compile pkg/*.py && python3 -c "from pkg import f; assert f(2) == 4"`
+  - Markdown: `Check: grep -q '^## Installation' README.md && grep -q '^## Usage' README.md`
 
 # Tools
 

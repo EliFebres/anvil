@@ -1,14 +1,67 @@
-//! The steps of a plan file: reading their checkboxes and ticking them.
+//! The parts of a plan file anvil acts on: its steps and its check command.
 //!
 //! A step is a list line that carries a checkbox, as the Plan prompt asks
 //! for: `1. [ ] text`. Bulleted steps (`- [ ] text`) are accepted too. Lines
-//! without a checkbox are never touched.
+//! without a checkbox are never touched. The check command is the plan's
+//! `Check:` line.
 
 /// An open checkbox.
 const OPEN: &str = "[ ]";
 
 /// A ticked checkbox.
 const DONE: &str = "[x]";
+
+/// The label that starts the plan's check line.
+const CHECK_LABEL: &str = "Check:";
+
+/// The value that defers to the check command anvil detected.
+const AUTO: &str = "auto";
+
+/// What a plan's `Check:` line asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanCheck {
+    /// `Check: auto`: the detected check command is enough.
+    Auto,
+    /// A command line to run from the project root.
+    Command(String),
+    /// The plan has no `Check:` line, or the line gives no command.
+    Missing,
+}
+
+/// Reads the plan's check line.
+///
+/// The line starts with `Check:` at the left margin; when a plan has
+/// several, the last one counts. Backticks around the command are dropped.
+///
+/// # Arguments
+///
+/// * `plan` - The text of the plan file.
+///
+/// # Returns
+///
+/// What the line asks for.
+pub fn check_line(plan: &str) -> PlanCheck {
+    let Some(value) = plan
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(CHECK_LABEL))
+    else {
+        return PlanCheck::Missing;
+    };
+    let value = value.trim();
+    let value = value
+        .strip_prefix('`')
+        .and_then(|inner| inner.strip_suffix('`'))
+        .unwrap_or(value)
+        .trim();
+    if value.is_empty() || value.starts_with("```") {
+        PlanCheck::Missing
+    } else if value.eq_ignore_ascii_case(AUTO) {
+        PlanCheck::Auto
+    } else {
+        PlanCheck::Command(value.to_owned())
+    }
+}
 
 /// What ticking one step did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +143,61 @@ mod tests {
     use super::*;
 
     const PLAN: &str = "# Plan\n\nAssumption: [ ] is not a step.\n\n1. [ ] First\n2. [x] Second\n10. [ ] Tenth\n   - [ ] a sub-step\n   - a plain bullet [ ]\n";
+
+    #[test]
+    fn check_line_reads_a_command() {
+        let plan = "# Plan\n\n1. [ ] Edit tool.sh\n\nCheck: bash -n tool.sh && test \"$(./tool.sh a)\" = \"a\"\n";
+        assert_eq!(
+            check_line(plan),
+            PlanCheck::Command("bash -n tool.sh && test \"$(./tool.sh a)\" = \"a\"".to_owned())
+        );
+        assert_eq!(
+            check_line("# Plan\n\nCheck: `grep -q '^## Usage' README.md`"),
+            PlanCheck::Command("grep -q '^## Usage' README.md".to_owned())
+        );
+        assert_eq!(
+            check_line("Check: echo `date`\n"),
+            PlanCheck::Command("echo `date`".to_owned()),
+            "backticks inside a command stay"
+        );
+        assert_eq!(
+            check_line("Check: first\n\n1. [ ] step\nCheck: second\n\ntrailing prose\n"),
+            PlanCheck::Command("second".to_owned()),
+            "the last check line counts"
+        );
+    }
+
+    #[test]
+    fn check_line_reads_auto() {
+        assert_eq!(
+            check_line("# Plan\n\n1. [ ] a\n\nCheck: auto\n"),
+            PlanCheck::Auto
+        );
+        assert_eq!(check_line("Check:   `Auto`  "), PlanCheck::Auto);
+    }
+
+    #[test]
+    fn a_plan_without_a_check_line_has_none() {
+        assert_eq!(check_line(PLAN), PlanCheck::Missing);
+        assert_eq!(check_line(""), PlanCheck::Missing);
+        assert_eq!(
+            check_line("1. [ ] Check: run the tests\n   Check: indented\n"),
+            PlanCheck::Missing,
+            "a step that mentions a check is not the check line"
+        );
+    }
+
+    #[test]
+    fn a_malformed_check_line_counts_as_missing() {
+        assert_eq!(check_line("Check:\n"), PlanCheck::Missing);
+        assert_eq!(check_line("Check: ``\n"), PlanCheck::Missing);
+        assert_eq!(
+            check_line("Check:\n```\ncargo test\n```\n"),
+            PlanCheck::Missing
+        );
+        assert_eq!(check_line("Check: ```sh\n"), PlanCheck::Missing);
+        assert_eq!(check_line("check: cargo test\n"), PlanCheck::Missing);
+    }
 
     #[test]
     fn tick_marks_one_numbered_step() {

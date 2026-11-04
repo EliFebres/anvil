@@ -190,6 +190,21 @@ impl WarningClass {
     }
 }
 
+/// Where a check command came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckOrigin {
+    /// The project's files or the configuration named it.
+    Detected,
+    /// The session's approved plan declared it.
+    Plan,
+    /// The standing-rule checks.
+    Standing,
+}
+
+/// What stands in for the program of a plan-declared check command.
+const PLAN_PROGRAM: &str = "plan";
+
 /// How a session ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -324,10 +339,14 @@ pub enum RecordKind {
     },
     /// A check command finished.
     Check {
-        /// The program name only.
+        /// The program name only; `plan` for a command a plan declared.
         program: String,
         /// Digest of the whole command line.
         command_digest: String,
+        /// Where the command came from; absent in records written before it
+        /// was recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<CheckOrigin>,
         /// Whether it passed.
         passed: bool,
     },
@@ -492,18 +511,27 @@ impl RecordKind {
 
     /// A check record that keeps the program name only.
     ///
+    /// A command a plan declared is written by the model and may start with
+    /// a file of the project, so its program is recorded as `plan`.
+    ///
     /// # Arguments
     ///
     /// * `command` - The command line; digested, not stored.
+    /// * `source` - Where the command came from.
     /// * `passed` - Whether it passed.
     ///
     /// # Returns
     ///
     /// The record.
-    pub fn check(command: &str, passed: bool) -> Self {
+    pub fn check(command: &str, source: CheckOrigin, passed: bool) -> Self {
+        let program = match source {
+            CheckOrigin::Plan => PLAN_PROGRAM.to_owned(),
+            CheckOrigin::Detected | CheckOrigin::Standing => program_name(command),
+        };
         Self::Check {
-            program: program_name(command),
+            program,
             command_digest: hex(digest(command.as_bytes())),
+            source: Some(source),
             passed,
         }
     }
@@ -703,18 +731,42 @@ mod tests {
         let RecordKind::Check {
             program,
             command_digest,
+            source,
             passed,
-        } = RecordKind::check("C:\\proj\\scripts\\check.ps1 --fast", true)
+        } = RecordKind::check(
+            "C:\\proj\\scripts\\check.ps1 --fast",
+            CheckOrigin::Detected,
+            true,
+        )
         else {
             panic!("check record");
         };
         assert_eq!(program, "check.ps1");
         assert_eq!(command_digest.len(), 16);
+        assert_eq!(source, Some(CheckOrigin::Detected));
         assert!(passed);
         assert!(matches!(
-            RecordKind::check("cargo test", false),
+            RecordKind::check("cargo test", CheckOrigin::Detected, false),
             RecordKind::Check { program, .. } if program == "cargo"
         ));
+    }
+
+    #[test]
+    fn a_plan_declared_check_keeps_no_part_of_its_command() {
+        let record = Record::now(
+            "s",
+            "p",
+            RecordKind::check("./scripts/cleanup.sh --dry-run", CheckOrigin::Plan, true),
+        );
+        let json = serde_json::to_string(&record).expect("json");
+        assert!(json.contains(r#""program":"plan""#), "{json}");
+        assert!(json.contains(r#""source":"plan""#), "{json}");
+        assert!(!json.contains("cleanup"), "{json}");
+        let older: Record = serde_json::from_str(
+            r#"{"ts":"2026-11-04T00:00:00Z","session":"s","project":"p","event":"check","program":"cargo","command_digest":"00","passed":true}"#,
+        )
+        .expect("a record without a source still loads");
+        assert!(matches!(older.kind, RecordKind::Check { source: None, .. }));
     }
 
     #[test]
