@@ -6,10 +6,12 @@ use std::time::Instant;
 
 use std::sync::Arc;
 
-use anvil_core::agent::{AgentLoop, IncompleteReason, LoopResult, SUMMARY_FILE, State, Status};
+use anvil_core::agent::{
+    AgentLoop, IncompleteReason, LoopResult, SUMMARY_FILE, State, Status, diff,
+};
 use anvil_core::context;
 use anvil_core::tools::ToolHook;
-use anvil_telemetry::SessionMode;
+use anvil_telemetry::{RecordKind, SessionMode};
 use anyhow::{Context, bail};
 use tokio::task::JoinHandle;
 
@@ -81,7 +83,7 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
         agent = agent.with_change_checks(checks);
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
-    remember(&wiring, &id, &frontend, yes, &telemetry).await;
+    remember(&wiring, &id, &frontend, yes, &telemetry, &result).await;
     frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())
@@ -143,17 +145,31 @@ async fn drive(
     }
 }
 
-/// Runs the memory extraction over the session log of a finished run.
+/// Runs the memory extraction over the session log of a finished run,
+/// unless the run gives it nothing to learn from.
 async fn remember(
     wiring: &Wiring,
     id: &str,
     frontend: &Frontend,
     yes: bool,
     telemetry: &SessionTelemetry,
+    result: &LoopResult,
 ) {
     let console = frontend.console();
     match context::load_session(&wiring.cwd, id) {
         Ok(snapshot) => {
+            let diff_lines = match &snapshot.baseline {
+                Some(baseline) => diff::diff_since(&wiring.cwd, &snapshot.dir, baseline)
+                    .await
+                    .map(|text| diff::changed_lines(&text)),
+                None => None,
+            };
+            let always = wiring.config.memory.always_summarize;
+            if let Some(reason) = memory::skip_reason(result, diff_lines, always) {
+                console.notice(format!("memory: skipped ({})", memory::skip_text(reason)));
+                telemetry.record(RecordKind::MemorySkipped { reason });
+                return;
+            }
             memory::finish_session(
                 wiring,
                 id,
@@ -242,7 +258,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
         agent = agent.with_change_checks(checks);
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
-    remember(&wiring, id, &frontend, yes, &telemetry).await;
+    remember(&wiring, id, &frontend, yes, &telemetry, &result).await;
     frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())

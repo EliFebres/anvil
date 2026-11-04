@@ -12,7 +12,8 @@ use tokio::process::Command;
 /// Bytes of diff kept before the text is cut for the reviewer.
 pub const MAX_DIFF_BYTES: usize = 200 * 1024;
 
-/// Changed lines below which a diff counts as small.
+/// Changed lines below which a diff counts as small. The CLI uses it to
+/// decide whether a session is worth a memory summarizer turn.
 pub const SMALL_DIFF_LINES: usize = 50;
 
 /// Name of the private index file inside the session folder.

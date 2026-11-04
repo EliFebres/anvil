@@ -65,6 +65,12 @@ summarizer = "runpod"
 # max_turns = 100
 # max_tokens = 1000000
 
+# After a run, a summarizer turn proposes facts for memory. It is skipped
+# when the run finished with no reviewer rejection and no failed check and
+# changed fewer than 50 lines. Set this to run it after every session.
+# [memory]
+# always_summarize = false
+
 # Lines that turn provider statistics into tickets. Defaults shown.
 # [telemetry]
 # slow_median_ms = 60000       # median completion latency over the last 20 sessions
@@ -150,6 +156,12 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # [limits.build]
 # max_turns = 100
 # max_tokens = 1000000
+
+# After a run, a summarizer turn proposes facts for memory. It is skipped
+# when the run finished with no reviewer rejection and no failed check and
+# changed fewer than 50 lines. Set this to run it after every session.
+# [memory]
+# always_summarize = false
 
 # Lines that turn provider statistics into tickets. Defaults shown.
 # [telemetry]
@@ -395,6 +407,15 @@ pub struct ToolsConfig {
     pub check: Option<String>,
 }
 
+/// When the end-of-session memory summarizer runs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct MemoryConfig {
+    /// Run the summarizer after every session, including an uneventful one
+    /// with a small diff, which is skipped otherwise.
+    pub always_summarize: bool,
+}
+
 /// Lines above which provider statistics become tickets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
@@ -507,6 +528,9 @@ pub struct AnvilConfig {
     /// Built-in tool settings.
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// When the end-of-session memory summarizer runs.
+    #[serde(default)]
+    pub memory: MemoryConfig,
     /// Lines that turn provider statistics into tickets.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
@@ -1082,6 +1106,16 @@ mod tests {
         assert_eq!(config.telemetry.slow_median_ms, 5);
         assert_eq!(config.telemetry.error_rate_percent, 20);
         assert_eq!(config.tickets.remote, "anvil");
+    }
+
+    #[test]
+    fn memory_table_defaults_to_skipping_and_can_force_the_summarizer() {
+        assert!(!template().memory.always_summarize);
+        let text = format!("{CONFIG_TEMPLATE}\n[memory]\nalways_summarize = true\n");
+        let config: AnvilConfig = toml::from_str(&text).expect("parses");
+        assert!(config.memory.always_summarize);
+        let unknown = format!("{CONFIG_TEMPLATE}\n[memory]\nsometimes = true\n");
+        assert!(toml::from_str::<AnvilConfig>(&unknown).is_err());
     }
 
     #[test]

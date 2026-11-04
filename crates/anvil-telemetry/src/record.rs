@@ -190,6 +190,15 @@ impl WarningClass {
     }
 }
 
+/// Why a session's memory summarizer did not run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySkipReason {
+    /// The session finished with no reviewer rejection and no failed check,
+    /// and changed few lines.
+    UneventfulSmallDiff,
+}
+
 /// Where a check command came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -387,6 +396,11 @@ pub enum RecordKind {
         /// The text, which passed the boundary check.
         text: String,
     },
+    /// The end-of-session memory summarizer was skipped.
+    MemorySkipped {
+        /// Why.
+        reason: MemorySkipReason,
+    },
     /// The session ended.
     SessionEnded {
         /// How.
@@ -578,6 +592,7 @@ impl RecordKind {
             Self::Warning { .. } => "warning",
             Self::SkillRequires { .. } => "skill_requires",
             Self::UserFlag { .. } => "user_flag",
+            Self::MemorySkipped { .. } => "memory_skipped",
             Self::SessionEnded { .. } => "session_ended",
         }
     }
@@ -767,6 +782,25 @@ mod tests {
         )
         .expect("a record without a source still loads");
         assert!(matches!(older.kind, RecordKind::Check { source: None, .. }));
+    }
+
+    #[test]
+    fn memory_skipped_is_a_fixed_tag() {
+        let record = Record::now(
+            "s",
+            "p",
+            RecordKind::MemorySkipped {
+                reason: MemorySkipReason::UneventfulSmallDiff,
+            },
+        );
+        assert_eq!(record.kind.tag(), "memory_skipped");
+        let json = serde_json::to_string(&record).expect("json");
+        assert!(
+            json.contains(r#""event":"memory_skipped","reason":"uneventful_small_diff""#),
+            "{json}"
+        );
+        let back: Record = serde_json::from_str(&json).expect("parses");
+        assert_eq!(back, record);
     }
 
     #[test]

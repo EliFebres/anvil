@@ -37,8 +37,8 @@ pub use draft::{
 pub use error::TelemetryError;
 pub use git::publish_ticket;
 pub use record::{
-    CheckOrigin, PermissionAnswer, PermissionScope, Record, RecordKind, SessionMode,
-    SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass, digest, hex,
+    CheckOrigin, MemorySkipReason, PermissionAnswer, PermissionScope, Record, RecordKind,
+    SessionMode, SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass, digest, hex,
 };
 pub use recorder::{Recorder, last_sessions, load_records, session_records};
 pub use signal::{
