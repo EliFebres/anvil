@@ -27,6 +27,18 @@ cost per task          0.0100                   0.0100                   +0.0%
 state                  turns/task (1 call, 2+ calls, text, verdict; context/turn)
   build                -  |  2.0 (1.0, 1.0, 0.0, 0.0; 1,000)  n/a
   review               -  |  1.0 (0.0, 0.0, 0.0, 1.0; 300)  n/a
+overheads              totals over the attempts
+  attempts recorded    n/a                      9
+  lone tick turns      n/a                      9
+  reviews              n/a                      18
+  review cap hits      n/a                      3
+  verify model turns   n/a                      0
+  check detected       n/a                      6
+  check from plan      n/a                      3
+  check none           n/a                      0
+  memory ran           n/a                      3
+  memory skipped       n/a                      6
+    uneventful_small_diff  n/a                      6
 
 input tokens / passed task: +0.0%
 flipped: 1 fixed, 1 regressed

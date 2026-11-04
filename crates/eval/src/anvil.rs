@@ -24,6 +24,7 @@ use crate::check::{self, forward_slashes, tail};
 use crate::error::EvalError;
 use crate::results::AttemptStatus;
 use crate::runner::{AttemptContext, AttemptFuture, AttemptOutcome, EvalRunner};
+use crate::session::read_lone_tick_turns;
 use crate::telemetry;
 
 /// Files copied from the real `~/.anvil` into the temporary home.
@@ -176,6 +177,13 @@ impl AnvilRunner {
         let usage = telemetry::read_session_usage(&telemetry_dir, session.as_deref())?;
         let cost_usd = telemetry::cost(&self.providers, &usage);
         let turns_by_state = usage.turns_by_state();
+        let lone_tick_turns = match &session {
+            Some(id) => {
+                read_lone_tick_turns(&attempt.work_dir.join(CONFIG_DIR).join("sessions").join(id))?
+            }
+            None => 0,
+        };
+        let overheads = Some(usage.overheads(lone_tick_turns));
         Ok(AttemptOutcome {
             status,
             session,
@@ -185,6 +193,7 @@ impl AnvilRunner {
             tool_calls: usage.tool_calls,
             turns: usage.turns,
             turns_by_state,
+            overheads,
             cost_usd,
             anvil_ms,
             stderr_tail: tail(&stderr, STDERR_TAIL_LINES),
