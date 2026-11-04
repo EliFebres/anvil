@@ -133,6 +133,9 @@ pub struct AttemptRecord {
     /// Tool calls the session made; 0 in results written before it was recorded.
     #[serde(default)]
     pub tool_calls: u32,
+    /// Model turns over every provider; 0 in results written before it was recorded.
+    #[serde(default)]
+    pub turns: u32,
     /// Cost in USD, when every provider used has a price.
     pub cost_usd: Option<f64>,
     /// Wall time of the anvil run.
@@ -296,6 +299,15 @@ fn ratio(part: usize, whole: usize) -> f64 {
 /// "Per task" means per attempt: each attempt is one task run once.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Efficiency {
+    /// Attempts counted.
+    pub attempts: usize,
+    /// Passed attempts / attempts; 0 when there are none.
+    pub pass_rate: f64,
+    /// Mean model turns per attempt.
+    pub turns_mean: f64,
+    /// Prompt tokens over every attempt divided by turns over every attempt:
+    /// how much context each turn re-sends. `None` when no turns were recorded.
+    pub context_per_turn: Option<f64>,
     /// Mean prompt tokens (uncached plus cached input) per attempt.
     pub input_mean: f64,
     /// Median prompt tokens per attempt.
@@ -329,7 +341,12 @@ impl Efficiency {
         let prompt_sum: u64 = prompts.iter().sum();
         let passed = attempts.iter().filter(|a| a.passed).count();
         let cost: Option<f64> = attempts.iter().map(|a| a.cost_usd).sum();
+        let turns: u64 = attempts.iter().map(|a| u64::from(a.turns)).sum();
         Efficiency {
+            attempts: count,
+            pass_rate: ratio(passed, count),
+            turns_mean: mean(turns, count),
+            context_per_turn: (turns > 0).then(|| prompt_sum as f64 / turns as f64),
             input_mean: mean(prompt_sum, count),
             input_median: median(&prompts),
             uncached_input_mean: mean(attempts.iter().map(|a| a.tokens.input).sum(), count),
@@ -544,6 +561,13 @@ impl fmt::Display for RunResult {
                 .map_or_else(|| "n/a".to_owned(), |v| thousands(v as u64))
         )?;
         writeln!(f, "tool calls / task     {:.1}", e.tool_calls_mean)?;
+        writeln!(f, "turns / task          {:.1}", e.turns_mean)?;
+        writeln!(
+            f,
+            "context / turn        {}",
+            e.context_per_turn
+                .map_or_else(|| "n/a".to_owned(), |v| thousands(v as u64))
+        )?;
         writeln!(f, "cost per task         {}", money(e.cost_per_attempt))?;
         writeln!(f, "wall                  {}", duration(t.wall_ms))
     }
@@ -636,6 +660,7 @@ pub(crate) mod samples {
                 cached: 50,
             },
             tool_calls: if passed { 4 } else { 9 },
+            turns: if passed { 3 } else { 7 },
             cost_usd: Some(0.01),
             anvil_ms: 1500,
             check_ms: 200,

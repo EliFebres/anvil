@@ -34,6 +34,8 @@ pub struct AttemptOutcome {
     pub tokens: Usage,
     /// Tool calls the session made.
     pub tool_calls: u32,
+    /// Model turns over every provider.
+    pub turns: u32,
     /// Cost in USD, when every provider used has a price.
     pub cost_usd: Option<f64>,
     /// Wall time of the run.
@@ -60,6 +62,7 @@ impl AttemptOutcome {
             model: None,
             tokens: Usage::default(),
             tool_calls: 0,
+            turns: 0,
             cost_usd: Some(0.0),
             anvil_ms: 0,
             stderr_tail: String::new(),
@@ -201,6 +204,7 @@ impl EvalRunner for FakeRunner {
                     cached: 0,
                 },
                 tool_calls: 3,
+                turns: 2,
                 cost_usd: Some(0.0012),
                 anvil_ms: 10,
                 stderr_tail: "done".to_owned(),
@@ -489,6 +493,7 @@ fn record_of(
         model: outcome.model,
         tokens: outcome.tokens,
         tool_calls: outcome.tool_calls,
+        turns: outcome.turns,
         cost_usd: outcome.cost_usd,
         anvil_ms: outcome.anvil_ms,
         check_ms: check.check_ms,
