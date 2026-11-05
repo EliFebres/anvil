@@ -35,11 +35,14 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).expect("write");
 }
 
-/// A bare remote with `main` and `factory/state`, and the factory's clone of it.
+/// A bare remote with `main` and `factory/state`, the factory's clone of it,
+/// and a fake `systemctl` first on `PATH` so the liveness probe never reaches
+/// the host's systemd.
 struct World {
     _dir: tempfile::TempDir,
     home: PathBuf,
     repo: PathBuf,
+    bin: PathBuf,
 }
 
 impl World {
@@ -89,20 +92,130 @@ origin = "human"
         );
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("mkdir");
-        Self {
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("mkdir");
+        let world = Self {
             _dir: dir,
             home,
             repo,
-        }
+            bin,
+        };
+        world.install_fake_systemctl();
+        world.set_service_active(true);
+        world
+    }
+
+    /// Writes a `systemctl` that logs its arguments and exits with the code
+    /// in `bin/exit-code`, so a test flips the service state without
+    /// rewriting an executable.
+    #[cfg(unix)]
+    fn install_fake_systemctl(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        let script = self.bin.join("systemctl");
+        let text = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nexit \"$(cat '{}')\"\n",
+            self.systemctl_log().display(),
+            self.bin.join("exit-code").display()
+        );
+        write(&script, &text);
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    /// Off unix the probe never runs systemctl, so no fake is needed.
+    #[cfg(not(unix))]
+    fn install_fake_systemctl(&self) {}
+
+    /// Where the fake `systemctl` records each call.
+    fn systemctl_log(&self) -> PathBuf {
+        self.bin.join("systemctl.log")
+    }
+
+    /// Makes the fake `systemctl is-active` report the unit active or not.
+    fn set_service_active(&self, active: bool) {
+        write(
+            &self.bin.join("exit-code"),
+            if active { "0\n" } else { "3\n" },
+        );
     }
 
     fn factory(&self, args: &[&str]) -> std::process::Output {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(self.bin.clone()).chain(std::env::split_paths(&path)),
+        )
+        .expect("PATH joins");
         Command::new(env!("CARGO_BIN_EXE_factory"))
             .args(args)
             .current_dir(&self.repo)
             .env("FACTORY_HOME", &self.home)
+            .env("PATH", path)
             .output()
             .expect("factory runs")
+    }
+}
+
+/// The lines `factory status` starts with, before the queue. Off Linux the
+/// service state is always unknown.
+fn expected_header(active: bool, paused: Option<&str>) -> String {
+    let pause_line = paused
+        .map(|reason| format!("PAUSED: {reason}\n"))
+        .unwrap_or_default();
+    if !cfg!(target_os = "linux") {
+        return format!("service state unknown\n{pause_line}\n");
+    }
+    match (active, paused) {
+        (true, None) => "running\n\n".to_owned(),
+        (true, Some(_)) => format!("{pause_line}\n"),
+        (false, _) => {
+            format!("STOPPED (start it with systemctl --user start factory)\n{pause_line}\n")
+        }
+    }
+}
+
+/// Runs `factory status` and returns its stdout, asserting it succeeded.
+fn status_text(world: &World) -> String {
+    let out = world.factory(&["status"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn status_header_follows_the_service_state_and_the_pause_flag() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("git not available; skipping");
+        return;
+    }
+    let world = World::new();
+    for (active, paused) in [
+        (false, None),
+        (true, None),
+        (true, Some("testing")),
+        (false, Some("testing")),
+    ] {
+        world.set_service_active(active);
+        match paused {
+            Some(reason) => assert!(world.factory(&["pause", reason]).status.success()),
+            None => assert!(world.factory(&["resume"]).status.success()),
+        }
+        let text = status_text(&world);
+        let header = expected_header(active, paused);
+        assert!(
+            text.starts_with(&format!("{header}queue (1 open):")),
+            "active={active} paused={paused:?}: {text}"
+        );
+    }
+    if cfg!(target_os = "linux") {
+        let calls = std::fs::read_to_string(world.systemctl_log()).expect("fake was called");
+        assert!(
+            calls
+                .lines()
+                .all(|line| line == "--user is-active --quiet factory.service"),
+            "{calls}"
+        );
     }
 }
 
@@ -114,14 +227,8 @@ fn status_shows_the_queue_and_pause_resume_toggle_the_flag() {
     }
     let world = World::new();
 
-    let out = world.factory(&["status"]);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(text.starts_with("running\n"), "{text}");
+    let text = status_text(&world);
+    assert!(text.starts_with(&expected_header(true, None)), "{text}");
     assert!(text.contains("queue (1 open):"), "{text}");
     assert!(text.contains("01ARZ3NDEKTSV4RRFFQ69G5FAV"), "{text}");
     assert!(text.contains("Something to fix"), "{text}");
@@ -147,8 +254,11 @@ fn status_shows_the_queue_and_pause_resume_toggle_the_flag() {
             .trim(),
         "testing"
     );
-    let out = world.factory(&["status"]);
-    assert!(String::from_utf8_lossy(&out.stdout).starts_with("PAUSED: testing"));
+    let text = status_text(&world);
+    assert!(
+        text.starts_with(&expected_header(true, Some("testing"))),
+        "{text}"
+    );
 
     let out = world.factory(&["resume"]);
     assert!(out.status.success());

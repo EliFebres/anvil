@@ -96,6 +96,20 @@ pub struct ServiceState {
     pub consecutive_errors: u32,
 }
 
+/// Whether the service process is alive, as the caller found out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Liveness {
+    /// The service unit is active.
+    Running,
+    /// The service unit is inactive, so nothing polls the queue.
+    Stopped,
+    /// The state could not be determined, such as without systemd.
+    Unknown,
+}
+
+/// The first line of `factory status` when the service is stopped.
+const STOPPED_LINE: &str = "STOPPED (start it with systemctl --user start factory)";
+
 impl ServiceState {
     /// Reads the state, or the default when the file does not exist.
     ///
@@ -163,17 +177,26 @@ impl ServiceState {
     /// # Arguments
     ///
     /// * `queue` - The open tickets in pick order.
+    /// * `liveness` - Whether the service process is alive.
     /// * `paused` - The pause reason, when paused.
     ///
     /// # Returns
     ///
-    /// The queue, the ticket in progress and the last outcomes.
-    pub fn render(&self, queue: &[Ticket], paused: Option<&str>) -> String {
+    /// The service state, the queue, the ticket in progress and the last
+    /// outcomes.
+    pub fn render(&self, queue: &[Ticket], liveness: Liveness, paused: Option<&str>) -> String {
         let mut out = String::new();
-        match paused {
-            Some(reason) => out.push_str(&format!("PAUSED: {reason}\n\n")),
-            None => out.push_str("running\n\n"),
+        match liveness {
+            Liveness::Running => {}
+            Liveness::Stopped => out.push_str(&format!("{STOPPED_LINE}\n")),
+            Liveness::Unknown => out.push_str("service state unknown\n"),
         }
+        match (liveness, paused) {
+            (_, Some(reason)) => out.push_str(&format!("PAUSED: {reason}\n")),
+            (Liveness::Running, None) => out.push_str("running\n"),
+            _ => {}
+        }
+        out.push('\n');
         out.push_str(&format!("queue ({} open):\n", queue.len()));
         if queue.is_empty() {
             out.push_str("  (empty)\n");
@@ -307,7 +330,7 @@ mod tests {
             stage: "gate B".to_owned(),
             since: "2026-10-31T11:00:00Z".parse().expect("rfc3339"),
         });
-        let text = state.render(&[], Some("main CI is red"));
+        let text = state.render(&[], Liveness::Running, Some("main CI is red"));
         assert!(text.starts_with("PAUSED: main CI is red"), "{text}");
         assert!(text.contains("queue (0 open):\n  (empty)"), "{text}");
         assert!(
@@ -315,7 +338,46 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("merged   T1 title 1: #1 $2.25"), "{text}");
-        let text = state.render(&[], None);
+        let text = state.render(&[], Liveness::Running, None);
         assert!(text.starts_with("running\n"), "{text}");
+    }
+
+    #[test]
+    fn render_header_covers_every_liveness_and_pause_combination() {
+        let state = ServiceState::default();
+        let stopped_header = format!("{STOPPED_LINE}\n\n");
+        let stopped_paused_header = format!("{STOPPED_LINE}\nPAUSED: red\n\n");
+        let cases = [
+            (Liveness::Running, None, "running\n\n"),
+            (Liveness::Running, Some("red"), "PAUSED: red\n\n"),
+            (Liveness::Stopped, None, stopped_header.as_str()),
+            (
+                Liveness::Stopped,
+                Some("red"),
+                stopped_paused_header.as_str(),
+            ),
+            (Liveness::Unknown, None, "service state unknown\n\n"),
+            (
+                Liveness::Unknown,
+                Some("red"),
+                "service state unknown\nPAUSED: red\n\n",
+            ),
+        ];
+        for (liveness, paused, header) in cases {
+            let text = state.render(&[], liveness, paused);
+            assert!(
+                text.starts_with(&format!("{header}queue (0 open):")),
+                "{liveness:?} {paused:?}: {text}"
+            );
+        }
+        let stopped = state.render(&[], Liveness::Stopped, None);
+        assert!(
+            stopped
+                .lines()
+                .next()
+                .is_some_and(|line| line.starts_with("STOPPED")
+                    && line.contains("systemctl --user start factory")),
+            "{stopped}"
+        );
     }
 }

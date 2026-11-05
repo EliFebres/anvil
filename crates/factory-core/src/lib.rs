@@ -13,26 +13,47 @@
 //! ports in [`ports`]; `factory-cli` wires the real implementations and the
 //! tests use [`fakes`].
 
+/// The dashboard snapshot in `~/.factory/status.json`.
 pub mod board;
+/// Per-ticket budgets: wall clock, tokens, Gate A attempts and review rounds.
 pub mod budget;
+/// The error type of the factory.
 pub mod error;
+/// Fakes for every port, for this crate's tests and factory-cli's.
 pub mod fakes;
+/// The git commands the factory needs, run in one repository or worktree.
 pub mod git;
+/// GitHub through octocrab: the only module that knows the REST routes.
 pub mod github;
+/// Every outcome ever recorded, in `~/.factory/outcomes.jsonl`.
 pub mod history;
+/// Notifications: one webhook URL that is a Discord, Slack or ntfy endpoint.
 pub mod notify;
+/// The factory's own folder, `~/.factory/`.
 pub mod paths;
+/// The ports the service and the worker drive.
 pub mod ports;
+/// The merge policy's protected paths.
 pub mod protected;
+/// The egress proxy that lets the container reach allowlisted hosts only.
 pub mod proxy;
+/// Text the worker writes: the task, the pull request body and rejection notes.
 pub mod render;
+/// The sandbox: anvil and the build tools in a container, or on the host.
 pub mod sandbox;
+/// The secret scan of a worktree about to be pushed.
 pub mod secrets;
+/// The service loop: poll, take the next ticket, work it, record the outcome.
 pub mod service;
+/// The service state in `~/.factory/state.json` and the `factory status` text.
 pub mod status;
+/// Reads the implementer output log into the lines the dashboard shows.
 pub mod tail;
+/// The ticket queue on a worktree of the `factory/state` branch.
 pub mod tickets;
+/// Token usage from anvil's telemetry files, priced with the providers.
 pub mod usage;
+/// The worker loop: one claimed ticket from a fresh worktree to an outcome.
 pub mod worker;
 
 pub use board::{Board, Live, Stage, Status, StatusReader, write_atomic};
@@ -54,7 +75,7 @@ pub use sandbox::{
     build_command, check_image, ensure_cache_volume, ensure_volume, preflight, resolve_anvil_bin,
 };
 pub use service::{Clock, ERRORS_BEFORE_PAUSE, Service, ServiceDeps, Tick, hostname, system_clock};
-pub use status::{InProgress, KEPT_OUTCOMES, OutcomeKind, OutcomeRecord, ServiceState};
+pub use status::{InProgress, KEPT_OUTCOMES, Liveness, OutcomeKind, OutcomeRecord, ServiceState};
 pub use tickets::{
     Ingested, MODEL_NOTE, OpenTickets, Refused, TicketQueue, Transition, open_ticket_id, order,
 };

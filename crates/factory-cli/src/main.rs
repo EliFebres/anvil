@@ -372,7 +372,14 @@ async fn status(cwd: &Path, factory_home: FactoryHome) -> anyhow::Result<i32> {
     )
     .await?;
     let open = queue.open_tickets()?;
-    print!("{}", state.render(&open.tickets, paused.as_deref()));
+    print!(
+        "{}",
+        state.render(
+            &open.tickets,
+            factory_cli::install::service_liveness(),
+            paused.as_deref()
+        )
+    );
     for (path, problem) in open.unusable {
         println!("unusable: {}: {problem}", path.display());
     }
