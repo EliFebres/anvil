@@ -1,18 +1,18 @@
 //! The states of the agent loop and the pure transition table between them.
 //!
 //! ```text
-//! Plan -> Build -> Review -> Optimize -> Verify -> Done
-//!           ^         |                    |
+//! Plan -> Build -> Review -> Verify -> Done
+//!           ^         |         |
 //!           +---------+ (review requests changes, max 3 rounds)
-//!           ^                              |
-//!           +------------------------------+ (verify fails, max 2 rounds)
+//!           ^                   |
+//!           +-------------------+ (verify fails, max 2 rounds)
 //! ```
 //!
-//! A diff under 50 lines takes shorter paths. On the first build with a
-//! check command, the checks run before the review and the reviewer sees
-//! their output, so its approval ends the run: `Build -> Verify -> Review ->
-//! Done`. Otherwise a small diff skips the simplification pass: `Build ->
-//! Review -> Verify -> Done`.
+//! When there is a check command, detected or declared by the plan, the
+//! checks run before the review and the reviewer sees their output, so its
+//! approval ends the run: `Build -> Verify -> Review -> Done`. The order
+//! above is what is left for a project with no check command, where the
+//! model verifies by hand after the review.
 
 use std::fmt;
 
@@ -37,9 +37,11 @@ pub enum State {
     Build,
     /// A second model reviews the diff.
     Review,
-    /// One simplification pass.
-    Optimize,
     /// Run the project's checks.
+    // Session logs written while the loop had a simplification state between
+    // Review and Verify still resume: the next thing such a session needs is
+    // its checks.
+    #[serde(alias = "optimize")]
     Verify,
     /// Terminal.
     Done,
@@ -60,7 +62,6 @@ impl State {
             State::Plan => limits.plan,
             State::Build => limits.build,
             State::Review => limits.review,
-            State::Optimize => limits.optimize,
             State::Verify => limits.verify,
             State::Done => StateBudget::default(),
         }
@@ -76,7 +77,6 @@ impl State {
             State::Plan => "plan",
             State::Build => "build",
             State::Review => "review",
-            State::Optimize => "optimize",
             State::Verify => "verify",
             State::Done => "done",
         }
@@ -164,7 +164,7 @@ impl fmt::Display for IncompleteReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum Status {
-    /// The task was built, reviewed, simplified and verified.
+    /// The task was built, reviewed and verified.
     Done,
     /// The task was not finished.
     Incomplete {
@@ -217,15 +217,13 @@ impl fmt::Display for Status {
 pub enum StateOutcome {
     /// The state finished its work.
     Finished,
-    /// Build finished a diff small enough to check before the review.
-    BuiltSmall,
+    /// Build finished and there is a check command to run before the review.
+    ReadyToCheck,
     /// The checks passed before the review, which will see their output.
     CheckedBeforeReview,
-    /// The reviewer approved the diff.
+    /// The reviewer approved the diff; its checks have not run yet.
     ReviewApproved,
-    /// The reviewer approved a small diff; the simplification pass is skipped.
-    ApprovedSmall,
-    /// The reviewer approved a small diff whose checks already passed.
+    /// The reviewer approved a diff whose checks already passed.
     ApprovedAfterCheck,
     /// The reviewer wants changes.
     ReviewChanges(Vec<String>),
@@ -274,10 +272,9 @@ pub fn transition(state: State, outcome: StateOutcome, rounds: &mut Rounds) -> S
         (_, StateOutcome::ProviderFailed(error)) => Step::Finish(Status::ProviderError { error }),
         (State::Plan, StateOutcome::Finished) => Step::Next(State::Build),
         (State::Build, StateOutcome::Finished) => Step::Next(State::Review),
-        (State::Build, StateOutcome::BuiltSmall) => Step::Next(State::Verify),
+        (State::Build, StateOutcome::ReadyToCheck) => Step::Next(State::Verify),
         (State::Verify, StateOutcome::CheckedBeforeReview) => Step::Next(State::Review),
-        (State::Review, StateOutcome::ReviewApproved) => Step::Next(State::Optimize),
-        (State::Review, StateOutcome::ApprovedSmall) => Step::Next(State::Verify),
+        (State::Review, StateOutcome::ReviewApproved) => Step::Next(State::Verify),
         (State::Review, StateOutcome::ApprovedAfterCheck) => Step::Finish(Status::Done),
         (State::Review, StateOutcome::ReviewChanges(_)) => {
             if rounds.review < MAX_REVIEW_ROUNDS {
@@ -289,7 +286,6 @@ pub fn transition(state: State, outcome: StateOutcome, rounds: &mut Rounds) -> S
                 })
             }
         }
-        (State::Optimize, StateOutcome::Finished) => Step::Next(State::Verify),
         (State::Verify, StateOutcome::VerifyPassed) => Step::Finish(Status::Done),
         (State::Verify, StateOutcome::VerifyFailed(_)) => {
             if rounds.verify < MAX_VERIFY_ROUNDS {
@@ -333,10 +329,6 @@ mod tests {
         );
         assert_eq!(
             transition(State::Review, StateOutcome::ReviewApproved, &mut rounds),
-            Step::Next(State::Optimize)
-        );
-        assert_eq!(
-            transition(State::Optimize, StateOutcome::Finished, &mut rounds),
             Step::Next(State::Verify)
         );
         assert_eq!(
@@ -347,10 +339,10 @@ mod tests {
     }
 
     #[test]
-    fn a_small_diff_checks_first_and_the_approval_ends_the_run() {
+    fn checks_run_first_and_the_approval_ends_the_run() {
         let mut rounds = Rounds::default();
         assert_eq!(
-            transition(State::Build, StateOutcome::BuiltSmall, &mut rounds),
+            transition(State::Build, StateOutcome::ReadyToCheck, &mut rounds),
             Step::Next(State::Verify)
         );
         assert_eq!(
@@ -369,12 +361,8 @@ mod tests {
     }
 
     #[test]
-    fn a_small_diff_without_an_early_check_skips_optimize() {
+    fn a_failed_check_after_the_review_goes_back_to_build() {
         let mut rounds = Rounds::default();
-        assert_eq!(
-            transition(State::Review, StateOutcome::ApprovedSmall, &mut rounds),
-            Step::Next(State::Verify)
-        );
         assert_eq!(
             transition(
                 State::Verify,
@@ -436,13 +424,7 @@ mod tests {
 
     #[test]
     fn stops_and_provider_failures_end_from_any_state() {
-        for state in [
-            State::Plan,
-            State::Build,
-            State::Review,
-            State::Optimize,
-            State::Verify,
-        ] {
+        for state in [State::Plan, State::Build, State::Review, State::Verify] {
             let mut rounds = Rounds::default();
             assert_eq!(
                 transition(
@@ -531,6 +513,16 @@ mod tests {
                 used: 0,
                 limit: 0
             }
+        );
+    }
+
+    #[test]
+    fn the_removed_optimize_state_in_older_logs_loads_as_verify() {
+        let old: State = serde_json::from_str(r#""optimize""#).expect("loads");
+        assert_eq!(old, State::Verify);
+        assert_eq!(
+            serde_json::to_string(&State::Verify).expect("writes"),
+            r#""verify""#
         );
     }
 

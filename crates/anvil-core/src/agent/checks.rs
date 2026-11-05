@@ -31,6 +31,32 @@ pub trait ChangeChecks: Send + Sync {
     fn run(&self, cwd: &Path, changed: &[PathBuf]) -> Vec<ChangeCheckFailure>;
 }
 
+/// Where a check that Verify ran came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckSource {
+    /// The project's files or the configuration named the command.
+    Detected,
+    /// The approved plan's `Check:` line named the command.
+    Plan,
+    /// The checks supplied from outside the loop, such as standing rules.
+    Standing,
+}
+
+impl CheckSource {
+    /// The lowercase name used in logs and telemetry.
+    ///
+    /// # Returns
+    ///
+    /// `detected`, `plan` or `standing`.
+    pub fn name(self) -> &'static str {
+        match self {
+            CheckSource::Detected => "detected",
+            CheckSource::Plan => "plan",
+            CheckSource::Standing => "standing",
+        }
+    }
+}
+
 /// How the Verify state runs the project's checks.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum CheckCommand {

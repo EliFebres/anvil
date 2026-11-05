@@ -404,7 +404,7 @@ impl RuleSet {
         ))
     }
 
-    /// The numbered list for the reviewer, with the citation requirement.
+    /// The numbered list for the reviewer, with how to report a violation.
     ///
     /// # Returns
     ///
@@ -414,9 +414,10 @@ impl RuleSet {
             return None;
         }
         Some(format!(
-            "The change must also follow these standing rules. When it violates one, request a \
-             change whose item starts with the rule id in square brackets, for example \
-             `[google-docstrings] src/api.py: add a docstring to parse_config`.\n\n{}",
+            "These are the user's standing rules. A violation is never a reason to request \
+             changes: report it as a note on your approval that starts with the rule id in \
+             square brackets, for example `[google-docstrings] src/api.py: parse_config has \
+             no docstring`. Rules that can be checked mechanically are enforced separately.\n\n{}",
             self.numbered_list()
         ))
     }

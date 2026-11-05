@@ -312,7 +312,8 @@ impl Transcript {
             LoopEvent::TextDelta(text) => self.append_text(text),
             LoopEvent::ReasoningDelta(_)
             | LoopEvent::Transition { .. }
-            | LoopEvent::PlanWritten { .. } => {}
+            | LoopEvent::PlanWritten { .. }
+            | LoopEvent::PlanUpdated { .. } => {}
             LoopEvent::TurnFinished { .. } => self.close_model(),
             LoopEvent::StateEntered { state, visit } => {
                 self.close_model();
@@ -383,6 +384,7 @@ impl Transcript {
                 command,
                 passed,
                 output_tail,
+                ..
             } => {
                 let status = if *passed {
                     CheckStatus::Passed
@@ -969,25 +971,17 @@ fn render_entry(
         Entry::Plan(plan) => render_plan(plan, columns, theme),
         Entry::Check { command, status } => render_check(command, status, columns, theme, tick),
         Entry::Review { verdict } => match verdict {
-            ReviewVerdict::Approve => {
-                vec![Line::styled("review: approved", theme.fg(Shade::Muted))]
+            ReviewVerdict::Approve { notes } => {
+                let mut lines = vec![Line::styled("review: approved", theme.fg(Shade::Muted))];
+                lines.extend(review_list(notes, columns, theme.fg(Shade::Muted)));
+                lines
             }
             ReviewVerdict::Changes { items } => {
                 let mut lines = vec![Line::styled(
                     "review: changes requested",
                     theme.fg(Shade::Secondary),
                 )];
-                for item in items {
-                    lines.extend(
-                        wrap(item, columns.saturating_sub(4).max(1))
-                            .into_iter()
-                            .enumerate()
-                            .map(|(index, line)| {
-                                let lead = if index == 0 { "  - " } else { "    " };
-                                Line::styled(format!("{lead}{line}"), theme.fg(Shade::Text))
-                            }),
-                    );
-                }
+                lines.extend(review_list(items, columns, theme.fg(Shade::Text)));
                 lines
             }
         },
@@ -1202,6 +1196,23 @@ pub fn diff_lines(diff: &Diff, width: usize, theme: &Theme) -> Vec<Line<'static>
     }
     if lines.is_empty() {
         lines.push(Line::styled("(no change)", theme.fg(Shade::Faint)));
+    }
+    lines
+}
+
+/// The reviewer's requests or notes as a wrapped list under the verdict line.
+fn review_list(entries: &[String], columns: usize, style: Style) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for entry in entries {
+        lines.extend(
+            wrap(entry, columns.saturating_sub(4).max(1))
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    let lead = if index == 0 { "  - " } else { "    " };
+                    Line::styled(format!("{lead}{line}"), style)
+                }),
+        );
     }
     lines
 }
@@ -1606,6 +1617,25 @@ mod tests {
     }
 
     #[test]
+    fn approval_notes_are_listed_under_the_verdict() {
+        let mut transcript = fresh();
+        transcript.apply(
+            &LoopEvent::ReviewVerdict {
+                verdict: ReviewVerdict::Approve {
+                    notes: vec![
+                        "[minimal-comments] a.rs: one comment restates the code".to_owned(),
+                    ],
+                },
+            },
+            Instant::now(),
+        );
+        assert_eq!(
+            joined(&mut transcript, 40),
+            "review: approved\n  - [minimal-comments] a.rs: one comment\n    restates the code"
+        );
+    }
+
+    #[test]
     fn plan_ticks_update_in_place() {
         let mut transcript = fresh();
         let path = PathBuf::from("/project/plan.md");
@@ -1724,6 +1754,7 @@ mod tests {
         transcript.apply(
             &LoopEvent::CheckFinished {
                 command: "cargo test".to_owned(),
+                source: anvil_core::agent::CheckSource::Detected,
                 passed: false,
                 output_tail: "boom".to_owned(),
             },

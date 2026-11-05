@@ -847,7 +847,6 @@ mod tests {
             FakeProvider::tool_turn(vec![write]),
             FakeProvider::text_turn("Built it.\n"),
             FakeProvider::text_turn("Addressed the review.\n"),
-            FakeProvider::text_turn("Nothing to simplify.\n"),
             FakeProvider::text_turn("Verified.\n"),
             FakeProvider::text_turn("Done.\n"),
         ]));
@@ -897,12 +896,25 @@ mod tests {
 
     /// Feeds events into the UI one by one, drawing after each so the
     /// streaming path is exercised, and reads the plan like the runner.
+    ///
+    /// The run is over by now, so the plan file has every box ticked. The
+    /// runner saw it as the model wrote it, which the replay restores for
+    /// `PlanWritten`; the ticks arrive with `PlanUpdated`, as they did live.
     fn replay(app: &mut App, terminal: &mut Terminal<TestBackend>, events: &[LoopEvent]) {
         for event in events {
-            if let LoopEvent::PlanWritten { path } = event
-                && let Some(msg) = plan_message(path)
-            {
-                app.handle(msg);
+            match event {
+                LoopEvent::PlanWritten { path } => {
+                    if let Some(UiMsg::Plan { path, text }) = plan_message(path) {
+                        let text = text.replace("[x]", "[ ]");
+                        app.handle(UiMsg::Plan { path, text });
+                    }
+                }
+                LoopEvent::PlanUpdated { path } => {
+                    if let Some(msg) = plan_message(path) {
+                        app.handle(msg);
+                    }
+                }
+                _ => {}
             }
             app.handle(UiMsg::Loop(event.clone()));
             terminal.draw(|frame| app.draw(frame)).expect("draw");

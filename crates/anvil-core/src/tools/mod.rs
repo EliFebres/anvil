@@ -650,6 +650,34 @@ impl ToolRegistry {
         execution
     }
 
+    /// Decides whether a call may run, without running it.
+    ///
+    /// The loop uses it for a command it runs itself but did not choose,
+    /// such as the check command a plan declares: the blocked list, the
+    /// rules and the session approvals apply as they would to the model's
+    /// own call, and an `ask` rule prompts.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The tool the call would go to.
+    /// * `args` - The call's arguments.
+    /// * `root` - The project root.
+    ///
+    /// # Errors
+    ///
+    /// The reason, when the tool is unknown or the call may not run.
+    pub fn permit(&self, name: &str, args: &Value, root: &Path) -> Result<(), String> {
+        let tool = self
+            .get(name)
+            .ok_or_else(|| format!("unknown tool `{name}`"))?;
+        for target in tool.targets(args) {
+            if let Some((output, _)) = self.check_permission(tool, args, target.as_deref(), root) {
+                return Err(output.content);
+            }
+        }
+        Ok(())
+    }
+
     /// Applies the blocked list, the rules and the session approvals; `None`
     /// means the call may run.
     fn check_permission(
@@ -1451,6 +1479,33 @@ mod tests {
         let execution = registry.execute(&read, &ToolContext::new(dir.path())).await;
         assert_eq!(execution.outcome, ToolOutcome::Completed);
         assert!(lock_or_recover(&observer.0).is_empty());
+    }
+
+    #[test]
+    fn permit_decides_like_a_call_without_running_anything() {
+        let registry = |rules: &str, answer: PromptAnswer| {
+            ToolRegistry::with_builtins(
+                Permissions::from_toml(rules, None).expect("rules parse"),
+                Box::new(StaticPrompt(answer)),
+            )
+        };
+        let root = Path::new("/project");
+        let args = serde_json::json!({"command": "bash -n tool.sh"});
+        let allowed = registry("allow = [\"shell:bash *\"]", PromptAnswer::No);
+        assert_eq!(allowed.permit("shell", &args, root), Ok(()));
+        let denied = registry("deny = [\"shell\"]", PromptAnswer::Yes);
+        assert_eq!(
+            denied.permit("shell", &args, root),
+            Err("denied by a permission rule".to_owned())
+        );
+        let asked = registry("", PromptAnswer::No);
+        assert!(asked.permit("shell", &args, root).is_err());
+        let answered_yes = registry("", PromptAnswer::Yes);
+        assert_eq!(answered_yes.permit("shell", &args, root), Ok(()));
+        assert_eq!(
+            allowed.permit("no_such_tool", &args, root),
+            Err("unknown tool `no_such_tool`".to_owned())
+        );
     }
 
     #[test]

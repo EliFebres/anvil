@@ -168,6 +168,39 @@ impl AttemptStatus {
     }
 }
 
+/// Where the check command a session ran came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckSource {
+    /// anvil detected a runner (or was configured with one).
+    Detected,
+    /// Only the approved plan declared one.
+    Plan,
+    /// No check command ran; the model verified by hand.
+    #[default]
+    None,
+}
+
+/// What one session spent on loop overheads rather than on the task.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overheads {
+    /// Build turns that did nothing but tick plan checkboxes.
+    pub lone_tick_turns: u32,
+    /// Reviews the session ran.
+    pub review_rounds: u32,
+    /// Whether the reviewer still wanted changes when the round cap stopped it.
+    pub review_cap_hit: bool,
+    /// Model turns spent in the verify state.
+    pub verify_model_turns: u32,
+    /// Where the session's check command came from.
+    pub check_source: CheckSource,
+    /// Whether the memory summarizer ran.
+    pub memory_ran: bool,
+    /// Why the memory summarizer was skipped, when anvil said so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_skip_reason: Option<String>,
+}
+
 /// One attempt at one task.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttemptRecord {
@@ -197,6 +230,10 @@ pub struct AttemptRecord {
     /// before it was recorded.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub turns_by_state: BTreeMap<String, StateTurns>,
+    /// The loop overheads, written as fields of the attempt itself; `None`
+    /// in results written before they were recorded.
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    pub overheads: Option<Overheads>,
     /// Cost in USD, when every provider used has a price.
     pub cost_usd: Option<f64>,
     /// Wall time of the anvil run.
@@ -384,8 +421,68 @@ pub struct Efficiency {
     /// Turns per loop state summed over every attempt; divide by `attempts`
     /// for a per-task figure.
     pub by_state: BTreeMap<String, StateTurns>,
+    /// Loop overheads over the attempts that recorded them; `None` when no
+    /// attempt did.
+    pub overheads: Option<OverheadTotals>,
     /// Mean cost per attempt, when every attempt could be priced.
     pub cost_per_attempt: Option<f64>,
+}
+
+/// The loop overheads of a set of attempts, summed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OverheadTotals {
+    /// Attempts that recorded their overheads.
+    pub attempts: usize,
+    /// Build turns that did nothing but tick plan checkboxes.
+    pub lone_tick_turns: u64,
+    /// Reviews run.
+    pub review_rounds: u64,
+    /// Attempts stopped by the review round cap.
+    pub review_cap_hits: u64,
+    /// Model turns spent in the verify state.
+    pub verify_model_turns: u64,
+    /// Attempts whose check command was detected.
+    pub check_detected: u64,
+    /// Attempts whose check command came from the plan alone.
+    pub check_plan: u64,
+    /// Attempts that ran no check command.
+    pub check_none: u64,
+    /// Attempts whose memory summarizer ran.
+    pub memory_ran: u64,
+    /// Attempts whose memory summarizer was skipped, per reason.
+    pub memory_skipped: BTreeMap<String, u64>,
+}
+
+impl OverheadTotals {
+    /// Sums the overheads of the attempts that recorded them.
+    ///
+    /// # Arguments
+    ///
+    /// * `attempts` - The attempts.
+    ///
+    /// # Returns
+    ///
+    /// The totals, or `None` when no attempt recorded its overheads.
+    pub fn of(attempts: &[&AttemptRecord]) -> Option<OverheadTotals> {
+        let mut totals = OverheadTotals::default();
+        for overheads in attempts.iter().filter_map(|a| a.overheads.as_ref()) {
+            totals.attempts += 1;
+            totals.lone_tick_turns += u64::from(overheads.lone_tick_turns);
+            totals.review_rounds += u64::from(overheads.review_rounds);
+            totals.review_cap_hits += u64::from(overheads.review_cap_hit);
+            totals.verify_model_turns += u64::from(overheads.verify_model_turns);
+            match overheads.check_source {
+                CheckSource::Detected => totals.check_detected += 1,
+                CheckSource::Plan => totals.check_plan += 1,
+                CheckSource::None => totals.check_none += 1,
+            }
+            totals.memory_ran += u64::from(overheads.memory_ran);
+            if let Some(reason) = &overheads.memory_skip_reason {
+                *totals.memory_skipped.entry(reason.clone()).or_default() += 1;
+            }
+        }
+        (totals.attempts > 0).then_some(totals)
+    }
 }
 
 impl Efficiency {
@@ -428,6 +525,7 @@ impl Efficiency {
             ),
             multi_call_turns_mean: mean(multi_call, count),
             by_state,
+            overheads: OverheadTotals::of(&attempts),
             cost_per_attempt: cost.filter(|_| count > 0).map(|c| c / count as f64),
         }
     }
@@ -601,7 +699,19 @@ impl fmt::Display for RunResult {
             .max(4);
         writeln!(f, "{:<width$}  result    status", "task")?;
         for task in &self.tasks {
-            let statuses: Vec<String> = task.attempts.iter().map(|a| a.status.label()).collect();
+            let statuses: Vec<String> = task
+                .attempts
+                .iter()
+                .map(|a| {
+                    let capped = a.overheads.as_ref().is_some_and(|o| o.review_cap_hit);
+                    // A capped attempt whose check passed must not read as a plain pass.
+                    format!(
+                        "{}{}",
+                        a.status.label(),
+                        if capped { "[review-cap]" } else { "" }
+                    )
+                })
+                .collect();
             writeln!(
                 f,
                 "{:<width$}  {:<8}  {}",
@@ -645,6 +755,16 @@ impl fmt::Display for RunResult {
                 .map_or_else(|| "n/a".to_owned(), |v| thousands(v as u64))
         )?;
         writeln!(f, "cost per task         {}", money(e.cost_per_attempt))?;
+        if let Some(o) = &e.overheads {
+            writeln!(f, "review cap hits       {}", o.review_cap_hits)?;
+            writeln!(f, "lone tick turns       {}", o.lone_tick_turns)?;
+            writeln!(f, "verify model turns    {}", o.verify_model_turns)?;
+            writeln!(
+                f,
+                "memory ran            {} of {}",
+                o.memory_ran, o.attempts
+            )?;
+        }
         writeln!(f, "wall                  {}", duration(t.wall_ms))
     }
 }
@@ -738,6 +858,7 @@ pub(crate) mod samples {
             tool_calls: if passed { 4 } else { 9 },
             turns: if passed { 3 } else { 7 },
             turns_by_state: BTreeMap::new(),
+            overheads: None,
             cost_usd: Some(0.01),
             anvil_ms: 1500,
             check_ms: 200,
@@ -785,7 +906,7 @@ pub(crate) mod samples {
 
 #[cfg(test)]
 mod tests {
-    use super::samples::{run, task};
+    use super::samples::{attempt, run, task};
     use super::*;
 
     #[test]
@@ -873,6 +994,38 @@ mod tests {
     }
 
     #[test]
+    fn overheads_are_flat_fields_and_absent_in_older_files() {
+        let mut recorded = attempt(1, true);
+        recorded.overheads = Some(Overheads {
+            lone_tick_turns: 1,
+            review_rounds: 4,
+            review_cap_hit: true,
+            verify_model_turns: 2,
+            check_source: CheckSource::Plan,
+            memory_ran: false,
+            memory_skip_reason: Some("uneventful_small_diff".to_owned()),
+        });
+        let json = serde_json::to_value(&recorded).expect("serializes");
+        assert_eq!(json["review_cap_hit"], true);
+        assert_eq!(json["check_source"], "plan");
+        assert_eq!(json["memory_skip_reason"], "uneventful_small_diff");
+        assert!(json.get("overheads").is_none(), "the fields are flat");
+        let back: AttemptRecord = serde_json::from_value(json).expect("reads");
+        assert_eq!(back, recorded);
+
+        let older = serde_json::to_value(attempt(1, true)).expect("serializes");
+        assert!(older.get("lone_tick_turns").is_none());
+        let back: AttemptRecord = serde_json::from_value(older).expect("reads");
+        assert_eq!(back.overheads, None);
+
+        let totals = OverheadTotals::of(&[&recorded, &attempt(2, true)]).expect("one recorded");
+        assert_eq!((totals.attempts, totals.review_cap_hits), (1, 1));
+        assert_eq!((totals.check_plan, totals.memory_ran), (1, 0));
+        assert_eq!(totals.memory_skipped["uneventful_small_diff"], 1);
+        assert_eq!(OverheadTotals::of(&[&attempt(1, true)]), None);
+    }
+
+    #[test]
     fn efficiency_takes_means_medians_and_per_pass_figures() {
         let mut t = task("t", &[true, false, true, false]);
         for (attempt, input) in t.attempts.iter_mut().zip([100, 400, 200, 300]) {
@@ -925,6 +1078,20 @@ mod tests {
             ],
         );
         insta::assert_snapshot!(result.to_string());
+    }
+
+    #[test]
+    fn a_review_cap_hit_shows_in_the_summary_even_when_the_check_passed() {
+        let mut capped = task("py-capped", &[true]);
+        capped.attempts[0].status = AttemptStatus::Denied;
+        capped.attempts[0].overheads = Some(Overheads {
+            review_rounds: 4,
+            review_cap_hit: true,
+            ..Overheads::default()
+        });
+        let text = run("fe92bc2", "m1", vec![capped]).to_string();
+        assert!(text.contains("PASS 1/1  denied[review-cap]"), "{text}");
+        assert!(text.contains("review cap hits       1"), "{text}");
     }
 
     #[test]

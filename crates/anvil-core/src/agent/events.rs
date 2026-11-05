@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use tokio::sync::mpsc;
 
+use super::checks::CheckSource;
 use super::state::{State, Status};
 use super::verdict::ReviewVerdict;
 use crate::provider::{StopReason, ToolCall, Usage};
@@ -66,6 +67,11 @@ pub enum LoopEvent {
         /// Where.
         path: PathBuf,
     },
+    /// anvil marked plan steps done in the plan file without a model turn.
+    PlanUpdated {
+        /// The plan file.
+        path: PathBuf,
+    },
     /// The reviewer answered.
     ReviewVerdict {
         /// The verdict.
@@ -80,6 +86,8 @@ pub enum LoopEvent {
     CheckFinished {
         /// The command line.
         command: String,
+        /// Where the command came from.
+        source: CheckSource,
         /// Whether it exited with zero.
         passed: bool,
         /// The last lines of its output.

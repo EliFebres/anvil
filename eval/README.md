@@ -36,7 +36,7 @@ eval baseline [--anvil-bin PATH] [--parallel N]
 
 `run` scores every task (or those with one of `--tags`) and writes `results/<date>-<git sha>-<model>.json`. `--repeat 3` reports a pass rate with its spread, because single runs lie. `--provider` forces the coder provider; it must be a `[providers.*]` entry in `~/.anvil/config.toml`. The anvil binary is `--anvil-bin`, else `anvil` on `PATH`, else `target/release/anvil`, else `target/debug/anvil`. `--parallel` defaults to `[eval] parallel` in `factory.toml`.
 
-`compare` prints both runs per task with `PASS 2/3`-style verdicts, the totals (tasks passing, pass rate, tokens, cost, cost per passed task) and the tasks that flipped.
+`compare` prints both runs per task with `PASS 2/3`-style verdicts, the totals (tasks passing, pass rate, tokens, cost, cost per passed task) and the tasks that flipped. Per group (small tasks, and those tagged `large`) it also prints turns per loop state and the loop overheads: lone checkbox-tick turns, reviews, review-cap hits, model turns in verify, where the check command came from, and how often the memory summarizer ran or was skipped. A run written before a figure was recorded shows `n/a`.
 
 `gate` is the factory's regression rule: a task passes a run when a strict majority of its attempts passed; the candidate fails (exit 2) when more than one task that passed in base fails in the candidate. Tasks the candidate did not run are warned about, not counted.
 
@@ -48,7 +48,7 @@ Exit codes: 0 ok, 1 error, 2 gate failed.
 
 Every run gets a temporary `ANVIL_HOME` seeded with copies of `~/.anvil/config.toml`, `.env`, `rules.toml` and `checks/`. API keys and prices flow in; the memory and telemetry anvil writes never reach the real home. Each attempt gets its own fixture copy with a project `.anvil/config.toml` that sets `roles.coder` and `limits.session_tokens`.
 
-anvil prints no usage, so the harness reads the attempt's `.anvil/telemetry/*.jsonl`, sums the `turn` and `compacted` records of the session, and prices them with each provider's `price_per_mtoken`. A run that used an unpriced provider reports its cost as `n/a`.
+anvil prints no usage, so the harness reads the attempt's `.anvil/telemetry/*.jsonl`, sums the `turn` and `compacted` records of the session, and prices them with each provider's `price_per_mtoken`. Telemetry carries no tool arguments, so the one figure that needs them (a build turn that only ticked plan checkboxes) comes from the session transcript, `.anvil/sessions/<id>/session.jsonl`. A run that used an unpriced provider reports its cost as `n/a`.
 
 ## Prerequisites
 
@@ -56,7 +56,7 @@ anvil prints no usage, so the harness reads the attempt's `.anvil/telemetry/*.js
 
 ## The result file
 
-`schema` is 1. The file holds the run (`started_at`, `git_sha`, `provider`, `model`, `runner`, `repeat`, `parallel`, `tags`), one entry per task with its attempts (`passed`, `status`, `check_exit`, `session`, `tokens`, `cost_usd`, `anvil_ms`, `check_ms`, `wall_ms`, output tails) and `totals`. `crates/eval/src/results.rs` is the schema; its snapshot test pins the shape.
+`schema` is 1. The file holds the run (`started_at`, `git_sha`, `provider`, `model`, `runner`, `repeat`, `parallel`, `tags`), one entry per task with its attempts (`passed`, `status`, `check_exit`, `session`, `tokens`, `turns_by_state`, the overheads `lone_tick_turns`, `review_rounds`, `review_cap_hit`, `verify_model_turns`, `check_source`, `memory_ran` and `memory_skip_reason`, `cost_usd`, `anvil_ms`, `check_ms`, `wall_ms`, output tails) and `totals`. An attempt stopped by the review round cap has `review_cap_hit: true` whether or not its check passed. `crates/eval/src/results.rs` is the schema; its snapshot test pins the shape.
 
 ## The tasks
 

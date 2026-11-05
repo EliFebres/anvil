@@ -7,7 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
-use anvil_core::agent::{ChangeCheckFailure, ChangeChecks, PromptSection};
+use anvil_core::agent::diff::SMALL_DIFF_LINES;
+use anvil_core::agent::{ChangeCheckFailure, ChangeChecks, LoopResult, PromptSection, Status};
 use anvil_core::context::{collect_text, render_transcript};
 use anvil_core::provider::{CompletionRequest, Message, Provider};
 use anvil_memory::facts::extract::{
@@ -17,6 +18,7 @@ use anvil_memory::rules::{ensure_check_scripts, strip_rule_prefix};
 use anvil_memory::{
     Decision, FactStore, MEMORY_TOKEN_CAP, Proposal, Rule, RuleSet, load_memory, paths, run_checks,
 };
+use anvil_telemetry::MemorySkipReason;
 use anyhow::Context;
 use tokio::sync::oneshot;
 
@@ -341,6 +343,51 @@ pub fn tui_decider(ui: UiHandle) -> Box<dyn FnMut(&Proposal) -> Decision> {
     })
 }
 
+/// Decides whether a finished run is worth a summarizer turn.
+///
+/// The facts worth keeping come from a session where something pushed
+/// back: a reviewer rejection, a failed check, a run that did not finish.
+/// A run that went straight through and changed little has nothing new to
+/// teach, so its summarizer turn is skipped.
+///
+/// # Arguments
+///
+/// * `result` - How the run ended.
+/// * `diff_lines` - Lines the session's final diff adds or removes; `None`
+///   when it could not be measured, which never skips.
+/// * `always` - `[memory] always_summarize` from the configuration.
+///
+/// # Returns
+///
+/// The reason to skip, or `None` to run the summarizer.
+pub fn skip_reason(
+    result: &LoopResult,
+    diff_lines: Option<usize>,
+    always: bool,
+) -> Option<MemorySkipReason> {
+    let uneventful =
+        result.status == Status::Done && result.rounds.review == 0 && result.rounds.verify == 0;
+    let small = diff_lines.is_some_and(|lines| lines < SMALL_DIFF_LINES);
+    (!always && uneventful && small).then_some(MemorySkipReason::UneventfulSmallDiff)
+}
+
+/// The words for a skip reason in the `memory: skipped (...)` line.
+///
+/// # Arguments
+///
+/// * `reason` - Why the summarizer was skipped.
+///
+/// # Returns
+///
+/// A short description.
+pub fn skip_text(reason: MemorySkipReason) -> String {
+    match reason {
+        MemorySkipReason::UneventfulSmallDiff => {
+            format!("no reviewer rejection, no failed check, diff under {SMALL_DIFF_LINES} lines")
+        }
+    }
+}
+
 /// Runs the end-of-session extraction for a finished run or chat and
 /// reports, rather than fails, when it cannot.
 ///
@@ -383,6 +430,64 @@ pub async fn finish_session(
     .await;
     if let Err(error) = outcome {
         console.warn(format!("warning: memory extraction skipped: {error:#}"));
+    }
+}
+
+#[cfg(test)]
+mod skip_tests {
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use anvil_core::agent::{IncompleteReason, Rounds};
+
+    use super::*;
+
+    fn result(status: Status, review: u32, verify: u32) -> LoopResult {
+        LoopResult {
+            status,
+            summary: String::new(),
+            summary_path: PathBuf::new(),
+            rounds: Rounds { review, verify },
+            spend: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn an_uneventful_small_session_is_skipped() {
+        let done = result(Status::Done, 0, 0);
+        let skip = Some(MemorySkipReason::UneventfulSmallDiff);
+        assert_eq!(skip_reason(&done, Some(0), false), skip);
+        assert_eq!(skip_reason(&done, Some(SMALL_DIFF_LINES - 1), false), skip);
+        assert_eq!(skip_reason(&done, Some(SMALL_DIFF_LINES), false), None);
+        assert_eq!(skip_reason(&done, None, false), None, "an unmeasured diff");
+    }
+
+    #[test]
+    fn pushback_or_an_unfinished_run_is_summarized() {
+        assert_eq!(
+            skip_reason(&result(Status::Done, 1, 0), Some(3), false),
+            None
+        );
+        assert_eq!(
+            skip_reason(&result(Status::Done, 0, 1), Some(3), false),
+            None
+        );
+        let stopped = Status::Incomplete {
+            reason: IncompleteReason::PlanRejected,
+        };
+        assert_eq!(skip_reason(&result(stopped, 0, 0), Some(3), false), None);
+    }
+
+    #[test]
+    fn the_config_override_always_summarizes() {
+        assert_eq!(
+            skip_reason(&result(Status::Done, 0, 0), Some(3), true),
+            None
+        );
+        assert_eq!(
+            skip_text(MemorySkipReason::UneventfulSmallDiff),
+            "no reviewer rejection, no failed check, diff under 50 lines"
+        );
     }
 }
 
@@ -458,7 +563,6 @@ mod tests {
         let coder = Arc::new(FakeProvider::new(vec![
             FakeProvider::text_turn(plan),
             FakeProvider::text_turn("built"),
-            FakeProvider::text_turn("nothing to simplify"),
         ]));
         let reviewer = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
             "```json\n{\"verdict\": \"approve\"}\n```",

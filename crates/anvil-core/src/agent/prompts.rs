@@ -20,9 +20,6 @@ pub const BUILD: &str = include_str!("../../prompts/build.md");
 /// The reviewer's prompt. It stands alone; the reviewer does not get `BASE`.
 pub const REVIEW: &str = include_str!("../../prompts/review.md");
 
-/// The Optimize state prompt.
-pub const OPTIMIZE: &str = include_str!("../../prompts/optimize.md");
-
 /// The Verify state prompt, used only when no check command is detected.
 pub const VERIFY: &str = include_str!("../../prompts/verify.md");
 
@@ -40,7 +37,6 @@ pub fn state_prompt(state: State) -> &'static str {
         State::Plan => PLAN,
         State::Build => BUILD,
         State::Review => REVIEW,
-        State::Optimize => OPTIMIZE,
         State::Verify => VERIFY,
         State::Done => "",
     }
@@ -184,11 +180,6 @@ mod tests {
             text: "Run just check before committing.\n".to_owned(),
         }];
         insta::assert_snapshot!(inputs(State::Build, &tools(), &instructions));
-    }
-
-    #[test]
-    fn optimize_prompt_snapshot() {
-        insta::assert_snapshot!(inputs(State::Optimize, &tools(), &[]));
     }
 
     #[test]

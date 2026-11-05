@@ -1,9 +1,8 @@
 ---
 source: crates/anvil-memory/src/rules/mod.rs
-assertion_line: 699
 expression: "seed.review_section().expect(\"section\")"
 ---
-The change must also follow these standing rules. When it violates one, request a change whose item starts with the rule id in square brackets, for example `[google-docstrings] src/api.py: add a docstring to parse_config`.
+These are the user's standing rules. A violation is never a reason to request changes: report it as a note on your approval that starts with the rule id in square brackets, for example `[google-docstrings] src/api.py: parse_config has no docstring`. Rules that can be checked mechanically are enforced separately.
 
 1. [google-docstrings] (python, rust) Every public function and class gets a Google-style docstring (Python) or a Google-shaped doc comment (Rust): a one-line summary, then Args, Returns and Raises or Errors where they apply.
 2. [assert-boundaries] (all languages) Validate inputs at class and function boundaries with assertions and descriptive errors.

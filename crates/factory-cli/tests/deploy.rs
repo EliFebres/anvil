@@ -48,7 +48,6 @@ fn the_factory_profile_matches_factory_toml_and_locks_permissions() {
         ("plan", &anvil.limits.plan, 400_000),
         ("build", &anvil.limits.build, 3_000_000),
         ("review", &anvil.limits.review, 300_000),
-        ("optimize", &anvil.limits.optimize, 200_000),
         ("verify", &anvil.limits.verify, 300_000),
     ];
     for (state, budget, tokens) in budgets {

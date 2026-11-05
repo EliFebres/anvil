@@ -114,6 +114,9 @@ impl Shell {
     }
 }
 
+/// The variable that stops Python from writing `__pycache__` folders.
+const NO_BYTECODE: &str = "PYTHONDONTWRITEBYTECODE";
+
 /// Arguments of the `shell` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ShellArgs {
@@ -266,9 +269,13 @@ pub async fn run_command(
     script: &str,
     timeout: Duration,
 ) -> std::io::Result<CommandRun> {
-    let mut child = ctx
-        .shell
-        .command(script)
+    let mut command = ctx.shell.command(script);
+    // Bytecode caches written by a test run would land in the session's diff,
+    // where the reviewer reads them as unrelated changes.
+    if std::env::var_os(NO_BYTECODE).is_none() {
+        command.env(NO_BYTECODE, "1");
+    }
+    let mut child = command
         .current_dir(&ctx.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -420,6 +427,21 @@ mod tests {
             "{}",
             output.content
         );
+    }
+
+    #[tokio::test]
+    async fn commands_run_with_python_bytecode_writing_off() {
+        let command = if cfg!(windows) {
+            "$env:PYTHONDONTWRITEBYTECODE"
+        } else {
+            "echo $PYTHONDONTWRITEBYTECODE"
+        };
+        let expected = std::env::var(NO_BYTECODE).unwrap_or_else(|_| "1".to_owned());
+        let run = run_command(&ctx(), command, Duration::from_secs(30))
+            .await
+            .expect("spawns");
+        let output = run.into_output().content;
+        assert!(output.starts_with(&expected), "{output}");
     }
 
     #[tokio::test]

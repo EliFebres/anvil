@@ -20,6 +20,7 @@ pub mod gate;
 pub mod git;
 pub mod results;
 pub mod runner;
+pub mod session;
 pub mod task;
 pub mod telemetry;
 
@@ -31,7 +32,8 @@ pub use compare::{Comparison, Flips, compare};
 pub use error::EvalError;
 pub use gate::{GateOutcome, MAX_REGRESSIONS, gate};
 pub use results::{
-    AttemptRecord, AttemptStatus, RESULTS_DIR, RunResult, SCHEMA_VERSION, TaskResult, Totals, Usage,
+    AttemptRecord, AttemptStatus, CheckSource, Overheads, RESULTS_DIR, RunResult, SCHEMA_VERSION,
+    TaskResult, Totals, Usage,
 };
 pub use runner::{
     AttemptContext, AttemptFuture, AttemptOutcome, EvalRunner, FakeRunner, Progress, ProgressFn,

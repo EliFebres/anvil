@@ -3,7 +3,9 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::results::{Efficiency, RunResult, TaskResult, money, percent, thousands};
+use crate::results::{
+    Efficiency, OverheadTotals, RunResult, TaskResult, money, percent, thousands,
+};
 
 /// Which tasks changed verdict between two runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -356,10 +358,82 @@ fn write_efficiency(
             change(a, b)
         )?;
     }
-    write_states(f, name_width, a, b)
+    write_states(f, name_width, a, b)?;
+    write_overheads(f, name_width, col, a, b)
+}
+
+/// Reads one count out of a run's overhead totals.
+type Count = fn(&OverheadTotals) -> u64;
+
+/// Writes the loop overheads of two runs: counts over the attempts that
+/// recorded them, `n/a` for a run written before they were recorded, and
+/// nothing when neither run has them.
+fn write_overheads(
+    f: &mut fmt::Formatter<'_>,
+    name_width: usize,
+    col: usize,
+    a: &Efficiency,
+    b: &Efficiency,
+) -> fmt::Result {
+    let (a, b) = (a.overheads.as_ref(), b.overheads.as_ref());
+    if a.is_none() && b.is_none() {
+        return Ok(());
+    }
+    let skipped = |o: &OverheadTotals| o.memory_skipped.values().sum::<u64>();
+    let rows: Vec<(&str, Count)> = vec![
+        ("attempts recorded", |o| o.attempts as u64),
+        ("lone tick turns", |o| o.lone_tick_turns),
+        ("reviews", |o| o.review_rounds),
+        ("review cap hits", |o| o.review_cap_hits),
+        ("verify model turns", |o| o.verify_model_turns),
+        ("check detected", |o| o.check_detected),
+        ("check from plan", |o| o.check_plan),
+        ("check none", |o| o.check_none),
+        ("memory ran", |o| o.memory_ran),
+    ];
+    let shown = |v: Option<u64>| v.map_or_else(|| "n/a".to_owned(), |v| v.to_string());
+    writeln!(f, "{:<name_width$}  totals over the attempts", "overheads")?;
+    for (label, value) in rows {
+        let label = format!("  {label}");
+        writeln!(
+            f,
+            "{label:<name_width$}  {:<col$}  {}",
+            shown(a.map(value)),
+            shown(b.map(value))
+        )?;
+    }
+    writeln!(
+        f,
+        "{:<name_width$}  {:<col$}  {}",
+        "  memory skipped",
+        shown(a.map(skipped)),
+        shown(b.map(skipped))
+    )?;
+    let mut reasons: Vec<&String> = a
+        .iter()
+        .chain(b.iter())
+        .flat_map(|o| o.memory_skipped.keys())
+        .collect();
+    reasons.sort();
+    reasons.dedup();
+    for reason in reasons {
+        let count = |o: Option<&OverheadTotals>| {
+            o.map(|o| o.memory_skipped.get(reason).copied().unwrap_or(0))
+        };
+        let label = format!("    {reason}");
+        writeln!(
+            f,
+            "{label:<name_width$}  {:<col$}  {}",
+            shown(count(a)),
+            shown(count(b))
+        )?;
+    }
+    Ok(())
 }
 
 /// The loop states in the order a session visits them; others sort after.
+// `optimize` is a state the loop no longer has; results recorded while it
+// existed still print it in its old place.
 const STATE_ORDER: [&str; 6] = ["plan", "build", "review", "optimize", "verify", "memory"];
 
 /// Writes turns per task for each loop state, split into one-call, 2+ call,
@@ -523,6 +597,20 @@ mod tests {
         for attempt in b.tasks.iter_mut().flat_map(|t| &mut t.attempts) {
             attempt.turns_by_state =
                 [("review".to_owned(), review), ("build".to_owned(), build)].into();
+            attempt.overheads = Some(crate::results::Overheads {
+                lone_tick_turns: 1,
+                review_rounds: 2,
+                review_cap_hit: attempt.index == 3,
+                verify_model_turns: 0,
+                check_source: if attempt.index == 1 {
+                    crate::results::CheckSource::Plan
+                } else {
+                    crate::results::CheckSource::Detected
+                },
+                memory_ran: attempt.index == 1,
+                memory_skip_reason: (attempt.index != 1)
+                    .then(|| "uneventful_small_diff".to_owned()),
+            });
         }
         insta::assert_snapshot!(compare(&a, &b).to_string());
     }

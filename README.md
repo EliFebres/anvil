@@ -8,7 +8,7 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 
 ## What it is
 
-**`anvil`, the CLI harness.** A coding agent for your own projects. Point it at a repository, give it a task, and it plans, builds, reviews, optimizes and verifies the change with a real tool set (shell, files, search) under a permission model you control. It reads Claude Code's conventions (`CLAUDE.md`, `SKILL.md`, `.claude/commands`, `.claude/agents`, hooks, MCP servers), so an existing Claude Code setup works as is. It remembers standing rules and facts across sessions, and it records what it does (sizes, tokens, latencies, outcomes), never what it works on.
+**`anvil`, the CLI harness.** A coding agent for your own projects. Point it at a repository, give it a task, and it plans, builds, reviews and verifies the change with a real tool set (shell, files, search) under a permission model you control. It reads Claude Code's conventions (`CLAUDE.md`, `SKILL.md`, `.claude/commands`, `.claude/agents`, hooks, MCP servers), so an existing Claude Code setup works as is. It remembers standing rules and facts across sessions, and it records what it does (sizes, tokens, latencies, outcomes), never what it works on.
 
 **`factory`, the Dark Factory.** A service that works on anvil itself without anyone watching. It takes tickets that anvil's own telemetry drafted, implements each one on a branch inside a network-isolated container, runs the checks, scores the change against a fixed eval set, has several other models review it, and merges through a pull request when everything is green. Anything risky waits for a human.
 
@@ -18,7 +18,7 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 
 | command | what happens |
 |---|---|
-| `anvil "<task>"` or `anvil run <task>` | One task through the state machine: `plan` (you approve the plan) → `build` → `review` (a second model) → `optimize` → `verify` (the project's checks and your rules). Exit code 0 when done, 2 when incomplete. |
+| `anvil "<task>"` or `anvil run <task>` | One task through the state machine: `plan` (you approve the plan, which ends with a `Check:` command) → `build` → `verify` (your rules, the project's checks and the plan's check, with no model turn) → `review` (a second model, which sees the check output). A project with no check command at all is reviewed first and then verified by the model. Exit code 0 when done, 2 when incomplete. |
 | `anvil chat` | A conversation with tools, outside the state machine. `/plan`, `/build` and `/review` switch the prompt and tool set; `rule: <text>` saves a standing rule on the spot; `/compact`, `/model <name>`, `/cost`, `/ticket <text>`, `/help`. |
 | `anvil resume <id>` | Continue a saved session from where it stopped. `anvil sessions` lists them. |
 | `anvil --yes ...` | Unattended: approve the plan, allow every asked tool call, keep every proposed memory. The factory and the eval harness run it this way. |
@@ -54,8 +54,8 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 
 Three kinds of state live under `~/.anvil/`, all plain files you can edit:
 
-- **Rules** (`rules.toml`): standing coding rules. They enter every system prompt, the reviewer must cite a rule id for any violation, and a rule with a `check` runs against the session's changed files in `verify`. `anvil rules list|add|remove|check`.
-- **Memory** (`memory/`): one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`, loaded under a token cap. At the end of a session the summarizer proposes new facts and you keep or drop each one.
+- **Rules** (`rules.toml`): standing coding rules. They enter every system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
+- **Memory** (`memory/`): one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`, loaded under a token cap. At the end of a session the summarizer proposes new facts and you keep or drop each one. A run that finished with no reviewer rejection, no failed check and a diff under 50 lines has nothing new to teach, so it skips that turn and says so; `[memory] always_summarize = true` runs it every time.
 - **Telemetry** (`telemetry/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates. A classifier turns them into signals, and `anvil ticket draft` has the summarizer write ticket drafts from the signals alone.
 
 Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, GitHub access, branch protection, tools), `anvil update` (fetch the latest release and swap the binary), `anvil ticket list|show|review|submit|drop`.
@@ -73,6 +73,34 @@ How a ticket moves:
 5. A pull request opens with the gate output, the eval table and every verdict. Green CI squash-merges it. A change to a protected path or a new dependency is labelled `needs-human` and the ticket waits.
 
 `factory run` is the loop (`--once` for a single pass), `factory status` shows the queue and the last ten outcomes, `factory pause` and `factory resume` toggle the flag it checks between tickets, `factory review <pr>` runs the swarm by hand, `factory env <NAME>` says where a secret came from without printing it, and `factory update` waits for the ticket in progress, stops the service, pulls `main`, rebuilds the binaries and the worker image, and starts it again (`--now` skips the wait). Per-ticket budgets (wall clock, tokens) and the protected paths live in `factory.toml`.
+
+#### `factory watch`
+
+`factory watch` is a full-screen dashboard of what the service is doing, redrawn every 2 seconds. It only reads `~/.factory/status.json`, which the service writes, so it works over SSH and never touches the service except through the pause flag. The top bar shows the host, the state, uptime, the next poll and today's totals; the rest of the screen depends on whether a ticket is in progress.
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/factory-watch-working.png" alt="factory watch while a ticket is in progress: the ticket with its wall-clock and token budget bars, the pipeline from claim to merge, the implementer's latest tool calls, resources, the open queue and recent outcomes">
+      <p align="center"><b>Working a ticket.</b> The budgets, the pipeline stage, the implementer's latest tool calls, and what the run costs so far.</p>
+    </td>
+    <td width="50%">
+      <img src="docs/factory-watch-idle.png" alt="factory watch while idle: an empty queue, the state of main and the baseline, the last 7 days of merged and rejected tickets, service health, tickets waiting on a human and recent outcomes">
+      <p align="center"><b>Idle.</b> The last 7 days, service health, and the tickets that are waiting on you.</p>
+    </td>
+  </tr>
+</table>
+
+| key | what it does |
+|---|---|
+| `p` / `r` | Pause after the current ticket, or resume. The same flag as `factory pause` and `factory resume`. |
+| `l` | Show the service's full log (its systemd journal) in a pager. |
+| `Enter` | Open the ticket in progress, or the most recent one when idle. |
+| `o` | Open the ticket's pull request in the browser (while working). |
+| `d` | Run `anvil doctor` (while idle). |
+| `q`, `Esc` or `Ctrl+C` | Quit the dashboard. The service keeps running. |
+
+`factory watch --once` prints the screen once as plain text and exits, for scripts and logs. `factory watch --file <path>` shows another status file instead of the service's; the pause keys then only change the screen.
 
 ### The eval harness
 
@@ -130,7 +158,8 @@ The factory is meant for a small always-on machine. `deploy/nuc/bootstrap.sh` do
 ```sh
 factory run --once     # one pass, for a first look
 factory run            # the service loop
-factory status
+factory status         # the queue and the last ten outcomes
+factory watch          # the live dashboard
 ```
 
 Secrets come from `~/.factory/env` (mode 600). The service needs `FACTORY_GITHUB_TOKEN`, a `factory.toml` at the repository root, and an eval result on `main` to gate against; until the baseline commit lands it pauses and says so. `anvil doctor --fix-github` creates the `factory/state` branch and the branch protection it expects.
