@@ -520,6 +520,10 @@ impl Sandbox {
 
     /// Starts the egress proxy for a ticket, replacing a previous one.
     fn start_proxy(&self, worktree: &Path) -> Result<()> {
+        // The previous proxy goes first. A ticket worked twice in a row, as
+        // after an error reopens it, gets the same socket path, and a handle
+        // dropped after the new bind would remove the new socket.
+        self.stop_proxy();
         let socket = self.config.home.proxy_socket(&Self::ticket_id(worktree));
         let egress_file = self.config.home.egress_file(&Self::ticket_id(worktree));
         let _ = std::fs::remove_file(&egress_file);
@@ -1403,6 +1407,34 @@ mod tests {
             profile: "[roles]\ncoder = \"anthropic\"\n".to_owned(),
             home: FactoryHome::under(Path::new("/h")),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_ticket_worked_twice_in_a_row_keeps_its_proxy_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = config(ContainerRuntime::Podman);
+        config.home = FactoryHome::under(dir.path());
+        let socket = config.home.proxy_socket("T1");
+        let worktree = config.home.work_root().join("T1");
+        let sandbox = Sandbox::new(config);
+
+        sandbox.start_proxy(&worktree).expect("first start");
+        assert!(socket.exists(), "the first proxy listens");
+        sandbox.start_proxy(&worktree).expect("second start");
+        assert!(
+            socket.exists(),
+            "replacing the ticket's own proxy must not remove the new socket"
+        );
+        let other = sandbox.config.home.work_root().join("T2");
+        sandbox.start_proxy(&other).expect("another ticket");
+        assert!(
+            !socket.exists(),
+            "the replaced proxy cleans up after itself"
+        );
+        assert!(sandbox.config.home.proxy_socket("T2").exists());
+        sandbox.stop_proxy();
+        assert!(!sandbox.config.home.proxy_socket("T2").exists());
     }
 
     #[test]
