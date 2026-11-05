@@ -169,8 +169,9 @@ pub struct AgentLoop {
     /// Paths read or written, for instruction file discovery.
     touched: BTreeSet<PathBuf>,
     plan: Option<String>,
-    /// The command the approved plan's `Check:` line declared, when the
-    /// permission rules allow it.
+    /// The command the plan's `Check:` line declares, as last read.
+    declared_check: Option<String>,
+    /// `declared_check` when the permission rules allow it: what Verify runs.
     plan_check: Option<String>,
     /// Git tree of the working tree at session start.
     baseline: Option<String>,
@@ -266,6 +267,7 @@ impl AgentLoop {
             plan: None,
             baseline: None,
             pending_feedback: None,
+            declared_check: None,
             plan_check: None,
             review_notes: Vec::new(),
             lane: Lane::Full,
@@ -302,10 +304,9 @@ impl AgentLoop {
         agent.conversation = Conversation::from_messages(snapshot.messages);
         agent.baseline = snapshot.baseline;
         agent.plan = std::fs::read_to_string(snapshot.dir.join(PLAN_FILE)).ok();
-        agent.plan_check = agent
-            .plan
-            .as_deref()
-            .and_then(|plan| agent.usable_plan_check(plan));
+        if let Some(plan) = agent.plan.clone() {
+            agent.adopt_plan_check(&plan);
+        }
         let (start, note) = match (snapshot.last_state, snapshot.status) {
             (_, Some(status)) => (
                 State::Build,
@@ -455,19 +456,29 @@ impl AgentLoop {
         }
     }
 
-    /// The command of the plan's `Check:` line, when it gives one that the
-    /// permission rules let anvil run.
-    fn usable_plan_check(&self, plan: &str) -> Option<String> {
-        let command = match plan::check_line(plan) {
-            PlanCheck::Command(command) => command,
-            PlanCheck::Auto | PlanCheck::Missing => return None,
+    /// Reads the plan's `Check:` line and, when it names a different
+    /// command than before, asks the permission rules about the new one.
+    fn adopt_plan_check(&mut self, plan: &str) {
+        let declared = match plan::check_line(plan) {
+            PlanCheck::Command(command) => Some(command),
+            PlanCheck::Auto | PlanCheck::Missing => None,
         };
+        if declared == self.declared_check {
+            return;
+        }
+        self.plan_check = declared.clone().filter(|command| self.permitted(command));
+        self.declared_check = declared;
+    }
+
+    /// Whether the permission rules let anvil run a plan's check command;
+    /// warns when they do not.
+    fn permitted(&self, command: &str) -> bool {
         let args = serde_json::json!({ "command": command });
         match self.registry.permit(SHELL_TOOL, &args, &self.config.cwd) {
-            Ok(()) => Some(command),
+            Ok(()) => true,
             Err(reason) => {
                 self.warn(format!("the plan's check command will not run: {reason}"));
-                None
+                false
             }
         }
     }
@@ -560,7 +571,7 @@ impl AgentLoop {
             self.plan = Some(plan.clone());
             match self.gate.review(&plan) {
                 PlanDecision::Approve => {
-                    self.plan_check = self.usable_plan_check(&plan);
+                    self.adopt_plan_check(&plan);
                     return StateOutcome::Finished;
                 }
                 PlanDecision::Revise(feedback) => {
@@ -586,6 +597,11 @@ impl AgentLoop {
             .await
         {
             return outcome;
+        }
+        // The plan's check can itself be wrong, and the plan file is where
+        // Build corrects the plan, so the line is read again after each build.
+        if let Ok(plan) = std::fs::read_to_string(self.config.session_dir.join(PLAN_FILE)) {
+            self.adopt_plan_check(&plan);
         }
         self.lane = if self.check_commands().is_empty() {
             Lane::Full
@@ -711,8 +727,15 @@ impl AgentLoop {
         for (source, command) in commands {
             let (passed, tail) = self.run_check(source, &command).await;
             if !passed {
+                let hint = match source {
+                    CheckSource::Plan => format!(
+                        " This command is the plan's `Check:` line. If the command itself is wrong, correct that line in `{}` and say why.",
+                        self.plan_path()
+                    ),
+                    CheckSource::Detected | CheckSource::Standing => String::new(),
+                };
                 self.pending_feedback = Some(format!(
-                    "Verification failed. `{command}` exited with an error:\n```\n{tail}\n```\nFix the cause, then end your turn with what you changed."
+                    "Verification failed. `{command}` exited with an error:\n```\n{tail}\n```\nFix the cause, then end your turn with what you changed.{hint}"
                 ));
                 return StateOutcome::VerifyFailed(tail);
             }
@@ -1460,6 +1483,51 @@ mod tests {
             checks.iter().map(|check| check.2).collect::<Vec<_>>(),
             [false, true]
         );
+    }
+
+    #[tokio::test]
+    async fn a_check_line_the_build_corrects_in_the_plan_file_is_the_one_that_runs_next() {
+        let fix_check = ToolCall {
+            id: "fix-check".to_owned(),
+            name: "edit_file".to_owned(),
+            arguments_json: serde_json::json!({
+                "path": ".anvil/sessions/t1/plan.md",
+                "old": "Check: test -f wrong-name.txt",
+                "new": "Check: test -f hello.txt"
+            })
+            .to_string(),
+        };
+        let mut h = Harness::new(
+            vec![
+                plan_with_check("test -f wrong-name.txt"),
+                FakeProvider::tool_turn(vec![write_call("hello.txt")]),
+                FakeProvider::text_turn("built"),
+                FakeProvider::tool_turn(vec![fix_check]),
+                FakeProvider::text_turn("the check named the wrong file"),
+            ],
+            vec![approve()],
+        );
+        let agent = h.default_agent(CheckCommand::None, "allow = [\"write_file\", \"shell\"]");
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        assert_eq!(result.rounds.verify, 1);
+        let events = h.drain();
+        assert_eq!(
+            check_events(&events),
+            [
+                (
+                    CheckSource::Plan,
+                    "test -f wrong-name.txt".to_owned(),
+                    false
+                ),
+                (CheckSource::Plan, "test -f hello.txt".to_owned(), true)
+            ]
+        );
+        let rebuild = &h.coder.requests()[3];
+        assert!(rebuild.messages.iter().any(|m| matches!(
+            m,
+            Message::User { text } if text.contains("If the command itself is wrong, correct that line")
+        )));
     }
 
     #[tokio::test]
