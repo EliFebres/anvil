@@ -14,7 +14,8 @@ acceptance = [
 ]
 evidence = []
 priority = "p2"
-status = "claimed"
+status = "in_review"
 origin = "human"
 claimed_at = "2026-11-05T01:23:39.338108730Z"
 claimed_by = "minipc-NUC14RVH-B"
+pr = 40
