@@ -103,6 +103,8 @@ Grep results on the 50k-line fixture grew from 1.7 KB to 6.8 KB mean with the co
 
 ### What is left
 
+[fewer-turns-2.md](fewer-turns-2.md) is the follow-up that works through this list.
+
 - The last build turn is still a checkbox tick on its own in 25 of 69 attempts (about 0.4 turns per task).
 - Markdown, shell and the four Python fixtures without tests still verify by hand (about 4 model turns each).
 - The reviewer's standing rules forced extra review rounds; 4 attempts hit the 3-round cap and were still counted as passes because the check passed.
