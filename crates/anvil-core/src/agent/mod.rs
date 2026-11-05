@@ -1405,7 +1405,7 @@ mod tests {
     async fn a_plan_declared_check_runs_with_no_model_turn_in_verify() {
         let mut h = Harness::new(
             vec![
-                plan_with_check("test -f hello.txt && echo plan-check-ok"),
+                plan_with_check("test -f hello.txt"),
                 FakeProvider::tool_turn(vec![write_call("hello.txt")]),
                 FakeProvider::text_turn("built"),
             ],
@@ -1428,15 +1428,11 @@ mod tests {
         assert!(!result.spend.contains_key(&State::Verify));
         assert_eq!(
             check_events(&events),
-            [(
-                CheckSource::Plan,
-                "test -f hello.txt && echo plan-check-ok".to_owned(),
-                true
-            )]
+            [(CheckSource::Plan, "test -f hello.txt".to_owned(), true)]
         );
         let brief = format!("{:?}", h.reviewer.requests()[0].messages);
         assert!(brief.contains("# Check"), "{brief}");
-        assert!(brief.contains("plan-check-ok"), "{brief}");
+        assert!(brief.contains("`test -f hello.txt` passed"), "{brief}");
         let plan_system = &h.coder.requests()[0].system;
         assert!(plan_system.contains("# Check command"), "{plan_system}");
         assert!(
