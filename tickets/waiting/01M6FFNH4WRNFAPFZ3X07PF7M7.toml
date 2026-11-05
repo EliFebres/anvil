@@ -14,8 +14,9 @@ acceptance = [
 ]
 evidence = []
 priority = "p2"
-status = "in_review"
+status = "waiting"
 origin = "human"
 claimed_at = "2026-11-05T01:23:39.338108730Z"
 claimed_by = "minipc-NUC14RVH-B"
 pr = 40
+note = "PR #40 touches protected paths: crates/factory-core/src/lib.rs (crates/factory-core/**), crates/factory-core/src/status.rs (crates/factory-core/**)"
