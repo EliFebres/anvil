@@ -1,8 +1,10 @@
 //! `factory install-service`: the systemd user unit from `deploy/nuc/`.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 use anyhow::Context;
+use factory_core::Liveness;
 
 /// The unit file in the repository.
 pub const UNIT_SOURCE: &str = "deploy/nuc/factory.service";
@@ -73,7 +75,31 @@ fn systemctl(args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `$XDG_CONFIG_HOME`, else `<home>/.config`.
+/// Whether the factory service is alive, asked of systemd.
+///
+/// On Linux, `systemctl --user is-active factory.service` exiting 0 means
+/// running and any other exit means stopped. When systemctl cannot be run,
+/// or on any other platform, the state is unknown.
+///
+/// # Returns
+///
+/// The liveness `factory status` reports.
+pub fn service_liveness() -> Liveness {
+    if !cfg!(target_os = "linux") {
+        return Liveness::Unknown;
+    }
+    let status = std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", UNIT_NAME])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(status) if status.success() => Liveness::Running,
+        Ok(_) => Liveness::Stopped,
+        Err(_) => Liveness::Unknown,
+    }
+}
 ///
 /// # Arguments
 ///
