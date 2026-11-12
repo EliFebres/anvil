@@ -313,7 +313,8 @@ impl Transcript {
             LoopEvent::ReasoningDelta(_)
             | LoopEvent::Transition { .. }
             | LoopEvent::PlanWritten { .. }
-            | LoopEvent::PlanUpdated { .. } => {}
+            | LoopEvent::PlanUpdated { .. }
+            | LoopEvent::Escalated { .. } => {}
             LoopEvent::TurnFinished { .. } => self.close_model(),
             LoopEvent::StateEntered { state, visit } => {
                 self.close_model();

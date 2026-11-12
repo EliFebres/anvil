@@ -114,6 +114,7 @@ impl<O: Write, E: Write> Renderer<O, E> {
             }
             LoopEvent::Transition { .. }
             | LoopEvent::TurnFinished { .. }
+            | LoopEvent::Escalated { .. }
             | LoopEvent::PlanUpdated { .. }
             | LoopEvent::ProposedEdit { .. } => {}
             LoopEvent::ToolStarted { call } => {
@@ -285,7 +286,7 @@ pub fn state_title(state: State) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use anvil_core::agent::{CheckSource, Status};
+    use anvil_core::agent::{CheckSource, Role, Status};
     use anvil_core::provider::{StopReason, Usage};
     use anvil_core::tools::OutputStats;
 
@@ -324,6 +325,7 @@ mod tests {
             LoopEvent::TextDelta(" flag\n2. [ ] wire it\n".to_owned()),
             LoopEvent::TurnFinished {
                 state: State::Plan,
+                role: Role::Coder,
                 stop_reason: StopReason::EndTurn,
                 usage: Some(Usage {
                     input: 10,

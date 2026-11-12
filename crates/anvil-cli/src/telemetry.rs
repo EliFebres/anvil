@@ -323,6 +323,7 @@ impl SessionTelemetry {
             LoopEvent::TurnFinished {
                 state,
                 stop_reason,
+                role: _,
                 usage,
                 latency_ms,
                 retries,
@@ -395,6 +396,7 @@ impl SessionTelemetry {
             | LoopEvent::PlanUpdated { .. }
             | LoopEvent::CheckStarted { .. }
             | LoopEvent::ProposedEdit { .. }
+            | LoopEvent::Escalated { .. }
             | LoopEvent::Finished { .. } => return None,
         })
     }
@@ -826,6 +828,7 @@ mod tests {
             config,
             LoopProviders {
                 coder: coder as Arc<dyn Provider>,
+                planner: None,
                 reviewer: reviewer as Arc<dyn Provider>,
                 summarizer: Arc::new(FakeProvider::new(vec![])) as Arc<dyn Provider>,
             },

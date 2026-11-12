@@ -702,7 +702,7 @@ mod tests {
     use crate::tui::welcome::LOGO;
     use crate::tui::{MemoryAnswer, RecentSession};
     use anvil_core::agent::{
-        AgentLoop, AutoApprove, CheckCommand, EventSink, LoopConfig, LoopProviders,
+        AgentLoop, AutoApprove, CheckCommand, EventSink, LoopConfig, LoopProviders, Role,
     };
     use anvil_core::provider::{Event, FakeProvider, Provider, StopReason, ToolCall, Usage};
     use anvil_core::tools::{
@@ -875,6 +875,7 @@ mod tests {
             config,
             LoopProviders {
                 coder: coder as Arc<dyn Provider>,
+                planner: None,
                 reviewer: reviewer as Arc<dyn Provider>,
                 summarizer: Arc::new(FakeProvider::new(vec![])) as Arc<dyn Provider>,
             },
@@ -1161,6 +1162,7 @@ mod tests {
         app.handle(UiMsg::Loop(LoopEvent::TextDelta(plan.to_owned())));
         app.handle(UiMsg::Loop(LoopEvent::TurnFinished {
             state: State::Plan,
+            role: Role::Coder,
             stop_reason: StopReason::EndTurn,
             usage: Some(Usage {
                 input: 1_200,
