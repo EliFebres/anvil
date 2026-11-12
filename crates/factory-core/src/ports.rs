@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anvil_types::Ticket;
+use serde::{Deserialize, Serialize};
 
 use crate::board::{ContainerView, HealthView, NeedsHuman, ProviderLatency, Stage, UsageView};
 use crate::error::Result;
@@ -160,6 +161,17 @@ pub trait Implementer: Send + Sync {
     fn denied_hosts(&self) -> Vec<String>;
 }
 
+/// What one step of a ticket cost: an implementer run, a gate B run or a gate C round.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateCost {
+    /// `implementer run 1`, `B: eval`, `C: review round 1`.
+    pub step: String,
+    /// Cost in USD, when the price was known.
+    pub cost_usd: Option<f64>,
+    /// Weighted tokens (cached input counts a tenth), when the step reports tokens.
+    pub weighted_tokens: Option<u64>,
+}
+
 /// What the eval gate found.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvalGateReport {
@@ -169,6 +181,8 @@ pub struct EvalGateReport {
     pub summary: String,
     /// What the run cost, when known.
     pub cost_usd: Option<f64>,
+    /// Tokens the run used, when the eval result reports them.
+    pub tokens: Option<Tokens>,
 }
 
 /// Gate B's verdict.
@@ -249,6 +263,11 @@ pub struct ReviewReport {
     pub minors: Vec<MinorFinding>,
     /// What the review cost, when known.
     pub cost_usd: Option<f64>,
+    /// Tokens every reviewer used, retries included.
+    pub tokens: Tokens,
+    /// Reviewers (`provider/stance`) that still failed after the swarm's own
+    /// reruns; the worker pauses instead of asking the implementer for changes.
+    pub failed: Vec<String>,
 }
 
 /// Reviews a diff with several models.
@@ -363,6 +382,8 @@ pub enum Outcome {
         pr: u64,
         /// What the ticket cost in model calls, when known.
         cost_usd: Option<f64>,
+        /// What each step cost.
+        gate_costs: Vec<GateCost>,
     },
     /// The pull request touches a protected path and waits for a human.
     NeedsHuman {
@@ -372,6 +393,8 @@ pub enum Outcome {
         held: Vec<String>,
         /// What the ticket cost in model calls, when known.
         cost_usd: Option<f64>,
+        /// What each step cost.
+        gate_costs: Vec<GateCost>,
     },
     /// A gate or a budget rejected the ticket.
     Rejected {
@@ -381,6 +404,8 @@ pub enum Outcome {
         notes: String,
         /// What the ticket cost in model calls, when known.
         cost_usd: Option<f64>,
+        /// What each step cost.
+        gate_costs: Vec<GateCost>,
     },
     /// The factory cannot continue safely; the ticket goes back to `open/`.
     Paused {
@@ -416,6 +441,8 @@ pub enum ProgressEvent {
     },
     /// The pull request was opened.
     PullRequest(u64),
+    /// A step's cost was recorded.
+    GateCost(GateCost),
 }
 
 impl ProgressEvent {

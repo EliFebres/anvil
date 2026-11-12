@@ -5,8 +5,8 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anvil_types::Ticket;
@@ -27,6 +27,23 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A shared list of the calls the fakes received, so a test can assert the
+/// order across the implementer, the review swarm and the eval gate.
+#[derive(Debug, Clone, Default)]
+pub struct CallLog(Arc<Mutex<Vec<String>>>);
+
+impl CallLog {
+    /// Adds one call.
+    fn push(&self, call: &str) {
+        lock(&self.0).push(call.to_owned());
+    }
+
+    /// The calls so far, oldest first.
+    pub fn entries(&self) -> Vec<String> {
+        lock(&self.0).clone()
+    }
 }
 
 /// Keeps every event it is given.
@@ -368,6 +385,7 @@ impl Worker for ScriptedWorker {
             None => Ok(Outcome::Merged {
                 pr: 1,
                 cost_usd: None,
+                gate_costs: Vec::new(),
             }),
         };
         Box::pin(std::future::ready(result))
@@ -445,7 +463,9 @@ pub struct ScriptedImplementer {
     tasks: Mutex<Vec<String>>,
     run_count: AtomicUsize,
     check_count: AtomicUsize,
+    build_count: AtomicUsize,
     prepared: AtomicUsize,
+    log: CallLog,
 }
 
 impl ScriptedImplementer {
@@ -497,9 +517,20 @@ impl ScriptedImplementer {
         self.check_count.load(Ordering::SeqCst)
     }
 
+    /// How many release builds happened.
+    pub fn builds(&self) -> usize {
+        self.build_count.load(Ordering::SeqCst)
+    }
+
     /// How many times `prepare` was called.
     pub fn prepared(&self) -> usize {
         self.prepared.load(Ordering::SeqCst)
+    }
+
+    /// Records `run`, `check` and `build` calls in `log`, shared with the other fakes.
+    pub fn with_log(mut self, log: CallLog) -> Self {
+        self.log = log;
+        self
     }
 }
 
@@ -516,6 +547,7 @@ impl Implementer for ScriptedImplementer {
         _deadline: Instant,
     ) -> BoxFuture<'a, Result<ImplementerOutcome>> {
         self.run_count.fetch_add(1, Ordering::SeqCst);
+        self.log.push("run");
         lock(&self.tasks).push(task.to_owned());
         let run = lock(&self.runs)
             .pop_front()
@@ -541,6 +573,7 @@ impl Implementer for ScriptedImplementer {
         _deadline: Instant,
     ) -> BoxFuture<'a, Result<CheckOutcome>> {
         self.check_count.fetch_add(1, Ordering::SeqCst);
+        self.log.push("check");
         let passed = lock(&self.checks).pop_front().unwrap_or(true);
         if passed {
             for (path, content) in &self.check_rewrites {
@@ -567,6 +600,8 @@ impl Implementer for ScriptedImplementer {
         _worktree: &'a Path,
         _deadline: Instant,
     ) -> BoxFuture<'a, Result<CheckOutcome>> {
+        self.build_count.fetch_add(1, Ordering::SeqCst);
+        self.log.push("build");
         let passed = lock(&self.builds).pop_front().unwrap_or(true);
         Box::pin(std::future::ready(Ok(CheckOutcome {
             passed,
@@ -648,6 +683,7 @@ impl CommandRunner for FakeRuntime {
 pub struct FakeEvalGate {
     script: Mutex<VecDeque<GateB>>,
     calls: AtomicUsize,
+    log: CallLog,
 }
 
 impl FakeEvalGate {
@@ -656,7 +692,14 @@ impl FakeEvalGate {
         Self {
             script: Mutex::new(script.into()),
             calls: AtomicUsize::new(0),
+            log: CallLog::default(),
         }
+    }
+
+    /// Records every run as `eval` in `log`.
+    pub fn with_log(mut self, log: CallLog) -> Self {
+        self.log = log;
+        self
     }
 
     /// How many times the gate ran.
@@ -670,6 +713,11 @@ impl FakeEvalGate {
             regressions: regressions.iter().map(|r| (*r).to_owned()).collect(),
             summary: format!("```\ngate: {} regression(s)\n```", regressions.len()),
             cost_usd: Some(0.5),
+            tokens: Some(Tokens {
+                input: 500,
+                output: 0,
+                cached: 0,
+            }),
         }
     }
 }
@@ -677,6 +725,7 @@ impl FakeEvalGate {
 impl EvalGate for FakeEvalGate {
     fn run<'a>(&'a self, _worktree: &'a Path) -> BoxFuture<'a, Result<GateB>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.log.push("eval");
         let next = lock(&self.script)
             .pop_front()
             .unwrap_or_else(|| GateB::Passed(Self::report(&[])));
@@ -689,6 +738,7 @@ impl EvalGate for FakeEvalGate {
 pub struct FakeSwarm {
     script: Mutex<VecDeque<ReviewReport>>,
     inputs: Mutex<Vec<ReviewInput>>,
+    log: CallLog,
 }
 
 impl FakeSwarm {
@@ -697,7 +747,14 @@ impl FakeSwarm {
         Self {
             script: Mutex::new(script.into()),
             inputs: Mutex::new(Vec::new()),
+            log: CallLog::default(),
         }
+    }
+
+    /// Records every review as `review` in `log`.
+    pub fn with_log(mut self, log: CallLog) -> Self {
+        self.log = log;
+        self
     }
 
     /// Every review request received.
@@ -717,7 +774,24 @@ impl FakeSwarm {
             ],
             minors: Vec::new(),
             cost_usd: Some(0.25),
+            tokens: Tokens {
+                input: 250,
+                output: 0,
+                cached: 0,
+            },
+            failed: Vec::new(),
         }
+    }
+
+    /// A report whose reviewers `failed` could not be reached; it asks for
+    /// changes, as the real swarm does, so only the worker's own check keeps
+    /// the implementer from running.
+    pub fn failed(failed: &[&str]) -> ReviewReport {
+        let mut report = Self::changes("a reviewer failed");
+        report.reason = format!("reviewer(s) failed: {}", failed.join(", "));
+        report.findings_markdown = String::new();
+        report.failed = failed.iter().map(|f| (*f).to_owned()).collect();
+        report
     }
 
     /// A `changes` report with one blocker.
@@ -732,6 +806,12 @@ impl FakeSwarm {
             ],
             minors: Vec::new(),
             cost_usd: Some(0.25),
+            tokens: Tokens {
+                input: 250,
+                output: 0,
+                cached: 0,
+            },
+            failed: Vec::new(),
         }
     }
 }
@@ -739,6 +819,7 @@ impl FakeSwarm {
 impl ReviewSwarm for FakeSwarm {
     fn review<'a>(&'a self, input: &'a ReviewInput) -> BoxFuture<'a, Result<ReviewReport>> {
         lock(&self.inputs).push(input.clone());
+        self.log.push("review");
         let next = lock(&self.script)
             .pop_front()
             .unwrap_or_else(Self::approved);

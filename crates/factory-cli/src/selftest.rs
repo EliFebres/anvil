@@ -180,7 +180,7 @@ async fn pipeline(
         world.sandbox_toolchain(&parts, &options.repo_root).await,
     )?;
     steps.report(
-        "pipeline: claim, sandbox, gate A, gate B (skipped), gate C, push, merge",
+        "pipeline: claim, sandbox, gate A, gate C, gate B (skipped), push, merge",
         world.work(&parts, ticket.id).await,
     )?;
     steps.report(
@@ -1263,6 +1263,7 @@ impl EvalGate for SkippedEvalGate {
             summary: "Gate B skipped: the selftest has no eval baseline and calls no model."
                 .to_owned(),
             cost_usd: None,
+            tokens: None,
         }))))
     }
 

@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use eval::{AnvilOptions, AnvilRunner, EvalRunner, RunOptions, RunResult};
-use factory_core::{BoxFuture, EvalGate, EvalGateReport, FactoryError, GateB, Git, Sandbox};
+use factory_core::{
+    BoxFuture, EvalGate, EvalGateReport, FactoryError, GateB, Git, Sandbox, Tokens,
+};
 
 /// Where results live in the repository.
 pub const RESULTS_DIR: &str = "eval/results";
@@ -113,6 +115,11 @@ impl HarnessGate {
             regressions: outcome.regressions.clone(),
             summary: format!("```\n{comparison}{outcome}```{evidence}"),
             cost_usd: candidate.totals.cost_usd,
+            tokens: Some(Tokens {
+                input: candidate.totals.tokens.input,
+                output: candidate.totals.tokens.output,
+                cached: candidate.totals.tokens.cached,
+            }),
         };
         Ok(if outcome.passed {
             GateB::Passed(report)

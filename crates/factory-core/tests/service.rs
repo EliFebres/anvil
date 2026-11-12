@@ -106,6 +106,11 @@ async fn a_worked_ticket_is_merged_recorded_and_announced() {
         ScriptedWorker::scripted(vec![Ok(Outcome::Merged {
             pr: 42,
             cost_usd: Some(1.25),
+            gate_costs: vec![factory_core::GateCost {
+                step: "implementer run 1".to_owned(),
+                cost_usd: Some(1.0),
+                weighted_tokens: Some(1000),
+            }],
         })]),
         7,
     )
@@ -124,6 +129,14 @@ async fn a_worked_ticket_is_merged_recorded_and_announced() {
     assert_eq!(state.outcomes.len(), 1);
     assert_eq!(state.outcomes[0].kind, OutcomeKind::Merged);
     assert_eq!(state.outcomes[0].detail, "#42");
+    let line = std::fs::read_to_string(h.world.home.outcomes_file()).expect("history");
+    assert!(
+        line.contains(
+            r#""gate_costs":[{"step":"implementer run 1","cost_usd":1.0,"weighted_tokens":1000}]"#
+        ),
+        "{line}"
+    );
+    assert_eq!(state.outcomes[0].gate_costs.len(), 1);
     assert!(state.in_progress.is_none());
     assert_eq!(h.worker.stages(), vec!["scripted".to_owned()]);
     assert!(matches!(
@@ -289,6 +302,7 @@ async fn the_digest_goes_out_once_a_day_after_the_configured_time() {
         ScriptedWorker::scripted(vec![Ok(Outcome::Merged {
             pr: 3,
             cost_usd: Some(2.0),
+            gate_costs: Vec::new(),
         })]),
         9,
     )
@@ -400,6 +414,7 @@ impl factory_core::Worker for PeekingWorker {
             Ok(Outcome::Merged {
                 pr: 7,
                 cost_usd: Some(0.5),
+                gate_costs: Vec::new(),
             })
         })
     }

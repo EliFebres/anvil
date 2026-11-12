@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::board::write_atomic;
 use crate::error::{FactoryError, Result};
+use crate::ports::GateCost;
 
 /// How many outcomes the state keeps.
 pub const KEPT_OUTCOMES: usize = 10;
@@ -61,6 +62,9 @@ pub struct OutcomeRecord {
     /// When the ticket was claimed; missing in records older than the field.
     #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
+    /// What each step cost; missing in records older than the field.
+    #[serde(default)]
+    pub gate_costs: Vec<GateCost>,
 }
 
 /// Counts since the last digest.
@@ -283,7 +287,16 @@ mod tests {
             cost_usd: cost,
             pr: None,
             started_at: None,
+            gate_costs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_old_outcome_line_without_gate_costs_still_parses() {
+        let old = r##"{"id":"T1","title":"t","kind":"merged","detail":"#1","finished_at":"2026-10-31T12:00:00Z","cost_usd":1.5}"##;
+        let record: OutcomeRecord = serde_json::from_str(old).expect("parses");
+        assert!(record.gate_costs.is_empty());
+        assert_eq!(record.pr, None);
     }
 
     #[test]
