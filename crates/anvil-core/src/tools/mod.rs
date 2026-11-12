@@ -213,6 +213,23 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether this particular call may change anything.
+    ///
+    /// The loop refuses such calls while it is planning. The default follows
+    /// [`Tool::access`]; a tool that only sometimes writes, like a
+    /// delegation, answers per call.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The call's arguments.
+    ///
+    /// # Returns
+    ///
+    /// `true` unless the tool only reads.
+    fn may_write(&self, _args: &Value) -> bool {
+        self.access() != Access::Read
+    }
+
     /// Runs the tool.
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> ToolFuture<'a>;
 }
@@ -706,6 +723,23 @@ impl ToolRegistry {
             .is_ok_and(|args| tool.parallel_safe(&args))
     }
 
+    /// Whether a call may change anything.
+    ///
+    /// # Arguments
+    ///
+    /// * `call` - The model's call.
+    ///
+    /// # Returns
+    ///
+    /// [`Tool::may_write`] for a known tool with parsable arguments; `false`
+    /// otherwise, since such a call fails without running anything.
+    pub fn may_write(&self, call: &ToolCall) -> bool {
+        let Some(tool) = self.get(&call.name) else {
+            return false;
+        };
+        serde_json::from_str::<Value>(&call.arguments_json).is_ok_and(|args| tool.may_write(&args))
+    }
+
     /// Decides whether a call may run, without running it.
     ///
     /// The loop uses it for a command it runs itself but did not choose,
@@ -832,6 +866,22 @@ impl ToolRegistry {
 }
 
 impl Execution {
+    /// A call the loop did not run, answered with `message`. Its outcome is
+    /// [`ToolOutcome::Failed`], which is not a denial: nothing was refused by
+    /// the permission model.
+    ///
+    /// # Arguments
+    ///
+    /// * `call` - The call.
+    /// * `message` - What the model is told.
+    ///
+    /// # Returns
+    ///
+    /// The execution.
+    pub fn not_run(call: &ToolCall, message: impl Into<String>) -> Self {
+        Self::finished(call, ToolOutput::error(message), ToolOutcome::Failed)
+    }
+
     /// Wraps an untruncated output.
     fn finished(call: &ToolCall, output: ToolOutput, outcome: ToolOutcome) -> Self {
         Self {
@@ -851,6 +901,23 @@ impl Execution {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_may_write_when_its_tool_does_by_default() {
+        let registry = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(StaticPrompt(PromptAnswer::No)),
+        );
+        let call = |name: &str| ToolCall {
+            id: "c".to_owned(),
+            name: name.to_owned(),
+            arguments_json: "{}".to_owned(),
+        };
+        assert!(registry.may_write(&call("write_file")));
+        assert!(registry.may_write(&call("shell")));
+        assert!(!registry.may_write(&call("read_file")));
+        assert!(!registry.may_write(&call("no_such_tool")));
+    }
 
     /// Returns its `text` argument repeated `times` times.
     struct Echo;

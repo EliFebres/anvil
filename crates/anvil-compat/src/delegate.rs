@@ -141,20 +141,26 @@ impl Tool for DelegateTool {
     /// Whether the target agent can only read, so the call may overlap
     /// others. An agent without a tool list may write, so it never does.
     fn parallel_safe(&self, args: &Value) -> bool {
+        !self.may_write(args)
+    }
+
+    /// Whether the target agent may write; an unknown agent counts as one
+    /// that may, so it is refused while planning.
+    fn may_write(&self, args: &Value) -> bool {
         let Some(agent) = args
             .get("agent")
             .and_then(Value::as_str)
             .and_then(|name| self.agents.get(name.trim()))
         else {
-            return false;
+            return true;
         };
         let Some(tools) = &agent.tools else {
-            return false;
+            return true;
         };
         let Ok(registry) = self.env.registry(false) else {
-            return false;
+            return true;
         };
-        tools
+        !tools
             .iter()
             .filter_map(|name| registry.get(name))
             .all(|tool| tool.access() == Access::Read)

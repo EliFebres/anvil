@@ -27,11 +27,14 @@ struct Gate {
     inside: Arc<AtomicUsize>,
     /// The most completions that were in flight at once.
     most_inside: Arc<AtomicUsize>,
+    /// Completions started in all.
+    started: Arc<AtomicUsize>,
 }
 
 impl Provider for Gate {
     fn complete(&self, request: CompletionRequest) -> EventStream {
         let rendezvous = self.rendezvous.clone();
+        self.started.fetch_add(1, Ordering::SeqCst);
         let (inside, most_inside) = (Arc::clone(&self.inside), Arc::clone(&self.most_inside));
         let task = match request.messages.first() {
             Some(Message::User { text }) => text.clone(),
@@ -101,15 +104,30 @@ struct Outcome {
     /// The tool results the coder saw after the delegations, as `(call id, text)`.
     results: Vec<(String, String)>,
     most_inside: usize,
+    /// Subagent completions started.
+    subagent_turns: usize,
+    /// The tool results of a turn in the Plan state, when the run made one.
+    plan_results: Vec<(String, String)>,
 }
 
 /// Runs a loop whose build turn makes `calls`, with `rendezvous` in the subagents' provider.
 async fn run_loop(calls: Vec<ToolCall>, rendezvous: Option<Arc<Barrier>>) -> Outcome {
+    run_loop_planning(Vec::new(), calls, rendezvous).await
+}
+
+/// As [`run_loop`], with the coder also making `plan_calls` while planning.
+async fn run_loop_planning(
+    plan_calls: Vec<ToolCall>,
+    calls: Vec<ToolCall>,
+    rendezvous: Option<Arc<Barrier>>,
+) -> Outcome {
+    let planning = !plan_calls.is_empty();
     let dir = tempfile::tempdir().expect("tempdir");
     let gate = Arc::new(Gate {
         rendezvous,
         inside: Arc::default(),
         most_inside: Arc::default(),
+        started: Arc::default(),
     });
     let env = Arc::new(Env {
         gate: Arc::clone(&gate),
@@ -122,12 +140,22 @@ async fn run_loop(calls: Vec<ToolCall>, rendezvous: Option<Arc<Barrier>>) -> Out
     );
     registry.register(Box::new(DelegateTool::new(agents, env)));
 
-    let coder = Arc::new(FakeProvider::new(vec![
-        FakeProvider::text_turn("Looked.\n\n# Plan\n\n1. [ ] Ask the workers\n"),
-        FakeProvider::tool_turn(calls),
+    let built_with_calls = !calls.is_empty();
+    let mut scripts = Vec::new();
+    if planning {
+        scripts.push(FakeProvider::tool_turn(plan_calls));
+    }
+    scripts.push(FakeProvider::text_turn(
+        "Looked.\n\n# Plan\n\n1. [ ] Ask the workers\n",
+    ));
+    if !calls.is_empty() {
+        scripts.push(FakeProvider::tool_turn(calls));
+    }
+    scripts.extend([
         FakeProvider::text_turn("built"),
         FakeProvider::text_turn("```json\n{\"verdict\": \"pass\"}\n```"),
-    ]));
+    ]);
+    let coder = Arc::new(FakeProvider::new(scripts));
     let reviewer = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
         "```json\n{\"verdict\": \"approve\"}\n```",
     )]));
@@ -163,11 +191,13 @@ async fn run_loop(calls: Vec<ToolCall>, rendezvous: Option<Arc<Barrier>>) -> Out
     while let Ok(event) = rx.try_recv() {
         events.push(event);
     }
-    let results = coder
-        .requests()
-        .iter()
-        .flat_map(|request| request.messages.iter())
-        .find_map(|message| match message {
+    let requests = coder.requests();
+    let mut groups: Vec<Vec<(String, String)>> = requests
+        .last()
+        .map(|request| request.messages.iter())
+        .into_iter()
+        .flatten()
+        .filter_map(|message| match message {
             Message::ToolResults { results } => Some(
                 results
                     .iter()
@@ -176,7 +206,17 @@ async fn run_loop(calls: Vec<ToolCall>, rendezvous: Option<Arc<Barrier>>) -> Out
             ),
             _ => None,
         })
-        .unwrap_or_default();
+        .collect();
+    let results = if built_with_calls {
+        groups.pop().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let plan_results = if planning {
+        groups.into_iter().next().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     Outcome {
         status: result.status,
         worker_turns: result
@@ -186,6 +226,8 @@ async fn run_loop(calls: Vec<ToolCall>, rendezvous: Option<Arc<Barrier>>) -> Out
         events,
         results,
         most_inside: gate.most_inside.load(Ordering::SeqCst),
+        subagent_turns: gate.started.load(Ordering::SeqCst),
+        plan_results,
     }
 }
 
@@ -269,5 +311,74 @@ async fn explore_and_implement_in_one_turn_do_not_overlap() {
     ];
     let outcome = run_loop(calls, None).await;
     assert_eq!(outcome.most_inside, 1);
+    assert_eq!(outcome.results.len(), 2);
+}
+
+#[tokio::test]
+async fn planning_refuses_delegated_writes_but_runs_read_only_agents() {
+    let call = |agent: &str| delegate_call("p1", agent, "plan step");
+    for refused in ["implement", "nobody"] {
+        let outcome = run_loop_planning(vec![call(refused)], Vec::new(), None).await;
+        assert_eq!(outcome.status, Status::Done, "not marked as denied");
+        assert_eq!(outcome.subagent_turns, 0, "nothing ran for {refused}");
+        let (id, text) = &outcome.plan_results[0];
+        assert_eq!(id, "p1");
+        assert!(text.contains("not available while planning"), "{text}");
+        let finished = outcome.events.iter().find_map(|event| match event {
+            LoopEvent::ToolFinished {
+                call_id, outcome, ..
+            } if call_id == "p1" => Some(*outcome),
+            _ => None,
+        });
+        assert_eq!(finished, Some(anvil_core::tools::ToolOutcome::Failed));
+        assert_eq!(
+            tool_events(&outcome.events)[..2],
+            ["started p1", "finished p1"]
+        );
+    }
+
+    let outcome = run_loop_planning(vec![call("explore")], Vec::new(), None).await;
+    assert_eq!(outcome.subagent_turns, 1);
+    assert_eq!(
+        outcome.plan_results,
+        [("p1".to_owned(), "answer to plan step".to_owned())]
+    );
+}
+
+#[test]
+fn an_agent_without_a_tool_list_may_write() {
+    let open = anvil_compat::SubagentDef {
+        name: "open".to_owned(),
+        description: "May do anything.".to_owned(),
+        tools: None,
+        model: None,
+        inherit_permissions: false,
+        body: "Do it.".to_owned(),
+        path: "open.md".into(),
+        origin: anvil_compat::Origin::ProjectAnvil,
+        extra: serde_json::Map::new(),
+    };
+    let env = Arc::new(Env {
+        gate: Arc::new(Gate {
+            rendezvous: None,
+            inside: Arc::default(),
+            most_inside: Arc::default(),
+            started: Arc::default(),
+        }),
+        dir: std::env::temp_dir(),
+    });
+    let tool = DelegateTool::new(Arc::new(AgentSet::from_agents(vec![open])), env);
+    let args = serde_json::json!({"agent": "open", "task": "x"});
+    assert!(anvil_core::tools::Tool::may_write(&tool, &args));
+}
+
+#[tokio::test]
+async fn building_runs_both_kinds_of_delegation() {
+    let calls = vec![
+        delegate_call("d1", "explore", "look"),
+        delegate_call("d2", "implement", "change"),
+    ];
+    let outcome = run_loop(calls, None).await;
+    assert_eq!(outcome.subagent_turns, 2);
     assert_eq!(outcome.results.len(), 2);
 }

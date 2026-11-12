@@ -1044,7 +1044,17 @@ impl AgentLoop {
             if together < 2 {
                 let call = &calls[next];
                 self.announce(call);
-                let execution = self.registry.execute(call, &self.ctx).await;
+                let execution = if state == State::Plan && self.registry.may_write(call) {
+                    Execution::not_run(
+                        call,
+                        format!(
+                            "`{}` may change files, so it is not available while planning; put this step in the plan instead",
+                            call.name
+                        ),
+                    )
+                } else {
+                    self.registry.execute(call, &self.ctx).await
+                };
                 results.push(self.finish_call(state, call, execution));
                 next += 1;
                 continue;
