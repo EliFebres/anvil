@@ -21,9 +21,11 @@ use anvil_telemetry::{RecordKind, SessionMode, SessionOutcome};
 use anyhow::Context;
 use tokio::sync::watch;
 
+use crate::commands::end_status;
 use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, model_id, session_info};
 use crate::memory;
+use crate::status::{Setup, StatusReporter};
 use crate::telemetry::SessionTelemetry;
 use crate::tui::{Input, PermissionMode, SessionKind, UiMsg, wait_cancel};
 use crate::wiring::Wiring;
@@ -64,7 +66,23 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
     std::fs::create_dir_all(&session_dir).context("creating the session folder")?;
     eprintln!("chat session {id}; /help for commands");
     let wiring = &wiring.with_session(&id, &session_dir);
-    let telemetry = SessionTelemetry::start(wiring, &id, SessionMode::Chat);
+    let status = StatusReporter::start(Setup::from_wiring(wiring, &id, &session_dir, "chat"));
+    let result = chat_session(wiring, id, session_dir, yes, ui, &status).await;
+    end_status(&status, &result).await;
+    result
+}
+
+/// The body of [`chat`], with the status reporter already running.
+async fn chat_session(
+    wiring: &Wiring,
+    id: String,
+    session_dir: std::path::PathBuf,
+    yes: bool,
+    ui: UiKind,
+    status: &StatusReporter,
+) -> anyhow::Result<i32> {
+    let telemetry =
+        SessionTelemetry::start(wiring, &id, SessionMode::Chat).with_status(status.clone());
     memory::prompt_sections(wiring.home.as_deref(), &wiring.cwd)?;
     let hooks = wiring.hook_runner();
     let mut session_context = Vec::new();
@@ -77,7 +95,8 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
     let (mut frontend, events_tx) = Frontend::start(ui, info);
     let (events, tee) = telemetry.sink(Some(events_tx));
     telemetry.observe_permissions(wiring);
-    let mut registry = wiring.registry(telemetry.recording(frontend.prompt(false)))?;
+    let mut registry =
+        wiring.registry(telemetry.recording(status.prompt(false, frontend.prompt(false))))?;
     frontend.install_tool_hook(
         &mut registry,
         wiring
@@ -157,11 +176,12 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
         wiring,
         &id,
         &messages,
-        frontend.decider(yes),
+        status.decider(yes, frontend.decider(yes)),
         &frontend.console(),
         Some(&telemetry),
     )
     .await;
+    status.finish_done("chat ended");
     frontend.shutdown(false).await?;
     telemetry.finish(SessionOutcome::Chat);
     Ok(0)

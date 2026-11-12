@@ -94,6 +94,16 @@ pub enum Command {
         #[arg(long, default_value = "7d")]
         since: String,
     },
+    /// List this project's sessions, newest first: state, loop state, age, spend, task, id.
+    /// A session that says `working` but whose process is gone shows as `stale`.
+    Status {
+        /// Print a JSON array instead of lines.
+        #[arg(long)]
+        json: bool,
+        /// Include every project that has run a session.
+        #[arg(long)]
+        all: bool,
+    },
     /// Download the latest release for this platform, verify its SHA256, swap the binary
     /// and print the changes since the installed version.
     Update {

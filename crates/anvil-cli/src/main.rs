@@ -16,6 +16,7 @@ mod secrets;
 mod setup;
 mod skills;
 mod stats;
+mod status;
 mod telemetry;
 mod terminal;
 mod ticket;
@@ -129,6 +130,17 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         Some(Command::Stats { since }) => {
             let config = load_config(home, cwd).ok().map(|loaded| loaded.config);
             stats::run(config.as_ref(), cwd, &since)
+        }
+        Some(Command::Status { json, all }) => {
+            status::list::run(
+                cwd,
+                home,
+                all,
+                json,
+                chrono::Utc::now(),
+                &mut std::io::stdout(),
+            )?;
+            Ok(0)
         }
         Some(Command::Ticket { command }) => ticket::run(command, home, cwd).await,
         Some(Command::Update { exe }) => {

@@ -19,6 +19,13 @@ pub enum ValidationError {
         max: usize,
     },
 
+    /// A session `status.json` breaks a rule of the format.
+    #[error("session status: {reason}")]
+    Status {
+        /// What is wrong, naming the field.
+        reason: String,
+    },
+
     /// A required text field is empty or only whitespace.
     #[error("field `{field}` must not be empty")]
     EmptyField {

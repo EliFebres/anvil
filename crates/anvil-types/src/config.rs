@@ -80,6 +80,17 @@ summarizer = "runpod"
 # [tickets]
 # remote = "origin"
 
+# Post one short message to a Discord, Slack or ntfy webhook when a session needs
+# you, is blocked, finishes or fails. `webhook_env` names the environment
+# variable that holds the URL.
+# [notify]
+# webhook_env = "ANVIL_WEBHOOK_URL"
+
+# Report the session to herdr (a terminal multiplexer for coding agents) when it
+# runs in a herdr pane.
+# [integrations]
+# herdr = false
+
 # Lines added to the coder's system prompt, one instruction each. Profiles use
 # this to explain their own rules.
 # [prompt]
@@ -416,6 +427,22 @@ pub struct MemoryConfig {
     pub always_summarize: bool,
 }
 
+/// Where session status messages are posted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionNotifyConfig {
+    /// Environment variable that holds the webhook URL.
+    pub webhook_env: String,
+}
+
+/// Optional reports to other tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct IntegrationsConfig {
+    /// Report the session's state to herdr when running in a herdr pane.
+    pub herdr: bool,
+}
+
 /// Lines above which provider statistics become tickets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
@@ -544,6 +571,12 @@ pub struct AnvilConfig {
     /// Normally set by a profile, not by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionRules>,
+    /// Where session status messages are posted; none by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<SessionNotifyConfig>,
+    /// Optional reports to other tools.
+    #[serde(default)]
+    pub integrations: IntegrationsConfig,
 }
 
 impl AnvilConfig {
