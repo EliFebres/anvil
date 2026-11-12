@@ -5,7 +5,9 @@
 //! [`anvil_core::agent::turn::complete_turn`]: the agent's body is the
 //! system prompt, its allow list filters the tools, and the project's
 //! permission rules apply with nobody at the keyboard (an `ask` decision is
-//! a `no`). The parent conversation sees one tool result, nothing else.
+//! a `no`, unless the agent says `permissions: inherit`). The parent
+//! conversation sees one tool result, nothing else; the model turns the run
+//! made travel with it so the loop can count them as worker spend.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -13,9 +15,12 @@ use std::sync::Arc;
 use anvil_core::agent::EventSink;
 use anvil_core::agent::turn::complete_turn;
 use anvil_core::context::Conversation;
-use anvil_core::provider::{CompletionRequest, Message, Provider, ToolResult, ToolSpec};
+use anvil_core::provider::{
+    CompletionRequest, Message, Provider, StopReason, ToolResult, ToolSpec,
+};
 use anvil_core::tools::{
-    Access, Tool, ToolContext, ToolFuture, ToolOutput, ToolRegistry, parse_args, schema_for,
+    Access, ModelTurn, Tool, ToolContext, ToolFuture, ToolOutput, ToolRegistry, parse_args,
+    schema_for,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -47,8 +52,13 @@ pub trait SubagentEnv: Send + Sync {
     /// A message for the model when no provider can be built.
     fn provider(&self, model: Option<&str>) -> Result<Arc<dyn Provider>, String>;
 
-    /// A fresh registry with the project's permission rules and a prompt
-    /// that answers `no`, without the `delegate` tool.
+    /// A fresh registry with the project's permission rules, without the
+    /// `delegate` tool.
+    ///
+    /// # Arguments
+    ///
+    /// * `ask_user` - Whether an `ask` decision prompts the user as in the
+    ///   main session; otherwise the prompt answers `no`.
     ///
     /// # Returns
     ///
@@ -57,7 +67,7 @@ pub trait SubagentEnv: Send + Sync {
     /// # Errors
     ///
     /// A message for the model when the permissions file cannot be read.
-    fn registry(&self) -> Result<ToolRegistry, String>;
+    fn registry(&self, ask_user: bool) -> Result<ToolRegistry, String>;
 
     /// Where the subagent's tools run.
     ///
@@ -128,6 +138,28 @@ impl Tool for DelegateTool {
         Access::Read
     }
 
+    /// Whether the target agent can only read, so the call may overlap
+    /// others. An agent without a tool list may write, so it never does.
+    fn parallel_safe(&self, args: &Value) -> bool {
+        let Some(agent) = args
+            .get("agent")
+            .and_then(Value::as_str)
+            .and_then(|name| self.agents.get(name.trim()))
+        else {
+            return false;
+        };
+        let Some(tools) = &agent.tools else {
+            return false;
+        };
+        let Ok(registry) = self.env.registry(false) else {
+            return false;
+        };
+        tools
+            .iter()
+            .filter_map(|name| registry.get(name))
+            .all(|tool| tool.access() == Access::Read)
+    }
+
     fn target(&self, args: &Value) -> Option<String> {
         args.get("agent").and_then(Value::as_str).map(str::to_owned)
     }
@@ -150,12 +182,29 @@ impl Tool for DelegateTool {
             let handle =
                 tokio::spawn(async move { run_subagent(&agent, &args.task, env.as_ref()).await });
             match handle.await {
-                Ok(Ok(text)) => ToolOutput::ok(text),
-                Ok(Err(reason)) => ToolOutput::error(reason),
+                Ok(run) => {
+                    let mut output = match run.result {
+                        Ok(text) => ToolOutput::ok(text),
+                        Err(reason) => ToolOutput::error(reason),
+                    };
+                    output.model_turns = run.turns;
+                    output
+                }
                 Err(error) => ToolOutput::error(format!("subagent task failed: {error}")),
             }
         })
     }
+}
+
+/// How a delegated run ended and what it spent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentRun {
+    /// The text of the agent's last turn, or a message for the parent model
+    /// when the provider failed (the session budget included), the registry
+    /// could not be built, or the run exceeded [`MAX_TURNS`].
+    pub result: Result<String, String>,
+    /// Every completion the run made, including those of a run that failed.
+    pub turns: Vec<ModelTurn>,
 }
 
 /// Runs one subagent to completion.
@@ -168,19 +217,22 @@ impl Tool for DelegateTool {
 ///
 /// # Returns
 ///
-/// The text of the agent's last turn.
-///
-/// # Errors
-///
-/// A message for the parent model when the provider fails, the registry
-/// cannot be built, or the run exceeds [`MAX_TURNS`].
-pub async fn run_subagent(
+/// The outcome and the completions it took; see [`SubagentRun`].
+pub async fn run_subagent(agent: &SubagentDef, task: &str, env: &dyn SubagentEnv) -> SubagentRun {
+    let mut turns = Vec::new();
+    let result = run_turns(agent, task, env, &mut turns).await;
+    SubagentRun { result, turns }
+}
+
+/// The turn loop of [`run_subagent`], recording each completion in `turns`.
+async fn run_turns(
     agent: &SubagentDef,
     task: &str,
     env: &dyn SubagentEnv,
+    turns: &mut Vec<ModelTurn>,
 ) -> Result<String, String> {
     let provider = env.provider(agent.model.as_deref())?;
-    let registry = env.registry()?;
+    let registry = env.registry(agent.inherit_permissions)?;
     let ctx = env.tool_context();
     let tools: Vec<ToolSpec> = registry
         .specs()
@@ -195,12 +247,22 @@ pub async fn run_subagent(
     let session_dir = ctx.session_dir.clone().unwrap_or_else(std::env::temp_dir);
 
     for _ in 0..MAX_TURNS {
-        if conversation.needs_compaction(&system, env.context_window())
-            && let Err(error) = conversation
+        if conversation.needs_compaction(&system, env.context_window()) {
+            match conversation
                 .compact(provider.as_ref(), task, &session_dir, 200_000)
                 .await
-        {
-            tracing::warn!(agent = agent.name, %error, "subagent compaction failed");
+            {
+                Ok(Some(compaction)) => turns.push(ModelTurn {
+                    stop_reason: StopReason::EndTurn,
+                    usage: compaction.usage,
+                    latency_ms: 0,
+                    retries: 0,
+                }),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(agent = agent.name, %error, "subagent compaction failed");
+                }
+            }
         }
         let request_len = conversation.messages().len();
         let request = CompletionRequest {
@@ -212,6 +274,12 @@ pub async fn run_subagent(
         let turn = complete_turn(provider.as_ref(), request, &events)
             .await
             .map_err(|error| format!("subagent `{}` provider error: {error}", agent.name))?;
+        turns.push(ModelTurn {
+            stop_reason: turn.stop_reason.clone(),
+            usage: turn.usage,
+            latency_ms: turn.latency_ms,
+            retries: turn.retries,
+        });
         if let Some(usage) = turn.usage {
             conversation.record_usage(request_len, usage);
         }
@@ -284,7 +352,7 @@ mod tests {
             Ok(Arc::clone(&self.provider) as Arc<dyn Provider>)
         }
 
-        fn registry(&self) -> Result<ToolRegistry, String> {
+        fn registry(&self, _ask_user: bool) -> Result<ToolRegistry, String> {
             Ok(ToolRegistry::with_builtins(
                 Permissions::empty(),
                 Box::new(StaticPrompt(PromptAnswer::No)),
@@ -306,6 +374,7 @@ mod tests {
             description: "Looks around.".to_owned(),
             tools: tools.map(|tools| tools.into_iter().map(str::to_owned).collect()),
             model: None,
+            inherit_permissions: false,
             body: "You are a scout.".to_owned(),
             path: PathBuf::from("scout.md"),
             origin: Origin::ProjectClaude,
@@ -333,10 +402,9 @@ mod tests {
             provider: Arc::clone(&provider),
             dir: dir.path().to_path_buf(),
         };
-        let text = run_subagent(&agent(Some(vec!["list_dir", "read_file"])), "look", &env)
-            .await
-            .expect("runs");
-        assert_eq!(text, "Found hello.txt.");
+        let run = run_subagent(&agent(Some(vec!["list_dir", "read_file"])), "look", &env).await;
+        assert_eq!(run.result.as_deref(), Ok("Found hello.txt."));
+        assert_eq!(run.turns.len(), 2, "every completion is reported");
 
         let requests = provider.requests();
         assert_eq!(requests.len(), 2);
@@ -367,6 +435,7 @@ mod tests {
         };
         run_subagent(&agent(Some(vec!["glob"])), "look", &env)
             .await
+            .result
             .expect("runs");
         let requests = provider.requests();
         let Message::ToolResults { results } = &requests[1].messages[2] else {
@@ -398,6 +467,51 @@ mod tests {
         let known = tool.run(json!({"agent": "scout", "task": "x"}), &ctx).await;
         assert!(!known.is_error);
         assert_eq!(known.content, "done");
+    }
+
+    #[test]
+    fn only_agents_that_cannot_write_may_overlap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let env = Arc::new(FakeEnv {
+            provider: Arc::new(FakeProvider::new(Vec::new())),
+            dir: dir.path().to_path_buf(),
+        });
+        let tool = DelegateTool::new(Arc::new(AgentSet::discover(dir.path(), None)), env);
+        let parallel = |agent: &str| tool.parallel_safe(&json!({"agent": agent, "task": "x"}));
+        assert!(parallel("explore"), "the built-in explorer only reads");
+        assert!(!parallel("implement"), "the built-in implementer writes");
+        assert!(!parallel("nobody"), "an unknown agent is not run at all");
+        assert!(!tool.parallel_safe(&json!({"task": "x"})));
+
+        let open = DelegateTool::new(
+            Arc::new(AgentSet::from_agents(vec![agent(None)])),
+            Arc::new(FakeEnv {
+                provider: Arc::new(FakeProvider::new(Vec::new())),
+                dir: dir.path().to_path_buf(),
+            }),
+        );
+        assert!(
+            !open.parallel_safe(&json!({"agent": "scout"})),
+            "an agent without a tool list may write"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_tool_output_carries_the_turns_of_the_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let provider = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn("done")]));
+        let env = Arc::new(FakeEnv {
+            provider,
+            dir: dir.path().to_path_buf(),
+        });
+        let tool = DelegateTool::new(Arc::new(AgentSet::from_agents(vec![agent(None)])), env);
+        let ctx = ToolContext::new(dir.path());
+        let output = tool.run(json!({"agent": "scout", "task": "x"}), &ctx).await;
+        assert_eq!(output.model_turns.len(), 1);
+        assert_eq!(
+            output.model_turns[0].usage.map(|usage| usage.total()),
+            Some(15)
+        );
     }
 
     #[test]

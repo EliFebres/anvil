@@ -41,7 +41,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::provider::lock_or_recover;
-use crate::provider::types::{ToolCall, ToolResult, ToolSpec};
+use crate::provider::types::{StopReason, ToolCall, ToolResult, ToolSpec, Usage};
 
 pub use output::{OutputStats, digest};
 pub use permissions::{
@@ -57,6 +57,20 @@ pub const DEFAULT_OUTPUT_CAP: usize = 30 * 1024;
 /// The future a tool's `run` returns.
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = ToolOutput> + Send + 'a>>;
 
+/// One model completion a tool made on its own, such as a delegated
+/// subagent's turn, so the loop can count it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTurn {
+    /// Why the model stopped.
+    pub stop_reason: StopReason,
+    /// Tokens it used, when the provider reported them.
+    pub usage: Option<Usage>,
+    /// Wall-clock milliseconds the completion took.
+    pub latency_ms: u64,
+    /// Retries before the request got through.
+    pub retries: u32,
+}
+
 /// What a tool produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutput {
@@ -64,6 +78,8 @@ pub struct ToolOutput {
     pub content: String,
     /// Whether the tool failed.
     pub is_error: bool,
+    /// Completions the tool made itself; empty for every tool but `delegate`.
+    pub model_turns: Vec<ModelTurn>,
 }
 
 impl ToolOutput {
@@ -80,6 +96,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            model_turns: Vec::new(),
         }
     }
 
@@ -96,6 +113,7 @@ impl ToolOutput {
         Self {
             content: message.into(),
             is_error: true,
+            model_turns: Vec::new(),
         }
     }
 }
@@ -176,6 +194,23 @@ pub trait Tool: Send + Sync {
     /// Only an explicit `allow` rule can override a blocked call.
     fn blocked_reason(&self, _args: &Value) -> Option<String> {
         None
+    }
+
+    /// Whether this call may run at the same time as other calls that
+    /// answer `true` in the same model turn.
+    ///
+    /// A call that may write must answer `false`: those run one after
+    /// another, in the order the model gave them.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The call's arguments.
+    ///
+    /// # Returns
+    ///
+    /// `false` by default.
+    fn parallel_safe(&self, _args: &Value) -> bool {
+        false
     }
 
     /// Runs the tool.
@@ -329,6 +364,8 @@ pub struct Execution {
     pub full_output: Option<PathBuf>,
     /// Size and digest of the full output, for telemetry.
     pub stats: OutputStats,
+    /// Completions the tool made itself, to count against the session.
+    pub model_turns: Vec<ModelTurn>,
 }
 
 /// A boxed future returned by a [`ToolHook`].
@@ -638,6 +675,7 @@ impl ToolRegistry {
                     outcome,
                     full_output,
                     stats: OutputStats::of(&output.content, true),
+                    model_turns: output.model_turns,
                 }
             }
         };
@@ -648,6 +686,24 @@ impl ToolRegistry {
             execution.result.content.push_str(note.trim_end());
         }
         execution
+    }
+
+    /// Whether a call may run at the same time as its neighbours.
+    ///
+    /// # Arguments
+    ///
+    /// * `call` - The model's call.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the tool exists, the arguments parse and
+    /// [`Tool::parallel_safe`] says so.
+    pub fn runs_in_parallel(&self, call: &ToolCall) -> bool {
+        let Some(tool) = self.get(&call.name) else {
+            return false;
+        };
+        serde_json::from_str::<Value>(&call.arguments_json)
+            .is_ok_and(|args| tool.parallel_safe(&args))
     }
 
     /// Decides whether a call may run, without running it.
@@ -780,6 +836,7 @@ impl Execution {
     fn finished(call: &ToolCall, output: ToolOutput, outcome: ToolOutcome) -> Self {
         Self {
             stats: OutputStats::of(&output.content, false),
+            model_turns: output.model_turns,
             result: ToolResult {
                 call_id: call.id.clone(),
                 content: output.content,

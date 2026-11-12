@@ -676,6 +676,7 @@ mod tests {
             extra_instructions: Vec::new(),
             sections: Vec::new(),
             review_sections: Vec::new(),
+            delegate_guidance: false,
         };
         let agent = AgentLoop::new(
             config,

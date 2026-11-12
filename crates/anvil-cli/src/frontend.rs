@@ -393,19 +393,23 @@ pub fn session_info(
     }
 }
 
-/// Each role's price when a planner is configured, so the UI can price every
-/// turn with the provider that served it; empty otherwise.
+/// Each role's price when a planner or a worker other than the coder is
+/// configured, so the UI can price every turn with the provider that served
+/// it; empty otherwise.
 fn role_prices(wiring: &Wiring) -> BTreeMap<Role, Option<Price>> {
     let roles = &wiring.config.roles;
-    match roles.planner.as_deref() {
-        Some(planner) if planner != roles.coder => role_price_map(&wiring.config),
-        _ => BTreeMap::new(),
+    let differs = |name: &str| name != roles.coder;
+    if differs(roles.planner_or_coder()) || differs(roles.worker_or_coder()) {
+        role_price_map(&wiring.config)
+    } else {
+        BTreeMap::new()
     }
 }
 
 /// The price of the provider behind every role, so a turn can be priced by
-/// the role that served it. The planner falls back to the coder and the
-/// reviewer to the coder, as the loop's providers do.
+/// the role that served it. The planner, the worker and the reviewer fall
+/// back to the coder, as the loop's providers do. A subagent whose `model`
+/// names another provider is still priced as the worker.
 ///
 /// # Arguments
 ///
@@ -422,6 +426,7 @@ pub fn role_price_map(config: &AnvilConfig) -> BTreeMap<Role, Option<Price>> {
         (Role::Coder, roles.coder.as_str()),
         (Role::Reviewer, reviewer),
         (Role::Summarizer, roles.summarizer.as_str()),
+        (Role::Worker, roles.worker_or_coder()),
     ]
     .into_iter()
     .map(|(role, name)| {

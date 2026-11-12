@@ -872,6 +872,7 @@ mod tests {
             extra_instructions: Vec::new(),
             sections: Vec::new(),
             review_sections: Vec::new(),
+            delegate_guidance: false,
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let agent = AgentLoop::new(

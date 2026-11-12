@@ -196,7 +196,7 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
     print!("{}", report.render());
     let roles = &config.roles;
     println!(
-        "roles: coder={} summarizer={} reviewer={}{}",
+        "roles: coder={} summarizer={} reviewer={}{}{}",
         roles.coder,
         roles.summarizer,
         roles.reviewer.as_deref().unwrap_or("(coder)"),
@@ -204,6 +204,11 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
             .planner
             .as_deref()
             .map(|planner| format!(" planner={planner}"))
+            .unwrap_or_default(),
+        roles
+            .worker
+            .as_deref()
+            .map(|worker| format!(" worker={worker}"))
             .unwrap_or_default()
     );
     commands::report_skills(wiring)?;

@@ -2,7 +2,12 @@
 //!
 //! The frontmatter names the agent and describes when to use it; the body
 //! is its system prompt. `tools` narrows what it may call and `model` picks
-//! a role or provider from the anvil config.
+//! a role or provider from the anvil config. `permissions: inherit` lets an
+//! `ask` decision reach the user, as it does in the main session; without it
+//! an `ask` is a `no`.
+//!
+//! `explore` and `implement` ship with anvil as embedded files in the same
+//! format; a file with the same name in any directory replaces them.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +22,12 @@ use crate::paths::{Origin, config_dirs};
 /// The subdirectory agents live in.
 pub const AGENTS_DIR: &str = "agents";
 
+/// The agents that ship with anvil, as (file name, contents).
+const BUILT_IN: [(&str, &str); 2] = [
+    ("explore.md", include_str!("../agents/explore.md")),
+    ("implement.md", include_str!("../agents/implement.md")),
+];
+
 /// One subagent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentDef {
@@ -28,6 +39,9 @@ pub struct SubagentDef {
     pub tools: Option<Vec<String>>,
     /// A role or provider name from the config, if the file names one.
     pub model: Option<String>,
+    /// Whether an `ask` permission decision prompts the user as in the main
+    /// session (`permissions: inherit`) instead of answering no.
+    pub inherit_permissions: bool,
     /// Its system prompt.
     pub body: String,
     /// The file it was read from.
@@ -65,7 +79,8 @@ pub struct AgentSet {
 }
 
 impl AgentSet {
-    /// Walks the `agents/` directories and loads every `.md` file.
+    /// Walks the `agents/` directories and loads every `.md` file, then adds
+    /// the built-in agents whose names no file took.
     ///
     /// # Arguments
     ///
@@ -99,6 +114,13 @@ impl AgentSet {
                         set.errors.push(LoadError { path, error });
                     }
                 }
+            }
+        }
+        for (file, text) in BUILT_IN {
+            match parse_agent(text, Path::new(file), Origin::Bundled) {
+                Ok(agent) if set.get(&agent.name).is_none() => set.agents.push(agent),
+                Ok(_) => {}
+                Err(error) => debug_assert!(false, "built-in agent {file} is invalid: {error}"),
             }
         }
         set.agents.sort_by(|a, b| a.name.cmp(&b.name));
@@ -227,7 +249,13 @@ impl AgentSet {
 /// [`CompatError::MissingField`] when `description` is absent.
 pub fn load_agent(path: &Path, origin: Origin) -> Result<SubagentDef, CompatError> {
     let text = std::fs::read_to_string(path).map_err(|error| CompatError::io(path, &error))?;
-    let parsed = frontmatter::parse(&text, path)?;
+    parse_agent(&text, path, origin)
+}
+
+/// Parses the text of one agent file; `path` names it in errors and for the
+/// stem that is the default name.
+fn parse_agent(text: &str, path: &Path, origin: Origin) -> Result<SubagentDef, CompatError> {
+    let parsed = frontmatter::parse(text, path)?;
     let description = parsed.require_str("description", path)?.to_owned();
     let stem = path
         .file_stem()
@@ -238,8 +266,9 @@ pub fn load_agent(path: &Path, origin: Origin) -> Result<SubagentDef, CompatErro
         .get_list("tools")
         .map(|tools| tools.iter().map(|tool| to_anvil_name(tool)).collect());
     let model = parsed.get_str("model").map(str::to_owned);
+    let inherit_permissions = parsed.get_str("permissions") == Some("inherit");
     let mut extra = parsed.fields.clone();
-    for key in ["name", "description", "tools", "model"] {
+    for key in ["name", "description", "tools", "model", "permissions"] {
         extra.remove(key);
     }
     Ok(SubagentDef {
@@ -247,6 +276,7 @@ pub fn load_agent(path: &Path, origin: Origin) -> Result<SubagentDef, CompatErro
         description,
         tools,
         model,
+        inherit_permissions,
         body: parsed.body,
         path: path.to_path_buf(),
         origin,
@@ -288,7 +318,10 @@ mod tests {
         );
 
         let set = AgentSet::discover(project.path(), Some(home.path()));
-        assert_eq!(set.names(), ["explorer", "reviewer"]);
+        assert_eq!(
+            set.names(),
+            ["explore", "explorer", "implement", "reviewer"]
+        );
         let reviewer = set.get("reviewer").expect("reviewer");
         assert_eq!(reviewer.origin, Origin::ProjectAnvil);
         assert_eq!(
@@ -325,6 +358,93 @@ mod tests {
         assert_eq!(claude.model.as_deref(), Some("haiku"));
         assert_eq!(claude.extra["color"], "blue");
         assert_eq!(claude.body, "Findings only.\n");
+    }
+
+    #[test]
+    fn built_in_agents_load_without_any_files() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        let set = AgentSet::discover(empty.path(), Some(empty.path()));
+        assert_eq!(set.names(), ["explore", "implement"]);
+        assert!(set.errors().is_empty());
+        for name in ["explore", "implement"] {
+            let agent = set.get(name).expect("built in");
+            assert_eq!(agent.origin, Origin::Bundled);
+            assert_eq!(agent.model.as_deref(), Some("worker"));
+        }
+        assert!(!set.get("explore").expect("explore").inherit_permissions);
+        assert!(set.get("implement").expect("implement").inherit_permissions);
+    }
+
+    #[test]
+    fn built_in_agent_snapshot() {
+        let set = AgentSet::discover(Path::new("no-such-project"), None);
+        let mut text = String::new();
+        for name in ["explore", "implement"] {
+            let agent = set.get(name).expect("built in");
+            text.push_str(&format!(
+                "name: {}
+description: {}
+tools: {:?}
+model: {:?}
+inherit_permissions: {}
+
+{}
+---
+",
+                agent.name,
+                agent.description,
+                agent.tools,
+                agent.model,
+                agent.inherit_permissions,
+                agent.body
+            ));
+        }
+        insta::assert_snapshot!(text);
+    }
+
+    #[test]
+    fn a_user_file_and_a_project_file_each_replace_a_built_in() {
+        let project = tempfile::tempdir().expect("tempdir");
+        let home = tempfile::tempdir().expect("tempdir");
+        write(
+            &home.path().join(".claude/agents/explore.md"),
+            "---
+description: home explore
+---
+Home body.
+",
+        );
+        write(
+            &project.path().join(".anvil/agents/implement.md"),
+            "---
+description: project implement
+---
+Project body.
+",
+        );
+        let set = AgentSet::discover(project.path(), Some(home.path()));
+        let explore = set.get("explore").expect("explore");
+        assert_eq!(explore.description, "home explore");
+        assert_eq!(explore.origin, Origin::HomeClaude);
+        let implement = set.get("implement").expect("implement");
+        assert_eq!(implement.description, "project implement");
+        assert_eq!(implement.origin, Origin::ProjectAnvil);
+        assert!(!implement.inherit_permissions);
+        assert_eq!(set.names(), ["explore", "implement"]);
+
+        write(
+            &project.path().join(".claude/agents/explore.md"),
+            "---
+description: project explore
+---
+B.
+",
+        );
+        let set = AgentSet::discover(project.path(), Some(home.path()));
+        assert_eq!(
+            set.get("explore").expect("explore").description,
+            "project explore"
+        );
     }
 
     #[test]

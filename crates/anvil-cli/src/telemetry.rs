@@ -43,6 +43,7 @@ const HISTORY_DAYS: i64 = 90;
 struct Roles {
     coder: String,
     planner: Option<String>,
+    worker: Option<String>,
     reviewer: String,
     summarizer: String,
 }
@@ -91,6 +92,7 @@ impl SessionTelemetry {
             wiring.config.telemetry,
         );
         this.set_planner(wiring.config.roles.planner.as_deref());
+        this.set_worker(wiring.config.roles.worker.as_deref());
         this.record(RecordKind::SessionStarted { mode });
         this
     }
@@ -112,6 +114,7 @@ impl SessionTelemetry {
             roles: Arc::new(Mutex::new(Roles {
                 coder: coder.to_owned(),
                 planner: None,
+                worker: None,
                 reviewer: reviewer.unwrap_or(coder).to_owned(),
                 summarizer: summarizer.to_owned(),
             })),
@@ -163,6 +166,17 @@ impl SessionTelemetry {
     pub fn set_planner(&self, name: Option<&str>) {
         if let Ok(mut roles) = self.roles.lock() {
             roles.planner = name.map(str::to_owned);
+        }
+    }
+
+    /// Sets the worker, which serves delegated turns when present.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The provider name, or `None` when the coder works.
+    pub fn set_worker(&self, name: Option<&str>) {
+        if let Ok(mut roles) = self.roles.lock() {
+            roles.worker = name.map(str::to_owned);
         }
     }
 
@@ -338,6 +352,7 @@ impl SessionTelemetry {
         let name = match self.roles.lock() {
             Ok(roles) => match role {
                 "planner" => roles.planner.clone().unwrap_or_else(|| roles.coder.clone()),
+                "worker" => roles.worker.clone().unwrap_or_else(|| roles.coder.clone()),
                 "reviewer" => roles.reviewer.clone(),
                 "summarizer" => roles.summarizer.clone(),
                 _ => roles.coder.clone(),
@@ -782,7 +797,7 @@ mod tests {
 
         let secret_name = format!("{MARKER}-file.txt");
         std::fs::write(cwd.path().join(&secret_name), format!("{MARKER}\n")).expect("write");
-        let subagent = SubagentEnv::registry(&wiring.clone()).expect("subagent registry");
+        let subagent = SubagentEnv::registry(&wiring.clone(), false).expect("subagent registry");
         let call = tool_call(
             "s1",
             "edit_file",
@@ -842,6 +857,7 @@ mod tests {
             extra_instructions: Vec::new(),
             sections: Vec::new(),
             review_sections: Vec::new(),
+            delegate_guidance: false,
         };
         let (sink, task) = telemetry.sink(None);
         let agent = AgentLoop::new(
@@ -941,6 +957,7 @@ mod tests {
             extra_instructions: Vec::new(),
             sections: Vec::new(),
             review_sections: Vec::new(),
+            delegate_guidance: false,
         };
         let prompt = RecordingPrompt {
             inner: Box::new(StaticPrompt(PromptAnswer::Yes)),

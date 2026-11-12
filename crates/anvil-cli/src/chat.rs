@@ -553,10 +553,16 @@ impl ChatSession<'_> {
             discover_instructions(self.wiring.home.as_deref(), &self.wiring.cwd, &self.touched);
         instructions.extend(self.wiring.extra_instructions(&self.registry.names()));
         instructions.extend(self.session_context.iter().cloned());
+        let mut coder_sections = sections.coder;
+        coder_sections.extend(prompts::delegate_guidance(
+            self.mode,
+            tools,
+            self.wiring.config.prompt.delegate_guidance,
+        ));
         prompts::system_prompt(&PromptInputs {
             state: self.mode,
             instructions: &instructions,
-            sections: &sections.coder,
+            sections: &coder_sections,
             tools,
             task: "Interactive chat: do what the user asks in each message.",
         })

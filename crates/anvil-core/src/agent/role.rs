@@ -22,6 +22,8 @@ pub enum Role {
     Reviewer,
     /// Writes compaction summaries.
     Summarizer,
+    /// Runs delegated subagents.
+    Worker,
 }
 
 impl Role {
@@ -36,6 +38,7 @@ impl Role {
             Role::Coder => "coder",
             Role::Reviewer => "reviewer",
             Role::Summarizer => "summarizer",
+            Role::Worker => "worker",
         }
     }
 }
@@ -81,6 +84,8 @@ mod tests {
             "\"planner\""
         );
         assert_eq!(Role::Summarizer.to_string(), "summarizer");
+        assert_eq!(Role::Worker.to_string(), "worker");
+        assert!(Role::Summarizer < Role::Worker);
         assert!(Role::Planner < Role::Coder && Role::Reviewer < Role::Summarizer);
     }
 }
