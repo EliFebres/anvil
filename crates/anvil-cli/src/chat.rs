@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use anvil_core::agent::prompts::{self, PromptInputs};
 use anvil_core::agent::turn::complete_turn;
-use anvil_core::agent::{EventSink, LoopEvent, State};
+use anvil_core::agent::{EventSink, LoopEvent, State, diff};
 use anvil_core::context::{Conversation, discover_instructions};
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
@@ -23,6 +23,7 @@ use tokio::sync::watch;
 
 use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, model_id, session_info};
+use crate::learn;
 use crate::memory;
 use crate::telemetry::SessionTelemetry;
 use crate::tui::{Input, PermissionMode, SessionKind, UiMsg, wait_cancel};
@@ -76,6 +77,8 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
     let info = session_info(wiring, SessionKind::Chat, false, State::Build);
     let (mut frontend, events_tx) = Frontend::start(ui, info);
     let (events, tee) = telemetry.sink(Some(events_tx));
+    learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
+    let baseline = diff::snapshot_tree(&wiring.cwd, &session_dir).await;
     telemetry.observe_permissions(wiring);
     let mut registry = wiring.registry(telemetry.recording(frontend.prompt(false)))?;
     frontend.install_tool_hook(
@@ -85,6 +88,7 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
     telemetry.record_skill_requires(wiring, &registry);
+    let chat_dir = session_dir.clone();
     let mut session = ChatSession {
         wiring,
         mode: State::Build,
@@ -162,6 +166,7 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
         Some(&telemetry),
     )
     .await;
+    learn::record_session_end(wiring, &chat_dir, baseline.as_deref(), &frontend.console()).await;
     frontend.shutdown(false).await?;
     telemetry.finish(SessionOutcome::Chat);
     Ok(0)

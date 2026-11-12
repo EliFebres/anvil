@@ -7,6 +7,7 @@ mod config_init;
 mod console;
 mod doctor;
 mod frontend;
+mod learn;
 mod legacy;
 mod logging;
 mod memory;
@@ -17,6 +18,7 @@ mod setup;
 mod skills;
 mod stats;
 mod telemetry;
+mod templates;
 mod terminal;
 mod ticket;
 mod tui;
@@ -29,7 +31,7 @@ use anvil_types::config::load_profile;
 use anvil_types::dotenv;
 use clap::Parser;
 
-use crate::cli::{Cli, Command, CompatCommand, ConfigCommand};
+use crate::cli::{Cli, Command, CompatCommand, ConfigCommand, MemoryCommand, TemplateCommand};
 use crate::frontend::UiKind;
 use crate::wiring::{Wiring, home_dir};
 
@@ -126,6 +128,29 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         }
         Some(Command::Skill { command }) => skills::run(command, home, cwd).await,
         Some(Command::Rules { command }) => rules::run(command, home, cwd),
+        Some(Command::New { template, dir }) => templates::new_project(home, cwd, &template, &dir),
+        Some(Command::Template {
+            command:
+                TemplateCommand::Save {
+                    name,
+                    dir,
+                    description,
+                    force,
+                },
+        }) => templates::save(
+            home,
+            cwd,
+            &name,
+            dir.as_deref(),
+            description.as_deref(),
+            force,
+        ),
+        Some(Command::Memory {
+            command: MemoryCommand::Learn,
+        }) => {
+            let wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            learn::run(&wiring).await
+        }
         Some(Command::Stats { since }) => {
             let config = load_config(home, cwd).ok().map(|loaded| loaded.config);
             stats::run(config.as_ref(), cwd, &since)

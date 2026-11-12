@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 
 use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, session_info};
+use crate::learn;
 use crate::memory;
 use crate::telemetry::SessionTelemetry;
 use crate::tui::{SessionKind, UiMsg, wait_cancel};
@@ -52,6 +53,7 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
         ui,
         session_info(&wiring, SessionKind::Run, yes, State::Plan),
     );
+    learn::at_session_start(&wiring, &frontend, yes, &telemetry).await;
     telemetry.observe_permissions(&wiring);
     let mut registry = wiring.registry(telemetry.recording(frontend.prompt(yes)))?;
     frontend.install_tool_hook(
@@ -84,6 +86,7 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
     remember(&wiring, &id, &frontend, yes, &telemetry, &result).await;
+    learn::record_run(&wiring, &id, &frontend.console()).await;
     frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())
@@ -224,6 +227,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
         ui,
         session_info(&wiring, SessionKind::Run, yes, State::Plan),
     );
+    learn::at_session_start(&wiring, &frontend, yes, &telemetry).await;
     telemetry.observe_permissions(&wiring);
     let mut registry = wiring.registry(telemetry.recording(frontend.prompt(yes)))?;
     frontend.install_tool_hook(
@@ -259,6 +263,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
     remember(&wiring, id, &frontend, yes, &telemetry, &result).await;
+    learn::record_run(&wiring, id, &frontend.console()).await;
     frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())

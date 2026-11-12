@@ -23,6 +23,9 @@ pub enum Topic {
     Workflow,
     /// One repository: `projects/<name>.md`.
     Project(String),
+    /// A standing rule for one language, proposed from the owner's edits.
+    /// It is kept in `rules.toml`, never in a topic file.
+    Rule(String),
 }
 
 impl Topic {
@@ -30,16 +33,18 @@ impl Topic {
     ///
     /// # Returns
     ///
-    /// `tooling.md`, `workflow.md` or `projects/<name>.md`.
+    /// `tooling.md`, `workflow.md` or `projects/<name>.md`. A rule topic has
+    /// no file of its own; its path is only a placeholder nothing writes.
     pub fn file_name(&self) -> PathBuf {
         match self {
             Topic::Tooling => PathBuf::from("tooling.md"),
             Topic::Workflow => PathBuf::from("workflow.md"),
             Topic::Project(name) => PathBuf::from("projects").join(format!("{name}.md")),
+            Topic::Rule(language) => PathBuf::from("rules").join(format!("{language}.md")),
         }
     }
 
-    /// The label the extractor uses: `tooling`, `workflow` or `project`.
+    /// The label the extractor uses: `tooling`, `workflow`, `project` or `rule`.
     ///
     /// # Returns
     ///
@@ -49,6 +54,7 @@ impl Topic {
             Topic::Tooling => "tooling",
             Topic::Workflow => "workflow",
             Topic::Project(_) => "project",
+            Topic::Rule(_) => "rule",
         }
     }
 

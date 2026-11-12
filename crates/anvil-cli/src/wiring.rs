@@ -21,6 +21,7 @@ use anvil_types::{AnvilConfig, PromptConfig};
 use anyhow::Context;
 
 use crate::memory::{self, RuleChecks};
+use crate::templates;
 use crate::terminal::TerminalPrompt;
 
 /// The home directory: `ANVIL_HOME` when set, otherwise the OS home.
@@ -487,6 +488,9 @@ impl Wiring {
     ) -> anyhow::Result<LoopConfig> {
         let mut sections = memory::prompt_sections(self.home.as_deref(), &self.cwd)?;
         sections.coder.extend(profile_section(&self.config.prompt));
+        sections
+            .coder
+            .extend(templates::plan_section(self.home.as_deref(), &self.cwd));
         Ok(LoopConfig {
             task,
             cwd: self.cwd.clone(),

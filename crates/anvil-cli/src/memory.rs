@@ -14,6 +14,7 @@ use anvil_core::provider::{CompletionRequest, Message, Provider};
 use anvil_memory::facts::extract::{
     EXTRACT_PROMPT, extract_user_message, filter_new, parse_proposals, review, write_proposed,
 };
+use anvil_memory::languages::detect_languages;
 use anvil_memory::rules::{ensure_check_scripts, strip_rule_prefix};
 use anvil_memory::{
     Decision, FactStore, MEMORY_TOKEN_CAP, Proposal, Rule, RuleSet, load_memory, paths, run_checks,
@@ -76,6 +77,11 @@ pub fn open_rules(home: &Path) -> anyhow::Result<RuleSet> {
 
 /// The prompt sections for a session in `cwd`.
 ///
+/// Only the rules for the languages found in `cwd` are included, plus the
+/// rules for every language; the reviewer gets the same set, because the
+/// changed files are not known until the loop has run. A project with no
+/// recognizable files (a new, empty one) gets every rule.
+///
 /// # Arguments
 ///
 /// * `home` - The home directory; without one there are no sections.
@@ -92,7 +98,8 @@ pub fn prompt_sections(home: Option<&Path>, cwd: &Path) -> anyhow::Result<Prompt
     let Some(home) = home else {
         return Ok(PromptSections::default());
     };
-    let rules = open_rules(home)?;
+    let languages = detect_languages(cwd);
+    let rules = open_rules(home)?.relevant_to(&languages);
     let mut sections = PromptSections::default();
     if let Some(text) = rules.prompt_section() {
         sections.coder.push(PromptSection {
@@ -544,6 +551,95 @@ mod tests {
         });
         insta::assert_snapshot!(prompt);
         assert!(add_rule_from_message("rule: x", None).is_err());
+    }
+
+    fn rules_file(home: &Path, rules: &[(&str, &str)]) {
+        let set = RuleSet {
+            rules: rules
+                .iter()
+                .map(|(id, language)| Rule {
+                    id: (*id).to_owned(),
+                    languages: vec![(*language).to_owned()],
+                    rule: format!("Rule {id}."),
+                    check: None,
+                })
+                .collect(),
+        };
+        set.save(&paths::rules_path(home)).expect("saves");
+    }
+
+    fn texts(sections: &PromptSections) -> (String, String) {
+        (
+            sections.coder[0].text.clone(),
+            sections.review[0].text.clone(),
+        )
+    }
+
+    #[test]
+    fn rules_are_loaded_by_the_projects_languages() {
+        let home = tempfile::tempdir().expect("home");
+        rules_file(
+            home.path(),
+            &[("py-only", "python"), ("any", "*"), ("rs-only", "rust")],
+        );
+        let rust = tempfile::tempdir().expect("rust project");
+        std::fs::write(
+            rust.path().join("main.rs"),
+            "fn main() {}
+",
+        )
+        .expect("write");
+        let python = tempfile::tempdir().expect("python project");
+        std::fs::write(
+            python.path().join("app.py"),
+            "x = 1
+",
+        )
+        .expect("write");
+
+        let (coder, review) =
+            texts(&prompt_sections(Some(home.path()), rust.path()).expect("rust"));
+        for text in [&coder, &review] {
+            assert!(!text.contains("[py-only]"), "{text}");
+            assert!(
+                text.contains("[any]") && text.contains("[rs-only]"),
+                "{text}"
+            );
+        }
+        let (coder, review) =
+            texts(&prompt_sections(Some(home.path()), python.path()).expect("python"));
+        for text in [&coder, &review] {
+            assert!(
+                text.contains("[py-only]") && text.contains("[any]"),
+                "{text}"
+            );
+            assert!(!text.contains("[rs-only]"), "{text}");
+        }
+    }
+
+    #[test]
+    fn nothing_filtered_leaves_the_sections_byte_identical() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        std::fs::write(
+            project.path().join("a.py"),
+            "x = 1
+",
+        )
+        .expect("write");
+        std::fs::write(
+            project.path().join("b.rs"),
+            "fn b() {}
+",
+        )
+        .expect("write");
+        let all = open_rules(home.path()).expect("seeded rules");
+        let sections = prompt_sections(Some(home.path()), project.path()).expect("sections");
+        assert_eq!(sections.coder[0].text, all.prompt_section().expect("coder"));
+        assert_eq!(
+            sections.review[0].text,
+            all.review_section().expect("review")
+        );
     }
 
     #[tokio::test]
