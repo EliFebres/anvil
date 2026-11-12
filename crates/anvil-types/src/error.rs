@@ -19,6 +19,13 @@ pub enum ValidationError {
         max: usize,
     },
 
+    /// A session `status.json` breaks a rule of the format.
+    #[error("session status: {reason}")]
+    Status {
+        /// What is wrong, naming the field.
+        reason: String,
+    },
+
     /// A required text field is empty or only whitespace.
     #[error("field `{field}` must not be empty")]
     EmptyField {
@@ -107,34 +114,29 @@ pub enum ValidationError {
         repo: String,
     },
 
-    /// A reviewer sits on the same base URL as the coder, so a model would review its own work.
-    #[error("reviewer `{reviewer}` shares base_url {base_url} with coder `{coder}`")]
-    ReviewerSharesCoderUrl {
+    /// A reviewer runs the same model as the coder, so a model would review its own work.
+    #[error(
+        "reviewer `{reviewer}` runs {model}, the same as coder `{coder}`; a reviewer needs a different model"
+    )]
+    ReviewerIsCoderModel {
         /// The reviewer's provider name.
         reviewer: String,
         /// The coder's provider name.
         coder: String,
-        /// The shared URL.
-        base_url: String,
+        /// The shared model, as `model at base_url`.
+        model: String,
     },
 
-    /// Two differently named reviewers sit on one base URL.
-    #[error("reviewers `{first}` and `{second}` share base_url {base_url}")]
-    ReviewersShareUrl {
-        /// The reviewer seen first.
-        first: String,
-        /// The reviewer seen second.
-        second: String,
-        /// The shared URL.
-        base_url: String,
-    },
-
-    /// The reviewers do not span two base URLs, so one model's blind spots decide every review.
-    #[error("reviewers use {found} distinct base_url(s); at least 2 are needed")]
-    TooFewReviewerUrls {
-        /// How many distinct base URLs the reviewers use.
+    /// The blocking reviewers do not span two models, so one model's blind spots decide every review.
+    #[error("blocking reviewers use {found} distinct model(s); at least 2 are needed")]
+    TooFewReviewerModels {
+        /// How many distinct (base URL, model) pairs the blocking reviewers use.
         found: usize,
     },
+
+    /// Every reviewer is non-blocking, so no review could ever send a change back.
+    #[error("at least one reviewer must be blocking")]
+    NoBlockingReviewer,
 
     /// A numeric field that must be positive is zero.
     #[error("field `{field}` must be at least 1")]

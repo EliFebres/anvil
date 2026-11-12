@@ -1,0 +1,26 @@
+---
+source: crates/factory-core/src/render.rs
+expression: text
+---
+# Address review findings
+
+The change for ticket "Add a `grep` tool with a max-results flag" is already committed on this branch. It touches:
+
+- `crates/anvil-core/src/lib.rs`
+
+The review swarm asked for changes. Address each finding below and nothing else: do not re-plan or re-implement the ticket.
+
+## Review findings
+
+- **major** (openai/correctness) `src/lib.rs:3`: `max_results` is never applied
+
+Before finishing, run `just check` and fix anything it reports; the factory rejects a branch that fails it.
+
+## Previous attempt failed `just check`
+
+Fix these before anything else; the same checks run again.
+
+```
+error[E0425]: cannot find value `x`
+ --> src/lib.rs:3:5
+```

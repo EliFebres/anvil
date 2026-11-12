@@ -197,6 +197,7 @@ mod tests {
             cost_usd: Some(cost),
             pr: None,
             started_at: Some(finished_at - Duration::minutes(minutes)),
+            gate_costs: Vec::new(),
         }
     }
 

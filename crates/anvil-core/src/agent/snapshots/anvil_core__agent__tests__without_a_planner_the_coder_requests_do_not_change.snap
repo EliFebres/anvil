@@ -1,0 +1,1520 @@
+---
+source: crates/anvil-core/src/agent/mod.rs
+assertion_line: 2739
+expression: requests
+---
+[
+  {
+    "system": "You are anvil, a coding agent working inside a real software project on the user's machine. You change the project only through the tools you are given.\n\nHow you work:\n- Read before you write. Look at the files you are about to change and at how neighbouring code does the same thing.\n- Make the smallest change that fully solves the task. Match the project's existing style, naming and conventions.\n- Never guess a path, a function signature or a command. Check with the tools.\n- Issue every independent tool call in the same turn; reads of different files are always independent.\n- Prefer edit_file for changes to existing files; use write_file for new files.\n- When a command or check fails, read the output and fix the cause. Do not retry the same thing unchanged.\n- Say what you did in a few plain sentences when you finish a state. Do not pad.\n\nTool calls are reviewed by a permission model. A call may come back denied; when it does, choose another approach or explain what you need, and never try to work around a denial.\n\n# State: PLAN\n\nYour job in this state is to understand the task and produce a plan. You have read-only tools: explore the project, find the code the task touches, and learn how it is tested.\n\nExplore narrowly; every byte you read is paid for again on each later turn:\n- Search with `grep` first to find the files and lines the task touches.\n- Read with `read_file` using `offset` and `limit` around the lines `grep` found. Never read a whole file longer than 200 lines.\n- Stop exploring as soon as you know which files to change and how they are tested, and write the plan.\n\nWhen you have what you need, end your turn with the plan and nothing else. Format it exactly like this:\n\n# Plan\n\n1. [ ] First concrete step, naming the file(s) it touches\n2. [ ] Second step\n3. [ ] ...\n\nCheck: one command line, or auto\n\nRules for the plan:\n- Each step is one concrete change a reader could verify. Name files and functions.\n- List every file you will change with the line ranges to edit, so the build can start with ranged reads.\n- Do not add a step that runs the checks or tests. anvil runs the `Check:` command itself after the build and sends you its output if it fails.\n- Keep it short. Three to eight steps is typical; do not plan work the task did not ask for.\n- If the task is ambiguous in a way that changes the plan, state the assumption you are making as the first line under the heading.\n\nRules for the `Check:` line, which is the last line of the plan:\n- The `Check command` section below says whether anvil detected a check command for this project. When it did and that command exercises the change, write `Check: auto`.\n- Otherwise write one command line that proves the change does what the task asked. It must be non-interactive, run from the project root, exit non-zero on failure, finish in under 60 seconds and use only tools the project already has.\n- Check only what the task asked for. Do not assert behaviour you chose yourself, such as how an unknown option is handled.\n- Do not guess where build output lands. Run a built program through its build tool, such as `cargo run -q -- args`, never by a path under `target/`.\n- Test behaviour, not that a file exists. Examples:\n  - a shell script: `Check: bash -n tool.sh && test \"$(./tool.sh a b)\" = \"expected output\"`\n  - Python without tests: `Check: python3 -m py_compile pkg/*.py && python3 -c \"from pkg import f; assert f(2) == 4\"`\n  - Markdown: `Check: grep -q '^## Installation' README.md && grep -q '^## Usage' README.md`\n\n# Check command\n\nanvil detected this project's check command: `test -f fixed.txt`. It runs after the build without you. End the plan with `Check: auto`, or with a command of your own only when `test -f fixed.txt` cannot exercise the change.\n\n# Tools\n\nYou can call these tools:\n- `glob`: Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.\n- `grep`: Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.\n- `list_dir`: Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.\n- `outline`: Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.\n- `read_file`: Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.\n\n# Task\n\nadd a --dry-run flag",
+    "messages": [
+      {
+        "role": "user",
+        "text": "add a --dry-run flag"
+      }
+    ],
+    "tools": [
+      {
+        "name": "glob",
+        "description": "Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.",
+        "parameters": {
+          "description": "Arguments of the `glob` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Glob such as `**/*.rs` or `src/*.toml`, matched against paths relative to the search root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "grep",
+        "description": "Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.",
+        "parameters": {
+          "description": "Arguments of the `grep` tool.",
+          "properties": {
+            "glob": {
+              "default": null,
+              "description": "Only search files matching this glob, such as `*.rs` (by file name) or `src/**/*.rs` (by path).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "File or directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Regular expression (Rust regex syntax) matched against each line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "list_dir",
+        "description": "Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.",
+        "parameters": {
+          "description": "Arguments of the `list_dir` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to list, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "outline",
+        "description": "Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.",
+        "parameters": {
+          "description": "Arguments of the `outline` tool.",
+          "properties": {
+            "depth": {
+              "default": null,
+              "description": "Nesting levels to show; 1 shows top-level items only. Default 2.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "File or directory, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "read_file",
+        "description": "Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.",
+        "parameters": {
+          "description": "Arguments of the `read_file` tool.",
+          "properties": {
+            "files": {
+              "description": "Several files or line ranges to read in one call, instead of `path`.",
+              "items": {
+                "description": "One file or line range in a multi-file read.",
+                "properties": {
+                  "limit": {
+                    "default": null,
+                    "description": "Maximum number of lines to return. Default 2000.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "offset": {
+                    "default": null,
+                    "description": "First line to return, counting from 1. Default 1.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "description": "Path of the file, relative to the project root or absolute.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "limit": {
+              "default": null,
+              "description": "Maximum number of lines to return. Default 2000.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": null,
+              "description": "First line to return, counting from 1. Default 1.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "Path of one file, relative to the project root or absolute. Omit when\npassing `files`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      }
+    ],
+    "max_output_tokens": null
+  },
+  {
+    "system": "You are anvil, a coding agent working inside a real software project on the user's machine. You change the project only through the tools you are given.\n\nHow you work:\n- Read before you write. Look at the files you are about to change and at how neighbouring code does the same thing.\n- Make the smallest change that fully solves the task. Match the project's existing style, naming and conventions.\n- Never guess a path, a function signature or a command. Check with the tools.\n- Issue every independent tool call in the same turn; reads of different files are always independent.\n- Prefer edit_file for changes to existing files; use write_file for new files.\n- When a command or check fails, read the output and fix the cause. Do not retry the same thing unchanged.\n- Say what you did in a few plain sentences when you finish a state. Do not pad.\n\nTool calls are reviewed by a permission model. A call may come back denied; when it does, choose another approach or explain what you need, and never try to work around a denial.\n\n# State: BUILD\n\nImplement the approved plan. You have full tool access, subject to the permission model.\n\n- The plan is the one you wrote; do not read its file back. Work through it in order.\n- When `complete_step` is among your tools, mark a step done with it in the same turn as the step's last edit, as one more call beside that edit. Never spend a turn on it: steps still open when the review approves are marked done for you.\n- Run the narrowest relevant check as you go (one test, one compile) so mistakes surface early.\n- If the plan turns out to be wrong, adjust it in the plan file and say why.\n- If you were sent reviewer comments or a failed verification, address each point and say how.\n\nEnd your turn when every step is done, with a short summary of the changes and anything the reviewer should look at closely.\n\n# Tools\n\nYou can call these tools:\n- `complete_step`: Marks one step of the approved plan as done. Call it in the same turn as the step's last edit, as one more call beside that edit, never in a turn of its own. Steps still open when the review approves are marked done automatically.\n- `edit_file`: Replaces an exact string in a file. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.\n- `glob`: Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.\n- `grep`: Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.\n- `list_dir`: Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.\n- `outline`: Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.\n- `read_file`: Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.\n- `shell`: Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.\n- `write_file`: Writes the given content to a file, creating parent directories and replacing any existing contents. Prefer edit_file for small changes to existing files.\n\n# Task\n\nadd a --dry-run flag",
+    "messages": [
+      {
+        "role": "user",
+        "text": "add a --dry-run flag"
+      },
+      {
+        "role": "assistant",
+        "text": "Looked around.\n\n# Plan\n\n1. [ ] Write hello.txt\n2. [ ] Check it\n",
+        "reasoning": [],
+        "tool_calls": []
+      },
+      {
+        "role": "user",
+        "text": "The plan above was approved. Implement it now without reading it back; its file is `.anvil/sessions/t1/plan.md`."
+      }
+    ],
+    "tools": [
+      {
+        "name": "complete_step",
+        "description": "Marks one step of the approved plan as done. Call it in the same turn as the step's last edit, as one more call beside that edit, never in a turn of its own. Steps still open when the review approves are marked done automatically.",
+        "parameters": {
+          "description": "Arguments of the `complete_step` tool.",
+          "properties": {
+            "step": {
+              "description": "The number of the finished step, as written in the plan.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "step"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "edit_file",
+        "description": "Replaces an exact string in a file. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.",
+        "parameters": {
+          "description": "Arguments of the `edit_file` tool.",
+          "properties": {
+            "new": {
+              "description": "Replacement text.",
+              "type": "string"
+            },
+            "old": {
+              "description": "Exact text to replace. Must occur exactly once unless replace_all is set.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the file, relative to the project root or absolute.",
+              "type": "string"
+            },
+            "replace_all": {
+              "default": false,
+              "description": "Replace every occurrence instead of requiring a unique match.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old",
+            "new"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "glob",
+        "description": "Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.",
+        "parameters": {
+          "description": "Arguments of the `glob` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Glob such as `**/*.rs` or `src/*.toml`, matched against paths relative to the search root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "grep",
+        "description": "Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.",
+        "parameters": {
+          "description": "Arguments of the `grep` tool.",
+          "properties": {
+            "glob": {
+              "default": null,
+              "description": "Only search files matching this glob, such as `*.rs` (by file name) or `src/**/*.rs` (by path).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "File or directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Regular expression (Rust regex syntax) matched against each line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "list_dir",
+        "description": "Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.",
+        "parameters": {
+          "description": "Arguments of the `list_dir` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to list, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "outline",
+        "description": "Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.",
+        "parameters": {
+          "description": "Arguments of the `outline` tool.",
+          "properties": {
+            "depth": {
+              "default": null,
+              "description": "Nesting levels to show; 1 shows top-level items only. Default 2.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "File or directory, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "read_file",
+        "description": "Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.",
+        "parameters": {
+          "description": "Arguments of the `read_file` tool.",
+          "properties": {
+            "files": {
+              "description": "Several files or line ranges to read in one call, instead of `path`.",
+              "items": {
+                "description": "One file or line range in a multi-file read.",
+                "properties": {
+                  "limit": {
+                    "default": null,
+                    "description": "Maximum number of lines to return. Default 2000.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "offset": {
+                    "default": null,
+                    "description": "First line to return, counting from 1. Default 1.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "description": "Path of the file, relative to the project root or absolute.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "limit": {
+              "default": null,
+              "description": "Maximum number of lines to return. Default 2000.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": null,
+              "description": "First line to return, counting from 1. Default 1.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "Path of one file, relative to the project root or absolute. Omit when\npassing `files`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "shell",
+        "description": "Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.",
+        "parameters": {
+          "description": "Arguments of the `shell` tool.",
+          "properties": {
+            "command": {
+              "description": "The command line to run.",
+              "type": "string"
+            },
+            "timeout_s": {
+              "default": null,
+              "description": "Seconds before the command is killed. Default 120, maximum 600.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "write_file",
+        "description": "Writes the given content to a file, creating parent directories and replacing any existing contents. Prefer edit_file for small changes to existing files.",
+        "parameters": {
+          "description": "Arguments of the `write_file` tool.",
+          "properties": {
+            "content": {
+              "description": "The complete new contents.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the file, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "max_output_tokens": null
+  },
+  {
+    "system": "You are anvil, a coding agent working inside a real software project on the user's machine. You change the project only through the tools you are given.\n\nHow you work:\n- Read before you write. Look at the files you are about to change and at how neighbouring code does the same thing.\n- Make the smallest change that fully solves the task. Match the project's existing style, naming and conventions.\n- Never guess a path, a function signature or a command. Check with the tools.\n- Issue every independent tool call in the same turn; reads of different files are always independent.\n- Prefer edit_file for changes to existing files; use write_file for new files.\n- When a command or check fails, read the output and fix the cause. Do not retry the same thing unchanged.\n- Say what you did in a few plain sentences when you finish a state. Do not pad.\n\nTool calls are reviewed by a permission model. A call may come back denied; when it does, choose another approach or explain what you need, and never try to work around a denial.\n\n# State: BUILD\n\nImplement the approved plan. You have full tool access, subject to the permission model.\n\n- The plan is the one you wrote; do not read its file back. Work through it in order.\n- When `complete_step` is among your tools, mark a step done with it in the same turn as the step's last edit, as one more call beside that edit. Never spend a turn on it: steps still open when the review approves are marked done for you.\n- Run the narrowest relevant check as you go (one test, one compile) so mistakes surface early.\n- If the plan turns out to be wrong, adjust it in the plan file and say why.\n- If you were sent reviewer comments or a failed verification, address each point and say how.\n\nEnd your turn when every step is done, with a short summary of the changes and anything the reviewer should look at closely.\n\n# Tools\n\nYou can call these tools:\n- `complete_step`: Marks one step of the approved plan as done. Call it in the same turn as the step's last edit, as one more call beside that edit, never in a turn of its own. Steps still open when the review approves are marked done automatically.\n- `edit_file`: Replaces an exact string in a file. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.\n- `glob`: Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.\n- `grep`: Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.\n- `list_dir`: Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.\n- `outline`: Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.\n- `read_file`: Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.\n- `shell`: Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.\n- `write_file`: Writes the given content to a file, creating parent directories and replacing any existing contents. Prefer edit_file for small changes to existing files.\n\n# Task\n\nadd a --dry-run flag",
+    "messages": [
+      {
+        "role": "user",
+        "text": "add a --dry-run flag"
+      },
+      {
+        "role": "assistant",
+        "text": "Looked around.\n\n# Plan\n\n1. [ ] Write hello.txt\n2. [ ] Check it\n",
+        "reasoning": [],
+        "tool_calls": []
+      },
+      {
+        "role": "user",
+        "text": "The plan above was approved. Implement it now without reading it back; its file is `.anvil/sessions/t1/plan.md`."
+      },
+      {
+        "role": "assistant",
+        "text": "",
+        "reasoning": [],
+        "tool_calls": [
+          {
+            "id": "w-a.txt",
+            "name": "write_file",
+            "arguments_json": "{\"content\":\"hi\",\"path\":\"a.txt\"}"
+          }
+        ]
+      },
+      {
+        "role": "tool_results",
+        "results": [
+          {
+            "call_id": "w-a.txt",
+            "content": "wrote 2 bytes to a.txt",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "complete_step",
+        "description": "Marks one step of the approved plan as done. Call it in the same turn as the step's last edit, as one more call beside that edit, never in a turn of its own. Steps still open when the review approves are marked done automatically.",
+        "parameters": {
+          "description": "Arguments of the `complete_step` tool.",
+          "properties": {
+            "step": {
+              "description": "The number of the finished step, as written in the plan.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "step"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "edit_file",
+        "description": "Replaces an exact string in a file. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.",
+        "parameters": {
+          "description": "Arguments of the `edit_file` tool.",
+          "properties": {
+            "new": {
+              "description": "Replacement text.",
+              "type": "string"
+            },
+            "old": {
+              "description": "Exact text to replace. Must occur exactly once unless replace_all is set.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the file, relative to the project root or absolute.",
+              "type": "string"
+            },
+            "replace_all": {
+              "default": false,
+              "description": "Replace every occurrence instead of requiring a unique match.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old",
+            "new"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "glob",
+        "description": "Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.",
+        "parameters": {
+          "description": "Arguments of the `glob` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Glob such as `**/*.rs` or `src/*.toml`, matched against paths relative to the search root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "grep",
+        "description": "Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.",
+        "parameters": {
+          "description": "Arguments of the `grep` tool.",
+          "properties": {
+            "glob": {
+              "default": null,
+              "description": "Only search files matching this glob, such as `*.rs` (by file name) or `src/**/*.rs` (by path).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "File or directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Regular expression (Rust regex syntax) matched against each line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "list_dir",
+        "description": "Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.",
+        "parameters": {
+          "description": "Arguments of the `list_dir` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to list, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "outline",
+        "description": "Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.",
+        "parameters": {
+          "description": "Arguments of the `outline` tool.",
+          "properties": {
+            "depth": {
+              "default": null,
+              "description": "Nesting levels to show; 1 shows top-level items only. Default 2.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "File or directory, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "read_file",
+        "description": "Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.",
+        "parameters": {
+          "description": "Arguments of the `read_file` tool.",
+          "properties": {
+            "files": {
+              "description": "Several files or line ranges to read in one call, instead of `path`.",
+              "items": {
+                "description": "One file or line range in a multi-file read.",
+                "properties": {
+                  "limit": {
+                    "default": null,
+                    "description": "Maximum number of lines to return. Default 2000.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "offset": {
+                    "default": null,
+                    "description": "First line to return, counting from 1. Default 1.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "description": "Path of the file, relative to the project root or absolute.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "limit": {
+              "default": null,
+              "description": "Maximum number of lines to return. Default 2000.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": null,
+              "description": "First line to return, counting from 1. Default 1.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "Path of one file, relative to the project root or absolute. Omit when\npassing `files`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "shell",
+        "description": "Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.",
+        "parameters": {
+          "description": "Arguments of the `shell` tool.",
+          "properties": {
+            "command": {
+              "description": "The command line to run.",
+              "type": "string"
+            },
+            "timeout_s": {
+              "default": null,
+              "description": "Seconds before the command is killed. Default 120, maximum 600.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "write_file",
+        "description": "Writes the given content to a file, creating parent directories and replacing any existing contents. Prefer edit_file for small changes to existing files.",
+        "parameters": {
+          "description": "Arguments of the `write_file` tool.",
+          "properties": {
+            "content": {
+              "description": "The complete new contents.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the file, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "max_output_tokens": null
+  },
+  {
+    "system": "You are anvil, a coding agent working inside a real software project on the user's machine. You change the project only through the tools you are given.\n\nHow you work:\n- Read before you write. Look at the files you are about to change and at how neighbouring code does the same thing.\n- Make the smallest change that fully solves the task. Match the project's existing style, naming and conventions.\n- Never guess a path, a function signature or a command. Check with the tools.\n- Issue every independent tool call in the same turn; reads of different files are always independent.\n- Prefer edit_file for changes to existing files; use write_file for new files.\n- When a command or check fails, read the output and fix the cause. Do not retry the same thing unchanged.\n- Say what you did in a few plain sentences when you finish a state. Do not pad.\n\nTool calls are reviewed by a permission model. A call may come back denied; when it does, choose another approach or explain what you need, and never try to work around a denial.\n\n# State: BUILD\n\nImplement the approved plan. You have full tool access, subject to the permission model.\n\n- The plan is the one you wrote; do not read its file back. Work through it in order.\n- When `complete_step` is among your tools, mark a step done with it in the same turn as the step's last edit, as one more call beside that edit. Never spend a turn on it: steps still open when the review approves are marked done for you.\n- Run the narrowest relevant check as you go (one test, one compile) so mistakes surface early.\n- If the plan turns out to be wrong, adjust it in the plan file and say why.\n- If you were sent reviewer comments or a failed verification, address each point and say how.\n\nEnd your turn when every step is done, with a short summary of the changes and anything the reviewer should look at closely.\n\n# Tools\n\nYou can call these tools:\n- `complete_step`: Marks one step of the approved plan as done. Call it in the same turn as the step's last edit, as one more call beside that edit, never in a turn of its own. Steps still open when the review approves are marked done automatically.\n- `edit_file`: Replaces an exact string in a file. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.\n- `glob`: Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.\n- `grep`: Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.\n- `list_dir`: Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.\n- `outline`: Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.\n- `read_file`: Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.\n- `shell`: Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.\n- `write_file`: Writes the given content to a file, creating parent directories and replacing any existing contents. Prefer edit_file for small changes to existing files.\n\n# Task\n\nadd a --dry-run flag",
+    "messages": [
+      {
+        "role": "user",
+        "text": "add a --dry-run flag"
+      },
+      {
+        "role": "assistant",
+        "text": "Looked around.\n\n# Plan\n\n1. [ ] Write hello.txt\n2. [ ] Check it\n",
+        "reasoning": [],
+        "tool_calls": []
+      },
+      {
+        "role": "user",
+        "text": "The plan above was approved. Implement it now without reading it back; its file is `.anvil/sessions/t1/plan.md`."
+      },
+      {
+        "role": "assistant",
+        "text": "",
+        "reasoning": [],
+        "tool_calls": [
+          {
+            "id": "w-a.txt",
+            "name": "write_file",
+            "arguments_json": "{\"content\":\"hi\",\"path\":\"a.txt\"}"
+          }
+        ]
+      },
+      {
+        "role": "tool_results",
+        "results": [
+          {
+            "call_id": "w-a.txt",
+            "content": "wrote 2 bytes to a.txt",
+            "is_error": false
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "text": "built",
+        "reasoning": [],
+        "tool_calls": []
+      },
+      {
+        "role": "user",
+        "text": "Verification failed. `test -f fixed.txt` exited with an error:\n```\n(no output)\n[exit code: 1]\n```\nFix the cause, then end your turn with what you changed."
+      }
+    ],
+    "tools": [
+      {
+        "name": "complete_step",
+        "description": "Marks one step of the approved plan as done. Call it in the same turn as the step's last edit, as one more call beside that edit, never in a turn of its own. Steps still open when the review approves are marked done automatically.",
+        "parameters": {
+          "description": "Arguments of the `complete_step` tool.",
+          "properties": {
+            "step": {
+              "description": "The number of the finished step, as written in the plan.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "step"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "edit_file",
+        "description": "Replaces an exact string in a file. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.",
+        "parameters": {
+          "description": "Arguments of the `edit_file` tool.",
+          "properties": {
+            "new": {
+              "description": "Replacement text.",
+              "type": "string"
+            },
+            "old": {
+              "description": "Exact text to replace. Must occur exactly once unless replace_all is set.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the file, relative to the project root or absolute.",
+              "type": "string"
+            },
+            "replace_all": {
+              "default": false,
+              "description": "Replace every occurrence instead of requiring a unique match.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old",
+            "new"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "glob",
+        "description": "Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.",
+        "parameters": {
+          "description": "Arguments of the `glob` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Glob such as `**/*.rs` or `src/*.toml`, matched against paths relative to the search root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "grep",
+        "description": "Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.",
+        "parameters": {
+          "description": "Arguments of the `grep` tool.",
+          "properties": {
+            "glob": {
+              "default": null,
+              "description": "Only search files matching this glob, such as `*.rs` (by file name) or `src/**/*.rs` (by path).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "File or directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Regular expression (Rust regex syntax) matched against each line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "list_dir",
+        "description": "Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.",
+        "parameters": {
+          "description": "Arguments of the `list_dir` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to list, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "outline",
+        "description": "Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.",
+        "parameters": {
+          "description": "Arguments of the `outline` tool.",
+          "properties": {
+            "depth": {
+              "default": null,
+              "description": "Nesting levels to show; 1 shows top-level items only. Default 2.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "File or directory, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "read_file",
+        "description": "Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.",
+        "parameters": {
+          "description": "Arguments of the `read_file` tool.",
+          "properties": {
+            "files": {
+              "description": "Several files or line ranges to read in one call, instead of `path`.",
+              "items": {
+                "description": "One file or line range in a multi-file read.",
+                "properties": {
+                  "limit": {
+                    "default": null,
+                    "description": "Maximum number of lines to return. Default 2000.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "offset": {
+                    "default": null,
+                    "description": "First line to return, counting from 1. Default 1.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "description": "Path of the file, relative to the project root or absolute.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "limit": {
+              "default": null,
+              "description": "Maximum number of lines to return. Default 2000.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": null,
+              "description": "First line to return, counting from 1. Default 1.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "Path of one file, relative to the project root or absolute. Omit when\npassing `files`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "shell",
+        "description": "Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.",
+        "parameters": {
+          "description": "Arguments of the `shell` tool.",
+          "properties": {
+            "command": {
+              "description": "The command line to run.",
+              "type": "string"
+            },
+            "timeout_s": {
+              "default": null,
+              "description": "Seconds before the command is killed. Default 120, maximum 600.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "write_file",
+        "description": "Writes the given content to a file, creating parent directories and replacing any existing contents. Prefer edit_file for small changes to existing files.",
+        "parameters": {
+          "description": "Arguments of the `write_file` tool.",
+          "properties": {
+            "content": {
+              "description": "The complete new contents.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the file, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "max_output_tokens": null
+  },
+  {
+    "system": "You are anvil, a coding agent working inside a real software project on the user's machine. You change the project only through the tools you are given.\n\nHow you work:\n- Read before you write. Look at the files you are about to change and at how neighbouring code does the same thing.\n- Make the smallest change that fully solves the task. Match the project's existing style, naming and conventions.\n- Never guess a path, a function signature or a command. Check with the tools.\n- Issue every independent tool call in the same turn; reads of different files are always independent.\n- Prefer edit_file for changes to existing files; use write_file for new files.\n- When a command or check fails, read the output and fix the cause. Do not retry the same thing unchanged.\n- Say what you did in a few plain sentences when you finish a state. Do not pad.\n\nTool calls are reviewed by a permission model. A call may come back denied; when it does, choose another approach or explain what you need, and never try to work around a denial.\n\n# State: BUILD\n\nImplement the approved plan. You have full tool access, subject to the permission model.\n\n- The plan is the one you wrote; do not read its file back. Work through it in order.\n- When `complete_step` is among your tools, mark a step done with it in the same turn as the step's last edit, as one more call beside that edit. Never spend a turn on it: steps still open when the review approves are marked done for you.\n- Run the narrowest relevant check as you go (one test, one compile) so mistakes surface early.\n- If the plan turns out to be wrong, adjust it in the plan file and say why.\n- If you were sent reviewer comments or a failed verification, address each point and say how.\n\nEnd your turn when every step is done, with a short summary of the changes and anything the reviewer should look at closely.\n\n# Tools\n\nYou can call these tools:\n- `complete_step`: Marks one step of the approved plan as done. Call it in the same turn as the step's last edit, as one more call beside that edit, never in a turn of its own. Steps still open when the review approves are marked done automatically.\n- `edit_file`: Replaces an exact string in a file. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.\n- `glob`: Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.\n- `grep`: Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.\n- `list_dir`: Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.\n- `outline`: Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.\n- `read_file`: Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.\n- `shell`: Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.\n- `write_file`: Writes the given content to a file, creating parent directories and replacing any existing contents. Prefer edit_file for small changes to existing files.\n\n# Task\n\nadd a --dry-run flag",
+    "messages": [
+      {
+        "role": "user",
+        "text": "add a --dry-run flag"
+      },
+      {
+        "role": "assistant",
+        "text": "Looked around.\n\n# Plan\n\n1. [ ] Write hello.txt\n2. [ ] Check it\n",
+        "reasoning": [],
+        "tool_calls": []
+      },
+      {
+        "role": "user",
+        "text": "The plan above was approved. Implement it now without reading it back; its file is `.anvil/sessions/t1/plan.md`."
+      },
+      {
+        "role": "assistant",
+        "text": "",
+        "reasoning": [],
+        "tool_calls": [
+          {
+            "id": "w-a.txt",
+            "name": "write_file",
+            "arguments_json": "{\"content\":\"hi\",\"path\":\"a.txt\"}"
+          }
+        ]
+      },
+      {
+        "role": "tool_results",
+        "results": [
+          {
+            "call_id": "w-a.txt",
+            "content": "wrote 2 bytes to a.txt",
+            "is_error": false
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "text": "built",
+        "reasoning": [],
+        "tool_calls": []
+      },
+      {
+        "role": "user",
+        "text": "Verification failed. `test -f fixed.txt` exited with an error:\n```\n(no output)\n[exit code: 1]\n```\nFix the cause, then end your turn with what you changed."
+      },
+      {
+        "role": "assistant",
+        "text": "",
+        "reasoning": [],
+        "tool_calls": [
+          {
+            "id": "w-fixed.txt",
+            "name": "write_file",
+            "arguments_json": "{\"content\":\"hi\",\"path\":\"fixed.txt\"}"
+          }
+        ]
+      },
+      {
+        "role": "tool_results",
+        "results": [
+          {
+            "call_id": "w-fixed.txt",
+            "content": "wrote 2 bytes to fixed.txt",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "complete_step",
+        "description": "Marks one step of the approved plan as done. Call it in the same turn as the step's last edit, as one more call beside that edit, never in a turn of its own. Steps still open when the review approves are marked done automatically.",
+        "parameters": {
+          "description": "Arguments of the `complete_step` tool.",
+          "properties": {
+            "step": {
+              "description": "The number of the finished step, as written in the plan.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "step"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "edit_file",
+        "description": "Replaces an exact string in a file. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.",
+        "parameters": {
+          "description": "Arguments of the `edit_file` tool.",
+          "properties": {
+            "new": {
+              "description": "Replacement text.",
+              "type": "string"
+            },
+            "old": {
+              "description": "Exact text to replace. Must occur exactly once unless replace_all is set.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the file, relative to the project root or absolute.",
+              "type": "string"
+            },
+            "replace_all": {
+              "default": false,
+              "description": "Replace every occurrence instead of requiring a unique match.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "old",
+            "new"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "glob",
+        "description": "Finds files whose path relative to the search root matches a glob pattern. `*` does not cross directory separators; use `**/` to recurse. Honors .gitignore and skips hidden files. Returns paths relative to the project root, sorted.",
+        "parameters": {
+          "description": "Arguments of the `glob` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Glob such as `**/*.rs` or `src/*.toml`, matched against paths relative to the search root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "grep",
+        "description": "Searches file contents for a regular expression. Up to 50 matches come back as `path:line:text` with 3 lines of context around each (`path-line-text`, groups separated by `--`) and, above each group, the enclosing function or item with its line range; more matches come back as bare `path:line:text` lines. Honors .gitignore, skips hidden and binary files. Optionally restrict to a directory and a file glob.",
+        "parameters": {
+          "description": "Arguments of the `grep` tool.",
+          "properties": {
+            "glob": {
+              "default": null,
+              "description": "Only search files matching this glob, such as `*.rs` (by file name) or `src/**/*.rs` (by path).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "File or directory to search, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pattern": {
+              "description": "Regular expression (Rust regex syntax) matched against each line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pattern"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "list_dir",
+        "description": "Lists the entries of one directory, sorted by name, with a trailing slash on subdirectories. Not recursive; use glob to find files by pattern.",
+        "parameters": {
+          "description": "Arguments of the `list_dir` tool.",
+          "properties": {
+            "path": {
+              "default": null,
+              "description": "Directory to list, relative to the project root or absolute. Default: the project root.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "outline",
+        "description": "Shows a file's structure without its bodies: imports, then each function, method, class, struct, enum, trait, impl, module, table or heading with its line range and first doc line. On a directory, does the same for every source file, honoring .gitignore. Use it to learn what a file or directory defines and where, at a fraction of the cost of reading it.",
+        "parameters": {
+          "description": "Arguments of the `outline` tool.",
+          "properties": {
+            "depth": {
+              "default": null,
+              "description": "Nesting levels to show; 1 shows top-level items only. Default 2.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "File or directory, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "read_file",
+        "description": "Reads UTF-8 text files and returns their lines prefixed with 1-based line numbers. Pass `path` (with optional offset and limit) for one file, or `files` with up to 20 {path, offset?, limit?} entries to read several files or ranges in one call; each then comes under a `==> path <==` header.",
+        "parameters": {
+          "description": "Arguments of the `read_file` tool.",
+          "properties": {
+            "files": {
+              "description": "Several files or line ranges to read in one call, instead of `path`.",
+              "items": {
+                "description": "One file or line range in a multi-file read.",
+                "properties": {
+                  "limit": {
+                    "default": null,
+                    "description": "Maximum number of lines to return. Default 2000.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "offset": {
+                    "default": null,
+                    "description": "First line to return, counting from 1. Default 1.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "path": {
+                    "description": "Path of the file, relative to the project root or absolute.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "limit": {
+              "default": null,
+              "description": "Maximum number of lines to return. Default 2000.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "offset": {
+              "default": null,
+              "description": "First line to return, counting from 1. Default 1.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "path": {
+              "default": null,
+              "description": "Path of one file, relative to the project root or absolute. Omit when\npassing `files`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        }
+      },
+      {
+        "name": "shell",
+        "description": "Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.",
+        "parameters": {
+          "description": "Arguments of the `shell` tool.",
+          "properties": {
+            "command": {
+              "description": "The command line to run.",
+              "type": "string"
+            },
+            "timeout_s": {
+              "default": null,
+              "description": "Seconds before the command is killed. Default 120, maximum 600.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        }
+      },
+      {
+        "name": "write_file",
+        "description": "Writes the given content to a file, creating parent directories and replacing any existing contents. Prefer edit_file for small changes to existing files.",
+        "parameters": {
+          "description": "Arguments of the `write_file` tool.",
+          "properties": {
+            "content": {
+              "description": "The complete new contents.",
+              "type": "string"
+            },
+            "path": {
+              "description": "Path of the file, relative to the project root or absolute.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ],
+          "type": "object"
+        }
+      }
+    ],
+    "max_output_tokens": null
+  }
+]

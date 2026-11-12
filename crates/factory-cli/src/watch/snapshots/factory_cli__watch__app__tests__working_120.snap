@@ -1,6 +1,5 @@
 ---
 source: crates/factory-cli/src/watch/app.rs
-assertion_line: 304
 expression: "draw(&app_for(\"working\"), 120, 38).backend()"
 ---
 " factory · minipc · running          uptime 3d 04:12   next poll in 2:14           today: 1 merged · 0 rejected · $4.71 "
@@ -12,7 +11,7 @@ expression: "draw(&app_for(\"working\"), 120, 38).backend()"
 "╰─────────────────────────────────────────────────────────────────────╯ │    ▃▅███████▅▆█████                          │"
 "╭ pipeline ───────────────────────────────────────────────────────────╮ │ ▄▆█████████████████                          │"
 "│ ● ──── ● ─────── ◔ ──────── ○ ───── ○ ───── ○ ───── ○ ──── ○        │ │ context tokens per turn              turn 19 │"
-"│ claim  worktree  implement  gate A  gate B  gate C  PR     merge    │ │ container cpu · mem             71% · 1.4 GB │"
+"│ claim  worktree  implement  gate A  gate C  gate B  PR     merge    │ │ container cpu · mem             71% · 1.4 GB │"
 "│ 2s     4s        22:41 · build                                      │ │ egress allowed · denied              142 · 2 │"
 "│                  run 1 of 2 · review round 0 of 2                   │ ╰──────────────────────────────────────────────╯"
 "╰─────────────────────────────────────────────────────────────────────╯ ╭ queue · 2 open ──────────────────────────────╮"

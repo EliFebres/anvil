@@ -189,6 +189,7 @@ impl AnvilRunner {
             session,
             provider: usage.coder_provider,
             model: usage.coder_model,
+            roles: usage.roles,
             tokens: usage.total,
             tool_calls: usage.tool_calls,
             turns: usage.turns,

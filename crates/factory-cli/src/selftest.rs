@@ -180,7 +180,7 @@ async fn pipeline(
         world.sandbox_toolchain(&parts, &options.repo_root).await,
     )?;
     steps.report(
-        "pipeline: claim, sandbox, gate A, gate B (skipped), gate C, push, merge",
+        "pipeline: claim, sandbox, gate A, gate C, gate B (skipped), push, merge",
         world.work(&parts, ticket.id).await,
     )?;
     steps.report(
@@ -1040,6 +1040,7 @@ fn factory_config(real: &FactoryConfig, runtime: ContainerRuntime) -> FactoryCon
     factory.reviewers = vec![ReviewerEntry {
         provider: FAKE_PROVIDER.to_owned(),
         stance: Stance::Correctness,
+        blocking: None,
     }];
     factory.worker.runtime = runtime;
     factory.worker.egress_allow = Vec::new();
@@ -1262,6 +1263,7 @@ impl EvalGate for SkippedEvalGate {
             summary: "Gate B skipped: the selftest has no eval baseline and calls no model."
                 .to_owned(),
             cost_usd: None,
+            tokens: None,
         }))))
     }
 

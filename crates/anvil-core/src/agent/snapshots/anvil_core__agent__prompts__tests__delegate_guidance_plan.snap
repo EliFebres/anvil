@@ -1,0 +1,7 @@
+---
+source: crates/anvil-core/src/agent/prompts.rs
+expression: section.render()
+---
+# Delegation
+
+`delegate` hands a self-contained task to a subagent that starts with a fresh context and returns only its final message. It pays for itself on a broad search across many files: ask `explore` the question instead of reading the files yourself. It does not pay for a single file read or a quick grep: do those yourself.

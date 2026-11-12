@@ -50,8 +50,8 @@ struct World {
 }
 
 impl World {
-    /// With `coder_on_alpha`, the coder shares alpha's base URL, which the
-    /// independence check must refuse.
+    /// With `coder_on_alpha`, the coder runs alpha's model at alpha's base
+    /// URL, which the independence check must refuse.
     async fn new(coder_on_alpha: bool) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path().join("home");
@@ -60,10 +60,10 @@ impl World {
         let github = MockServer::start().await;
         let alpha = MockServer::start().await;
         let beta = MockServer::start().await;
-        let coder_url = if coder_on_alpha {
-            format!("{}/v1", alpha.uri())
+        let (coder_url, coder_model) = if coder_on_alpha {
+            (format!("{}/v1", alpha.uri()), "alpha-1")
         } else {
-            "https://coder.example/v1".to_owned()
+            ("https://coder.example/v1".to_owned(), "coder-1")
         };
         write(
             &home.join(".anvil").join("config.toml"),
@@ -73,7 +73,7 @@ impl World {
 protocol = "anthropic"
 base_url = "{coder_url}"
 api_key_env = "CODER_KEY"
-model = "coder-1"
+model = "{coder_model}"
 context_window = 100000
 supports_tools = true
 supports_reasoning = false
@@ -313,7 +313,7 @@ async fn approval_exits_0_and_posts_nothing() {
 }
 
 #[tokio::test]
-async fn a_reviewer_on_the_coder_url_is_refused_before_any_request() {
+async fn a_reviewer_running_the_coders_model_is_refused_before_any_request() {
     let world = World::new(true).await;
     world.mount_pull().await;
     world.mount_models(approve(), approve()).await;
@@ -321,7 +321,7 @@ async fn a_reviewer_on_the_coder_url_is_refused_before_any_request() {
     let out = world.run();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
-    assert!(stderr.contains("shares base_url"), "{stderr}");
+    assert!(stderr.contains("the same as coder"), "{stderr}");
     assert!(
         world
             .alpha

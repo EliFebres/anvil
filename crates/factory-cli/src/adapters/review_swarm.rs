@@ -1,6 +1,6 @@
 //! Gate C: the review swarm over the diff.
 
-use factory_core::{BoxFuture, MinorFinding, ReviewInput, ReviewReport, ReviewSwarm};
+use factory_core::{BoxFuture, MinorFinding, ReviewInput, ReviewReport, ReviewSwarm, Tokens};
 use factory_review::{
     AttributedFinding, Decision, DiffLines, Outcome, ReviewRequest, Reviewer, Severity,
     TicketSummary, Verdict,
@@ -85,13 +85,20 @@ impl Swarm {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let usage = verdict.usage();
         ReviewReport {
             approved: verdict.decision == Decision::Approve,
             reason: verdict.reason.clone(),
             findings_markdown,
             verdicts,
             minors,
-            cost_usd: verdict.usage().cost_usd,
+            cost_usd: usage.cost_usd,
+            tokens: Tokens {
+                input: usage.input_tokens,
+                output: usage.output_tokens,
+                cached: usage.cached_tokens,
+            },
+            failed: verdict.failed.clone(),
         }
     }
 }
@@ -148,7 +155,7 @@ pub fn blocks(severity: Severity) -> bool {
 mod tests {
     use super::*;
     use anvil_types::Stance;
-    use factory_review::{Finding, RawVerdict, Review, ReviewerId, Usage};
+    use factory_review::{FakeReviewer, Finding, RawVerdict, Review, ReviewerId, Usage};
 
     fn finding(
         severity: Severity,
@@ -171,6 +178,7 @@ mod tests {
                 provider: "openai".to_owned(),
                 stance,
                 model: "m".to_owned(),
+                blocking: true,
             },
             outcome: Outcome::Reviewed {
                 review: Review { verdict, findings },
@@ -207,6 +215,52 @@ mod tests {
             vec![("openai/style".to_owned(), "approve".to_owned())]
         );
         assert!(report.findings_markdown.is_empty());
+    }
+
+    fn request() -> ReviewRequest {
+        ReviewRequest {
+            ticket: TicketSummary::from_pull("a ticket", ""),
+            diff: String::new(),
+            changed_files: Vec::new(),
+            guidelines: None,
+            earlier_findings: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_style_reviewers_major_approves_and_lands_in_the_minors() {
+        let style_major = vec![finding(Severity::Major, Some("a.rs"), Some(2), "naming")];
+        let reviewers: Vec<Box<dyn Reviewer>> = vec![
+            Box::new(FakeReviewer::approving("openai", Stance::Correctness)),
+            Box::new(FakeReviewer::with_findings(
+                "openai",
+                Stance::Style,
+                style_major,
+            )),
+        ];
+        let verdict = factory_review::review(&request(), &reviewers).await;
+        let report = Swarm::report(&verdict, "");
+        assert!(report.approved, "{}", report.reason);
+        assert!(report.failed.is_empty());
+        assert!(report.findings_markdown.is_empty());
+        assert_eq!(report.minors.len(), 1);
+        assert!(report.minors[0].body.contains("(openai/style): naming"));
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_reviewer_is_reported_as_failed() {
+        let reviewers: Vec<Box<dyn Reviewer>> = vec![
+            Box::new(FakeReviewer::failing(
+                "openai",
+                Stance::Correctness,
+                "connection refused",
+            )),
+            Box::new(FakeReviewer::approving("google", Stance::Safety)),
+        ];
+        let verdict = factory_review::review(&request(), &reviewers).await;
+        let report = Swarm::report(&verdict, "");
+        assert!(!report.approved);
+        assert_eq!(report.failed, vec!["openai/correctness".to_owned()]);
     }
 
     #[test]

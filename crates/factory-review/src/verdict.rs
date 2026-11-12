@@ -138,6 +138,14 @@ pub struct ReviewerId {
     pub stance: Stance,
     /// The model the provider is configured with.
     pub model: String,
+    /// Whether this reviewer's findings can send the change back.
+    #[serde(default = "default_blocking")]
+    pub blocking: bool,
+}
+
+/// Verdicts stored before reviewers could be non-blocking were all blocking.
+fn default_blocking() -> bool {
+    true
 }
 
 impl fmt::Display for ReviewerId {
@@ -221,8 +229,13 @@ pub struct Verdict {
     pub reason: String,
     /// The blocker and major findings, worst first, in reviewer order within a severity.
     pub findings: Vec<AttributedFinding>,
-    /// The minor findings, for the caller to post as comments rather than block on.
+    /// The minor findings plus every finding of a non-blocking reviewer, whatever
+    /// its severity, for the caller to post as comments rather than block on.
     pub minors: Vec<AttributedFinding>,
+    /// The `provider/stance` of each reviewer that still has no review after its
+    /// reruns; the caller stops the ticket instead of rerunning the implementer.
+    #[serde(default)]
+    pub failed: Vec<String>,
     /// Every reviewer's raw result, in `[[reviewers]]` order.
     pub raw: Vec<RawVerdict>,
 }
@@ -230,10 +243,12 @@ pub struct Verdict {
 impl Verdict {
     /// Applies the aggregation rule to the raw reviews.
     ///
-    /// Any blocker is `changes`. Two or more majors is `changes`. A reviewer
-    /// that failed is `changes`, because a review nobody delivered must not
-    /// count as approval. Otherwise `approve`, with the minors set aside. The
-    /// models' own `verdict` fields are recorded but not trusted.
+    /// Every finding of a non-blocking reviewer is set aside as a minor and
+    /// never counts below. Of the rest, any blocker is `changes` and two or
+    /// more majors is `changes`. A reviewer that failed is `changes`, because a
+    /// review nobody delivered must not count as approval. Otherwise `approve`,
+    /// with the minors set aside. The models' own `verdict` fields are recorded
+    /// but not trusted.
     ///
     /// # Arguments
     ///
@@ -254,7 +269,7 @@ impl Verdict {
                             reviewer: result.reviewer.clone(),
                             finding: finding.clone(),
                         };
-                        if finding.severity == Severity::Minor {
+                        if finding.severity == Severity::Minor || !result.reviewer.blocking {
                             minors.push(attributed);
                         } else {
                             findings.push(attributed);
@@ -291,6 +306,7 @@ impl Verdict {
             reason,
             findings,
             minors,
+            failed,
             raw,
         }
     }
@@ -440,6 +456,7 @@ mod tests {
             provider: provider.to_owned(),
             stance,
             model: format!("{provider}-model"),
+            blocking: stance.blocks_by_default(),
         }
     }
 
@@ -519,7 +536,7 @@ mod tests {
                 vec![finding(Severity::Major, "a.rs", 1, "one")],
             ),
             reviewed(
-                id("google", Stance::Simplicity),
+                id("google", Stance::Safety),
                 Decision::Approve,
                 vec![finding(Severity::Major, "b.rs", 2, "two")],
             ),
@@ -528,6 +545,68 @@ mod tests {
         assert_eq!(verdict.decision, Decision::Changes);
         assert_eq!(verdict.reason, "2 majors");
         assert_eq!(verdict.findings.len(), 2);
+    }
+
+    #[test]
+    fn a_non_blocking_major_does_not_count_toward_the_limit() {
+        let raw = vec![
+            reviewed(
+                id("openai", Stance::Correctness),
+                Decision::Approve,
+                vec![finding(Severity::Major, "a.rs", 1, "one")],
+            ),
+            reviewed(
+                id("google", Stance::Simplicity),
+                Decision::Approve,
+                vec![finding(Severity::Major, "b.rs", 2, "two")],
+            ),
+        ];
+        let verdict = Verdict::aggregate(raw);
+        assert_eq!(verdict.decision, Decision::Approve);
+        assert_eq!(verdict.findings.len(), 1);
+        assert_eq!(verdict.minors.len(), 1);
+        assert_eq!(verdict.minors[0].reviewer.provider, "google");
+    }
+
+    #[test]
+    fn a_non_blocking_blocker_is_only_a_comment() {
+        let raw = vec![
+            reviewed(id("openai", Stance::Correctness), Decision::Approve, vec![]),
+            reviewed(
+                id("google", Stance::Style),
+                Decision::Changes,
+                vec![finding(Severity::Blocker, "b.rs", 2, "rule x")],
+            ),
+        ];
+        let verdict = Verdict::aggregate(raw);
+        assert_eq!(verdict.decision, Decision::Approve);
+        assert!(verdict.findings.is_empty());
+        assert_eq!(verdict.minors.len(), 1);
+    }
+
+    #[test]
+    fn a_style_reviewer_marked_blocking_can_block() {
+        let mut style = id("google", Stance::Style);
+        style.blocking = true;
+        let raw = vec![reviewed(
+            style,
+            Decision::Changes,
+            vec![finding(Severity::Blocker, "b.rs", 2, "rule x")],
+        )];
+        let verdict = Verdict::aggregate(raw);
+        assert_eq!(verdict.decision, Decision::Changes);
+        assert_eq!(verdict.reason, "1 blocker");
+    }
+
+    #[test]
+    fn stored_json_without_blocking_or_failed_still_parses() {
+        let id: ReviewerId =
+            serde_json::from_str(r#"{"provider":"p","stance":"style","model":"m"}"#)
+                .expect("old reviewer id");
+        assert!(id.blocking);
+        let old = r#"{"decision":"changes","reason":"r","findings":[],"minors":[],"raw":[]}"#;
+        let verdict: Verdict = serde_json::from_str(old).expect("old verdict");
+        assert!(verdict.failed.is_empty());
     }
 
     #[test]
@@ -574,6 +653,7 @@ mod tests {
         let verdict = Verdict::aggregate(raw);
         assert_eq!(verdict.decision, Decision::Changes);
         assert_eq!(verdict.reason, "reviewer(s) failed: google/safety");
+        assert_eq!(verdict.failed, vec!["google/safety"]);
         assert_eq!(verdict.usage().cost_usd, None);
 
         let empty = Verdict::aggregate(Vec::new());

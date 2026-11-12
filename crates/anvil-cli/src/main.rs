@@ -1,5 +1,6 @@
 //! `anvil`: the CLI coding agent. Argument parsing and wiring only.
 
+mod build;
 mod chat;
 mod cli;
 mod commands;
@@ -7,6 +8,7 @@ mod config_init;
 mod console;
 mod doctor;
 mod frontend;
+mod learn;
 mod legacy;
 mod logging;
 mod memory;
@@ -16,7 +18,9 @@ mod secrets;
 mod setup;
 mod skills;
 mod stats;
+mod status;
 mod telemetry;
+mod templates;
 mod terminal;
 mod ticket;
 mod tui;
@@ -29,7 +33,9 @@ use anvil_types::config::load_profile;
 use anvil_types::dotenv;
 use clap::Parser;
 
-use crate::cli::{Cli, Command, CompatCommand, ConfigCommand};
+use crate::cli::{
+    BuildCommand, Cli, Command, CompatCommand, ConfigCommand, MemoryCommand, TemplateCommand,
+};
 use crate::frontend::UiKind;
 use crate::wiring::{Wiring, home_dir};
 
@@ -126,9 +132,43 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         }
         Some(Command::Skill { command }) => skills::run(command, home, cwd).await,
         Some(Command::Rules { command }) => rules::run(command, home, cwd),
+        Some(Command::New { template, dir }) => templates::new_project(home, cwd, &template, &dir),
+        Some(Command::Template {
+            command:
+                TemplateCommand::Save {
+                    name,
+                    dir,
+                    description,
+                    force,
+                },
+        }) => templates::save(
+            home,
+            cwd,
+            &name,
+            dir.as_deref(),
+            description.as_deref(),
+            force,
+        ),
+        Some(Command::Memory {
+            command: MemoryCommand::Learn,
+        }) => {
+            let wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            learn::run(&wiring).await
+        }
         Some(Command::Stats { since }) => {
             let config = load_config(home, cwd).ok().map(|loaded| loaded.config);
             stats::run(config.as_ref(), cwd, &since)
+        }
+        Some(Command::Status { json, all }) => {
+            status::list::run(
+                cwd,
+                home,
+                all,
+                json,
+                chrono::Utc::now(),
+                &mut std::io::stdout(),
+            )?;
+            Ok(0)
         }
         Some(Command::Ticket { command }) => ticket::run(command, home, cwd).await,
         Some(Command::Update { exe }) => {
@@ -153,6 +193,16 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
                 fix_github,
             };
             doctor::run(&wiring, options).await
+        }
+        Some(Command::Build(args)) => {
+            if let Some(BuildCommand::Status { id }) = &args.command {
+                build::status(cwd, id.as_deref())?;
+                return Ok(0);
+            }
+            let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            wiring.allow_tools(&cli.allow_tools)?;
+            wiring.load_mcp().await;
+            build::execute(args, wiring, cli.yes).await
         }
         Some(Command::Chat) => {
             let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;

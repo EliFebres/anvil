@@ -1,0 +1,57 @@
+---
+source: crates/anvil-cli/src/status/list.rs
+expression: json
+---
+[
+  {
+    "schema": 1,
+    "session_id": "01B",
+    "project": "<project>",
+    "task": "task of 01B",
+    "state": "working",
+    "loop_state": "build",
+    "detail": "detail",
+    "spend": {
+      "input_tokens": 10000,
+      "output_tokens": 2300,
+      "cached_tokens": 0,
+      "cost_usd": 0.4242
+    },
+    "started_at": "2026-11-01T11:00:00Z",
+    "updated_at": "2026-11-01T11:59:30Z"
+  },
+  {
+    "schema": 1,
+    "session_id": "01C",
+    "project": "<project>",
+    "task": "task of 01C",
+    "state": "done",
+    "loop_state": "build",
+    "detail": "detail",
+    "spend": {
+      "input_tokens": 10000,
+      "output_tokens": 2300,
+      "cached_tokens": 0,
+      "cost_usd": 0.4242
+    },
+    "started_at": "2026-11-01T10:00:00Z",
+    "updated_at": "2026-11-01T10:30:00Z"
+  },
+  {
+    "schema": 1,
+    "session_id": "01A",
+    "project": "<project>",
+    "task": "task of 01A",
+    "state": "stale",
+    "loop_state": "build",
+    "detail": "detail",
+    "spend": {
+      "input_tokens": 10000,
+      "output_tokens": 2300,
+      "cached_tokens": 0,
+      "cost_usd": 0.4242
+    },
+    "started_at": "2026-11-01T09:00:00Z",
+    "updated_at": "2026-11-01T09:10:00Z"
+  }
+]

@@ -3,10 +3,11 @@
 //!
 //! ```text
 //! worktree from origin/main
-//! loop (at most two review rounds)
+//! loop (review rounds and one Gate B retry are budgeted)
 //!   loop (one Gate A retry per ticket)
 //!     implementer run -> commit -> secret scan -> Gate A: just check
-//!   release build -> Gate B: eval against main (one retry) -> Gate C: review swarm
+//!   Gate C: review swarm (changes -> a fix round; a failed reviewer -> pause)
+//!   changed path matches [eval_gate]? release build -> Gate B: eval against main
 //! push -> pull request -> minors as comments
 //! protected path touched? -> label needs-human, wait
 //! CI green? -> squash merge, delete branch
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anvil_types::{FactoryConfig, Ticket};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::board::Stage;
 use crate::budget::{Budget, BudgetExceeded};
@@ -26,17 +28,20 @@ use crate::error::{FactoryError, Result};
 use crate::git::Git;
 use crate::paths::FactoryHome;
 use crate::ports::{
-    BoxFuture, CiStatus, CodeHost, EvalGate, GateB, Implementer, ImplementerStatus, InlineComment,
-    MinorFinding, NEEDS_HUMAN_LABEL, Outcome, Progress, ProgressEvent, ReviewInput, ReviewSwarm,
-    Worker,
+    BoxFuture, CiStatus, CodeHost, EvalGate, GateB, GateCost, Implementer, ImplementerStatus,
+    InlineComment, MinorFinding, NEEDS_HUMAN_LABEL, Outcome, Progress, ProgressEvent, ReviewInput,
+    ReviewSwarm, Tokens, Worker,
 };
 use crate::protected::ProtectedPaths;
-use crate::render::{self, GateRecord, Notes, PullBody};
+use crate::render::{self, GateRecord, GateResult, Notes, PullBody};
 use crate::secrets;
 use crate::tickets::{TicketQueue, Transition};
 
 /// The repository file the style reviewer receives.
 const GUIDELINES_FILE: &str = "CLAUDE.md";
+
+/// Why Gate B did not run, for the gate records, the notes and the pull request.
+const EVAL_SKIPPED_DETAIL: &str = "no changed path matches [eval_gate] paths";
 
 /// A clock, injected so tests can run out the wall clock.
 pub type InstantClock = Arc<dyn Fn() -> Instant + Send + Sync>;
@@ -69,10 +74,12 @@ pub struct WorkerDeps {
 pub struct TicketWorker {
     deps: WorkerDeps,
     protected: ProtectedPaths,
+    /// `[eval_gate] paths`; `None` runs Gate B for every diff.
+    eval_paths: Option<GlobSet>,
 }
 
 impl TicketWorker {
-    /// Builds the worker, compiling the protected paths.
+    /// Builds the worker, compiling the protected and eval-gate paths.
     ///
     /// # Arguments
     ///
@@ -80,10 +87,20 @@ impl TicketWorker {
     ///
     /// # Errors
     ///
-    /// [`FactoryError::Config`] when a protected path is not a glob.
+    /// [`FactoryError::Config`] when a protected or eval-gate path is not a glob.
     pub fn new(deps: WorkerDeps) -> Result<Self> {
         let protected = ProtectedPaths::from_config(&deps.config.protected)?;
-        Ok(Self { deps, protected })
+        let eval_paths = deps
+            .config
+            .eval_gate
+            .as_ref()
+            .map(|gate| compile_eval_paths(&gate.paths))
+            .transpose()?;
+        Ok(Self {
+            deps,
+            protected,
+            eval_paths,
+        })
     }
 
     /// `origin/main`.
@@ -141,7 +158,7 @@ impl TicketWorker {
         let mut plan_retried = false;
         let mut eval_retried = false;
         let mut earlier_findings: Vec<String> = Vec::new();
-        let (minors, review_cost) = loop {
+        let minors = loop {
             run.gates.clear();
             // Gate A: implement, commit, scan, check.
             loop {
@@ -178,6 +195,12 @@ impl TicketWorker {
                         .unwrap_or_default()
                 ));
                 run.add_cost(out.cost_usd);
+                run.record_cost(
+                    progress,
+                    format!("implementer run {n}"),
+                    out.cost_usd,
+                    Some(out.tokens.weighted()),
+                );
                 progress(ProgressEvent::RunUsage {
                     tokens: out.tokens,
                     cost_usd: out.cost_usd,
@@ -253,7 +276,7 @@ impl TicketWorker {
                         .await?;
                     run.gates.push(GateRecord {
                         name: "A: just check".to_owned(),
-                        passed: true,
+                        result: GateResult::Pass,
                         detail: format!("passed after implementer run {n}"),
                     });
                     break;
@@ -261,7 +284,7 @@ impl TicketWorker {
                 if let Err(exceeded) = run.budget.gate_a_failed() {
                     run.gates.push(GateRecord {
                         name: "A: just check".to_owned(),
-                        passed: false,
+                        result: GateResult::Fail,
                         detail: format!("failed after implementer run {n}"),
                     });
                     return Ok(run.reject(format!("gate A: {exceeded}"), deps.implementer.as_ref()));
@@ -269,7 +292,91 @@ impl TicketWorker {
                 task = render::append_check_failure(&task, &check.output_tail);
             }
 
-            // Gate B: the eval harness on the branch build.
+            // Gate C: the review swarm. It runs before the release build and
+            // the eval, which are the expensive gates, so a change the
+            // reviewers send back never pays for them.
+            progress(ProgressEvent::stage(Stage::GateC, "gate C: review swarm"));
+            let changed = wt.diff_names(&main, "HEAD").await?;
+            let input = ReviewInput {
+                ticket: ticket.clone(),
+                diff: wt.diff_text(&main, "HEAD").await?,
+                changed_files: changed.clone(),
+                guidelines: deps.repo.show(&main, GUIDELINES_FILE).await.ok(),
+                earlier_findings: earlier_findings.clone(),
+            };
+            let report = deps.review.review(&input).await?;
+            run.add_cost(report.cost_usd);
+            run.review_calls += 1;
+            run.record_cost(
+                progress,
+                format!("C: review round {}", run.review_calls),
+                report.cost_usd,
+                Some(report.tokens.weighted()),
+            );
+            run.verdicts = report.verdicts.clone();
+            run.notes.markdown(
+                &format!(
+                    "gate C: {} ({})",
+                    if report.approved {
+                        "approve"
+                    } else {
+                        "changes"
+                    },
+                    report.reason
+                ),
+                if report.findings_markdown.trim().is_empty() {
+                    "no blocking findings"
+                } else {
+                    &report.findings_markdown
+                },
+            );
+            if !report.failed.is_empty() {
+                // An unreachable reviewer says nothing about the diff, so
+                // neither an approval nor another implementer run is earned.
+                let reason = format!(
+                    "gate C: reviewer(s) could not be reached after retries: {}; no implementer run was spent",
+                    report.failed.join(", ")
+                );
+                run.notes.line(&reason);
+                run.gates.push(GateRecord {
+                    name: "C: review".to_owned(),
+                    result: GateResult::Fail,
+                    detail: format!("reviewer(s) unreachable: {}", report.failed.join(", ")),
+                });
+                return Ok(Outcome::Paused { reason });
+            }
+            if !report.approved {
+                run.gates.push(GateRecord {
+                    name: "C: review".to_owned(),
+                    result: GateResult::Fail,
+                    detail: format!("changes: {}", report.reason),
+                });
+                if let Err(exceeded) = run.budget.review_asked_for_changes() {
+                    return Ok(run.reject(format!("gate C: {exceeded}"), deps.implementer.as_ref()));
+                }
+                task = render::fix_task(ticket, &changed, &report.findings_markdown);
+                earlier_findings.push(report.findings_markdown);
+                continue;
+            }
+            run.gates.push(GateRecord {
+                name: "C: review".to_owned(),
+                result: GateResult::Pass,
+                detail: format!("approve: {}", report.reason),
+            });
+            let minors = report.minors;
+
+            // Gate B: the eval harness on the branch build, when the diff can
+            // change anvil at all.
+            if self.skips_eval(&changed) {
+                run.notes
+                    .line(&format!("gate B: skipped: {EVAL_SKIPPED_DETAIL}"));
+                run.gates.push(GateRecord {
+                    name: "B: eval".to_owned(),
+                    result: GateResult::Skipped,
+                    detail: EVAL_SKIPPED_DETAIL.to_owned(),
+                });
+                break minors;
+            }
             if deps.eval_gate.needs_release_build() {
                 progress(ProgressEvent::stage(
                     Stage::GateB,
@@ -303,9 +410,15 @@ impl TicketWorker {
                 GateB::Failed(report) => {
                     run.notes.markdown("gate B: fail", &report.summary);
                     run.add_cost(report.cost_usd);
+                    run.record_cost(
+                        progress,
+                        "B: eval".to_owned(),
+                        report.cost_usd,
+                        report.tokens.map(Tokens::weighted),
+                    );
                     run.gates.push(GateRecord {
                         name: "B: eval".to_owned(),
-                        passed: false,
+                        result: GateResult::Fail,
                         detail: format!("{} regression(s)", report.regressions.len()),
                     });
                     // A branch that breaks anvil itself fails every task in
@@ -330,63 +443,22 @@ impl TicketWorker {
                 GateB::Passed(report) => {
                     run.notes.markdown("gate B: pass", &report.summary);
                     run.add_cost(report.cost_usd);
+                    run.record_cost(
+                        progress,
+                        "B: eval".to_owned(),
+                        report.cost_usd,
+                        report.tokens.map(Tokens::weighted),
+                    );
                     run.gates.push(GateRecord {
                         name: "B: eval".to_owned(),
-                        passed: true,
+                        result: GateResult::Pass,
                         detail: format!("{} regression(s)", report.regressions.len()),
                     });
                     run.eval_summary = Some(report.summary);
+                    break minors;
                 }
             }
-
-            // Gate C: the review swarm.
-            progress(ProgressEvent::stage(Stage::GateC, "gate C: review swarm"));
-            let input = ReviewInput {
-                ticket: ticket.clone(),
-                diff: wt.diff_text(&main, "HEAD").await?,
-                changed_files: wt.diff_names(&main, "HEAD").await?,
-                guidelines: deps.repo.show(&main, GUIDELINES_FILE).await.ok(),
-                earlier_findings: earlier_findings.clone(),
-            };
-            let report = deps.review.review(&input).await?;
-            run.add_cost(report.cost_usd);
-            run.verdicts = report.verdicts.clone();
-            run.notes.markdown(
-                &format!(
-                    "gate C: {} ({})",
-                    if report.approved {
-                        "approve"
-                    } else {
-                        "changes"
-                    },
-                    report.reason
-                ),
-                if report.findings_markdown.trim().is_empty() {
-                    "no blocking findings"
-                } else {
-                    &report.findings_markdown
-                },
-            );
-            if report.approved {
-                run.gates.push(GateRecord {
-                    name: "C: review".to_owned(),
-                    passed: true,
-                    detail: format!("approve: {}", report.reason),
-                });
-                break (report.minors, report.cost_usd);
-            }
-            run.gates.push(GateRecord {
-                name: "C: review".to_owned(),
-                passed: false,
-                detail: format!("changes: {}", report.reason),
-            });
-            if let Err(exceeded) = run.budget.review_asked_for_changes() {
-                return Ok(run.reject(format!("gate C: {exceeded}"), deps.implementer.as_ref()));
-            }
-            task = render::append_review_findings(&task, &report.findings_markdown);
-            earlier_findings.push(report.findings_markdown);
         };
-        let _ = review_cost;
 
         // Publish.
         progress(ProgressEvent::stage(Stage::Pr, "pushing the branch"));
@@ -413,6 +485,7 @@ impl TicketWorker {
         let body = render::pull_body(&PullBody {
             ticket,
             gates: &run.gates,
+            costs: &run.gate_costs,
             eval_summary: run.eval_summary.as_deref(),
             verdicts: &run.verdicts,
             held: &held,
@@ -439,6 +512,7 @@ impl TicketWorker {
                 pr: pull.number,
                 held,
                 cost_usd: run.cost,
+                gate_costs: run.gate_costs,
             });
         }
 
@@ -455,6 +529,7 @@ impl TicketWorker {
                 Ok(Outcome::Merged {
                     pr: pull.number,
                     cost_usd: run.cost,
+                    gate_costs: run.gate_costs,
                 })
             }
             CiStatus::Red { url, .. } => {
@@ -476,6 +551,13 @@ impl TicketWorker {
                 Ok(run.reject(reason, deps.implementer.as_ref()))
             }
         }
+    }
+
+    /// Whether the diff cannot change anvil, so Gate B has nothing to test.
+    fn skips_eval(&self, changed: &[String]) -> bool {
+        self.eval_paths
+            .as_ref()
+            .is_some_and(|paths| !changed.iter().any(|path| paths.is_match(path)))
     }
 
     /// Closes a pull request that will not merge and deletes its branch.
@@ -510,6 +592,8 @@ struct Run {
     eval_summary: Option<String>,
     verdicts: Vec<(String, String)>,
     implementer_runs: u32,
+    review_calls: u32,
+    gate_costs: Vec<GateCost>,
 }
 
 impl Run {
@@ -522,7 +606,27 @@ impl Run {
             eval_summary: None,
             verdicts: Vec::new(),
             implementer_runs: 0,
+            review_calls: 0,
+            gate_costs: Vec::new(),
         }
+    }
+
+    /// Keeps one step's cost, notes it and reports it to the dashboard.
+    fn record_cost(
+        &mut self,
+        progress: &Progress,
+        step: String,
+        cost_usd: Option<f64>,
+        weighted_tokens: Option<u64>,
+    ) {
+        let cost = GateCost {
+            step,
+            cost_usd,
+            weighted_tokens,
+        };
+        self.notes.line(&format!("cost: {}", describe_cost(&cost)));
+        progress(ProgressEvent::GateCost(cost.clone()));
+        self.gate_costs.push(cost);
     }
 
     /// Adds a cost; an unknown cost makes the total unknown.
@@ -547,6 +651,15 @@ impl Run {
             );
         }
         self.notes.line(&format!("**Rejected:** {reason}"));
+        if !self.gate_costs.is_empty() {
+            let list = self
+                .gate_costs
+                .iter()
+                .map(|cost| format!("- {}", describe_cost(cost)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.notes.markdown("cost per step", &list);
+        }
         self.notes.line(&format!(
             "weighted tokens used: {}{}",
             self.budget.tokens_used(),
@@ -558,8 +671,35 @@ impl Run {
             reason,
             notes: self.notes.text().to_owned(),
             cost_usd: self.cost,
+            gate_costs: self.gate_costs,
         }
     }
+}
+
+/// Compiles the `[eval_gate] paths` globs.
+fn compile_eval_paths(paths: &[String]) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for path in paths {
+        let glob = Glob::new(path).map_err(|error| {
+            FactoryError::Config(format!("eval_gate path `{path}` is not a glob: {error}"))
+        })?;
+        builder.add(glob);
+    }
+    builder
+        .build()
+        .map_err(|error| FactoryError::Config(format!("eval_gate paths: {error}")))
+}
+
+/// `step: $0.01, 1000 weighted tokens`, with `cost unknown` and `-` for what was not reported.
+fn describe_cost(cost: &GateCost) -> String {
+    format!(
+        "{}: {}, {} weighted tokens",
+        cost.step,
+        cost.cost_usd
+            .map_or_else(|| "cost unknown".to_owned(), |usd| format!("${usd:.2}")),
+        cost.weighted_tokens
+            .map_or_else(|| "-".to_owned(), |tokens| tokens.to_string())
+    )
 }
 
 /// One word for a gate result.
@@ -624,6 +764,44 @@ Outside the diff:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_repository_eval_gate_globs_match_what_can_change_anvil() {
+        let text = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../factory.toml"),
+        )
+        .expect("factory.toml");
+        let config: FactoryConfig = toml::from_str(&text).expect("factory.toml parses");
+        let gate = config.eval_gate.expect("factory.toml has [eval_gate]");
+        let set = compile_eval_paths(&gate.paths).expect("globs compile");
+        for path in [
+            "crates/anvil-core/src/x.rs",
+            "crates/anvil-cli/tests/cli.rs",
+            "crates/eval/src/lib.rs",
+            "skills/hello/SKILL.md",
+            "eval/tasks/rs-grep/task.toml",
+            "Cargo.lock",
+            "Cargo.toml",
+            "rust-toolchain.toml",
+        ] {
+            assert!(set.is_match(path), "{path} should run gate B");
+        }
+        for path in [
+            "crates/factory-core/src/worker.rs",
+            "README.md",
+            "docs/x.md",
+            "crates/factory-cli/Cargo.toml",
+            "deploy/nuc/README.md",
+        ] {
+            assert!(!set.is_match(path), "{path} should skip gate B");
+        }
+    }
+
+    #[test]
+    fn a_bad_eval_gate_glob_is_a_config_error() {
+        let error = compile_eval_paths(&["crates/[".to_owned()]).expect_err("not a glob");
+        assert!(matches!(error, FactoryError::Config(_)), "{error}");
+    }
 
     #[test]
     fn minors_with_an_anchored_line_go_inline_and_the_rest_into_the_body() {

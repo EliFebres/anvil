@@ -84,6 +84,7 @@ impl ModelReviewer {
     ///
     /// * `provider_name` - The name from `factory.toml`, for attribution.
     /// * `stance` - Which stance this reviewer takes.
+    /// * `blocking` - Whether its findings can send the change back.
     /// * `provider` - The provider entry from the anvil configuration.
     /// * `api_key` - The key for the provider.
     /// * `rules` - The standing rules; used by the style stance.
@@ -100,6 +101,7 @@ impl ModelReviewer {
     pub fn new(
         provider_name: &str,
         stance: Stance,
+        blocking: bool,
         provider: &ProviderConfig,
         api_key: String,
         rules: &[Rule],
@@ -120,6 +122,7 @@ impl ModelReviewer {
                 provider: provider_name.to_owned(),
                 stance,
                 model: provider.model.clone(),
+                blocking,
             },
             wire,
             url,
@@ -212,6 +215,7 @@ impl ModelReviewer {
             reviewers.push(Box::new(Self::new(
                 name,
                 entry.stance,
+                entry.is_blocking(),
                 provider,
                 api_key,
                 rules,
@@ -534,6 +538,7 @@ mod tests {
         ModelReviewer::new(
             "p",
             Stance::Correctness,
+            true,
             &provider(protocol, base_url),
             "sk-test".to_owned(),
             &[],

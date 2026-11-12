@@ -47,12 +47,12 @@
         "ended_at": null
       },
       {
-        "stage": "gate_b",
+        "stage": "gate_c",
         "started_at": null,
         "ended_at": null
       },
       {
-        "stage": "gate_c",
+        "stage": "gate_b",
         "started_at": null,
         "ended_at": null
       },

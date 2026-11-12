@@ -277,6 +277,10 @@ pub enum RecordKind {
     Turn {
         /// The state it ran in, or `chat`.
         state: String,
+        /// The role whose provider served it (`planner`, `coder`, `reviewer`,
+        /// `summarizer`); absent in records written before roles were recorded.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
         /// The provider name from config.
         provider: String,
         /// The model name from config.
@@ -650,6 +654,24 @@ mod tests {
         assert_eq!(digest(b""), 0xcbf2_9ce4_8422_2325);
         assert_eq!(digest(b"a"), 0xaf63_dc4c_8601_ec8c);
         assert_eq!(hex(0xaf63_dc4c_8601_ec8c), "af63dc4c8601ec8c");
+    }
+
+    #[test]
+    fn a_turn_without_a_role_still_parses_and_one_with_a_role_keeps_it() {
+        let old = r#"{"ts":"2026-10-30T10:00:00Z","session":"s","project":"p","event":"turn","state":"build","provider":"fast","model":"m1","tokens":{"input":1,"output":2,"cached":0},"latency_ms":5,"retries":0,"stop_reason":"end_turn"}"#;
+        let record: Record = serde_json::from_str(old).expect("an old line parses");
+        assert!(matches!(record.kind, RecordKind::Turn { role: None, .. }));
+        assert!(
+            !serde_json::to_string(&record)
+                .expect("json")
+                .contains("role")
+        );
+
+        let new = old.replace(r#""state":"build""#, r#""state":"plan","role":"planner""#);
+        let record: Record = serde_json::from_str(&new).expect("a new line parses");
+        assert!(
+            matches!(&record.kind, RecordKind::Turn { role: Some(role), .. } if role == "planner")
+        );
     }
 
     #[test]

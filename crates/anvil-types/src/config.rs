@@ -45,6 +45,12 @@ supports_reasoning = true
 coder = "runpod"
 summarizer = "runpod"
 # reviewer = "runpod"
+# Optional: a model that plans, and takes a build round when the coder is
+# stuck. The coder plans when this is absent.
+# planner = "runpod"
+# Optional: a model for delegated work, the `explore` and `implement`
+# subagents and any agent file with `model: worker`. The coder when absent.
+# worker = "runpod"
 
 # Optional. The shell program behind the `shell` tool: "powershell", "pwsh",
 # "sh", "bash", "zsh" or "cmd". Default: PowerShell on Windows, sh elsewhere.
@@ -80,10 +86,22 @@ summarizer = "runpod"
 # [tickets]
 # remote = "origin"
 
+# Post one short message to a Discord, Slack or ntfy webhook when a session needs
+# you, is blocked, finishes or fails. `webhook_env` names the environment
+# variable that holds the URL.
+# [notify]
+# webhook_env = "ANVIL_WEBHOOK_URL"
+
+# Report the session to herdr (a terminal multiplexer for coding agents) when it
+# runs in a herdr pane.
+# [integrations]
+# herdr = false
+
 # Lines added to the coder's system prompt, one instruction each. Profiles use
 # this to explain their own rules.
 # [prompt]
 # notes = ["Shell commands are a single program with arguments."]
+# delegate_guidance = true   # tell the model when delegating to a subagent pays off
 "#;
 
 /// The provider entries and roles `anvil setup` adds to `~/.anvil/config.toml`.
@@ -134,6 +152,12 @@ price_per_mtoken = { input = 2.0, output = 10.0 }
 coder = "anthropic"
 reviewer = "openai"
 summarizer = "anthropic"
+# Optional: a model that plans, and takes a build round when the coder is
+# stuck. The coder plans when this is absent.
+# planner = "anthropic"
+# Optional: a model for delegated work (the `explore` and `implement`
+# subagents). The coder when absent.
+# worker = "anthropic"
 "#;
 
 /// The optional, commented sections `anvil setup` appends to a new config file.
@@ -336,6 +360,32 @@ pub struct Roles {
     /// Provider that reviews factory pull requests. Only the factory needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
+    /// Provider that plans; the coder when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner: Option<String>,
+    /// Provider that runs delegated subagents; the coder when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
+}
+
+impl Roles {
+    /// The provider that plans.
+    ///
+    /// # Returns
+    ///
+    /// The `planner` provider name, or the `coder` one when none is set.
+    pub fn planner_or_coder(&self) -> &str {
+        self.planner.as_deref().unwrap_or(&self.coder)
+    }
+
+    /// The provider that runs delegated subagents.
+    ///
+    /// # Returns
+    ///
+    /// The `worker` provider name, or the `coder` one when none is set.
+    pub fn worker_or_coder(&self) -> &str {
+        self.worker.as_deref().unwrap_or(&self.coder)
+    }
 }
 
 /// What one agent-loop state may spend before the session ends as incomplete.
@@ -416,6 +466,22 @@ pub struct MemoryConfig {
     pub always_summarize: bool,
 }
 
+/// Where session status messages are posted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionNotifyConfig {
+    /// Environment variable that holds the webhook URL.
+    pub webhook_env: String,
+}
+
+/// Optional reports to other tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct IntegrationsConfig {
+    /// Report the session's state to herdr when running in a herdr pane.
+    pub herdr: bool,
+}
+
 /// Lines above which provider statistics become tickets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
@@ -454,11 +520,23 @@ impl Default for TicketsConfig {
 }
 
 /// Lines a profile adds to the coder's system prompt.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct PromptConfig {
     /// One instruction per entry, shown under a "Profile notes" heading.
     pub notes: Vec<String>,
+    /// Whether the Plan and Build prompts say when delegating to a subagent
+    /// pays off. Only has an effect when the `delegate` tool is available.
+    pub delegate_guidance: bool,
+}
+
+impl Default for PromptConfig {
+    fn default() -> Self {
+        Self {
+            notes: Vec::new(),
+            delegate_guidance: true,
+        }
+    }
 }
 
 /// What a call gets when no permission rule matches it.
@@ -544,6 +622,12 @@ pub struct AnvilConfig {
     /// Normally set by a profile, not by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionRules>,
+    /// Where session status messages are posted; none by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<SessionNotifyConfig>,
+    /// Optional reports to other tools.
+    #[serde(default)]
+    pub integrations: IntegrationsConfig,
 }
 
 impl AnvilConfig {
@@ -552,7 +636,7 @@ impl AnvilConfig {
     /// # Returns
     ///
     /// `Ok(())` when all providers validate and `coder`, `summarizer` and
-    /// (if set) `reviewer` each name a key in `providers`.
+    /// (if set) `reviewer`, `planner` and `worker` each name a key in `providers`.
     ///
     /// # Errors
     ///
@@ -565,6 +649,12 @@ impl AnvilConfig {
         self.check_role("summarizer", &self.roles.summarizer)?;
         if let Some(reviewer) = &self.roles.reviewer {
             self.check_role("reviewer", reviewer)?;
+        }
+        if let Some(planner) = &self.roles.planner {
+            self.check_role("planner", planner)?;
+        }
+        if let Some(worker) = &self.roles.worker {
+            self.check_role("worker", worker)?;
         }
         Ok(())
     }
@@ -1013,6 +1103,37 @@ mod tests {
                 field: "model"
             })
         );
+    }
+
+    #[test]
+    fn the_worker_is_optional_defaults_to_the_coder_and_must_exist() {
+        let mut config = template();
+        assert_eq!(config.roles.worker, None);
+        assert_eq!(config.roles.worker_or_coder(), config.roles.coder);
+        config.roles.worker = Some("runpod".to_owned());
+        config.validate().expect("a declared worker is valid");
+        assert_eq!(config.roles.worker_or_coder(), "runpod");
+        config.roles.worker = Some("nope".to_owned());
+        assert_eq!(
+            config.validate(),
+            Err(ValidationError::UnknownProvider {
+                role: "worker",
+                provider: "nope".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn delegate_guidance_defaults_on_and_can_be_turned_off() {
+        assert!(template().prompt.delegate_guidance);
+        let text = format!(
+            "{CONFIG_TEMPLATE}
+[prompt]
+delegate_guidance = false
+"
+        );
+        let off: AnvilConfig = toml::from_str(&text).expect("parses");
+        assert!(!off.prompt.delegate_guidance);
     }
 
     #[test]

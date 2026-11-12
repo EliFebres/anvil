@@ -292,7 +292,8 @@ pub async fn build_service(loaded: &Loaded, home: FactoryHome) -> anyhow::Result
 ///
 /// # Returns
 ///
-/// The probe; it pings the coder's provider and every reviewer's.
+/// The probe; it pings the coder's provider, the planner's if set, and every
+/// reviewer's.
 pub fn machine_probe(
     loaded: &Loaded,
     home: &FactoryHome,
@@ -300,6 +301,7 @@ pub fn machine_probe(
     repo: &factory_core::Git,
 ) -> MachineProbe {
     let mut ping = vec![loaded.factory.roles.coder.clone()];
+    ping.extend(loaded.factory.roles.planner.clone());
     for reviewer in &loaded.factory.reviewers {
         if !ping.contains(&reviewer.provider) {
             ping.push(reviewer.provider.clone());

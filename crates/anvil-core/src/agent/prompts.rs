@@ -42,6 +42,42 @@ pub fn state_prompt(state: State) -> &'static str {
     }
 }
 
+/// The name of the tool that hands a task to a subagent.
+pub const DELEGATE_TOOL: &str = "delegate";
+
+/// The Plan state's advice on delegating: planning only reads.
+const DELEGATE_PLAN: &str = "`delegate` hands a self-contained task to a subagent that starts with a fresh context and returns only its final message. It pays for itself on a broad search across many files: ask `explore` the question instead of reading the files yourself. It does not pay for a single file read or a quick grep: do those yourself.";
+
+/// The Build state's advice on delegating.
+const DELEGATE_BUILD: &str = "`delegate` hands a self-contained task to a subagent that starts with a fresh context and returns only its final message. It pays for itself on a broad search across many files (`explore`) and on an independent, self-contained step of the plan (`implement`); several `explore` calls in one turn run at the same time. It does not pay for a single file read or a one-line edit: do those yourself.";
+
+/// The section that says when delegating pays off.
+///
+/// # Arguments
+///
+/// * `state` - The state the prompt is for.
+/// * `tools` - The tools on offer in it.
+/// * `enabled` - `[prompt] delegate_guidance`.
+///
+/// # Returns
+///
+/// The section, or `None` outside Plan and Build, when `enabled` is false,
+/// or when the `delegate` tool is not among `tools`.
+pub fn delegate_guidance(state: State, tools: &[ToolSpec], enabled: bool) -> Option<PromptSection> {
+    if !enabled || !tools.iter().any(|tool| tool.name == DELEGATE_TOOL) {
+        return None;
+    }
+    let text = match state {
+        State::Plan => DELEGATE_PLAN,
+        State::Build => DELEGATE_BUILD,
+        _ => return None,
+    };
+    Some(PromptSection {
+        heading: "Delegation".to_owned(),
+        text: text.to_owned(),
+    })
+}
+
 /// An instruction file found on disk, such as a `CLAUDE.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instruction {
@@ -180,6 +216,32 @@ mod tests {
             text: "Run just check before committing.\n".to_owned(),
         }];
         insta::assert_snapshot!(inputs(State::Build, &tools(), &instructions));
+    }
+
+    fn tool_named(name: &str) -> ToolSpec {
+        ToolSpec {
+            name: name.to_owned(),
+            description: "Hands off a task.".to_owned(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn delegate_guidance_snapshots() {
+        let tools = [tool_named("delegate")];
+        for state in [State::Plan, State::Build] {
+            let section = delegate_guidance(state, &tools, true).expect("guidance");
+            insta::assert_snapshot!(format!("delegate_guidance_{state}"), section.render());
+        }
+    }
+
+    #[test]
+    fn delegate_guidance_needs_the_tool_the_switch_and_a_coding_state() {
+        let tools = [tool_named("delegate")];
+        assert!(delegate_guidance(State::Build, &tools, false).is_none());
+        assert!(delegate_guidance(State::Build, &[tool_named("shell")], true).is_none());
+        assert!(delegate_guidance(State::Review, &tools, true).is_none());
+        assert!(delegate_guidance(State::Verify, &tools, true).is_none());
     }
 
     #[test]

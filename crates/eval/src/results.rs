@@ -14,7 +14,11 @@ use crate::error::EvalError;
 pub const RESULTS_DIR: &str = "eval/results";
 
 /// The version of the JSON shape; bump it when a field changes meaning.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// The oldest schema [`RunResult::read`] still accepts: version 1 has no
+/// `roles`, and its `model` is the coder.
+pub const OLDEST_READABLE_SCHEMA: u32 = 1;
 
 /// Token counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +205,15 @@ pub struct Overheads {
     pub memory_skip_reason: Option<String>,
 }
 
+/// The provider and model that served one role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleModel {
+    /// The provider name from config.
+    pub provider: String,
+    /// The model name from config.
+    pub model: String,
+}
+
 /// One attempt at one task.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttemptRecord {
@@ -218,6 +231,11 @@ pub struct AttemptRecord {
     pub provider: Option<String>,
     /// The coder model, from telemetry.
     pub model: Option<String>,
+    /// The provider and model of each role seen in telemetry (`planner`,
+    /// `coder`, `reviewer`, `summarizer`); empty in results written before
+    /// schema 2.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<String, RoleModel>,
     /// Tokens over every provider the run used.
     pub tokens: Usage,
     /// Tool calls the session made; 0 in results written before it was recorded.
@@ -565,6 +583,10 @@ pub struct RunResult {
     pub provider: Option<String>,
     /// The first coder model seen in telemetry.
     pub model: Option<String>,
+    /// The first provider and model seen for each role; empty in results
+    /// written before schema 2, where `model` is the coder.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub roles: BTreeMap<String, RoleModel>,
     /// What ran the attempts: the anvil binary path, or a fake's label.
     pub runner: String,
     /// Attempts per task.
@@ -619,6 +641,23 @@ impl RunResult {
         format!("{} {model}", self.git_sha)
     }
 
+    /// The roles line of `eval compare`: each role with its model.
+    ///
+    /// # Returns
+    ///
+    /// `planner m1, coder m2`, or an empty string when the run used no more
+    /// than the coder, so a coder-only run shows nothing extra.
+    pub fn roles_label(&self) -> String {
+        if self.roles.len() < 2 {
+            return String::new();
+        }
+        self.roles
+            .iter()
+            .map(|(role, served)| format!("{role} {}", served.model))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     /// Writes the result as pretty JSON into `dir`.
     ///
     /// # Arguments
@@ -656,7 +695,8 @@ impl RunResult {
     ///
     /// # Errors
     ///
-    /// When the file cannot be read or parsed, or its schema version differs.
+    /// When the file cannot be read or parsed, or its schema version is not
+    /// one this build reads (1 and 2).
     pub fn read(path: &Path) -> Result<RunResult, EvalError> {
         let text = std::fs::read_to_string(path)
             .map_err(|source| EvalError::io("reading", path, source))?;
@@ -664,7 +704,7 @@ impl RunResult {
             path: path.to_owned(),
             source,
         })?;
-        if result.schema != SCHEMA_VERSION {
+        if !(OLDEST_READABLE_SCHEMA..=SCHEMA_VERSION).contains(&result.schema) {
             return Err(EvalError::Schema {
                 path: path.to_owned(),
                 found: result.schema,
@@ -850,6 +890,7 @@ pub(crate) mod samples {
             session: Some(format!("01ARZ3NDEKTSV4RRFFQ69G5FA{index}")),
             provider: Some("fast".to_owned()),
             model: Some("m1".to_owned()),
+            roles: BTreeMap::new(),
             tokens: Usage {
                 input: 1000,
                 output: 100,
@@ -893,6 +934,7 @@ pub(crate) mod samples {
             git_sha: sha.to_owned(),
             provider: Some("fast".to_owned()),
             model: Some(model.to_owned()),
+            roles: BTreeMap::new(),
             runner: "anvil".to_owned(),
             repeat,
             parallel: 2,
@@ -964,6 +1006,49 @@ mod tests {
         assert!(first.ends_with("2026-10-30-fe92bc2-claude-opus-5-5.json"));
         assert!(second.ends_with("2026-10-30-fe92bc2-claude-opus-5-5-2.json"));
         assert_eq!(RunResult::read(&first).expect("reads"), result);
+    }
+
+    #[test]
+    fn schema_one_files_without_roles_still_read() {
+        let mut result = run("abc", "m", vec![task("a", &[true])]);
+        result.schema = 1;
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = result.write(dir.path()).expect("writes");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(!text.contains("\"roles\""), "an empty map is not written");
+        let read = RunResult::read(&path).expect("schema 1 reads");
+        assert_eq!(read.schema, 1);
+        assert!(read.roles.is_empty());
+        assert_eq!(read.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn every_committed_result_still_reads() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../eval/results");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("eval/results exists") {
+            let path = entry.expect("entry").path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                RunResult::read(&path)
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "the repository has committed results");
+    }
+
+    #[test]
+    fn roles_label_shows_only_beyond_the_coder() {
+        let mut result = run("abc", "m", vec![task("a", &[true])]);
+        let served = |model: &str| RoleModel {
+            provider: "p".to_owned(),
+            model: model.to_owned(),
+        };
+        assert_eq!(result.roles_label(), "");
+        result.roles.insert("coder".to_owned(), served("cheap"));
+        assert_eq!(result.roles_label(), "");
+        result.roles.insert("planner".to_owned(), served("dear"));
+        assert_eq!(result.roles_label(), "coder cheap, planner dear");
     }
 
     #[test]

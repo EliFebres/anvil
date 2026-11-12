@@ -16,11 +16,13 @@ pub mod factory_config;
 pub mod github;
 pub mod schema;
 pub mod skill;
+pub mod status;
 pub mod ticket;
 
 pub use config::{
-    AnvilConfig, LimitsConfig, LoadedConfig, PermissionRules, Price, PromptConfig, Protocol,
-    ProviderConfig, Roles, StateBudget, TelemetryConfig, TicketsConfig, ToolsConfig, Unmatched,
+    AnvilConfig, IntegrationsConfig, LimitsConfig, LoadedConfig, PermissionRules, Price,
+    PromptConfig, Protocol, ProviderConfig, Roles, SessionNotifyConfig, StateBudget,
+    TelemetryConfig, TicketsConfig, ToolsConfig, Unmatched,
 };
 pub use error::{ConfigError, DotenvError, ValidationError};
 pub use factory_config::{
@@ -28,4 +30,5 @@ pub use factory_config::{
     NotifyConfig, ProtectedConfig, Reviewer, ServiceConfig, Stance, WorkerConfig,
 };
 pub use skill::SkillManifest;
+pub use status::{LoopState, SessionSpend, SessionState, SessionStatus};
 pub use ticket::{Priority, TelemetryRef, Ticket, TicketKind, TicketOrigin, TicketStatus};

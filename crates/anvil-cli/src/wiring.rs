@@ -14,13 +14,14 @@ use anvil_core::agent::{
 use anvil_core::context;
 use anvil_core::provider::{self, Provider, SharedBudget, TokenBudget};
 use anvil_core::tools::{
-    PermissionObserver, PermissionPrompt, Permissions, PromptAnswer, SessionApprovals, Shell,
-    StaticPrompt, ToolContext, ToolRegistry,
+    PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
+    SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry,
 };
 use anvil_types::{AnvilConfig, PromptConfig};
 use anyhow::Context;
 
 use crate::memory::{self, RuleChecks};
+use crate::templates;
 use crate::terminal::TerminalPrompt;
 
 /// The home directory: `ANVIL_HOME` when set, otherwise the OS home.
@@ -71,6 +72,18 @@ pub struct Wiring {
     /// The session's permission observer, shared by every clone so
     /// sub-agent registries built later report to it too.
     observer: Arc<Mutex<Option<Arc<dyn PermissionObserver>>>>,
+    /// The prompt the main registry was built with, shared by every clone so
+    /// a sub-agent that inherits permissions asks the same person.
+    prompt: Arc<Mutex<Option<Arc<dyn PermissionPrompt>>>>,
+}
+
+/// The main session's prompt, lent to a sub-agent's registry.
+struct ParentPrompt(Arc<dyn PermissionPrompt>);
+
+impl PermissionPrompt for ParentPrompt {
+    fn ask(&self, request: &PermissionRequest) -> PromptAnswer {
+        self.0.ask(request)
+    }
 }
 
 /// The session a run or chat belongs to, for hook payloads.
@@ -146,6 +159,7 @@ impl Wiring {
             session: None,
             approvals,
             observer: Arc::new(Mutex::new(None)),
+            prompt: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -253,7 +267,7 @@ impl Wiring {
 
     /// Resolves a subagent's `model` key to a provider name.
     ///
-    /// A role name (`coder`, `reviewer`, `summarizer`) maps through
+    /// A role name (`coder`, `planner`, `reviewer`, `summarizer`, `worker`) maps through
     /// `[roles]`; a provider name is used as is; anything else falls back to
     /// the coder.
     ///
@@ -271,7 +285,9 @@ impl Wiring {
         };
         let by_role = match model {
             "coder" => Some(roles.coder.clone()),
+            "planner" => Some(roles.planner_or_coder().to_owned()),
             "summarizer" => Some(roles.summarizer.clone()),
+            "worker" => Some(roles.worker_or_coder().to_owned()),
             "reviewer" => Some(
                 roles
                     .reviewer
@@ -340,7 +356,8 @@ impl Wiring {
     ///
     /// # Returns
     ///
-    /// The providers; the reviewer falls back to the coder.
+    /// The providers; the reviewer falls back to the coder, and the planner is
+    /// `None` unless it names a different provider than the coder.
     ///
     /// # Errors
     ///
@@ -357,8 +374,13 @@ impl Wiring {
         } else {
             self.provider(&roles.summarizer)?
         };
+        let planner = match &roles.planner {
+            Some(name) if name != &roles.coder => Some(self.provider(name)?),
+            _ => None,
+        };
         Ok(LoopProviders {
             coder,
+            planner,
             reviewer,
             summarizer,
         })
@@ -392,7 +414,11 @@ impl Wiring {
     ///
     /// When `.anvil/permissions.toml` exists but cannot be read.
     pub fn registry(&self, prompt: Box<dyn PermissionPrompt>) -> anyhow::Result<ToolRegistry> {
-        let mut registry = self.registry_without_delegate(prompt)?;
+        let prompt: Arc<dyn PermissionPrompt> = Arc::from(prompt);
+        if let Ok(mut slot) = self.prompt.lock() {
+            *slot = Some(Arc::clone(&prompt));
+        }
+        let mut registry = self.registry_without_delegate(Box::new(ParentPrompt(prompt)))?;
         if !self.agents.is_empty() {
             registry.register(Box::new(DelegateTool::new(
                 Arc::clone(&self.agents),
@@ -487,6 +513,9 @@ impl Wiring {
     ) -> anyhow::Result<LoopConfig> {
         let mut sections = memory::prompt_sections(self.home.as_deref(), &self.cwd)?;
         sections.coder.extend(profile_section(&self.config.prompt));
+        sections
+            .coder
+            .extend(templates::plan_section(self.home.as_deref(), &self.cwd));
         Ok(LoopConfig {
             task,
             cwd: self.cwd.clone(),
@@ -503,6 +532,7 @@ impl Wiring {
             extra_instructions: self.extra_instructions(&registry.names()),
             sections: sections.coder,
             review_sections: sections.review,
+            delegate_guidance: self.config.prompt.delegate_guidance,
         })
     }
 
@@ -551,8 +581,13 @@ impl SubagentEnv for Wiring {
         Wiring::provider(self, &name).map_err(|error| format!("{error:#}"))
     }
 
-    fn registry(&self) -> Result<ToolRegistry, String> {
-        self.registry_without_delegate(Box::new(StaticPrompt(PromptAnswer::No)))
+    fn registry(&self, ask_user: bool) -> Result<ToolRegistry, String> {
+        let parent = self.prompt.lock().ok().and_then(|slot| slot.clone());
+        let prompt: Box<dyn PermissionPrompt> = match parent {
+            Some(parent) if ask_user => Box::new(ParentPrompt(parent)),
+            _ => Box::new(StaticPrompt(PromptAnswer::No)),
+        };
+        self.registry_without_delegate(prompt)
             .map_err(|error| format!("{error:#}"))
     }
 
@@ -609,6 +644,7 @@ mod tests {
                 "one program per command".to_owned(),
                 " no pipes ".to_owned(),
             ],
+            ..PromptConfig::default()
         };
         let section = profile_section(&prompt).expect("a section");
         assert_eq!(section.heading, "Profile notes");
@@ -670,6 +706,115 @@ mod tests {
     }
 
     #[test]
+    fn the_planner_is_a_role_name_for_model_keys() {
+        let mut config = config("");
+        let coder = config.roles.coder.clone();
+        let wiring = Wiring::new(config.clone()).expect("wiring");
+        assert_eq!(wiring.resolve_model(Some("planner")), (coder.clone(), None));
+
+        let big = config.providers[&coder].clone();
+        config.providers.insert("big".to_owned(), big);
+        config.roles.planner = Some("big".to_owned());
+        let wiring = Wiring::new(config).expect("wiring");
+        assert_eq!(
+            wiring.resolve_model(Some("planner")),
+            ("big".to_owned(), None)
+        );
+        assert_eq!(wiring.resolve_model(Some("coder")), (coder, None));
+    }
+
+    #[test]
+    fn the_worker_is_a_role_name_for_model_keys_and_falls_back_to_the_coder() {
+        let mut config = config("");
+        let coder = config.roles.coder.clone();
+        let wiring = Wiring::new(config.clone()).expect("wiring");
+        assert_eq!(wiring.resolve_model(Some("worker")), (coder.clone(), None));
+
+        let cheap = config.providers[&coder].clone();
+        config.providers.insert("cheap".to_owned(), cheap);
+        config.roles.worker = Some("cheap".to_owned());
+        let wiring = Wiring::new(config).expect("wiring");
+        assert_eq!(
+            wiring.resolve_model(Some("worker")),
+            ("cheap".to_owned(), None)
+        );
+        assert_eq!(wiring.resolve_model(Some("coder")), (coder, None));
+    }
+
+    /// A config whose coder and worker are scripted fake providers that
+    /// each replay `worker_turns` list_dir calls and then answer.
+    fn scripted_config(dir: &Path, session_tokens: u64, worker_turns: usize) -> AnvilConfig {
+        let call = r#"{"name": "list_dir", "arguments": {}}"#;
+        let turns: Vec<String> = (0..worker_turns)
+            .map(|_| format!(r#"{{"tool_calls": [{call}]}}"#))
+            .chain([r#"{"text": "all done"}"#.to_owned()])
+            .collect();
+        let script = dir.join("script.json");
+        std::fs::write(&script, format!(r#"{{"turns": [{}]}}"#, turns.join(","))).expect("script");
+        let provider = |script: &Path| -> anvil_types::ProviderConfig {
+            toml::from_str(&format!(
+                "protocol = \"fake\"\nmodel = \"fake\"\ncontext_window = 100000\n\
+                 supports_tools = true\nsupports_reasoning = false\nscript = '{}'\n",
+                script.display()
+            ))
+            .expect("provider parses")
+        };
+        let mut config = config("");
+        config.providers.clear();
+        config
+            .providers
+            .insert("coder".to_owned(), provider(&script));
+        config
+            .providers
+            .insert("worker".to_owned(), provider(&script));
+        config.roles.coder = "coder".to_owned();
+        config.roles.summarizer = "coder".to_owned();
+        config.roles.worker = Some("worker".to_owned());
+        config.limits.session_tokens = session_tokens;
+        config
+    }
+
+    #[tokio::test]
+    async fn a_delegated_run_draws_on_the_session_budget_and_stops_when_it_is_spent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Every fake completion costs 15 weighted tokens.
+        let wiring = Wiring::new(scripted_config(dir.path(), 20, 3)).expect("wiring");
+        let coder = wiring.provider("coder").expect("coder provider");
+        let request = anvil_core::provider::CompletionRequest {
+            system: String::new(),
+            messages: vec![anvil_core::provider::Message::user("hi")],
+            tools: Vec::new(),
+            max_output_tokens: None,
+        };
+        anvil_core::agent::turn::complete_turn(
+            coder.as_ref(),
+            request,
+            &anvil_core::agent::EventSink::discard(),
+        )
+        .await
+        .expect("the coder's turn is within budget");
+        assert_eq!(wiring.budget.lock().expect("lock").used(), 15);
+
+        let explore = wiring.agents.get("explore").expect("built-in explore");
+        let run = anvil_compat::delegate::run_subagent(explore, "look around", &wiring).await;
+        let reason = run.result.expect_err("the budget ends the run");
+        assert!(reason.contains("budget"), "{reason}");
+        assert_eq!(run.turns.len(), 1, "one worker turn fit in the budget");
+        assert_eq!(wiring.budget.lock().expect("lock").used(), 30);
+    }
+
+    #[tokio::test]
+    async fn a_delegated_run_within_budget_reports_its_turns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wiring = Wiring::new(scripted_config(dir.path(), 10_000, 1)).expect("wiring");
+        let explore = wiring.agents.get("explore").expect("built-in explore");
+        let run = anvil_compat::delegate::run_subagent(explore, "look around", &wiring).await;
+        assert_eq!(run.result.as_deref(), Ok("all done"));
+        assert_eq!(run.turns.len(), 2);
+        assert_eq!(wiring.budget.lock().expect("lock").used(), 30);
+    }
+
+    #[test]
     fn invalid_allow_tool_names_are_errors() {
         let mut wiring = Wiring::new(config("")).expect("wiring");
         let error = wiring
@@ -690,7 +835,7 @@ mod tests {
             .expect("lock")
             .approve("edit_file", dir.path())
             .expect("approve");
-        let subagent = SubagentEnv::registry(&wiring.clone()).expect("registry");
+        let subagent = SubagentEnv::registry(&wiring.clone(), false).expect("registry");
         assert_eq!(completed_edits(&subagent, dir.path()).await, 5);
     }
 }

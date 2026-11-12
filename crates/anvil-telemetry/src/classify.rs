@@ -400,6 +400,7 @@ mod tests {
             session,
             RecordKind::Turn {
                 state: "build".to_owned(),
+                role: None,
                 provider: provider.to_owned(),
                 model: "m".to_owned(),
                 tokens: Tokens::default(),

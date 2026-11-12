@@ -13,7 +13,7 @@ use anvil_types::ProviderConfig;
 use serde::Deserialize;
 
 use crate::error::EvalError;
-use crate::results::{CheckSource, Overheads, StateTurns, Usage};
+use crate::results::{CheckSource, Overheads, RoleModel, StateTurns, Usage};
 
 /// The file anvil writes signals to; it holds no usage.
 const SIGNALS_FILE: &str = "signals.jsonl";
@@ -38,6 +38,9 @@ pub struct SessionUsage {
     pub coder_provider: Option<String>,
     /// The model of the first turn.
     pub coder_model: Option<String>,
+    /// The first provider and model seen for each role; empty for telemetry
+    /// written before roles were recorded.
+    pub roles: BTreeMap<String, RoleModel>,
     /// How many `turn` records were counted.
     pub turns: u32,
     /// How many `tool_call` records were counted.
@@ -134,6 +137,9 @@ struct UsageRecord {
     tokens: Option<Usage>,
     #[serde(default)]
     state: Option<String>,
+    /// `turn`: the role that served it; absent in older telemetry.
+    #[serde(default)]
+    role: Option<String>,
     /// `check`: `detected`, `plan` or `standing`.
     #[serde(default)]
     source: Option<String>,
@@ -228,10 +234,23 @@ impl SessionUsage {
                 calls: 0,
                 prompt_tokens: tokens.prompt(),
             });
-            if self.coder_provider.is_none() {
+            // A planner's turns come first; the coder is the first turn
+            // that is not a planner, reviewer or summarizer turn.
+            let is_coder = record.role.as_deref().is_none_or(|role| role == "coder");
+            if is_coder && self.coder_provider.is_none() {
                 self.coder_provider = Some(provider.clone());
                 self.coder_model = Some(model.clone());
             }
+        }
+        let role = match (record.event.as_str(), record.role) {
+            ("compacted", _) => Some("summarizer".to_owned()),
+            (_, role) => role,
+        };
+        if let Some(role) = role {
+            self.roles.entry(role).or_insert_with(|| RoleModel {
+                provider: provider.clone(),
+                model: model.clone(),
+            });
         }
         self.total.add(tokens);
         let entry = self.by_provider.entry(provider).or_default();
@@ -305,6 +324,54 @@ mod tests {
         format!(
             "{{\"ts\":\"2026-10-30T10:00:00Z\",\"session\":\"{session}\",\"project\":\"p\",\"event\":\"{event}\",\"state\":\"build\",\"provider\":\"{provider}\",\"model\":\"{model}\",\"tokens\":{tokens},\"latency_ms\":5,\"retries\":0,\"stop_reason\":\"end_turn\"}}"
         )
+    }
+
+    #[test]
+    fn the_coder_is_the_first_coder_turn_and_every_role_is_recorded() {
+        let turn = |role: &str, provider: &str, model: &str| {
+            line(
+                "turn",
+                "s1",
+                provider,
+                model,
+                r#"{"input":1,"output":1,"cached":0}"#,
+            )
+            .replace(
+                r#""state":"build""#,
+                &format!(r#""state":"build","role":"{role}""#),
+            )
+        };
+        let dir = tempfile::tempdir().expect("tmp");
+        let lines = [
+            turn("planner", "dear", "big"),
+            turn("coder", "cheap", "small"),
+            turn("reviewer", "dear", "big"),
+            line(
+                "compacted",
+                "s1",
+                "summ",
+                "tiny",
+                r#"{"input":1,"output":1,"cached":0}"#,
+            ),
+        ];
+        std::fs::write(dir.path().join("2026-10-30.jsonl"), lines.join("\n")).expect("write");
+        let usage = read_session_usage(dir.path(), Some("s1")).expect("reads");
+        assert_eq!(usage.coder_provider.as_deref(), Some("cheap"));
+        assert_eq!(usage.coder_model.as_deref(), Some("small"));
+        let models: Vec<(&str, &str)> = usage
+            .roles
+            .iter()
+            .map(|(role, served)| (role.as_str(), served.model.as_str()))
+            .collect();
+        assert_eq!(
+            models,
+            [
+                ("coder", "small"),
+                ("planner", "big"),
+                ("reviewer", "big"),
+                ("summarizer", "tiny")
+            ]
+        );
     }
 
     fn provider(model: &str, price: Option<Price>) -> ProviderConfig {

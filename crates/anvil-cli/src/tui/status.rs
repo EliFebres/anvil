@@ -2,7 +2,9 @@
 
 use std::time::Instant;
 
-use anvil_core::agent::State;
+use std::collections::BTreeMap;
+
+use anvil_core::agent::{Role, State};
 use anvil_core::provider::Usage;
 use anvil_types::Price;
 use ratatui::text::{Line, Span};
@@ -28,7 +30,25 @@ pub struct StatusBar {
     last_prompt: u64,
     context_window: u32,
     price: Option<Price>,
+    role_prices: BTreeMap<Role, Option<Price>>,
+    /// Tokens per role, for pricing each with its own provider's price.
+    by_role: BTreeMap<Role, Tokens>,
     started: Instant,
+}
+
+/// Tokens a role has used.
+#[derive(Debug, Clone, Copy, Default)]
+struct Tokens {
+    input: u64,
+    output: u64,
+    cached: u64,
+}
+
+impl Tokens {
+    /// The cost of these tokens at `price`.
+    fn cost(self, price: Price) -> f64 {
+        price.cost(self.input, self.output, self.cached)
+    }
 }
 
 impl StatusBar {
@@ -53,6 +73,8 @@ impl StatusBar {
             last_prompt: 0,
             context_window: info.context_window,
             price: info.price,
+            role_prices: info.role_prices.clone(),
+            by_role: BTreeMap::new(),
             started,
         }
     }
@@ -93,12 +115,17 @@ impl StatusBar {
         self.permission_mode
     }
 
-    /// Adds one completion's usage.
+    /// Adds one completion's usage, to the role whose provider served it.
     ///
     /// # Arguments
     ///
+    /// * `role` - The role.
     /// * `usage` - The tokens.
-    pub fn record(&mut self, usage: Usage) {
+    pub fn record_for(&mut self, role: Role, usage: Usage) {
+        let tokens = self.by_role.entry(role).or_default();
+        tokens.input = tokens.input.saturating_add(usage.input);
+        tokens.output = tokens.output.saturating_add(usage.output);
+        tokens.cached = tokens.cached.saturating_add(usage.cached);
         self.input = self.input.saturating_add(usage.input);
         self.output = self.output.saturating_add(usage.output);
         self.cached = self.cached.saturating_add(usage.cached);
@@ -111,9 +138,49 @@ impl StatusBar {
     ///
     /// Dollars.
     pub fn cost(&self) -> Option<f64> {
-        self.price
-            .as_ref()
-            .map(|price| price.cost(self.input, self.output, self.cached))
+        if self.role_prices.is_empty() {
+            return self
+                .price
+                .map(|price| price.cost(self.input, self.output, self.cached));
+        }
+        self.by_role.keys().try_fold(0.0, |sum, role| {
+            self.role_cost(*role).map(|cost| sum + cost)
+        })
+    }
+
+    /// The estimated cost of one role's turns, at the price of the provider
+    /// that served them.
+    ///
+    /// # Arguments
+    ///
+    /// * `role` - The role.
+    ///
+    /// # Returns
+    ///
+    /// Dollars, or `None` when the role has no price.
+    pub fn role_cost(&self, role: Role) -> Option<f64> {
+        let tokens = self.by_role.get(&role).copied().unwrap_or_default();
+        let price = if self.role_prices.is_empty() {
+            self.price
+        } else {
+            self.role_prices.get(&role).copied().flatten()
+        };
+        price.map(|price| tokens.cost(price))
+    }
+
+    /// The cost as the status line shows it: the total, and with a planner
+    /// configured the part each role that spent anything accounts for.
+    fn cost_label(&self) -> Option<String> {
+        let total = self.cost()?;
+        if self.role_prices.is_empty() || self.by_role.len() < 2 {
+            return Some(format!("${total:.2}"));
+        }
+        let parts: Vec<String> = self
+            .by_role
+            .keys()
+            .filter_map(|role| Some(format!("{role} ${:.2}", self.role_cost(*role)?)))
+            .collect();
+        Some(format!("${total:.2} ({})", parts.join(", ")))
     }
 
     /// How much of the context window the latest prompt used.
@@ -158,8 +225,8 @@ impl StatusBar {
             format!("ctx {}%", self.context_pct()),
             format!("in {} · out {}", short(self.input), short(self.output)),
         ];
-        if let Some(cost) = self.cost() {
-            parts.push(format!("${cost:.2}"));
+        if let Some(cost) = self.cost_label() {
+            parts.push(cost);
         }
         parts.push(elapsed(
             now.saturating_duration_since(self.started).as_secs(),
@@ -195,6 +262,7 @@ mod tests {
                 output: 15.0,
                 cached: Some(0.3),
             }),
+            role_prices: BTreeMap::new(),
             permission_mode: PermissionMode::Ask,
             initial_state: State::Build,
             slash_commands: Vec::new(),
@@ -220,11 +288,14 @@ mod tests {
     fn status_bar_layout() {
         let started = Instant::now();
         let mut bar = StatusBar::new(&info(), started);
-        bar.record(Usage {
-            input: 41_200,
-            output: 3_800,
-            cached: 1_000,
-        });
+        bar.record_for(
+            Role::Coder,
+            Usage {
+                input: 41_200,
+                output: 3_800,
+                cached: 1_000,
+            },
+        );
         let theme = Theme::truecolor();
         let line = bar.line(120, started + Duration::from_secs(137), &theme);
         let text = text_of(&line);
@@ -243,6 +314,60 @@ mod tests {
             .find(|span| span.content.starts_with("mode:"))
             .expect("mode span");
         assert_eq!(mode.style.fg, Some(theme.accent2));
+    }
+
+    #[test]
+    fn each_role_is_priced_by_the_provider_that_served_it() {
+        let cheap = Price {
+            input: 1.0,
+            output: 5.0,
+            cached: None,
+        };
+        let dear = Price {
+            input: 15.0,
+            output: 75.0,
+            cached: None,
+        };
+        let mut session = info();
+        session.role_prices = BTreeMap::from([
+            (Role::Planner, Some(dear)),
+            (Role::Coder, Some(cheap)),
+            (Role::Reviewer, Some(dear)),
+        ]);
+        let started = Instant::now();
+        let mut bar = StatusBar::new(&session, started);
+        let usage = Usage {
+            input: 1_000_000,
+            output: 100_000,
+            cached: 0,
+        };
+        bar.record_for(Role::Planner, usage);
+        bar.record_for(Role::Coder, usage);
+        assert_eq!(bar.role_cost(Role::Planner), Some(22.5));
+        assert_eq!(bar.role_cost(Role::Coder), Some(1.5));
+        assert_eq!(bar.cost(), Some(24.0));
+        let text = text_of(&bar.line(160, started, &Theme::mono()));
+        assert!(
+            text.contains("$24.00 (planner $22.50, coder $1.50)"),
+            "{text:?}"
+        );
+
+        bar.record_for(Role::Summarizer, usage);
+        assert_eq!(bar.cost(), None, "an unpriced role makes the total unknown");
+    }
+
+    #[test]
+    fn without_role_prices_everything_is_priced_as_the_coder() {
+        let started = Instant::now();
+        let mut bar = StatusBar::new(&info(), started);
+        let usage = Usage {
+            input: 1_000_000,
+            output: 0,
+            cached: 0,
+        };
+        bar.record_for(Role::Reviewer, usage);
+        assert_eq!(bar.cost(), Some(3.0));
+        assert!(!text_of(&bar.line(160, started, &Theme::mono())).contains("reviewer"));
     }
 
     #[test]

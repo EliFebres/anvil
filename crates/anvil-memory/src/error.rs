@@ -76,6 +76,45 @@ pub enum MemoryError {
         detail: String,
     },
 
+    /// A template name is empty or holds characters other than a-z, 0-9, `-`, `_`.
+    #[error("template name `{name}` must use only a-z, 0-9, `-` and `_`")]
+    InvalidTemplateName {
+        /// The name as written.
+        name: String,
+    },
+
+    /// A `template.toml` is unusable.
+    #[error("template `{name}`: {detail}")]
+    InvalidTemplate {
+        /// The template's directory name.
+        name: String,
+        /// What is wrong.
+        detail: String,
+    },
+
+    /// No usable template has this name.
+    #[error("no template named `{name}`; available: {available}")]
+    UnknownTemplate {
+        /// The name asked for.
+        name: String,
+        /// The usable names, comma-separated, or `none`.
+        available: String,
+    },
+
+    /// A template of this name is already saved.
+    #[error("template `{name}` already exists; pass --force to replace it")]
+    TemplateExists {
+        /// The name.
+        name: String,
+    },
+
+    /// A template would be copied into a directory that holds files.
+    #[error("{} is not empty; a project is only created in an empty directory", path.display())]
+    DestinationNotEmpty {
+        /// The directory.
+        path: PathBuf,
+    },
+
     /// A rule's command check is empty.
     #[error("rule `{id}` has an empty command check")]
     BadCommand {

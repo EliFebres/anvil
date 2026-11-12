@@ -93,6 +93,12 @@ pub enum SessionRecord {
         /// Where the summary was written.
         summary_path: PathBuf,
     },
+    /// A new conversation replaced the old one: the coder's build
+    /// conversation, started from the task and the approved plan.
+    Rebased {
+        /// The whole conversation now.
+        messages: Vec<Message>,
+    },
     /// A state was entered.
     State {
         /// The state.
@@ -277,7 +283,9 @@ pub fn load_session(project_root: &Path, id: &str) -> Result<SessionSnapshot, Se
             SessionRecord::Meta(_) => {}
             SessionRecord::Baseline { tree } => snapshot.baseline = Some(tree),
             SessionRecord::Message { message } => snapshot.messages.push(message),
-            SessionRecord::Compacted { messages, .. } => snapshot.messages = messages,
+            SessionRecord::Compacted { messages, .. } | SessionRecord::Rebased { messages } => {
+                snapshot.messages = messages;
+            }
             SessionRecord::State { state, .. } => snapshot.last_state = Some(state),
             SessionRecord::Finished { status } => snapshot.status = Some(status),
         }
