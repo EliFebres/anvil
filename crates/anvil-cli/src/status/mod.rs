@@ -77,23 +77,13 @@ impl Setup {
     pub fn from_wiring(wiring: &Wiring, session_id: &str, session_dir: &Path, task: &str) -> Self {
         let env = |name: &str| std::env::var(name).ok();
         let config = &wiring.config;
-        let price = |provider: &str| {
-            config
-                .providers
-                .get(provider)
-                .and_then(|provider| provider.price_per_mtoken)
-        };
-        let coder = &config.roles.coder;
         Self {
             project: wiring.cwd.clone(),
             home: wiring.home.clone(),
             session_id: session_id.to_owned(),
             session_dir: session_dir.to_path_buf(),
             task: task.to_owned(),
-            prices: Prices {
-                coder: price(coder),
-                reviewer: price(config.roles.reviewer.as_deref().unwrap_or(coder)),
-            },
+            prices: crate::frontend::role_price_map(config),
             webhook: webhook_url(
                 config
                     .notify

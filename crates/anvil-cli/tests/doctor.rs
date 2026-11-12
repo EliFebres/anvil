@@ -48,6 +48,61 @@ fn write(path: &Path, text: &str) {
 }
 
 #[tokio::test]
+async fn doctor_pings_the_planner_and_lists_it_in_the_roles() {
+    let good = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(GOOD_STREAM, "text/event-stream"))
+        .mount(&good)
+        .await;
+    let planner = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(GOOD_STREAM, "text/event-stream"))
+        .expect(1)
+        .mount(&planner)
+        .await;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir");
+    // `bad` is the planner here: the mock behind it answers.
+    write(
+        &home.join(".anvil").join("config.toml"),
+        &config(&good.uri(), &planner.uri()).replace(
+            "summarizer = \"good\"",
+            "summarizer = \"good\"
+planner = \"bad\"",
+        ),
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(&project)
+        .env("ANVIL_HOME", &home)
+        .env("ANVIL_LOG", "off")
+        .env("ANVIL_TEST_GOOD_KEY", "good-key")
+        .env("ANVIL_TEST_BAD_KEY", "bad-key")
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("FACTORY_GITHUB_TOKEN")
+        .arg("doctor")
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("provider:bad"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no row for the planner's provider:
+{stdout}"
+            )
+        });
+    assert!(row.starts_with("PASS"), "{row}");
+    assert!(stdout.contains("planner=bad"), "{stdout}");
+}
+
+#[tokio::test]
 async fn doctor_reports_the_failing_provider_in_its_row_with_a_fix() {
     let good = MockServer::start().await;
     Mock::given(method("POST"))

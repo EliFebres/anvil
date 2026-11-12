@@ -2,7 +2,9 @@
 //! observes (loop events, prompts waiting and answered, how the run ended)
 //! to a [`Snapshot`]. No files, no terminal, no clock.
 
-use anvil_core::agent::{IncompleteReason, LoopEvent, State, Status};
+use std::collections::BTreeMap;
+
+use anvil_core::agent::{IncompleteReason, LoopEvent, Role, State, Status};
 use anvil_types::{LoopState, Price, SessionSpend, SessionState};
 
 /// Longest `detail` kept, in characters.
@@ -21,15 +23,10 @@ pub struct Snapshot {
     pub spend: SessionSpend,
 }
 
-/// Prices used to estimate cost; a turn in the review state is charged at
-/// the reviewer's price, every other turn at the coder's.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Prices {
-    /// The coder's price, when configured.
-    pub coder: Option<Price>,
-    /// The reviewer's price, when configured.
-    pub reviewer: Option<Price>,
-}
+/// Prices used to estimate cost: each turn is charged at the price of the
+/// provider behind the role that served it, and a compaction at the
+/// summarizer's. A role missing from the map has no price.
+pub type Prices = BTreeMap<Role, Option<Price>>;
 
 /// Follows one session from its first event to its end.
 #[derive(Debug)]
@@ -92,18 +89,16 @@ impl Tracker {
                 self.loop_state = loop_state(*state).or(self.loop_state);
                 self.set_working(format!("{state} step"));
             }
-            LoopEvent::TurnFinished { state, usage, .. } => {
+            LoopEvent::TurnFinished { role, usage, .. } => {
                 if let Some(usage) = usage {
-                    let price = match state {
-                        State::Review => self.prices.reviewer,
-                        _ => self.prices.coder,
-                    };
+                    let price = self.price(*role);
                     self.add_spend(usage.input, usage.output, usage.cached, price);
                 }
             }
             LoopEvent::Compacted { usage, .. } => {
                 if let Some(usage) = usage {
-                    self.add_spend(usage.input, usage.output, usage.cached, self.prices.coder);
+                    let price = self.price(Role::Summarizer);
+                    self.add_spend(usage.input, usage.output, usage.cached, price);
                 }
             }
             LoopEvent::ToolStarted { call } => self.set_working(format!("running {}", call.name)),
@@ -187,6 +182,11 @@ impl Tracker {
         if !self.has_ended() {
             self.resting = (SessionState::Working, one_line(&detail));
         }
+    }
+
+    /// The price of the provider behind `role`, when it has one.
+    fn price(&self, role: Role) -> Option<Price> {
+        self.prices.get(&role).copied().flatten()
     }
 
     fn add_spend(&mut self, input: u64, output: u64, cached: u64, price: Option<Price>) {
@@ -388,19 +388,21 @@ mod tests {
     }
 
     #[test]
-    fn turns_add_tokens_and_cost_at_the_state_price() {
+    fn turns_add_tokens_and_cost_at_the_price_of_the_role_that_served_them() {
         let price = |input| Price {
             input,
             output: 0.0,
             cached: None,
         };
-        let mut tracker = Tracker::new(Prices {
-            coder: Some(price(1.0)),
-            reviewer: Some(price(10.0)),
-        });
-        let turn = |state| LoopEvent::TurnFinished {
+        let mut tracker = Tracker::new(Prices::from([
+            (Role::Planner, Some(price(100.0))),
+            (Role::Coder, Some(price(1.0))),
+            (Role::Reviewer, Some(price(10.0))),
+            (Role::Summarizer, Some(price(1000.0))),
+        ]));
+        let turn = |state, role| LoopEvent::TurnFinished {
             state,
-            role: anvil_core::agent::Role::Coder,
+            role,
             stop_reason: StopReason::EndTurn,
             usage: Some(Usage {
                 input: 1_000_000,
@@ -410,12 +412,26 @@ mod tests {
             latency_ms: 1,
             retries: 0,
         };
-        tracker.observe(&turn(State::Build));
-        tracker.observe(&turn(State::Review));
+        tracker.observe(&turn(State::Build, Role::Coder));
+        tracker.observe(&turn(State::Review, Role::Reviewer));
         let spend = tracker.snapshot().spend;
         assert_eq!(spend.input_tokens, 2_000_000);
         assert_eq!(spend.output_tokens, 10);
-        assert_eq!(spend.cost_usd, Some(11.0));
+        assert_eq!(spend.cost_usd, Some(11.0), "coder and reviewer prices");
+
+        tracker.observe(&turn(State::Plan, Role::Planner));
+        tracker.observe(&turn(State::Build, Role::Planner));
+        assert_eq!(tracker.snapshot().spend.cost_usd, Some(211.0));
+        tracker.observe(&LoopEvent::Compacted {
+            dropped_messages: 1,
+            summary_path: "s.md".into(),
+            usage: Some(Usage {
+                input: 1_000_000,
+                output: 0,
+                cached: 0,
+            }),
+        });
+        assert_eq!(tracker.snapshot().spend.cost_usd, Some(1211.0));
     }
 
     #[test]

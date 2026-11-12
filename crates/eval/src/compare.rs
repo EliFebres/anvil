@@ -71,6 +71,8 @@ pub struct RunSummary {
     pub cost_per_passed_task: Option<f64>,
     /// What the run spent per attempt.
     pub efficiency: Efficiency,
+    /// Each role with its model; empty when the run used no more than the coder.
+    pub roles: String,
 }
 
 impl From<&RunResult> for RunSummary {
@@ -84,6 +86,7 @@ impl From<&RunResult> for RunSummary {
             cost_usd: run.totals.cost_usd,
             cost_per_passed_task: run.totals.cost_per_passed_task,
             efficiency: Efficiency::of(&run.tasks),
+            roles: run.roles_label(),
         }
     }
 }
@@ -210,6 +213,9 @@ impl fmt::Display for Comparison {
         let mut totals = |label: &str, a: String, b: String| -> fmt::Result {
             writeln!(f, "{label:<name_width$}  {a:<col$}  {b}")
         };
+        if !self.a.roles.is_empty() || !self.b.roles.is_empty() {
+            totals("roles", self.a.roles.clone(), self.b.roles.clone())?;
+        }
         totals(
             "tasks passing",
             format!("{}/{}", self.a.tasks_passing, self.a.tasks),
@@ -565,6 +571,27 @@ mod tests {
         assert_eq!(comparison.groups[1].a.attempts, 0);
         assert!((comparison.groups[1].b.pass_rate - 1.0 / 3.0).abs() < 1e-9);
         assert!(comparison.to_string().contains("large tasks"));
+    }
+
+    #[test]
+    fn a_schema_one_and_a_schema_two_result_compare() {
+        let mut old = run("aaa", "m-old", vec![task("t", &[true, true, true])]);
+        old.schema = 1;
+        let mut new = run("bbb", "m-new", vec![task("t", &[true, false, true])]);
+        let served = |model: &str| crate::results::RoleModel {
+            provider: "p".to_owned(),
+            model: model.to_owned(),
+        };
+        new.roles = [
+            ("planner".to_owned(), served("dear")),
+            ("coder".to_owned(), served("m-new")),
+        ]
+        .into();
+        let text = compare(&old, &new).to_string();
+        assert!(text.contains("roles"), "{text}");
+        assert!(text.contains("coder m-new, planner dear"), "{text}");
+        let plain = compare(&old, &old).to_string();
+        assert!(!plain.contains("roles"), "{plain}");
     }
 
     #[test]

@@ -254,7 +254,7 @@ impl Wiring {
 
     /// Resolves a subagent's `model` key to a provider name.
     ///
-    /// A role name (`coder`, `reviewer`, `summarizer`) maps through
+    /// A role name (`coder`, `planner`, `reviewer`, `summarizer`) maps through
     /// `[roles]`; a provider name is used as is; anything else falls back to
     /// the coder.
     ///
@@ -272,6 +272,7 @@ impl Wiring {
         };
         let by_role = match model {
             "coder" => Some(roles.coder.clone()),
+            "planner" => Some(roles.planner_or_coder().to_owned()),
             "summarizer" => Some(roles.summarizer.clone()),
             "reviewer" => Some(
                 roles
@@ -677,6 +678,24 @@ mod tests {
         let neither = Wiring::new(config("")).expect("wiring");
         let registry = neither.registry(refusing()).expect("registry");
         assert_eq!(completed_edits(&registry, dir.path()).await, 0);
+    }
+
+    #[test]
+    fn the_planner_is_a_role_name_for_model_keys() {
+        let mut config = config("");
+        let coder = config.roles.coder.clone();
+        let wiring = Wiring::new(config.clone()).expect("wiring");
+        assert_eq!(wiring.resolve_model(Some("planner")), (coder.clone(), None));
+
+        let big = config.providers[&coder].clone();
+        config.providers.insert("big".to_owned(), big);
+        config.roles.planner = Some("big".to_owned());
+        let wiring = Wiring::new(config).expect("wiring");
+        assert_eq!(
+            wiring.resolve_model(Some("planner")),
+            ("big".to_owned(), None)
+        );
+        assert_eq!(wiring.resolve_model(Some("coder")), (coder, None));
     }
 
     #[test]

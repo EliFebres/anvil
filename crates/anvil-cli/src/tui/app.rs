@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anvil_core::agent::{LoopEvent, PlanDecision, State};
+use anvil_core::agent::{LoopEvent, PlanDecision, Role, State};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -480,11 +480,13 @@ impl App {
         match event {
             LoopEvent::StateEntered { state, .. } => self.set_state(*state),
             LoopEvent::TurnFinished {
+                role,
+                usage: Some(usage),
+                ..
+            } => self.status.record_for(*role, *usage),
+            LoopEvent::Compacted {
                 usage: Some(usage), ..
-            }
-            | LoopEvent::Compacted {
-                usage: Some(usage), ..
-            } => self.status.record(*usage),
+            } => self.status.record_for(Role::Summarizer, *usage),
             _ => {}
         }
         self.transcript.apply(event, self.now);
@@ -723,6 +725,7 @@ mod tests {
             model: "main (test-model)".to_owned(),
             context_window: 100_000,
             price: None,
+            role_prices: Default::default(),
             permission_mode: PermissionMode::Ask,
             initial_state: State::Build,
             slash_commands: vec!["/plan".to_owned(), "/plain".to_owned()],

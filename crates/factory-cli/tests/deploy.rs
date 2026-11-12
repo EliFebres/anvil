@@ -40,10 +40,25 @@ fn the_factory_profile_matches_factory_toml_and_locks_permissions() {
         reviewer, anvil.roles.coder,
         "anvil's own reviewer is a different provider"
     );
+    let model = |name: &str| {
+        let provider = &anvil.providers[name];
+        (
+            provider.base_url.trim_end_matches('/').to_owned(),
+            provider.model.clone(),
+        )
+    };
     assert_ne!(
-        anvil.providers[reviewer].base_url, anvil.providers[&anvil.roles.coder].base_url,
-        "and sits on a different base URL"
+        model(reviewer),
+        model(&anvil.roles.coder),
+        "and runs a different model (base URL and model name together)"
     );
+    assert_eq!(
+        anvil.roles.planner, factory.roles.planner,
+        "the profile's planner must be factory.toml's planner"
+    );
+    factory
+        .check_independence(&anvil)
+        .expect("factory.toml's reviewers are independent of the coder");
     let budgets = [
         ("plan", &anvil.limits.plan, 400_000),
         ("build", &anvil.limits.build, 3_000_000),

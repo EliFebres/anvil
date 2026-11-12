@@ -2,13 +2,15 @@
 //! prompts, or the full-screen UI. The session driver asks the front end
 //! for input, prompts and a console, and never knows which it got.
 
+use std::collections::BTreeMap;
 use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anvil_core::agent::{AutoApprove, LoopEvent, PlanGate, State, Status};
+use anvil_core::agent::{AutoApprove, LoopEvent, PlanGate, Role, State, Status};
 use anvil_core::tools::{PermissionPrompt, PromptAnswer, StaticPrompt, ToolHook, ToolRegistry};
 use anvil_memory::{Decision, Proposal};
+use anvil_types::{AnvilConfig, Price};
 use anyhow::Context;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -364,6 +366,7 @@ pub fn session_info(
         model: model_id(wiring, coder),
         context_window: wiring.context_window(),
         price: provider.and_then(|provider| provider.price_per_mtoken),
+        role_prices: role_prices(wiring),
         permission_mode: if yes {
             PermissionMode::Bypass
         } else {
@@ -388,6 +391,47 @@ pub fn session_info(
             std::env::var_os("ANVIL_NO_ANIMATION").is_some(),
         ),
     }
+}
+
+/// Each role's price when a planner is configured, so the UI can price every
+/// turn with the provider that served it; empty otherwise.
+fn role_prices(wiring: &Wiring) -> BTreeMap<Role, Option<Price>> {
+    let roles = &wiring.config.roles;
+    match roles.planner.as_deref() {
+        Some(planner) if planner != roles.coder => role_price_map(&wiring.config),
+        _ => BTreeMap::new(),
+    }
+}
+
+/// The price of the provider behind every role, so a turn can be priced by
+/// the role that served it. The planner falls back to the coder and the
+/// reviewer to the coder, as the loop's providers do.
+///
+/// # Arguments
+///
+/// * `config` - The merged configuration.
+///
+/// # Returns
+///
+/// One entry per role; `None` for a provider without a price.
+pub fn role_price_map(config: &AnvilConfig) -> BTreeMap<Role, Option<Price>> {
+    let roles = &config.roles;
+    let reviewer = roles.reviewer.as_deref().unwrap_or(&roles.coder);
+    [
+        (Role::Planner, roles.planner_or_coder()),
+        (Role::Coder, roles.coder.as_str()),
+        (Role::Reviewer, reviewer),
+        (Role::Summarizer, roles.summarizer.as_str()),
+    ]
+    .into_iter()
+    .map(|(role, name)| {
+        let price = config
+            .providers
+            .get(name)
+            .and_then(|provider| provider.price_per_mtoken);
+        (role, price)
+    })
+    .collect()
 }
 
 /// How many saved sessions the startup screen lists.

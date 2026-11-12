@@ -42,6 +42,7 @@ const HISTORY_DAYS: i64 = 90;
 #[derive(Debug, Clone)]
 struct Roles {
     coder: String,
+    planner: Option<String>,
     reviewer: String,
     summarizer: String,
 }
@@ -89,6 +90,7 @@ impl SessionTelemetry {
                 .collect(),
             wiring.config.telemetry,
         );
+        this.set_planner(wiring.config.roles.planner.as_deref());
         this.record(RecordKind::SessionStarted { mode });
         this
     }
@@ -109,6 +111,7 @@ impl SessionTelemetry {
             recorder: Arc::new(Recorder::open(cwd, home, session)),
             roles: Arc::new(Mutex::new(Roles {
                 coder: coder.to_owned(),
+                planner: None,
                 reviewer: reviewer.unwrap_or(coder).to_owned(),
                 summarizer: summarizer.to_owned(),
             })),
@@ -149,6 +152,17 @@ impl SessionTelemetry {
     pub fn set_coder(&self, name: &str) {
         if let Ok(mut roles) = self.roles.lock() {
             roles.coder = name.to_owned();
+        }
+    }
+
+    /// Sets the planner, which serves Plan turns when present.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The provider name, or `None` when the coder plans.
+    pub fn set_planner(&self, name: Option<&str>) {
+        if let Ok(mut roles) = self.roles.lock() {
+            roles.planner = name.map(str::to_owned);
         }
     }
 
@@ -319,12 +333,13 @@ impl SessionTelemetry {
         self.recorder.project_dir().to_path_buf()
     }
 
-    /// The provider and model that serve a state.
-    fn provider_for(&self, state: &str) -> (String, String) {
+    /// The provider and model that serve a role.
+    fn provider_for(&self, role: &str) -> (String, String) {
         let name = match self.roles.lock() {
-            Ok(roles) => match state {
-                "review" => roles.reviewer.clone(),
-                "compact" => roles.summarizer.clone(),
+            Ok(roles) => match role {
+                "planner" => roles.planner.clone().unwrap_or_else(|| roles.coder.clone()),
+                "reviewer" => roles.reviewer.clone(),
+                "summarizer" => roles.summarizer.clone(),
                 _ => roles.coder.clone(),
             },
             Err(_) => String::new(),
@@ -344,14 +359,15 @@ impl SessionTelemetry {
             LoopEvent::TurnFinished {
                 state,
                 stop_reason,
-                role: _,
+                role,
                 usage,
                 latency_ms,
                 retries,
             } => {
-                let (provider, model) = self.provider_for(&state.to_string());
+                let (provider, model) = self.provider_for(role.name());
                 RecordKind::Turn {
                     state: state.to_string(),
+                    role: Some(role.name().to_owned()),
                     provider,
                     model,
                     tokens: usage.map(tokens).unwrap_or_default(),
@@ -399,7 +415,7 @@ impl SessionTelemetry {
                 usage,
                 ..
             } => {
-                let (provider, model) = self.provider_for("compact");
+                let (provider, model) = self.provider_for("summarizer");
                 RecordKind::Compacted {
                     dropped: *dropped_messages,
                     provider,
@@ -487,6 +503,7 @@ impl Provider for RecordedProvider {
                     Ok(Event::Retried { retries: count }) => retries = *count,
                     Ok(Event::Done { stop_reason }) => telemetry.record(RecordKind::Turn {
                         state: state.to_owned(),
+                        role: Some("summarizer".to_owned()),
                         provider: provider.clone(),
                         model: model.clone(),
                         tokens: usage,
@@ -591,7 +608,7 @@ mod tests {
         AgentLoop, AutoApprove, CheckCommand, LoopConfig, LoopProviders, State,
     };
     use anvil_core::provider::{FakeProvider, ToolCall};
-    use anvil_core::tools::{Permissions, StaticPrompt, ToolContext};
+    use anvil_core::tools::{Permissions, PromptAnswer, StaticPrompt, ToolContext};
     use anvil_telemetry::{DraftFuture, Drafter, Signal, SignalKind, TicketStore, draft_all};
     use anvil_types::LimitsConfig;
 
@@ -785,6 +802,91 @@ mod tests {
             assert!(!text.contains(MARKER), "{}: {text}", file.display());
             assert!(!text.contains("file.txt"), "{}: {text}", file.display());
         }
+    }
+
+    #[tokio::test]
+    async fn each_turn_is_attributed_to_the_role_and_provider_that_served_it() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let telemetry = SessionTelemetry::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "cheap",
+            Some("judge"),
+            "cheap",
+            BTreeMap::from([
+                ("cheap".to_owned(), "small-model".to_owned()),
+                ("dear".to_owned(), "big-model".to_owned()),
+                ("judge".to_owned(), "judge-model".to_owned()),
+            ]),
+            TelemetryConfig::default(),
+        );
+        telemetry.set_planner(Some("dear"));
+        let planner = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
+            "# Plan\n\n1. [ ] x\n",
+        )]));
+        let coder = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn("built")]));
+        let reviewer = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
+            "```json\n{\"verdict\": \"approve\"}\n```",
+        )]));
+        let config = LoopConfig {
+            task: "t".to_owned(),
+            cwd: cwd.path().to_path_buf(),
+            session_dir: cwd.path().join(".anvil").join("sessions").join(&session),
+            limits: LimitsConfig::default(),
+            check: CheckCommand::Command("exit 0".to_owned()),
+            context_window: 100_000,
+            home_dir: None,
+            extra_instructions: Vec::new(),
+            sections: Vec::new(),
+            review_sections: Vec::new(),
+        };
+        let (sink, task) = telemetry.sink(None);
+        let agent = AgentLoop::new(
+            config,
+            LoopProviders {
+                coder: coder as Arc<dyn Provider>,
+                planner: Some(planner as Arc<dyn Provider>),
+                reviewer: reviewer as Arc<dyn Provider>,
+                summarizer: Arc::new(FakeProvider::new(vec![])) as Arc<dyn Provider>,
+            },
+            ToolRegistry::with_builtins(
+                Permissions::empty(),
+                Box::new(StaticPrompt(PromptAnswer::No)),
+            ),
+            ToolContext::new(cwd.path()),
+            Box::new(AutoApprove),
+            sink,
+        );
+        agent.run().await;
+        task.await.expect("tee ends");
+
+        let records = load_records(&telemetry.project_dir(), None).expect("records");
+        let turns: Vec<(String, String, String)> = records
+            .iter()
+            .filter_map(|record| match &record.kind {
+                RecordKind::Turn {
+                    role: Some(role),
+                    provider,
+                    model,
+                    ..
+                } => Some((role.clone(), provider.clone(), model.clone())),
+                _ => None,
+            })
+            .collect();
+        let turn = |role: &str, provider: &str, model: &str| {
+            (role.to_owned(), provider.to_owned(), model.to_owned())
+        };
+        assert_eq!(
+            turns,
+            [
+                turn("planner", "dear", "big-model"),
+                turn("coder", "cheap", "small-model"),
+                turn("reviewer", "judge", "judge-model"),
+            ]
+        );
     }
 
     #[tokio::test]

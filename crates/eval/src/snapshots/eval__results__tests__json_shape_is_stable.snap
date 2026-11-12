@@ -1,9 +1,10 @@
 ---
 source: crates/eval/src/results.rs
+assertion_line: 1078
 expression: result
 ---
 {
-  "schema": 1,
+  "schema": 2,
   "started_at": "2026-10-30T10:00:00Z",
   "finished_at": "2026-10-30T10:02:05Z",
   "git_sha": "fe92bc2",

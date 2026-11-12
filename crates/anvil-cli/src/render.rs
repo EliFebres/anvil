@@ -114,7 +114,6 @@ impl<O: Write, E: Write> Renderer<O, E> {
             }
             LoopEvent::Transition { .. }
             | LoopEvent::TurnFinished { .. }
-            | LoopEvent::Escalated { .. }
             | LoopEvent::PlanUpdated { .. }
             | LoopEvent::ProposedEdit { .. } => {}
             LoopEvent::ToolStarted { call } => {
@@ -187,6 +186,12 @@ impl<O: Write, E: Write> Renderer<O, E> {
                 self.err_line(&format!(
                     "compacted {dropped_messages} messages; summary at {}",
                     summary_path.display()
+                ));
+            }
+            LoopEvent::Escalated { reason, round } => {
+                self.end_line();
+                self.err_line(&format!(
+                    "build round {round} runs on the planner: {reason}"
                 ));
             }
             LoopEvent::Warning(message) => {
@@ -418,6 +423,26 @@ mod tests {
             err.contains("review: approved\n  note: a.rs: `total` could fold into `sum`\n"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_escalation_is_one_line() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(LoopEvent::Escalated {
+            reason: anvil_core::agent::EscalationReason::CheckFailures,
+            round: 3,
+        })
+        .expect("open channel");
+        drop(tx);
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        render_to(rx, false, &mut out, &mut err).await;
+        let err = String::from_utf8(err).expect("utf-8 stderr");
+        assert_eq!(
+            err,
+            "build round 3 runs on the planner: the project check failed 2 times in a row\n"
+        );
+        assert!(out.is_empty());
     }
 
     #[tokio::test]

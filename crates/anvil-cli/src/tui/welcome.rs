@@ -258,6 +258,7 @@ mod tests {
             model: "claude-sonnet-5-5".to_owned(),
             context_window: 200_000,
             price: None,
+            role_prices: Default::default(),
             permission_mode: PermissionMode::Ask,
             initial_state: State::Build,
             slash_commands: Vec::new(),

@@ -363,10 +363,16 @@ fn print_models() {
         );
     }
     println!(
-        "  roles: coder={} reviewer={} summarizer={}",
+        "  roles: coder={} reviewer={} summarizer={}{}",
         config.roles.coder,
         config.roles.reviewer.as_deref().unwrap_or("(coder)"),
-        config.roles.summarizer
+        config.roles.summarizer,
+        config
+            .roles
+            .planner
+            .as_deref()
+            .map(|planner| format!(" planner={planner}"))
+            .unwrap_or_default()
     );
 }
 

@@ -3,10 +3,13 @@
 # from `main`, never from the worktree, so a pull request cannot loosen its own
 # permissions. It is a config overlay over the global `~/.anvil/config.toml`.
 
-# `coder` must equal [roles].coder in factory.toml; `reviewer` is anvil's own
-# in-loop reviewer and must be a different provider. A test asserts both.
+# `coder` must equal [roles].coder in factory.toml, and `planner`, when
+# factory.toml sets one, must equal [roles].planner; `reviewer` is anvil's own
+# in-loop reviewer and must run a different model than the coder (a different
+# base URL or model name). A test asserts all of it.
 [roles]
 coder = "anthropic"
+# planner = "anthropic"
 reviewer = "openai"
 summarizer = "anthropic"
 

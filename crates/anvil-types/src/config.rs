@@ -45,6 +45,9 @@ supports_reasoning = true
 coder = "runpod"
 summarizer = "runpod"
 # reviewer = "runpod"
+# Optional: a model that plans, and takes a build round when the coder is
+# stuck. The coder plans when this is absent.
+# planner = "runpod"
 
 # Optional. The shell program behind the `shell` tool: "powershell", "pwsh",
 # "sh", "bash", "zsh" or "cmd". Default: PowerShell on Windows, sh elsewhere.
@@ -145,6 +148,9 @@ price_per_mtoken = { input = 2.0, output = 10.0 }
 coder = "anthropic"
 reviewer = "openai"
 summarizer = "anthropic"
+# Optional: a model that plans, and takes a build round when the coder is
+# stuck. The coder plans when this is absent.
+# planner = "anthropic"
 "#;
 
 /// The optional, commented sections `anvil setup` appends to a new config file.
