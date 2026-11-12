@@ -13,7 +13,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{FactoryError, Result};
-use crate::ports::ProgressEvent;
+use crate::ports::{GateCost, ProgressEvent};
 use crate::status::OutcomeRecord;
 
 /// The schema version written into every snapshot.
@@ -126,10 +126,10 @@ pub enum Stage {
     Implement,
     /// `just check` in the sandbox.
     GateA,
-    /// The release build and the eval against main.
-    GateB,
     /// The review swarm.
     GateC,
+    /// The release build and the eval against main.
+    GateB,
     /// The branch is pushed and the pull request opened.
     Pr,
     /// CI on the pull request, then the squash merge.
@@ -143,8 +143,8 @@ impl Stage {
         Stage::Worktree,
         Stage::Implement,
         Stage::GateA,
-        Stage::GateB,
         Stage::GateC,
+        Stage::GateB,
         Stage::Pr,
         Stage::Merge,
     ];
@@ -153,7 +153,7 @@ impl Stage {
     ///
     /// # Returns
     ///
-    /// `claim`, `worktree`, `implement`, `gate A`, `gate B`, `gate C`, `PR`
+    /// `claim`, `worktree`, `implement`, `gate A`, `gate C`, `gate B`, `PR`
     /// or `merge`.
     pub fn label(self) -> &'static str {
         match self {
@@ -224,6 +224,8 @@ pub struct TicketView {
     pub budget: BudgetView,
     /// The pull request, once opened.
     pub pr: Option<u64>,
+    /// What each finished step has cost so far, in the order they ran.
+    pub gate_costs: Vec<GateCost>,
 }
 
 impl TicketView {
@@ -618,6 +620,11 @@ impl Board {
                     ticket.pr = Some(*number);
                 }
             }
+            ProgressEvent::GateCost(cost) => {
+                if let Some(ticket) = inner.status.ticket.as_mut() {
+                    ticket.gate_costs.push(cost.clone());
+                }
+            }
         }
         self.save(&mut inner);
     }
@@ -944,8 +951,8 @@ mod tests {
         board.progress(&stage(Stage::Worktree), t(2));
         board.progress(&stage(Stage::Implement), t(3));
         board.progress(&stage(Stage::GateA), t(10));
-        board.progress(&stage(Stage::GateB), t(12));
-        board.progress(&stage(Stage::GateC), t(20));
+        board.progress(&stage(Stage::GateC), t(12));
+        board.progress(&stage(Stage::GateB), t(20));
         board.progress(&stage(Stage::Implement), t(25));
         let on_disk: Status =
             serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).expect("file"))
@@ -1036,6 +1043,29 @@ mod tests {
         let status = board.snapshot();
         assert!(status.ticket.is_none() && status.usage.is_none());
         assert_eq!(status.service.state, RunState::Idle);
+    }
+
+    #[test]
+    fn gate_costs_reach_the_snapshot_and_a_snapshot_without_them_still_parses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let board = board_with_ticket(dir.path());
+        board.progress(
+            &ProgressEvent::GateCost(GateCost {
+                step: "C: review round 1".to_owned(),
+                cost_usd: Some(0.25),
+                weighted_tokens: Some(250),
+            }),
+            Utc::now(),
+        );
+        let on_disk: Status =
+            serde_json::from_slice(&std::fs::read(dir.path().join("status.json")).expect("file"))
+                .expect("parses");
+        let costs = on_disk.ticket.expect("ticket").gate_costs;
+        assert_eq!(costs.len(), 1);
+        assert_eq!(costs[0].step, "C: review round 1");
+
+        let old: TicketView = serde_json::from_str(r#"{"id":"T1"}"#).expect("old ticket view");
+        assert!(old.gate_costs.is_empty());
     }
 
     #[test]

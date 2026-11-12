@@ -32,6 +32,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::status::StatusReporter;
 use crate::wiring::Wiring;
 
 /// How far back the cross-session history reaches.
@@ -57,6 +58,8 @@ pub struct SessionTelemetry {
     /// Provider name to model name, from config.
     models: Arc<BTreeMap<String, String>>,
     thresholds: TelemetryConfig,
+    /// Told of every loop event, so the session's `status.json` follows the loop.
+    status: Option<StatusReporter>,
 }
 
 impl SessionTelemetry {
@@ -114,7 +117,22 @@ impl SessionTelemetry {
             })),
             models: Arc::new(models),
             thresholds,
+            status: None,
         }
+    }
+
+    /// Makes the event tee keep a status file current.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The session's status reporter.
+    ///
+    /// # Returns
+    ///
+    /// The handle, to be used before [`SessionTelemetry::sink`].
+    pub fn with_status(mut self, status: StatusReporter) -> Self {
+        self.status = Some(status);
+        self
     }
 
     /// Records one event.
@@ -222,6 +240,9 @@ impl SessionTelemetry {
         let this = self.clone();
         let task = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
+                if let Some(status) = &this.status {
+                    status.observe(&event);
+                }
                 if let Some(kind) = this.translate(&event) {
                     this.record(kind);
                 }

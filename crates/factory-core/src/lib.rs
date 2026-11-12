@@ -64,10 +64,10 @@ pub use github::{GitHub, Pull};
 pub use notify::{Event, LogNotifier, Notifier, WebhookNotifier};
 pub use paths::FactoryHome;
 pub use ports::{
-    BoxFuture, CheckOutcome, CiStatus, CodeHost, EvalGate, EvalGateReport, GateB, Implementer,
-    ImplementerOutcome, ImplementerStatus, InlineComment, MinorFinding, NEEDS_HUMAN_LABEL, NoProbe,
-    Outcome, Probe, Progress, ProgressEvent, PullRequest, ReviewInput, ReviewReport, ReviewSwarm,
-    Tokens, Worker,
+    BoxFuture, CheckOutcome, CiStatus, CodeHost, EvalGate, EvalGateReport, GateB, GateCost,
+    Implementer, ImplementerOutcome, ImplementerStatus, InlineComment, MinorFinding,
+    NEEDS_HUMAN_LABEL, NoProbe, Outcome, Probe, Progress, ProgressEvent, PullRequest, ReviewInput,
+    ReviewReport, ReviewSwarm, Tokens, Worker,
 };
 pub use protected::{Held, ProtectedPaths, dependency_additions};
 pub use sandbox::{

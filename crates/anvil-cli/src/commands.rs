@@ -17,7 +17,9 @@ use tokio::task::JoinHandle;
 
 use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, session_info};
+use crate::learn;
 use crate::memory;
+use crate::status::{Setup, StatusReporter};
 use crate::telemetry::SessionTelemetry;
 use crate::tui::{SessionKind, UiMsg, wait_cancel};
 use crate::wiring::{Wiring, home_dir};
@@ -46,21 +48,47 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
     let (session_dir, id) = wiring.new_session_dir();
     eprintln!("session {id}");
     let wiring = wiring.with_session(&id, &session_dir);
-    let telemetry = SessionTelemetry::start(&wiring, &id, SessionMode::Run);
     let task = wiring.expand_slash(&task).unwrap_or(task);
-    let (frontend, events) = Frontend::start(
-        ui,
-        session_info(&wiring, SessionKind::Run, yes, State::Plan),
-    );
-    telemetry.observe_permissions(&wiring);
-    let mut registry = wiring.registry(telemetry.recording(frontend.prompt(yes)))?;
+    let status = StatusReporter::start(Setup::from_wiring(&wiring, &id, &session_dir, &task));
+    let result = run_session(&wiring, &id, session_dir, task, yes, ui, &status).await;
+    end_status(&status, &result).await;
+    result
+}
+
+/// Records an error that aborted the command as `failed`, then lets the
+/// last notifications go out.
+pub(crate) async fn end_status(status: &StatusReporter, result: &anyhow::Result<i32>) {
+    if let Err(error) = result {
+        status.fail(&format!("{error:#}"));
+    }
+    status.shutdown().await;
+}
+
+/// The body of [`run_task`], with the status reporter already running.
+async fn run_session(
+    wiring: &Wiring,
+    id: &str,
+    session_dir: std::path::PathBuf,
+    task: String,
+    yes: bool,
+    ui: UiKind,
+    status: &StatusReporter,
+) -> anyhow::Result<i32> {
+    let telemetry =
+        SessionTelemetry::start(wiring, id, SessionMode::Run).with_status(status.clone());
+    let (frontend, events) =
+        Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
+    learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
+    telemetry.observe_permissions(wiring);
+    let mut registry =
+        wiring.registry(telemetry.recording(status.prompt(yes, frontend.prompt(yes))))?;
     frontend.install_tool_hook(
         &mut registry,
         wiring
             .hook_runner()
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
-    telemetry.record_skill_requires(&wiring, &registry);
+    telemetry.record_skill_requires(wiring, &registry);
     let mut config = wiring.loop_config(task, session_dir.clone(), &registry)?;
     let hooks = wiring.hook_runner();
     if let Some(hooks) = &hooks {
@@ -76,14 +104,16 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
-        frontend.gate(yes),
+        status.gate(yes, frontend.gate(yes)),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
-    remember(&wiring, &id, &frontend, yes, &telemetry, &result).await;
+    remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
+    learn::record_run(wiring, id, &frontend.console()).await;
+    status.finish_run(&result.status);
     frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())
@@ -154,6 +184,7 @@ async fn remember(
     frontend: &Frontend,
     yes: bool,
     telemetry: &SessionTelemetry,
+    status: &StatusReporter,
     result: &LoopResult,
 ) {
     let console = frontend.console();
@@ -175,7 +206,7 @@ async fn remember(
                 wiring,
                 id,
                 &snapshot.messages,
-                frontend.decider(yes),
+                status.decider(yes, frontend.decider(yes)),
                 &console,
                 Some(telemetry),
             )
@@ -220,20 +251,41 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
     let snapshot = context::load_session(&wiring.cwd, id).context("loading the session")?;
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
     let wiring = wiring.with_session(id, &snapshot.dir);
-    let telemetry = SessionTelemetry::start(&wiring, id, SessionMode::Resume);
-    let (frontend, events) = Frontend::start(
-        ui,
-        session_info(&wiring, SessionKind::Run, yes, State::Plan),
-    );
-    telemetry.observe_permissions(&wiring);
-    let mut registry = wiring.registry(telemetry.recording(frontend.prompt(yes)))?;
+    let status = StatusReporter::start(Setup::from_wiring(
+        &wiring,
+        id,
+        &snapshot.dir,
+        &snapshot.meta.task,
+    ));
+    let result = resume_session(&wiring, id, snapshot, yes, ui, &status).await;
+    end_status(&status, &result).await;
+    result
+}
+
+/// The body of [`resume`], with the status reporter already running.
+async fn resume_session(
+    wiring: &Wiring,
+    id: &str,
+    snapshot: anvil_core::context::SessionSnapshot,
+    yes: bool,
+    ui: UiKind,
+    status: &StatusReporter,
+) -> anyhow::Result<i32> {
+    let telemetry =
+        SessionTelemetry::start(wiring, id, SessionMode::Resume).with_status(status.clone());
+    let (frontend, events) =
+        Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
+    learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
+    telemetry.observe_permissions(wiring);
+    let mut registry =
+        wiring.registry(telemetry.recording(status.prompt(yes, frontend.prompt(yes))))?;
     frontend.install_tool_hook(
         &mut registry,
         wiring
             .hook_runner()
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
-    telemetry.record_skill_requires(&wiring, &registry);
+    telemetry.record_skill_requires(wiring, &registry);
     let session_dir = snapshot.dir.clone();
     let mut config =
         wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry)?;
@@ -252,14 +304,16 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
-        frontend.gate(yes),
+        status.gate(yes, frontend.gate(yes)),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
-    remember(&wiring, id, &frontend, yes, &telemetry, &result).await;
+    remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
+    learn::record_run(wiring, id, &frontend.console()).await;
+    status.finish_run(&result.status);
     frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
     Ok(result.status.exit_code())

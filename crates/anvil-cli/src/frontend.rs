@@ -10,7 +10,7 @@ use std::time::Instant;
 use anvil_core::agent::{AutoApprove, LoopEvent, PlanGate, Role, State, Status};
 use anvil_core::tools::{PermissionPrompt, PromptAnswer, StaticPrompt, ToolHook, ToolRegistry};
 use anvil_memory::{Decision, Proposal};
-use anvil_types::Price;
+use anvil_types::{AnvilConfig, Price};
 use anyhow::Context;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -397,20 +397,35 @@ pub fn session_info(
 /// turn with the provider that served it; empty otherwise.
 fn role_prices(wiring: &Wiring) -> BTreeMap<Role, Option<Price>> {
     let roles = &wiring.config.roles;
-    let Some(planner) = roles.planner.as_deref().filter(|name| *name != roles.coder) else {
-        return BTreeMap::new();
-    };
+    match roles.planner.as_deref() {
+        Some(planner) if planner != roles.coder => role_price_map(&wiring.config),
+        _ => BTreeMap::new(),
+    }
+}
+
+/// The price of the provider behind every role, so a turn can be priced by
+/// the role that served it. The planner falls back to the coder and the
+/// reviewer to the coder, as the loop's providers do.
+///
+/// # Arguments
+///
+/// * `config` - The merged configuration.
+///
+/// # Returns
+///
+/// One entry per role; `None` for a provider without a price.
+pub fn role_price_map(config: &AnvilConfig) -> BTreeMap<Role, Option<Price>> {
+    let roles = &config.roles;
     let reviewer = roles.reviewer.as_deref().unwrap_or(&roles.coder);
     [
-        (Role::Planner, planner),
+        (Role::Planner, roles.planner_or_coder()),
         (Role::Coder, roles.coder.as_str()),
         (Role::Reviewer, reviewer),
         (Role::Summarizer, roles.summarizer.as_str()),
     ]
     .into_iter()
     .map(|(role, name)| {
-        let price = wiring
-            .config
+        let price = config
             .providers
             .get(name)
             .and_then(|provider| provider.price_per_mtoken);

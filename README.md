@@ -21,6 +21,7 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 | `anvil "<task>"` or `anvil run <task>` | One task through the state machine: `plan` (you approve the plan, which ends with a `Check:` command) → `build` → `verify` (your rules, the project's checks and the plan's check, with no model turn) → `review` (a second model, which sees the check output). A project with no check command at all is reviewed first and then verified by the model. Exit code 0 when done, 2 when incomplete. |
 | `anvil chat` | A conversation with tools, outside the state machine. `/plan`, `/build` and `/review` switch the prompt and tool set; `rule: <text>` saves a standing rule on the spot; `/compact`, `/model <name>`, `/cost`, `/ticket <text>`, `/help`. |
 | `anvil resume <id>` | Continue a saved session from where it stopped. `anvil sessions` lists them. |
+| `anvil status [--json] [--all]` | Where every session of this project stands, newest first: state, loop step, age, spend, task, id. See [Watching a session](#watching-a-session). |
 | `anvil --yes ...` | Unattended: approve the plan, allow every asked tool call, keep every proposed memory. The factory and the eval harness run it this way. |
 | `anvil --plain ...` | Keep the line renderer and stdin prompts. Chosen automatically when a standard stream is not a terminal. |
 | `anvil --profile <name> ...` | Layer `~/.anvil/profiles/<name>.toml` over the config; its `[permissions]` table replaces the project's. |
@@ -54,11 +55,60 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 
 Three kinds of state live under `~/.anvil/`, all plain files you can edit:
 
-- **Rules** (`rules.toml`): standing coding rules. They enter every system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
+- **Rules** (`rules.toml`): standing coding rules. They enter the system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
 - **Memory** (`memory/`): one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`, loaded under a token cap. At the end of a session the summarizer proposes new facts and you keep or drop each one. A run that finished with no reviewer rejection, no failed check and a diff under 50 lines has nothing new to teach, so it skips that turn and says so; `[memory] always_summarize = true` runs it every time.
 - **Telemetry** (`telemetry/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates, and with a planner configured adds a per-role table, each role priced by its own provider. A classifier turns them into signals, and `anvil ticket draft` has the summarizer write ticket drafts from the signals alone.
 
-Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, GitHub access, branch protection, tools), `anvil update` (fetch the latest release and swap the binary), `anvil ticket list|show|review|submit|drop`.
+#### Watching a session
+
+Every `run`, `resume` and `chat` keeps a `status.json` in its session folder (`.anvil/sessions/<id>/`), replaced atomically on every change, so you can see from outside whether a session is working, stuck or waiting for you. `state` is one of `working`, `needs_input` (a permission prompt, a plan approval or a question is waiting), `blocked` (a budget ran out, the provider cannot be reached, or the loop stopped unfinished; `detail` says which), `done` and `failed`. It also holds the loop step, the tokens and cost so far, and when it started and last changed.
+
+`anvil status` lists the sessions of the current project from those files; `--json` prints them as a JSON array and `--all` covers every project that has run a session. A session that says `working` or `needs_input` but whose process is gone shows as `stale` (the running process holds a lock on `status.lock`; `stale` is never written to the file). Sessions from before status files existed are skipped.
+
+Two optional tables in `config.toml` make a session reach you:
+
+```toml
+# One short message (Discord, Slack or ntfy, chosen by the URL) when a session
+# needs you, is blocked, finishes or fails. Nothing for `working`.
+[notify]
+webhook_env = "ANVIL_WEBHOOK_URL"   # the environment variable that holds the URL
+
+# Report the session to herdr when it runs in a herdr pane: working, blocked
+# (with the reason) or idle, released when the session exits.
+[integrations]
+herdr = false
+```
+
+A failing webhook or a missing `herdr` never affects the session.
+
+#### Learning how you work
+
+Three more things build on those files.
+
+**Rules by relevance.** Each rule lists the `languages` it applies to. A session sends the coder and the reviewer only the rules for languages present in the project (from file extensions, honoring `.gitignore`, at most 5,000 files), plus every `*` rule and any rule for a language anvil cannot detect. An empty project has no languages yet, so it gets every rule. A Python-only rule stays out of a Rust-only project; the prompt is otherwise unchanged. The reviewer uses the project's languages too, since the changed files are not known when the prompt is built.
+
+**Learning from your edits.** At the end of a session in a git repository, anvil records the text files it changed (each at most 32 KiB, 128 KiB in all) with a SHA-256 of their bytes in `~/.anvil/memory/corrections/<repo>.toml`. At the start of the next session in that project, and whenever you run `anvil memory learn`, the files you edited since are compared with what anvil left, and the summarizer proposes rules from the difference. You keep or drop each one, exactly as with proposed facts; nothing reaches `rules.toml` until you keep it, and an edit is never proposed twice. Lock files, minified files, `target/`, `dist/`, `node_modules/` and anything in the project's `.gitignore` are skipped, the diff sent to the model is cut at 16 KiB, and when nothing was edited there is no model call. Each proposal names one language and says when a mechanical check is realistic. Under `--yes` the start-of-session step is skipped (nobody can answer); `anvil memory learn` picks the edits up later. `[memory] always_summarize` does not apply, because this step only runs a model when you really edited something.
+
+```
+$ anvil memory learn
+memory: you edited 2 file(s) anvil wrote; asking the summarizer for rules
+memory: 1 proposed rule(s), written to ~/.anvil/memory/proposed.md
+[rule] (python) Annotate every parameter and return type.
+  keep? [k]eep / [d]rop: k
+memory: kept 1 rule(s) in ~/.anvil/rules.toml
+```
+
+**Project templates.** `~/.anvil/templates/<name>/` holds a directory tree and a `template.toml` with `name` (the directory name), a one-line `description` and `languages`. A directory without a valid `template.toml` is ignored with a warning.
+
+```
+$ anvil template save rust-cli --description "A small Rust CLI with clap"   # saves the current directory
+$ anvil template save web ../site --force                                   # another directory, replacing `web`
+$ anvil new rust-cli ./my-tool                                              # copies the tree, not template.toml
+```
+
+`template save` honors `.gitignore` and skips `.git/` and `.anvil/`, and refuses to overwrite a template without `--force`. `anvil new` creates the directory, or fills an existing one that holds no files other than dot-directories such as `.git`; an unknown name lists the templates you have. When a task starts in such an empty directory, the Plan prompt lists each template's name and description so the plan can start from the one that fits (`anvil new <name> .`); with files present or no templates, the prompt is unchanged.
+
+Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, GitHub access, branch protection, tools), `anvil update` (fetch the latest release and swap the binary), `anvil ticket list|show|review|submit|drop`, `anvil memory learn`, `anvil new`, `anvil template save`.
 
 ### The Dark Factory
 
@@ -69,8 +119,8 @@ How a ticket moves:
 1. `anvil ticket submit` pushes it on a `tickets/<id>` branch. That push is the only thing that ever leaves your machine toward the factory.
 2. The service polls, copies the ticket onto the `factory/state` branch, and claims the highest-priority oldest one when `main` is green.
 3. A worker makes a standalone local clone (`git clone --local`, so the container sees a complete repository) on `factory/<id>` and runs `anvil --yes --profile factory` inside a container with no network, except an allowlisting proxy for the providers, GitHub and the crate registry.
-4. Three gates: `just check` (one retry with the failure appended), the eval harness against the newest result on `main`, and the review swarm (several models, each with one stance: correctness, safety, style, simplicity; none may run the same model as the coder, and the blocking ones span at least two models; `[roles] planner` in `factory.toml` is optional).
-5. A pull request opens with the gate output, the eval table and every verdict. Green CI squash-merges it. A change to a protected path or a new dependency is labelled `needs-human` and the ticket waits.
+4. Three gates, in this order. Gate A: `just check` (one retry with the failure appended). Gate C: the review swarm (several models, each with one stance: correctness, safety, style, simplicity; none may run the same model as the coder, and the blocking ones span at least two models; `[roles] planner` in `factory.toml` is optional). Only correctness and safety block by default; a reviewer's `blocking = true|false` in `factory.toml` overrides that, and the findings of a non-blocking reviewer are posted as comments. When the swarm asks for changes, the implementer gets a fresh session whose task names the changed files and lists only the findings; the release build and the eval do not run for that round. A reviewer that still fails after its own reruns pauses the factory without spending an implementer run, and the ticket goes back to `open/`. Gate B: the release build and the eval harness against the newest result on `main`, one retry, and only when a changed path matches `[eval_gate] paths` in `factory.toml` (without that table it always runs; when it is skipped the pull request says so).
+5. A pull request opens with the gate output in run order, a cost table (cost and weighted tokens per implementer run, review round and eval), the eval table and every verdict. The same per-step costs go to `~/.factory/outcomes.jsonl` and the dashboard snapshot. Green CI squash-merges it. A change to a protected path or a new dependency is labelled `needs-human` and the ticket waits.
 
 `factory run` is the loop (`--once` for a single pass), `factory status` shows the queue and the last ten outcomes, `factory pause` and `factory resume` toggle the flag it checks between tickets, `factory review <pr>` runs the swarm by hand, `factory env <NAME>` says where a secret came from without printing it, and `factory update` waits for the ticket in progress, stops the service, pulls `main`, rebuilds the binaries and the worker image, and starts it again (`--now` skips the wait). Per-ticket budgets (wall clock, tokens) and the protected paths live in `factory.toml`.
 
@@ -108,7 +158,7 @@ How a ticket moves:
 
 ## Setup
 
-You need a Rust toolchain (edition 2024, rust-version 1.88 or newer), git, and [`just`](https://github.com/casey/just). Windows, macOS and Linux all work; HTTP uses rustls, so there is no OpenSSL to install.
+You need a Rust toolchain (edition 2024, rust-version 1.89 or newer), git, and [`just`](https://github.com/casey/just). Windows, macOS and Linux all work; HTTP uses rustls, so there is no OpenSSL to install.
 
 ```sh
 git clone https://github.com/EliFebres/anvil

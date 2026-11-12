@@ -302,7 +302,7 @@ impl Service {
         started: DateTime<Utc>,
         result: Result<Outcome>,
     ) -> Result<()> {
-        let record = |kind, detail: &str, cost_usd, pr| {
+        let record = |kind, detail: &str, cost_usd, pr, gate_costs| {
             self.record_outcome(OutcomeRecord {
                 id: id.to_string(),
                 title: title.to_owned(),
@@ -312,12 +312,23 @@ impl Service {
                 cost_usd,
                 pr,
                 started_at: Some(started),
+                gate_costs,
             })
         };
         match result {
-            Ok(Outcome::Merged { pr, cost_usd }) => {
+            Ok(Outcome::Merged {
+                pr,
+                cost_usd,
+                gate_costs,
+            }) => {
                 self.queue.transition(id, Transition::Merged { pr }).await?;
-                record(OutcomeKind::Merged, &format!("#{pr}"), cost_usd, Some(pr))?;
+                record(
+                    OutcomeKind::Merged,
+                    &format!("#{pr}"),
+                    cost_usd,
+                    Some(pr),
+                    gate_costs,
+                )?;
                 self.reset_errors()?;
                 self.notify(Event::Merged {
                     id: id.to_string(),
@@ -327,7 +338,12 @@ impl Service {
                 })
                 .await;
             }
-            Ok(Outcome::NeedsHuman { pr, held, cost_usd }) => {
+            Ok(Outcome::NeedsHuman {
+                pr,
+                held,
+                cost_usd,
+                gate_costs,
+            }) => {
                 let reason = format!("PR #{pr} touches protected paths: {}", held.join(", "));
                 self.queue
                     .transition(
@@ -338,7 +354,13 @@ impl Service {
                         },
                     )
                     .await?;
-                record(OutcomeKind::Waiting, &reason, cost_usd, Some(pr))?;
+                record(
+                    OutcomeKind::Waiting,
+                    &reason,
+                    cost_usd,
+                    Some(pr),
+                    gate_costs,
+                )?;
                 self.reset_errors()?;
                 self.notify(Event::NeedsHuman {
                     id: id.to_string(),
@@ -352,6 +374,7 @@ impl Service {
                 reason,
                 notes,
                 cost_usd,
+                gate_costs,
             }) => {
                 self.queue
                     .transition(
@@ -362,7 +385,7 @@ impl Service {
                         },
                     )
                     .await?;
-                record(OutcomeKind::Rejected, &reason, cost_usd, None)?;
+                record(OutcomeKind::Rejected, &reason, cost_usd, None, gate_costs)?;
                 self.reset_errors()?;
                 self.notify(Event::Rejected {
                     id: id.to_string(),
@@ -373,13 +396,19 @@ impl Service {
             }
             Ok(Outcome::Paused { reason }) => {
                 self.queue.transition(id, Transition::Reopen).await?;
-                record(OutcomeKind::Reopened, &reason, None, None)?;
+                record(OutcomeKind::Reopened, &reason, None, None, Vec::new())?;
                 self.pause_and_notify(&reason).await?;
             }
             Err(error) => {
                 tracing::error!(%id, %error, "working the ticket failed; reopening it");
                 self.queue.transition(id, Transition::Reopen).await?;
-                record(OutcomeKind::Reopened, &error.to_string(), None, None)?;
+                record(
+                    OutcomeKind::Reopened,
+                    &error.to_string(),
+                    None,
+                    None,
+                    Vec::new(),
+                )?;
                 self.count_error(Some(id), &error).await;
             }
         }
@@ -535,6 +564,7 @@ impl Service {
             cost_usd,
             pr: None,
             started_at: None,
+            gate_costs: Vec::new(),
         })
     }
 
@@ -583,6 +613,7 @@ impl Service {
                 tokens: self.config.budget.tokens,
             },
             pr: None,
+            gate_costs: Vec::new(),
         }
     }
 

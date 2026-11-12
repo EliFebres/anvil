@@ -88,11 +88,40 @@ pub enum Command {
         #[command(subcommand)]
         command: RulesCommand,
     },
+    /// Create a project in an empty directory from a template saved with `anvil template save`.
+    New {
+        /// The template name, from `~/.anvil/templates`.
+        template: String,
+        /// The project directory; created when missing, otherwise it must be empty.
+        dir: std::path::PathBuf,
+    },
+    /// Save directories as project templates under `~/.anvil/templates`.
+    Template {
+        /// Which template action to take.
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
+    /// Work with what anvil remembers about you.
+    Memory {
+        /// Which memory action to take.
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
     /// Summarize this project's telemetry: sessions, completion rate, tokens and cost.
     Stats {
         /// How far back to look: a number followed by m, h, d or w.
         #[arg(long, default_value = "7d")]
         since: String,
+    },
+    /// List this project's sessions, newest first: state, loop state, age, spend, task, id.
+    /// A session that says `working` but whose process is gone shows as `stale`.
+    Status {
+        /// Print a JSON array instead of lines.
+        #[arg(long)]
+        json: bool,
+        /// Include every project that has run a session.
+        #[arg(long)]
+        all: bool,
     },
     /// Download the latest release for this platform, verify its SHA256, swap the binary
     /// and print the changes since the installed version.
@@ -107,6 +136,32 @@ pub enum Command {
         #[command(subcommand)]
         command: TicketCommand,
     },
+}
+
+/// Subcommands under `anvil template`.
+#[derive(Debug, Subcommand)]
+pub enum TemplateCommand {
+    /// Copy a directory into `~/.anvil/templates/<name>`, honoring `.gitignore` and skipping `.git/`.
+    Save {
+        /// The template name: a-z, 0-9, `-` and `_`.
+        name: String,
+        /// The directory to save; the current one by default.
+        dir: Option<std::path::PathBuf>,
+        /// One line saying what the template is for.
+        #[arg(long)]
+        description: Option<String>,
+        /// Replace a template of the same name.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+/// Subcommands under `anvil memory`.
+#[derive(Debug, Subcommand)]
+pub enum MemoryCommand {
+    /// Find files you edited after anvil wrote them and propose rules from the changes; you
+    /// keep or drop each one, and nothing reaches `rules.toml` until you keep it.
+    Learn,
 }
 
 /// Subcommands under `anvil ticket`.

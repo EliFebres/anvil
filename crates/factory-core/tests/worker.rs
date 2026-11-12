@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use anvil_types::ticket::dirs;
 use anvil_types::{FactoryConfig, Priority, Ticket, TicketKind, TicketStatus};
-use factory_core::fakes::{FakeEvalGate, FakeSwarm, LocalHost, ScriptedImplementer, ScriptedRun};
+use factory_core::fakes::{
+    CallLog, FakeEvalGate, FakeSwarm, LocalHost, ScriptedImplementer, ScriptedRun,
+};
 use factory_core::{GateB, Git, Outcome, TicketQueue, TicketWorker, Worker, WorkerDeps};
 use support::{World, git, have_git, ticket};
 
@@ -46,6 +48,18 @@ impl Harness {
         swarm: FakeSwarm,
         clock: factory_core::worker::InstantClock,
     ) -> Self {
+        let config: FactoryConfig =
+            toml::from_str(&FactoryConfig::template("owner/repo")).expect("template");
+        Self::with_config(implementer, eval, swarm, clock, config).await
+    }
+
+    async fn with_config(
+        implementer: ScriptedImplementer,
+        eval: FakeEvalGate,
+        swarm: FakeSwarm,
+        clock: factory_core::worker::InstantClock,
+        config: FactoryConfig,
+    ) -> Self {
         let world = World::new();
         let queue = world.queue().await;
         let t = ticket(Priority::P1, "2026-10-01T00:00:00Z", TicketKind::Skill);
@@ -60,8 +74,6 @@ impl Harness {
             &world.remote,
             &world.dir.path().join("scratch"),
         ));
-        let config: FactoryConfig =
-            toml::from_str(&FactoryConfig::template("owner/repo")).expect("template");
         let worker = TicketWorker::new(WorkerDeps {
             repo: Git::new(&world.factory),
             remote: "origin".to_owned(),
@@ -144,7 +156,7 @@ async fn a_clean_ticket_goes_from_worktree_to_squash_merge() {
     )
     .await;
     let outcome = h.work().await;
-    let Outcome::Merged { pr, cost_usd } = &outcome else {
+    let Outcome::Merged { pr, cost_usd, .. } = &outcome else {
         panic!("{outcome:?}");
     };
     assert_eq!(*pr, 1);
@@ -269,14 +281,14 @@ async fn review_changes_buy_one_more_round_and_the_second_approval_merges() {
     let outcome = h.work().await;
     assert!(matches!(outcome, Outcome::Merged { .. }), "{outcome:?}");
     assert_eq!(h.implementer.runs(), 2);
-    assert_eq!(h.eval.calls(), 2, "all gates re-run after changes");
+    assert_eq!(
+        h.eval.calls(),
+        1,
+        "a change the review sent back never pays for gate B"
+    );
     assert_eq!(h.swarm.inputs().len(), 2);
     let tasks = h.implementer.tasks();
-    assert!(
-        tasks[1].contains("## Review findings to address"),
-        "{}",
-        tasks[1]
-    );
+    assert!(tasks[1].contains("## Review findings"), "{}", tasks[1]);
     assert!(tasks[1].contains("`max_results` is never applied"));
     let inputs = h.swarm.inputs();
     assert!(inputs[0].earlier_findings.is_empty());
@@ -331,7 +343,11 @@ async fn gate_b_regressions_reject_and_a_missing_baseline_pauses() {
     assert!(reason.contains("gate B"), "{reason}");
     assert!(reason.contains("rs-grep, py-cli"), "{reason}");
     assert!(notes.contains("## gate B: fail"));
-    assert_eq!(h.swarm.inputs().len(), 0, "the review never ran");
+    assert_eq!(
+        h.swarm.inputs().len(),
+        2,
+        "the review runs before gate B, on both attempts"
+    );
     assert_eq!(h.eval.calls(), 2, "one retry after the first failure");
     let tasks = h.implementer.tasks();
     assert!(
@@ -659,4 +675,218 @@ async fn minor_findings_are_posted_as_a_review_and_denied_hosts_land_in_the_note
     assert_eq!(inline.len(), 1);
     assert_eq!(inline[0].path, "skills/hello/SKILL.md");
     assert!(body.contains("nothing to delete"), "{body}");
+}
+
+fn gate_config(paths: &[&str]) -> FactoryConfig {
+    let mut config: FactoryConfig =
+        toml::from_str(&FactoryConfig::template("owner/repo")).expect("template");
+    config.eval_gate = Some(anvil_types::factory_config::EvalGateConfig {
+        paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+    });
+    config
+}
+
+#[tokio::test]
+async fn gate_b_runs_once_after_the_approving_review_even_when_round_one_asked_for_changes() {
+    if !have_git() {
+        return;
+    }
+    let log = CallLog::default();
+    let h = Harness::new(
+        ScriptedImplementer::default().with_log(log.clone()),
+        FakeEvalGate::default().with_log(log.clone()),
+        FakeSwarm::scripted(vec![FakeSwarm::changes("a"), FakeSwarm::approved()])
+            .with_log(log.clone()),
+        clock(usize::MAX),
+    )
+    .await;
+    assert!(matches!(h.work().await, Outcome::Merged { .. }));
+    assert_eq!(h.eval.calls(), 1);
+    assert_eq!(h.implementer.builds(), 1);
+    assert_eq!(
+        log.entries(),
+        [
+            "run", "check", "review", "run", "check", "review", "build", "eval"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn gate_b_failing_once_sends_the_new_diff_through_a_and_c_before_b_again() {
+    if !have_git() {
+        return;
+    }
+    let log = CallLog::default();
+    let h = Harness::new(
+        ScriptedImplementer::default().with_log(log.clone()),
+        FakeEvalGate::scripted(vec![
+            GateB::Failed(FakeEvalGate::report(&["rs-grep", "py-cli"])),
+            GateB::Passed(FakeEvalGate::report(&[])),
+        ])
+        .with_log(log.clone()),
+        FakeSwarm::default().with_log(log.clone()),
+        clock(usize::MAX),
+    )
+    .await;
+    assert!(matches!(h.work().await, Outcome::Merged { .. }));
+    assert_eq!(
+        log.entries(),
+        [
+            "run", "check", "review", "build", "eval", "run", "check", "review", "build", "eval"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn gate_b_is_skipped_when_no_changed_path_matches_eval_gate_paths() {
+    if !have_git() {
+        return;
+    }
+    for path in ["docs/x.md", "crates/factory-core/src/y.rs"] {
+        let h = Harness::with_config(
+            ScriptedImplementer::default()
+                .with_runs(vec![ScriptedRun::done(&[(path, "x\n")], 1000)]),
+            FakeEvalGate::default(),
+            FakeSwarm::default(),
+            clock(usize::MAX),
+            gate_config(&["crates/anvil-core/**"]),
+        )
+        .await;
+        let outcome = h.work().await;
+        assert!(
+            matches!(outcome, Outcome::Merged { .. } | Outcome::NeedsHuman { .. }),
+            "{path}: {outcome:?}"
+        );
+        assert_eq!(h.eval.calls(), 0, "{path}");
+        assert_eq!(h.implementer.builds(), 0, "{path}");
+        let body = &h.host.recorder().pulls()[0].body;
+        assert!(
+            body.contains("| B: eval | skipped | no changed path matches [eval_gate] paths |"),
+            "{body}"
+        );
+        let gates = body.find("| A: just check").expect("A");
+        let review = body.find("| C: review").expect("C");
+        let eval = body.find("| B: eval").expect("B");
+        assert!(gates < review && review < eval, "run order A, C, B: {body}");
+    }
+}
+
+#[tokio::test]
+async fn gate_b_runs_when_a_changed_path_matches_eval_gate_paths() {
+    if !have_git() {
+        return;
+    }
+    let h = Harness::with_config(
+        ScriptedImplementer::default().with_runs(vec![ScriptedRun::done(
+            &[("crates/anvil-core/src/x.rs", "pub fn x() {}\n")],
+            1000,
+        )]),
+        FakeEvalGate::default(),
+        FakeSwarm::default(),
+        clock(usize::MAX),
+        gate_config(&["crates/anvil-core/**"]),
+    )
+    .await;
+    let outcome = h.work().await;
+    assert!(
+        matches!(outcome, Outcome::Merged { .. } | Outcome::NeedsHuman { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(h.eval.calls(), 1);
+    assert_eq!(h.implementer.builds(), 1);
+    let body = &h.host.recorder().pulls()[0].body;
+    assert!(body.contains("| B: eval | pass |"), "{body}");
+}
+
+#[tokio::test]
+async fn an_unreachable_reviewer_pauses_without_an_implementer_run_or_a_pull_request() {
+    if !have_git() {
+        return;
+    }
+    let h = Harness::new(
+        ScriptedImplementer::default(),
+        FakeEvalGate::default(),
+        FakeSwarm::scripted(vec![FakeSwarm::failed(&["openai/correctness"])]),
+        clock(usize::MAX),
+    )
+    .await;
+    let outcome = h.work().await;
+    let Outcome::Paused { reason } = &outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(reason.contains("openai/correctness"), "{reason}");
+    assert!(reason.contains("no implementer run was spent"), "{reason}");
+    assert_eq!(h.implementer.runs(), 1, "the implementer never reran");
+    assert_eq!(h.eval.calls(), 0);
+    assert_eq!(h.implementer.builds(), 0);
+    assert!(h.host.recorder().pulls().is_empty());
+}
+
+#[tokio::test]
+async fn a_major_that_only_a_non_blocking_reviewer_found_still_merges() {
+    if !have_git() {
+        return;
+    }
+    let mut report = FakeSwarm::approved();
+    report.minors = vec![factory_core::MinorFinding {
+        file: None,
+        line: None,
+        anchored: false,
+        body: "**major** (openai/style): rename `x`".to_owned(),
+    }];
+    let h = Harness::new(
+        ScriptedImplementer::default(),
+        FakeEvalGate::default(),
+        FakeSwarm::scripted(vec![report]),
+        clock(usize::MAX),
+    )
+    .await;
+    assert!(matches!(h.work().await, Outcome::Merged { .. }));
+    assert_eq!(h.implementer.runs(), 1);
+    let pulls = h.host.recorder().pulls();
+    assert!(pulls[0].reviews[0].0.contains("rename `x`"));
+}
+
+#[tokio::test]
+async fn every_step_records_its_cost_and_a_fix_round_gets_a_narrow_task() {
+    if !have_git() {
+        return;
+    }
+    let h = Harness::new(
+        ScriptedImplementer::default(),
+        FakeEvalGate::default(),
+        FakeSwarm::scripted(vec![
+            FakeSwarm::changes("`max_results` is never applied"),
+            FakeSwarm::approved(),
+        ]),
+        clock(usize::MAX),
+    )
+    .await;
+    let Outcome::Merged { gate_costs, .. } = h.work().await else {
+        panic!("not merged");
+    };
+    let steps: Vec<(&str, Option<f64>, Option<u64>)> = gate_costs
+        .iter()
+        .map(|c| (c.step.as_str(), c.cost_usd, c.weighted_tokens))
+        .collect();
+    assert_eq!(
+        steps,
+        vec![
+            ("implementer run 1", Some(0.01), Some(1000)),
+            ("C: review round 1", Some(0.25), Some(250)),
+            ("implementer run 2", Some(0.01), Some(1000)),
+            ("C: review round 2", Some(0.25), Some(250)),
+            ("B: eval", Some(0.5), Some(500)),
+        ]
+    );
+    let body = &h.host.recorder().pulls()[0].body;
+    assert!(body.contains("## Cost"), "{body}");
+    assert!(body.contains("| B: eval | $0.50 | 500 |"), "{body}");
+
+    let fix = &h.implementer.tasks()[1];
+    assert!(fix.contains("`max_results` is never applied"), "{fix}");
+    assert!(fix.contains("skills/hello/SKILL.md"), "{fix}");
+    assert!(!fix.contains(factory_core::render::INSTRUCTION), "{fix}");
+    assert!(!fix.contains(h.ticket.spec.trim()), "{fix}");
+    assert!(!fix.contains("## Acceptance"), "{fix}");
 }

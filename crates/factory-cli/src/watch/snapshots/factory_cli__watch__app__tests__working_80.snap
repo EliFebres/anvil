@@ -1,6 +1,5 @@
 ---
 source: crates/factory-cli/src/watch/app.rs
-assertion_line: 309
 expression: "draw(&app_for(\"working\"), 80, 24).backend()"
 ---
 " factory · minipc · running                       1 merged · 0 rejected · $4.71 "
@@ -12,7 +11,7 @@ expression: "draw(&app_for(\"working\"), 80, 24).backend()"
 "╰──────────────────────────────────────────────────────────────────────────────╯"
 "╭ pipeline ────────────────────────────────────────────────────────────────────╮"
 "│ ● ───── ● ──────── ◔ ───────── ○ ────── ○ ────── ○ ────── ○ ───── ○          │"
-"│ claim   worktree   implement   gate A   gate B   gate C   PR      merge      │"
+"│ claim   worktree   implement   gate A   gate C   gate B   PR      merge      │"
 "│ 2s      4s         22:41 · build                                             │"
 "│                    run 1 of 2 · review round 0 of 2                          │"
 "╰──────────────────────────────────────────────────────────────────────────────╯"

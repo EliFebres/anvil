@@ -3,6 +3,8 @@
 
 use anvil_types::Ticket;
 
+use crate::ports::GateCost;
+
 /// The standing instruction every task ends with.
 pub const INSTRUCTION: &str = "Add or update tests for every acceptance item; do not touch files outside the crates the spec names unless a shared type in anvil-types must change, and if so say why in the PR body.";
 
@@ -80,17 +82,59 @@ pub fn append_plan_retry(task: &str) -> String {
     )
 }
 
-/// Appends the review findings to the task for the next implementer round.
+/// The task for a fix round: a fresh session that only addresses the review findings.
+///
+/// It leaves out the ticket's spec and acceptance list on purpose; the change
+/// is already committed, and re-reading the spec invites a re-implementation.
 ///
 /// # Arguments
 ///
-/// * `task` - The task so far.
-/// * `findings` - The findings as Markdown.
-pub fn append_review_findings(task: &str, findings: &str) -> String {
-    format!(
-        "{task}\n## Review findings to address\n\nThe review swarm asked for changes. Address every finding below; the full gate sequence runs again.\n\n{}\n",
+/// * `ticket` - The ticket, for its title.
+/// * `changed_files` - The files the branch changes against `main`.
+/// * `findings` - The blocking findings as Markdown.
+///
+/// # Returns
+///
+/// Markdown that ends with [`CHECK_INSTRUCTION`].
+pub fn fix_task(ticket: &Ticket, changed_files: &[String], findings: &str) -> String {
+    let mut text = format!(
+        "# Address review findings\n\nThe change for ticket \"{}\" is already committed on this branch. It touches:\n\n",
+        ticket.title
+    );
+    for file in changed_files {
+        text.push_str(&format!("- `{file}`\n"));
+    }
+    text.push_str(&format!(
+        "\nThe review swarm asked for changes. Address each finding below and nothing else: do not re-plan or re-implement the ticket.\n\n## Review findings\n\n{}\n\n{CHECK_INSTRUCTION}\n",
         findings.trim()
-    )
+    ));
+    text
+}
+
+/// How a gate ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateResult {
+    /// The gate passed.
+    Pass,
+    /// The gate failed.
+    Fail,
+    /// The gate did not run because it could not apply.
+    Skipped,
+}
+
+impl GateResult {
+    /// The word in the pull request body.
+    ///
+    /// # Returns
+    ///
+    /// `pass`, `fail` or `skipped`.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Skipped => "skipped",
+        }
+    }
 }
 
 /// One gate's result for the pull request body.
@@ -98,19 +142,21 @@ pub fn append_review_findings(task: &str, findings: &str) -> String {
 pub struct GateRecord {
     /// `A: just check`, `B: eval`, `C: review`.
     pub name: String,
-    /// Whether it passed.
-    pub passed: bool,
+    /// How it ended.
+    pub result: GateResult,
     /// One line of detail.
     pub detail: String,
 }
 
 /// Everything the pull request body shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PullBody<'a> {
     /// The ticket.
     pub ticket: &'a Ticket,
-    /// The gates, in order.
+    /// The gates, in the order they ran.
     pub gates: &'a [GateRecord],
+    /// What each step cost, in the order they ran.
+    pub costs: &'a [GateCost],
     /// The eval compare table and gate line, as Markdown.
     pub eval_summary: Option<&'a str>,
     /// Every reviewer and its verdict word.
@@ -152,12 +198,25 @@ pub fn pull_body(body: &PullBody<'_>) -> String {
     }
     text.push_str("\n## Gates\n\n| gate | result | detail |\n|---|---|---|\n");
     for gate in body.gates {
-        let word = if gate.passed { "pass" } else { "fail" };
         text.push_str(&format!(
-            "| {} | {word} | {} |\n",
+            "| {} | {} | {} |\n",
             gate.name,
+            gate.result.word(),
             gate.detail.replace('|', "\\|")
         ));
+    }
+    if !body.costs.is_empty() {
+        text.push_str("\n## Cost\n\n| step | cost | weighted tokens |\n|---|---|---|\n");
+        for cost in body.costs {
+            text.push_str(&format!(
+                "| {} | {} | {} |\n",
+                cost.step,
+                cost.cost_usd
+                    .map_or_else(|| "unknown".to_owned(), |usd| format!("${usd:.2}")),
+                cost.weighted_tokens
+                    .map_or_else(|| "-".to_owned(), |tokens| tokens.to_string())
+            ));
+        }
     }
     if let Some(summary) = body.eval_summary {
         text.push_str(&format!("\n## Eval against main\n\n{}\n", summary.trim()));
@@ -271,14 +330,26 @@ mod tests {
     }
 
     #[test]
-    fn task_with_a_check_failure_and_findings_is_stable() {
-        let text = append_check_failure(
-            &task(&sample()),
-            "error[E0425]: cannot find value `x`\n --> src/lib.rs:3:5\n",
+    fn fix_task_with_a_check_failure_is_stable_and_narrow() {
+        let findings =
+            "- **major** (openai/correctness) `src/lib.rs:3`: `max_results` is never applied\n";
+        let text = fix_task(
+            &sample(),
+            &["crates/anvil-core/src/lib.rs".to_owned()],
+            findings,
         );
-        let text = append_review_findings(
+        assert!(text.ends_with(&format!("{CHECK_INSTRUCTION}\n")), "{text}");
+        for left_out in [
+            INSTRUCTION,
+            "## Acceptance",
+            "## Spec",
+            "max_results` (default 50)",
+        ] {
+            assert!(!text.contains(left_out), "{left_out}: {text}");
+        }
+        let text = append_check_failure(
             &text,
-            "- **major** (openai/correctness) `src/lib.rs:3`: `max_results` is never applied\n",
+            "error[E0425]: cannot find value `x`\n --> src/lib.rs:3:5\n",
         );
         insta::assert_snapshot!(text);
     }
@@ -288,18 +359,30 @@ mod tests {
         let gates = [
             GateRecord {
                 name: "A: just check".to_owned(),
-                passed: true,
+                result: GateResult::Pass,
                 detail: "passed on attempt 1".to_owned(),
             },
             GateRecord {
-                name: "B: eval".to_owned(),
-                passed: true,
-                detail: "0 regressions | 1 fixed".to_owned(),
+                name: "C: review".to_owned(),
+                result: GateResult::Pass,
+                detail: "approve: no blocking findings".to_owned(),
             },
             GateRecord {
-                name: "C: review".to_owned(),
-                passed: true,
-                detail: "approve: no blocking findings".to_owned(),
+                name: "B: eval".to_owned(),
+                result: GateResult::Skipped,
+                detail: "no changed path matches [eval_gate] paths".to_owned(),
+            },
+        ];
+        let costs = [
+            GateCost {
+                step: "implementer run 1".to_owned(),
+                cost_usd: Some(0.01),
+                weighted_tokens: Some(1000),
+            },
+            GateCost {
+                step: "C: review round 1".to_owned(),
+                cost_usd: None,
+                weighted_tokens: None,
             },
         ];
         let verdicts = [
@@ -310,6 +393,7 @@ mod tests {
         let body = pull_body(&PullBody {
             ticket: &sample(),
             gates: &gates,
+            costs: &costs,
             eval_summary: Some(
                 "```\ntask          main  branch\nrs-grep       PASS  PASS\ngate: PASS (0 regressions)\n```",
             ),
@@ -318,7 +402,9 @@ mod tests {
         });
         insta::assert_snapshot!(body);
         assert!(body.contains("- [ ] cargo test -p anvil-core passes"));
-        assert!(body.contains("| B: eval | pass | 0 regressions \\| 1 fixed |"));
+        assert!(body.contains("| B: eval | skipped | no changed path matches [eval_gate] paths |"));
+        assert!(body.contains("| implementer run 1 | $0.01 | 1000 |"));
+        assert!(body.contains("| C: review round 1 | unknown | - |"));
     }
 
     #[test]

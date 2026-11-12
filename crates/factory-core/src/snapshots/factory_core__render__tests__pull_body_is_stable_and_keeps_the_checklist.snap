@@ -28,8 +28,15 @@ Tool `grep` with `pattern`, `path`, `max_results` (default 50) in anvil-core.
 | gate | result | detail |
 |---|---|---|
 | A: just check | pass | passed on attempt 1 |
-| B: eval | pass | 0 regressions \| 1 fixed |
 | C: review | pass | approve: no blocking findings |
+| B: eval | skipped | no changed path matches [eval_gate] paths |
+
+## Cost
+
+| step | cost | weighted tokens |
+|---|---|---|
+| implementer run 1 | $0.01 | 1000 |
+| C: review round 1 | unknown | - |
 
 ## Eval against main
 

@@ -9,10 +9,13 @@ coder = "anthropic"
 # planner = "anthropic"
 
 # Each reviewer reads the pull request with one stance: correctness, safety,
-# style or simplicity. Reviewers must run a different model than the coder (a
-# different base URL or a different model name), so no model reviews its own
-# work, and the blocking reviewers must run at least two different models
-# between them, so no single model's blind spots decide a review.
+# style or simplicity. Only correctness and safety block by default; findings
+# of a non-blocking reviewer are posted as comments and never send a change
+# back. Set `blocking = true` or `false` on a reviewer to override. Reviewers
+# must run a different model than the coder (a different base URL or a
+# different model name), so no model reviews its own work, and the blocking
+# reviewers must run at least two different models between them, so no single
+# model's blind spots decide a review.
 [[reviewers]]
 provider = "openai"
 stance = "correctness"
@@ -62,6 +65,21 @@ egress_allow = ["github.com", "index.crates.io", "static.crates.io"]
 wall_clock_minutes = 150
 tokens = 9000000
 review_rounds = 3
+
+# Gate B (the release build and the eval) runs only when a changed path matches
+# one of these globs: the paths that can change how anvil behaves. A diff that
+# touches none of them skips both and the pull request says so. Without this
+# table Gate B always runs.
+[eval_gate]
+paths = [
+  "crates/anvil-*/**",
+  "crates/eval/**",
+  "skills/**",
+  "eval/tasks/**",
+  "Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+]
 
 # Paths the factory never merges on its own: a pull request touching one is
 # labelled `needs-human` and its ticket waits. Globs match repository-relative
