@@ -2811,7 +2811,12 @@ mod tests {
             "allow = [\"write_file\"]",
         );
         assert_eq!(agent.run().await.status, Status::Done);
-        insta::assert_json_snapshot!(h.coder.requests());
+        // The prompt files check out with CRLF on Windows; the snapshot must
+        // be the same on every platform.
+        let requests = serde_json::to_string_pretty(&h.coder.requests())
+            .expect("requests serialize")
+            .replace("\\r\\n", "\\n");
+        insta::assert_snapshot!(requests);
     }
 
     /// Gives the next agent a planner that replays `scripts`.

@@ -1,5 +1,6 @@
 //! `anvil`: the CLI coding agent. Argument parsing and wiring only.
 
+mod build;
 mod chat;
 mod cli;
 mod commands;
@@ -32,7 +33,9 @@ use anvil_types::config::load_profile;
 use anvil_types::dotenv;
 use clap::Parser;
 
-use crate::cli::{Cli, Command, CompatCommand, ConfigCommand, MemoryCommand, TemplateCommand};
+use crate::cli::{
+    BuildCommand, Cli, Command, CompatCommand, ConfigCommand, MemoryCommand, TemplateCommand,
+};
 use crate::frontend::UiKind;
 use crate::wiring::{Wiring, home_dir};
 
@@ -190,6 +193,16 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
                 fix_github,
             };
             doctor::run(&wiring, options).await
+        }
+        Some(Command::Build(args)) => {
+            if let Some(BuildCommand::Status { id }) = &args.command {
+                build::status(cwd, id.as_deref())?;
+                return Ok(0);
+            }
+            let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            wiring.allow_tools(&cli.allow_tools)?;
+            wiring.load_mcp().await;
+            build::execute(args, wiring, cli.yes).await
         }
         Some(Command::Chat) => {
             let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
