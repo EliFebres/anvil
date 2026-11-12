@@ -14,7 +14,7 @@ ssh nuc 'bash -s' < deploy/nuc/bootstrap.sh
 | `env.template` | The secrets file, copied to `~/.factory/env` with mode 600. The service loads it itself; the unit never names it. |
 | `factory.service` | The systemd user unit `factory install-service` installs. Logs go to journald and `~/.factory/logs/factory.jsonl`. |
 | `Containerfile`, `entrypoint.sh` | The worker image: the Rust toolchain pinned in `rust-toolchain.toml` (read at build time, with its components and the musl target, since the offline container can never download one), `musl-tools`, `just`, `rg`, Python with pytest and pandas, `socat`. The entrypoint bridges the egress proxy's socket to `localhost:3128`. |
-| `anvil-factory.toml` | The `factory` profile anvil runs with inside the container: the coder and reviewer roles, and permissions that allow writes in the worktree and `shell` for cargo, just and git only. The factory reads it from `main`, so a pull request cannot loosen its own permissions. |
+| `anvil-factory.toml` | The `factory` profile anvil runs with inside the container: the coder, optional planner and reviewer roles, and permissions that allow writes in the worktree and `shell` for cargo, just and git only. The factory reads it from `main`, so a pull request cannot loosen its own permissions. |
 
 ## How a ticket moves
 

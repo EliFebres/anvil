@@ -39,7 +39,7 @@ pub struct MachineProbeConfig {
     pub disk_path: PathBuf,
     /// `[providers]` from the anvil configuration.
     pub providers: BTreeMap<String, ProviderConfig>,
-    /// The providers to ping: the coder's and the reviewers'.
+    /// The providers to ping: the coder's, the planner's and the reviewers'.
     pub ping: Vec<String>,
     /// The coder provider, whose context window scales the chart.
     pub coder: Option<String>,

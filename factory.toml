@@ -3,10 +3,15 @@
 
 [roles]
 coder = "anthropic"
+# Optional: a provider that plans, and takes a build round when the coder is
+# stuck. It may be a reviewer's model; the coder may not. Absent, the coder
+# plans.
+# planner = "anthropic"
 
 # Each reviewer reads the pull request with one stance: correctness, safety,
-# style or simplicity. Reviewers must sit on different base URLs from the
-# coder, so no model reviews its own work, and on at least two base URLs
+# style or simplicity. Reviewers must run a different model than the coder (a
+# different base URL or a different model name), so no model reviews its own
+# work, and the blocking reviewers must run at least two different models
 # between them, so no single model's blind spots decide a review.
 [[reviewers]]
 provider = "openai"

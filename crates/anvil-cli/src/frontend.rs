@@ -2,13 +2,15 @@
 //! prompts, or the full-screen UI. The session driver asks the front end
 //! for input, prompts and a console, and never knows which it got.
 
+use std::collections::BTreeMap;
 use std::io::{self, IsTerminal};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anvil_core::agent::{AutoApprove, LoopEvent, PlanGate, State, Status};
+use anvil_core::agent::{AutoApprove, LoopEvent, PlanGate, Role, State, Status};
 use anvil_core::tools::{PermissionPrompt, PromptAnswer, StaticPrompt, ToolHook, ToolRegistry};
 use anvil_memory::{Decision, Proposal};
+use anvil_types::Price;
 use anyhow::Context;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -364,6 +366,7 @@ pub fn session_info(
         model: model_id(wiring, coder),
         context_window: wiring.context_window(),
         price: provider.and_then(|provider| provider.price_per_mtoken),
+        role_prices: role_prices(wiring),
         permission_mode: if yes {
             PermissionMode::Bypass
         } else {
@@ -388,6 +391,32 @@ pub fn session_info(
             std::env::var_os("ANVIL_NO_ANIMATION").is_some(),
         ),
     }
+}
+
+/// Each role's price when a planner is configured, so the UI can price every
+/// turn with the provider that served it; empty otherwise.
+fn role_prices(wiring: &Wiring) -> BTreeMap<Role, Option<Price>> {
+    let roles = &wiring.config.roles;
+    let Some(planner) = roles.planner.as_deref().filter(|name| *name != roles.coder) else {
+        return BTreeMap::new();
+    };
+    let reviewer = roles.reviewer.as_deref().unwrap_or(&roles.coder);
+    [
+        (Role::Planner, planner),
+        (Role::Coder, roles.coder.as_str()),
+        (Role::Reviewer, reviewer),
+        (Role::Summarizer, roles.summarizer.as_str()),
+    ]
+    .into_iter()
+    .map(|(role, name)| {
+        let price = wiring
+            .config
+            .providers
+            .get(name)
+            .and_then(|provider| provider.price_per_mtoken);
+        (role, price)
+    })
+    .collect()
 }
 
 /// How many saved sessions the startup screen lists.

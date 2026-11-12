@@ -15,8 +15,8 @@ use crate::check::{self, CheckResult, forward_slashes};
 use crate::error::EvalError;
 use crate::git;
 use crate::results::{
-    AttemptRecord, AttemptStatus, Overheads, RunResult, SCHEMA_VERSION, StateTurns, TaskResult,
-    Totals, Usage,
+    AttemptRecord, AttemptStatus, Overheads, RoleModel, RunResult, SCHEMA_VERSION, StateTurns,
+    TaskResult, Totals, Usage,
 };
 use crate::task::{Task, copy_fixture, load_tasks};
 
@@ -31,6 +31,8 @@ pub struct AttemptOutcome {
     pub provider: Option<String>,
     /// The coder model, when known.
     pub model: Option<String>,
+    /// The provider and model of each role seen.
+    pub roles: BTreeMap<String, RoleModel>,
     /// Tokens used.
     pub tokens: Usage,
     /// Tool calls the session made.
@@ -65,6 +67,7 @@ impl AttemptOutcome {
             session: None,
             provider: None,
             model: None,
+            roles: BTreeMap::new(),
             tokens: Usage::default(),
             tool_calls: 0,
             turns: 0,
@@ -205,6 +208,7 @@ impl EvalRunner for FakeRunner {
                 session: Some("01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
                 provider: Some("fake".to_owned()),
                 model: Some("fake-1".to_owned()),
+                roles: BTreeMap::new(),
                 tokens: Usage {
                     input: 1000,
                     output: 100,
@@ -367,6 +371,12 @@ pub async fn run_with(
         .iter()
         .flat_map(|t| &t.attempts)
         .find_map(|a| a.model.clone());
+    let mut roles: BTreeMap<String, RoleModel> = BTreeMap::new();
+    for attempt in task_results.iter().flat_map(|t| &t.attempts) {
+        for (role, served) in &attempt.roles {
+            roles.entry(role.clone()).or_insert_with(|| served.clone());
+        }
+    }
     let totals = Totals::compute(
         &task_results,
         options.repeat,
@@ -379,6 +389,7 @@ pub async fn run_with(
         git_sha,
         provider: options.provider.clone(),
         model,
+        roles,
         runner: shared.runner.label(),
         repeat: options.repeat,
         parallel: options.parallel,
@@ -506,6 +517,7 @@ fn record_of(
         session: outcome.session,
         provider: outcome.provider,
         model: outcome.model,
+        roles: outcome.roles,
         tokens: outcome.tokens,
         tool_calls: outcome.tool_calls,
         turns: outcome.turns,

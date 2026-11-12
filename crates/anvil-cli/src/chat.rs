@@ -218,10 +218,15 @@ impl ChatSession<'_> {
                 }
                 Err(error) => self.console.error(format!("error: {error:#}")),
             },
-            ("model", None) => self.console.notice(format!(
-                "coder is `{}`; usage: /model <name>",
-                self.coder_name
-            )),
+            ("model", None) => self
+                .console
+                .notice(match &self.wiring.config.roles.planner {
+                    Some(planner) => format!(
+                        "coder is `{}`, planner is `{planner}`; usage: /model <name>",
+                        self.coder_name
+                    ),
+                    None => format!("coder is `{}`; usage: /model <name>", self.coder_name),
+                }),
             ("cost", _) => {
                 let budget = self
                     .wiring

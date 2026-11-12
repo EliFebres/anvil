@@ -7,7 +7,7 @@ use anvil_types::Price;
 use chrono::Duration;
 
 use crate::error::TelemetryError;
-use crate::record::{Record, RecordKind, SessionOutcome, ToolOutcomeKind};
+use crate::record::{Record, RecordKind, SessionOutcome, Tokens, ToolOutcomeKind};
 
 /// How many tools and failure classes the summary lists.
 const TOP_N: usize = 10;
@@ -98,6 +98,9 @@ pub struct Stats {
     pub turns: usize,
     /// Token use per provider.
     pub providers: BTreeMap<String, ProviderStats>,
+    /// Token use and cost per role, each turn priced by the provider that
+    /// served it. Empty for records written before roles were recorded.
+    pub roles: BTreeMap<String, ProviderStats>,
     /// The most called tools, most calls first.
     pub tools: Vec<ToolStats>,
     /// The most common failure classes, most common first.
@@ -120,18 +123,32 @@ impl Stats {
         let mut sessions: BTreeMap<&str, Option<&SessionOutcome>> = BTreeMap::new();
         let mut tools: BTreeMap<&str, ToolStats> = BTreeMap::new();
         let mut failures: BTreeMap<String, usize> = BTreeMap::new();
+        let mut role_costs: BTreeMap<String, Option<f64>> = BTreeMap::new();
         for record in records {
             let session = sessions.entry(&record.session).or_default();
             match &record.kind {
                 RecordKind::SessionEnded { outcome } => *session = Some(outcome),
                 RecordKind::Turn {
-                    provider, tokens, ..
+                    provider,
+                    tokens,
+                    role,
+                    ..
                 } => {
                     let entry = stats.providers.entry(provider.clone()).or_default();
                     entry.turns += 1;
                     entry.input += tokens.input;
                     entry.output += tokens.output;
                     entry.cached += tokens.cached;
+                    if let Some(role) = role {
+                        add_to_role(
+                            &mut stats.roles,
+                            &mut role_costs,
+                            prices,
+                            role,
+                            provider,
+                            tokens,
+                        );
+                    }
                 }
                 RecordKind::Compacted {
                     provider,
@@ -143,6 +160,14 @@ impl Stats {
                     entry.input += tokens.input;
                     entry.output += tokens.output;
                     entry.cached += tokens.cached;
+                    add_to_role(
+                        &mut stats.roles,
+                        &mut role_costs,
+                        prices,
+                        "summarizer",
+                        provider,
+                        tokens,
+                    );
                 }
                 RecordKind::ToolResult { name, outcome, .. } => {
                     let entry = tools.entry(name).or_insert_with(|| ToolStats {
@@ -183,6 +208,11 @@ impl Stats {
                 .flatten()
                 .map(|price| price.cost(entry.input, entry.output, entry.cached));
         }
+        for (role, cost) in role_costs {
+            if let Some(entry) = stats.roles.get_mut(&role) {
+                entry.cost = cost;
+            }
+        }
         stats.tools = tools.into_values().collect();
         stats
             .tools
@@ -205,6 +235,34 @@ impl Stats {
         let runs = self.done + self.failed;
         (runs > 0).then(|| self.done as f64 / runs as f64)
     }
+}
+
+/// Adds one completion to a role's totals, priced with the price of the
+/// provider that served it; a provider without a price makes the role's
+/// cost unknown.
+fn add_to_role(
+    roles: &mut BTreeMap<String, ProviderStats>,
+    costs: &mut BTreeMap<String, Option<f64>>,
+    prices: &BTreeMap<String, Option<Price>>,
+    role: &str,
+    provider: &str,
+    tokens: &Tokens,
+) {
+    let entry = roles.entry(role.to_owned()).or_default();
+    entry.turns += 1;
+    entry.input += tokens.input;
+    entry.output += tokens.output;
+    entry.cached += tokens.cached;
+    let cost = prices
+        .get(provider)
+        .copied()
+        .flatten()
+        .map(|price| price.cost(tokens.input, tokens.output, tokens.cached));
+    let total = costs.entry(role.to_owned()).or_insert(Some(0.0));
+    *total = match (*total, cost) {
+        (Some(sum), Some(cost)) => Some(sum + cost),
+        _ => None,
+    };
 }
 
 impl fmt::Display for Stats {
@@ -254,6 +312,24 @@ impl fmt::Display for Stats {
         if self.providers.is_empty() {
             writeln!(f, "(no completions)")?;
         }
+        if self.roles.contains_key("planner") {
+            writeln!(
+                f,
+                "
+role            turns   input      output     cached     cost"
+            )?;
+            for (name, p) in &self.roles {
+                let cost = p
+                    .cost
+                    .map(|cost| format!("${cost:.2}"))
+                    .unwrap_or_else(|| "n/a".to_owned());
+                writeln!(
+                    f,
+                    "{name:<15} {:<7} {:<10} {:<10} {:<10} {cost}",
+                    p.turns, p.input, p.output, p.cached
+                )?;
+            }
+        }
         writeln!(f, "\ntop tools")?;
         for tool in &self.tools {
             writeln!(
@@ -297,6 +373,7 @@ mod tests {
             session,
             RecordKind::Turn {
                 state: "build".to_owned(),
+                role: None,
                 provider: provider.to_owned(),
                 model: "m".to_owned(),
                 tokens: Tokens {
@@ -309,6 +386,60 @@ mod tests {
                 stop_reason: StopKind::EndTurn,
             },
         )
+    }
+
+    fn role_turn(role: &str, provider: &str, input: u64) -> Record {
+        let mut record = turn("a", provider, input, 0, 0);
+        if let RecordKind::Turn { role: slot, .. } = &mut record.kind {
+            *slot = Some(role.to_owned());
+        }
+        record
+    }
+
+    #[test]
+    fn each_role_is_priced_by_the_provider_that_served_it() {
+        let prices = BTreeMap::from([
+            (
+                "dear".to_owned(),
+                Some(Price {
+                    input: 15.0,
+                    output: 75.0,
+                    cached: None,
+                }),
+            ),
+            (
+                "cheap".to_owned(),
+                Some(Price {
+                    input: 1.0,
+                    output: 5.0,
+                    cached: None,
+                }),
+            ),
+        ]);
+        let records = vec![
+            role_turn("planner", "dear", 1_000_000),
+            role_turn("coder", "cheap", 1_000_000),
+            role_turn("coder", "cheap", 1_000_000),
+        ];
+        let stats = Stats::compute(&records, &prices);
+        assert_eq!(stats.roles["planner"].turns, 1);
+        assert_eq!(stats.roles["planner"].cost, Some(15.0));
+        assert_eq!(stats.roles["coder"].turns, 2);
+        assert_eq!(stats.roles["coder"].cost, Some(2.0));
+        let text = stats.to_string();
+        assert!(text.contains("role            turns"), "{text}");
+        assert!(text.contains("planner"), "{text}");
+
+        let without_planner = Stats::compute(&records[1..], &prices).to_string();
+        assert!(!without_planner.contains("role            turns"));
+    }
+
+    #[test]
+    fn records_without_roles_print_no_role_table() {
+        let records = vec![turn("a", "m", 100, 10, 0)];
+        let stats = Stats::compute(&records, &BTreeMap::new());
+        assert!(stats.roles.is_empty());
+        assert!(!stats.to_string().contains("role            turns"));
     }
 
     #[test]

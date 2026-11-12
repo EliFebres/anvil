@@ -18,6 +18,7 @@ fn attempt(index: u32, passed: bool) -> AttemptRecord {
         session: None,
         provider: Some("fake".to_owned()),
         model: Some("fake-1".to_owned()),
+        roles: Default::default(),
         tokens: Usage {
             input: 10,
             output: 1,
@@ -57,6 +58,7 @@ fn result(sha: &str, outcomes: &[(&str, &[bool])]) -> RunResult {
         git_sha: sha.to_owned(),
         provider: Some("fake".to_owned()),
         model: Some("fake-1".to_owned()),
+        roles: Default::default(),
         runner: "fake".to_owned(),
         repeat: 3,
         parallel: 1,

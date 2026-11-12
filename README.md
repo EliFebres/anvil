@@ -56,7 +56,7 @@ Three kinds of state live under `~/.anvil/`, all plain files you can edit:
 
 - **Rules** (`rules.toml`): standing coding rules. They enter every system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
 - **Memory** (`memory/`): one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`, loaded under a token cap. At the end of a session the summarizer proposes new facts and you keep or drop each one. A run that finished with no reviewer rejection, no failed check and a diff under 50 lines has nothing new to teach, so it skips that turn and says so; `[memory] always_summarize = true` runs it every time.
-- **Telemetry** (`telemetry/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates. A classifier turns them into signals, and `anvil ticket draft` has the summarizer write ticket drafts from the signals alone.
+- **Telemetry** (`telemetry/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates, and with a planner configured adds a per-role table, each role priced by its own provider. A classifier turns them into signals, and `anvil ticket draft` has the summarizer write ticket drafts from the signals alone.
 
 Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, GitHub access, branch protection, tools), `anvil update` (fetch the latest release and swap the binary), `anvil ticket list|show|review|submit|drop`.
 
@@ -69,7 +69,7 @@ How a ticket moves:
 1. `anvil ticket submit` pushes it on a `tickets/<id>` branch. That push is the only thing that ever leaves your machine toward the factory.
 2. The service polls, copies the ticket onto the `factory/state` branch, and claims the highest-priority oldest one when `main` is green.
 3. A worker makes a standalone local clone (`git clone --local`, so the container sees a complete repository) on `factory/<id>` and runs `anvil --yes --profile factory` inside a container with no network, except an allowlisting proxy for the providers, GitHub and the crate registry.
-4. Three gates: `just check` (one retry with the failure appended), the eval harness against the newest result on `main`, and the review swarm (several models, each with one stance: correctness, safety, style, simplicity; none may share a base URL with the coder).
+4. Three gates: `just check` (one retry with the failure appended), the eval harness against the newest result on `main`, and the review swarm (several models, each with one stance: correctness, safety, style, simplicity; none may run the same model as the coder, and the blocking ones span at least two models; `[roles] planner` in `factory.toml` is optional).
 5. A pull request opens with the gate output, the eval table and every verdict. Green CI squash-merges it. A change to a protected path or a new dependency is labelled `needs-human` and the ticket waits.
 
 `factory run` is the loop (`--once` for a single pass), `factory status` shows the queue and the last ten outcomes, `factory pause` and `factory resume` toggle the flag it checks between tickets, `factory review <pr>` runs the swarm by hand, `factory env <NAME>` says where a secret came from without printing it, and `factory update` waits for the ticket in progress, stops the service, pulls `main`, rebuilds the binaries and the worker image, and starts it again (`--now` skips the wait). Per-ticket budgets (wall clock, tokens) and the protected paths live in `factory.toml`.
@@ -128,7 +128,7 @@ This writes `~/.anvil/.env` (API keys), `~/.anvil/config.toml` (providers and ro
 anvil doctor
 ```
 
-Every provider is a `[providers.<name>]` table naming its protocol, base URL, the environment variable that holds its key, the model and its context window; `[roles]` maps `coder`, `summarizer` and `reviewer` onto those names. A project can add `.anvil/config.toml` to override the global file, and `anvil config init` writes a template for either. Keys never live in config: `anvil scan-keys` fails if a tracked file contains one.
+Every provider is a `[providers.<name>]` table naming its protocol, base URL, the environment variable that holds its key, the model and its context window; `[roles]` maps `coder`, `summarizer`, `reviewer` and an optional `planner` (an expensive model that plans, while the coder builds and takes over a round only when the coder is stuck) onto those names. A project can add `.anvil/config.toml` to override the global file, and `anvil config init` writes a template for either. Keys never live in config: `anvil scan-keys` fails if a tracked file contains one.
 
 ## Running
 

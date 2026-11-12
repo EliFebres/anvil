@@ -196,10 +196,15 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
     print!("{}", report.render());
     let roles = &config.roles;
     println!(
-        "roles: coder={} summarizer={} reviewer={}",
+        "roles: coder={} summarizer={} reviewer={}{}",
         roles.coder,
         roles.summarizer,
-        roles.reviewer.as_deref().unwrap_or("(coder)")
+        roles.reviewer.as_deref().unwrap_or("(coder)"),
+        roles
+            .planner
+            .as_deref()
+            .map(|planner| format!(" planner={planner}"))
+            .unwrap_or_default()
     );
     commands::report_skills(wiring)?;
     commands::report_commands(wiring);
@@ -392,7 +397,7 @@ fn report_reviewers(
             "reviewers",
             problem.to_string(),
             format!(
-                "give each reviewer in {FACTORY_FILE} a provider whose base_url differs from the coder's and from the other reviewers'"
+                "give each reviewer in {FACTORY_FILE} a provider that runs a different model than the coder (another base_url or model), with at least two models among the blocking reviewers"
             ),
         ),
         Ok(()) => {

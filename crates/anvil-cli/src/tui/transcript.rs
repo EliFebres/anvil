@@ -313,8 +313,14 @@ impl Transcript {
             LoopEvent::ReasoningDelta(_)
             | LoopEvent::Transition { .. }
             | LoopEvent::PlanWritten { .. }
-            | LoopEvent::PlanUpdated { .. }
-            | LoopEvent::Escalated { .. } => {}
+            | LoopEvent::PlanUpdated { .. } => {}
+            LoopEvent::Escalated { reason, round } => {
+                self.close_model();
+                self.notice(
+                    format!("build round {round} runs on the planner: {reason}"),
+                    Level::Info,
+                );
+            }
             LoopEvent::TurnFinished { .. } => self.close_model(),
             LoopEvent::StateEntered { state, visit } => {
                 self.close_model();
@@ -1633,6 +1639,24 @@ mod tests {
         assert_eq!(
             joined(&mut transcript, 40),
             "review: approved\n  - [minimal-comments] a.rs: one comment\n    restates the code"
+        );
+    }
+
+    #[test]
+    fn an_escalation_is_one_notice() {
+        let mut transcript = fresh();
+        transcript.apply(
+            &LoopEvent::Escalated {
+                reason: anvil_core::agent::EscalationReason::ReviewChanges,
+                round: 3,
+            },
+            Instant::now(),
+        );
+        assert_eq!(transcript.entries().len(), 1);
+        let text = joined(&mut transcript, 120);
+        assert_eq!(
+            text,
+            "build round 3 runs on the planner: the reviewer asked for changes 2 times in a row"
         );
     }
 

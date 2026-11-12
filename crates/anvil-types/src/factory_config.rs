@@ -4,7 +4,7 @@
 //! The file lives at the repository root and is committed. Provider names
 //! refer to entries in the anvil configuration (`~/.anvil/config.toml`).
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use schemars::JsonSchema;
@@ -30,14 +30,19 @@ pub const FACTORY_TEMPLATE: &str = r#"# factory configuration, written by `anvil
 
 [roles]
 coder = "anthropic"
+# Optional: a provider that plans, and takes a build round when the coder is
+# stuck. It may be a reviewer's model; the coder may not. Absent, the coder
+# plans.
+# planner = "anthropic"
 
 # Each reviewer reads the pull request with one stance: correctness, safety,
 # style or simplicity. Only correctness and safety block by default; findings
 # of a non-blocking reviewer are posted as comments and never send a change
 # back. Set `blocking = true` or `false` on a reviewer to override. Reviewers
-# must sit on different base URLs from the coder, so no model reviews its own
-# work, and on at least two base URLs between them, so no single model's blind
-# spots decide a review.
+# must run a different model than the coder (a different base URL or a
+# different model name), so no model reviews its own work, and the blocking
+# reviewers must run at least two different models between them, so no single
+# model's blind spots decide a review.
 [[reviewers]]
 provider = "openai"
 stance = "correctness"
@@ -157,6 +162,9 @@ pub const DEFAULT_ANVIL_BIN: &str = "target/x86_64-unknown-linux-musl/release/an
 pub struct FactoryRoles {
     /// Provider that works tickets.
     pub coder: String,
+    /// Provider that plans them; the coder when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner: Option<String>,
 }
 
 /// What one reviewer concentrates on.
@@ -444,6 +452,9 @@ impl FactoryConfig {
     /// The first [`ValidationError`] found.
     pub fn validate(&self) -> Result<(), ValidationError> {
         check_filled("roles.coder", &self.roles.coder)?;
+        if let Some(planner) = &self.roles.planner {
+            check_filled("roles.planner", planner)?;
+        }
         if self.reviewers.is_empty() {
             return Err(ValidationError::EmptyField { field: "reviewers" });
         }
@@ -486,10 +497,13 @@ impl FactoryConfig {
         Ok(())
     }
 
-    /// Checks that the reviewers are independent of the coder and of each other.
+    /// Checks that no reviewer runs the model that wrote the code, and that
+    /// the blocking reviewers between them run at least two models.
     ///
-    /// Different training, different blind spots: that is the point of the
-    /// swarm. Base URLs are compared with any trailing `/` removed.
+    /// A model is its base URL (any trailing `/` removed) together with its
+    /// model name, so a reviewer on the coder's vendor with a different
+    /// model is independent. With a planner set, the coder is still the
+    /// model that wrote the code: a reviewer may equal the planner.
     ///
     /// # Arguments
     ///
@@ -498,53 +512,54 @@ impl FactoryConfig {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when the coder and every reviewer name a provider, no reviewer
-    /// shares a base URL with the coder, two differently named reviewers never
-    /// share a base URL, and the reviewers span at least two base URLs.
+    /// `Ok(())` when the coder, the planner (if set) and every reviewer name
+    /// a provider, no reviewer runs the coder's model, and the blocking
+    /// reviewers span at least two models. Non-blocking reviewers do not
+    /// count toward the two.
     ///
     /// # Errors
     ///
     /// The first [`ValidationError`] found.
     pub fn check_independence(&self, config: &AnvilConfig) -> Result<(), ValidationError> {
-        let base_url = |role: &'static str, name: &str| {
+        let model = |role: &'static str, name: &str| {
             config
                 .providers
                 .get(name)
-                .map(|provider| provider.base_url.trim_end_matches('/').to_owned())
+                .map(|provider| {
+                    (
+                        provider.base_url.trim_end_matches('/').to_owned(),
+                        provider.model.clone(),
+                    )
+                })
                 .ok_or_else(|| ValidationError::UnknownProvider {
                     role,
                     provider: name.to_owned(),
                 })
         };
         let coder = &self.roles.coder;
-        let coder_url = base_url("coder", coder)?;
-        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
+        let coder_model = model("coder", coder)?;
+        if let Some(planner) = &self.roles.planner {
+            model("planner", planner)?;
+        }
+        let mut blocking_models: BTreeSet<(String, String)> = BTreeSet::new();
         for reviewer in &self.reviewers {
             let name = reviewer.provider.as_str();
-            let url = base_url("reviewer", name)?;
-            if url == coder_url {
-                return Err(ValidationError::ReviewerSharesCoderUrl {
+            let reviewer_model = model("reviewer", name)?;
+            if reviewer_model == coder_model {
+                return Err(ValidationError::ReviewerIsCoderModel {
                     reviewer: name.to_owned(),
                     coder: coder.clone(),
-                    base_url: url,
+                    model: format!("`{}` at {}", reviewer_model.1, reviewer_model.0),
                 });
             }
-            match seen.get(&url) {
-                Some(other) if *other != name => {
-                    return Err(ValidationError::ReviewersShareUrl {
-                        first: (*other).to_owned(),
-                        second: name.to_owned(),
-                        base_url: url,
-                    });
-                }
-                Some(_) => {}
-                None => {
-                    seen.insert(url, name);
-                }
+            if reviewer.is_blocking() {
+                blocking_models.insert(reviewer_model);
             }
         }
-        if seen.len() < 2 {
-            return Err(ValidationError::TooFewReviewerUrls { found: seen.len() });
+        if blocking_models.len() < 2 {
+            return Err(ValidationError::TooFewReviewerModels {
+                found: blocking_models.len(),
+            });
         }
         Ok(())
     }
@@ -767,15 +782,24 @@ mod tests {
             .expect("a provider may review twice with different stances");
     }
 
+    /// The providers plus `sibling`: the coder's vendor (same base URL) running `model`.
+    fn with_sibling(model: &str) -> AnvilConfig {
+        let mut config = providers();
+        let mut sibling = config.providers["anthropic"].clone();
+        sibling.model = model.to_owned();
+        config.providers.insert("sibling".to_owned(), sibling);
+        config
+    }
+
     #[test]
-    fn a_reviewer_on_the_coder_url_is_rejected() {
+    fn a_reviewer_running_the_coders_model_is_rejected() {
         let error = with_reviewers("anthropic", &["anthropic", "openai"])
             .check_independence(&providers())
             .expect_err("rejected");
         assert!(
             matches!(
                 &error,
-                ValidationError::ReviewerSharesCoderUrl { reviewer, coder, .. }
+                ValidationError::ReviewerIsCoderModel { reviewer, coder, .. }
                     if reviewer == "anthropic" && coder == "anthropic"
             ),
             "{error}"
@@ -783,29 +807,68 @@ mod tests {
     }
 
     #[test]
-    fn two_reviewers_on_one_url_are_rejected() {
+    fn the_same_base_url_and_the_same_model_under_another_name_is_rejected() {
         let mut config = providers();
-        let openai_url = config.providers["openai"].base_url.clone();
-        config.providers.get_mut("google").expect("google").base_url = format!("{openai_url}/");
-        let error = with_reviewers("anthropic", &["openai", "google"])
+        let twin = config.providers["anthropic"].clone();
+        config.providers.insert("twin".to_owned(), twin);
+        let error = with_reviewers("anthropic", &["twin", "openai"])
             .check_independence(&config)
             .expect_err("rejected");
         assert!(
-            matches!(
-                &error,
-                ValidationError::ReviewersShareUrl { first, second, .. }
-                    if first == "openai" && second == "google"
-            ),
+            matches!(&error, ValidationError::ReviewerIsCoderModel { reviewer, .. } if reviewer == "twin"),
             "{error}"
         );
     }
 
     #[test]
-    fn reviewers_must_span_two_urls() {
+    fn a_reviewer_on_the_coders_vendor_with_another_model_is_accepted() {
+        let config = with_sibling("a-different-model");
+        with_reviewers("anthropic", &["sibling", "openai"])
+            .check_independence(&config)
+            .expect("same vendor, different model");
+    }
+
+    #[test]
+    fn blocking_reviewers_must_span_two_models() {
         let error = with_reviewers("anthropic", &["openai", "openai"])
             .check_independence(&providers())
             .expect_err("rejected");
-        assert_eq!(error, ValidationError::TooFewReviewerUrls { found: 1 });
+        assert_eq!(error, ValidationError::TooFewReviewerModels { found: 1 });
+
+        let mut config = with_reviewers("anthropic", &["openai", "google"]);
+        config.reviewers[1].blocking = Some(false);
+        assert_eq!(
+            config.check_independence(&providers()),
+            Err(ValidationError::TooFewReviewerModels { found: 1 }),
+            "a non-blocking reviewer does not count"
+        );
+    }
+
+    #[test]
+    fn a_planner_must_exist_and_a_reviewer_may_equal_it() {
+        let mut config = with_reviewers("anthropic", &["openai", "google"]);
+        config.roles.planner = Some("openai".to_owned());
+        config
+            .check_independence(&providers())
+            .expect("a reviewer may be the planner");
+        config.roles.planner = Some("nope".to_owned());
+        let error = config
+            .check_independence(&providers())
+            .expect_err("rejected");
+        assert!(
+            matches!(&error, ValidationError::UnknownProvider { role: "planner", provider } if provider == "nope"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_planner_is_optional_in_the_file() {
+        let text = FactoryConfig::template("o/r");
+        let config: FactoryConfig = toml::from_str(&text).expect("parses");
+        assert_eq!(config.roles.planner, None);
+        let with_planner = text.replace("# planner = \"anthropic\"", "planner = \"openai\"");
+        let config: FactoryConfig = toml::from_str(&with_planner).expect("parses");
+        assert_eq!(config.roles.planner.as_deref(), Some("openai"));
     }
 
     #[test]
