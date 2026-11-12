@@ -55,7 +55,7 @@ Anvil is a coding agent you run from the terminal, plus an unattended service th
 
 Three kinds of state live under `~/.anvil/`, all plain files you can edit:
 
-- **Rules** (`rules.toml`): standing coding rules. They enter every system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
+- **Rules** (`rules.toml`): standing coding rules. They enter the system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
 - **Memory** (`memory/`): one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`, loaded under a token cap. At the end of a session the summarizer proposes new facts and you keep or drop each one. A run that finished with no reviewer rejection, no failed check and a diff under 50 lines has nothing new to teach, so it skips that turn and says so; `[memory] always_summarize = true` runs it every time.
 - **Telemetry** (`telemetry/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates. A classifier turns them into signals, and `anvil ticket draft` has the summarizer write ticket drafts from the signals alone.
 
@@ -81,7 +81,34 @@ herdr = false
 
 A failing webhook or a missing `herdr` never affects the session.
 
-Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, GitHub access, branch protection, tools), `anvil update` (fetch the latest release and swap the binary), `anvil ticket list|show|review|submit|drop`.
+#### Learning how you work
+
+Three more things build on those files.
+
+**Rules by relevance.** Each rule lists the `languages` it applies to. A session sends the coder and the reviewer only the rules for languages present in the project (from file extensions, honoring `.gitignore`, at most 5,000 files), plus every `*` rule and any rule for a language anvil cannot detect. An empty project has no languages yet, so it gets every rule. A Python-only rule stays out of a Rust-only project; the prompt is otherwise unchanged. The reviewer uses the project's languages too, since the changed files are not known when the prompt is built.
+
+**Learning from your edits.** At the end of a session in a git repository, anvil records the text files it changed (each at most 32 KiB, 128 KiB in all) with a SHA-256 of their bytes in `~/.anvil/memory/corrections/<repo>.toml`. At the start of the next session in that project, and whenever you run `anvil memory learn`, the files you edited since are compared with what anvil left, and the summarizer proposes rules from the difference. You keep or drop each one, exactly as with proposed facts; nothing reaches `rules.toml` until you keep it, and an edit is never proposed twice. Lock files, minified files, `target/`, `dist/`, `node_modules/` and anything in the project's `.gitignore` are skipped, the diff sent to the model is cut at 16 KiB, and when nothing was edited there is no model call. Each proposal names one language and says when a mechanical check is realistic. Under `--yes` the start-of-session step is skipped (nobody can answer); `anvil memory learn` picks the edits up later. `[memory] always_summarize` does not apply, because this step only runs a model when you really edited something.
+
+```
+$ anvil memory learn
+memory: you edited 2 file(s) anvil wrote; asking the summarizer for rules
+memory: 1 proposed rule(s), written to ~/.anvil/memory/proposed.md
+[rule] (python) Annotate every parameter and return type.
+  keep? [k]eep / [d]rop: k
+memory: kept 1 rule(s) in ~/.anvil/rules.toml
+```
+
+**Project templates.** `~/.anvil/templates/<name>/` holds a directory tree and a `template.toml` with `name` (the directory name), a one-line `description` and `languages`. A directory without a valid `template.toml` is ignored with a warning.
+
+```
+$ anvil template save rust-cli --description "A small Rust CLI with clap"   # saves the current directory
+$ anvil template save web ../site --force                                   # another directory, replacing `web`
+$ anvil new rust-cli ./my-tool                                              # copies the tree, not template.toml
+```
+
+`template save` honors `.gitignore` and skips `.git/` and `.anvil/`, and refuses to overwrite a template without `--force`. `anvil new` creates the directory, or fills an existing one that holds no files other than dot-directories such as `.git`; an unknown name lists the templates you have. When a task starts in such an empty directory, the Plan prompt lists each template's name and description so the plan can start from the one that fits (`anvil new <name> .`); with files present or no templates, the prompt is unchanged.
+
+Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, GitHub access, branch protection, tools), `anvil update` (fetch the latest release and swap the binary), `anvil ticket list|show|review|submit|drop`, `anvil memory learn`, `anvil new`, `anvil template save`.
 
 ### The Dark Factory
 

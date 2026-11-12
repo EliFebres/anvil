@@ -121,6 +121,7 @@ impl Tracker {
             | LoopEvent::CheckFinished { .. }
             | LoopEvent::Warning(_)
             | LoopEvent::ProposedEdit { .. }
+            | LoopEvent::Escalated { .. }
             | LoopEvent::Finished { .. } => {}
         }
     }
@@ -389,6 +390,7 @@ mod tests {
         });
         let turn = |state| LoopEvent::TurnFinished {
             state,
+            role: anvil_core::agent::Role::Coder,
             stop_reason: StopReason::EndTurn,
             usage: Some(Usage {
                 input: 1_000_000,

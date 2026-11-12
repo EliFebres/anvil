@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 
 use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, session_info};
+use crate::learn;
 use crate::memory;
 use crate::status::{Setup, StatusReporter};
 use crate::telemetry::SessionTelemetry;
@@ -77,6 +78,7 @@ async fn run_session(
         SessionTelemetry::start(wiring, id, SessionMode::Run).with_status(status.clone());
     let (frontend, events) =
         Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
+    learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
     telemetry.observe_permissions(wiring);
     let mut registry =
         wiring.registry(telemetry.recording(status.prompt(yes, frontend.prompt(yes))))?;
@@ -110,6 +112,7 @@ async fn run_session(
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
     remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
+    learn::record_run(wiring, id, &frontend.console()).await;
     status.finish_run(&result.status);
     frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
@@ -272,6 +275,7 @@ async fn resume_session(
         SessionTelemetry::start(wiring, id, SessionMode::Resume).with_status(status.clone());
     let (frontend, events) =
         Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
+    learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
     telemetry.observe_permissions(wiring);
     let mut registry =
         wiring.registry(telemetry.recording(status.prompt(yes, frontend.prompt(yes))))?;
@@ -308,6 +312,7 @@ async fn resume_session(
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
     remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
+    learn::record_run(wiring, id, &frontend.console()).await;
     status.finish_run(&result.status);
     frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);

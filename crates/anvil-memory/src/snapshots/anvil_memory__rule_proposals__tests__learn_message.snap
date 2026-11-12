@@ -1,0 +1,19 @@
+---
+source: crates/anvil-memory/src/rule_proposals.rs
+expression: "learn_user_message(&corrections,\n\"1. [no-todo] (all languages) Leave no TODO.\")"
+---
+# Existing rules
+
+1. [no-todo] (all languages) Leave no TODO.
+
+# Owner's edits
+
+## src/a.py
+
+```diff
+--- anvil/src/a.py
++++ owner/src/a.py
+@@ -1 +1 @@
+-x = 1
++X: int = 1
+```

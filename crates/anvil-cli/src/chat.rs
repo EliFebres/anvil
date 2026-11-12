@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use anvil_core::agent::prompts::{self, PromptInputs};
 use anvil_core::agent::turn::complete_turn;
-use anvil_core::agent::{EventSink, LoopEvent, Role, State};
+use anvil_core::agent::{EventSink, LoopEvent, Role, State, diff};
 use anvil_core::context::{Conversation, discover_instructions};
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
@@ -24,6 +24,7 @@ use tokio::sync::watch;
 use crate::commands::end_status;
 use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, model_id, session_info};
+use crate::learn;
 use crate::memory;
 use crate::status::{Setup, StatusReporter};
 use crate::telemetry::SessionTelemetry;
@@ -94,6 +95,8 @@ async fn chat_session(
     let info = session_info(wiring, SessionKind::Chat, false, State::Build);
     let (mut frontend, events_tx) = Frontend::start(ui, info);
     let (events, tee) = telemetry.sink(Some(events_tx));
+    learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
+    let baseline = diff::snapshot_tree(&wiring.cwd, &session_dir).await;
     telemetry.observe_permissions(wiring);
     let mut registry =
         wiring.registry(telemetry.recording(status.prompt(false, frontend.prompt(false))))?;
@@ -104,6 +107,7 @@ async fn chat_session(
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
     telemetry.record_skill_requires(wiring, &registry);
+    let chat_dir = session_dir.clone();
     let mut session = ChatSession {
         wiring,
         mode: State::Build,
@@ -181,6 +185,7 @@ async fn chat_session(
         Some(&telemetry),
     )
     .await;
+    learn::record_session_end(wiring, &chat_dir, baseline.as_deref(), &frontend.console()).await;
     status.finish_done("chat ended");
     frontend.shutdown(false).await?;
     telemetry.finish(SessionOutcome::Chat);
