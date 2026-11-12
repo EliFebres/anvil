@@ -11,7 +11,8 @@ expression: "Verdict::aggregate(raw)"
       "reviewer": {
         "provider": "openai",
         "stance": "correctness",
-        "model": "openai-model"
+        "model": "openai-model",
+        "blocking": true
       },
       "finding": {
         "severity": "minor",
@@ -22,12 +23,14 @@ expression: "Verdict::aggregate(raw)"
       }
     }
   ],
+  "failed": [],
   "raw": [
     {
       "reviewer": {
         "provider": "openai",
         "stance": "correctness",
-        "model": "openai-model"
+        "model": "openai-model",
+        "blocking": true
       },
       "outcome": {
         "kind": "reviewed",

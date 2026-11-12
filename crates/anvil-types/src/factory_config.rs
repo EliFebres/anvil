@@ -32,9 +32,12 @@ pub const FACTORY_TEMPLATE: &str = r#"# factory configuration, written by `anvil
 coder = "anthropic"
 
 # Each reviewer reads the pull request with one stance: correctness, safety,
-# style or simplicity. Reviewers must sit on different base URLs from the
-# coder, so no model reviews its own work, and on at least two base URLs
-# between them, so no single model's blind spots decide a review.
+# style or simplicity. Only correctness and safety block by default; findings
+# of a non-blocking reviewer are posted as comments and never send a change
+# back. Set `blocking = true` or `false` on a reviewer to override. Reviewers
+# must sit on different base URLs from the coder, so no model reviews its own
+# work, and on at least two base URLs between them, so no single model's blind
+# spots decide a review.
 [[reviewers]]
 provider = "openai"
 stance = "correctness"
@@ -50,6 +53,11 @@ stance = "style"
 [[reviewers]]
 provider = "google"
 stance = "simplicity"
+
+# Gate B (the release build and the eval) runs only when a changed path matches
+# one of these globs; absent = always.
+# [eval_gate]
+# paths = ["crates/anvil-core/**"]
 
 # How many eval tasks run at once. Default: 2.
 # [eval]
@@ -192,6 +200,15 @@ impl Stance {
             Stance::Simplicity => "simplicity",
         }
     }
+
+    /// Whether a reviewer with this stance blocks a merge unless `blocking` says otherwise.
+    ///
+    /// # Returns
+    ///
+    /// `true` for correctness and safety, `false` for style and simplicity.
+    pub fn blocks_by_default(self) -> bool {
+        matches!(self, Stance::Correctness | Stance::Safety)
+    }
 }
 
 impl fmt::Display for Stance {
@@ -208,6 +225,22 @@ pub struct Reviewer {
     pub provider: String,
     /// What the review concentrates on.
     pub stance: Stance,
+    /// Whether this reviewer's findings can send the change back; the
+    /// stance's default when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking: Option<bool>,
+}
+
+impl Reviewer {
+    /// Whether this reviewer's findings can block a merge.
+    ///
+    /// # Returns
+    ///
+    /// The explicit `blocking` value, or [`Stance::blocks_by_default`].
+    pub fn is_blocking(&self) -> bool {
+        self.blocking
+            .unwrap_or_else(|| self.stance.blocks_by_default())
+    }
 }
 
 /// Where pull requests go.
@@ -343,6 +376,14 @@ impl Default for EvalConfig {
     }
 }
 
+/// When Gate B runs.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvalGateConfig {
+    /// Globs over repository-relative paths; Gate B runs when a changed path matches one.
+    pub paths: Vec<String>,
+}
+
 /// The whole `factory.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -370,6 +411,9 @@ pub struct FactoryConfig {
     /// What needs a human. Empty by default; `factory run` refuses an empty list.
     #[serde(default)]
     pub protected: ProtectedConfig,
+    /// When Gate B runs; absent means always.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval_gate: Option<EvalGateConfig>,
 }
 
 impl FactoryConfig {
@@ -392,7 +436,8 @@ impl FactoryConfig {
     ///
     /// `Ok(())` when there is at least one reviewer, no text field is empty or
     /// a placeholder, `github.repo` is `owner/repo`, every count is at least
-    /// 1, `notify.digest_at` is `HH:MM` and every protected path is a glob.
+    /// 1, `notify.digest_at` is `HH:MM`, every protected and eval-gate path is
+    /// a glob and at least one reviewer is blocking.
     ///
     /// # Errors
     ///
@@ -431,12 +476,12 @@ impl FactoryConfig {
         }
         check_filled("worker.image", &self.worker.image)?;
         check_filled("worker.anvil_bin", &self.worker.anvil_bin)?;
-        for glob in &self.protected.paths {
-            globset::Glob::new(glob).map_err(|error| ValidationError::InvalidGlob {
-                field: "protected.paths",
-                glob: glob.clone(),
-                detail: error.to_string(),
-            })?;
+        if !self.reviewers.iter().any(Reviewer::is_blocking) {
+            return Err(ValidationError::NoBlockingReviewer);
+        }
+        check_globs("protected.paths", &self.protected.paths)?;
+        if let Some(gate) = &self.eval_gate {
+            check_globs("eval_gate.paths", &gate.paths)?;
         }
         Ok(())
     }
@@ -516,6 +561,18 @@ impl FactoryConfig {
         }
         fields
     }
+}
+
+/// Fails when any of `globs` does not compile.
+fn check_globs(field: &'static str, globs: &[String]) -> Result<(), ValidationError> {
+    for glob in globs {
+        globset::Glob::new(glob).map_err(|error| ValidationError::InvalidGlob {
+            field,
+            glob: glob.clone(),
+            detail: error.to_string(),
+        })?;
+    }
+    Ok(())
 }
 
 /// Fails when `value` is empty or a placeholder.
@@ -694,6 +751,7 @@ mod tests {
             .map(|(provider, stance)| Reviewer {
                 provider: (*provider).to_owned(),
                 stance: *stance,
+                blocking: None,
             })
             .collect();
         config
@@ -790,6 +848,86 @@ parallel = 4
                 field: "eval.parallel"
             })
         );
+    }
+
+    #[test]
+    fn blocking_defaults_by_stance() {
+        for (stance, expected) in [
+            (Stance::Correctness, true),
+            (Stance::Safety, true),
+            (Stance::Style, false),
+            (Stance::Simplicity, false),
+        ] {
+            let reviewer = Reviewer {
+                provider: "p".to_owned(),
+                stance,
+                blocking: None,
+            };
+            assert_eq!(stance.blocks_by_default(), expected, "{stance}");
+            assert_eq!(reviewer.is_blocking(), expected, "{stance}");
+        }
+    }
+
+    #[test]
+    fn explicit_blocking_overrides_the_default_both_ways() {
+        let text = FactoryConfig::template("o/r")
+            .replace(
+                "stance = \"correctness\"",
+                "stance = \"correctness\"\nblocking = false",
+            )
+            .replace("stance = \"style\"", "stance = \"style\"\nblocking = true");
+        let config: FactoryConfig = toml::from_str(&text).expect("parses");
+        config.validate().expect("validates");
+        assert!(!config.reviewers[0].is_blocking());
+        assert!(config.reviewers[1].is_blocking());
+        assert!(config.reviewers[2].is_blocking());
+        assert!(!config.reviewers[3].is_blocking());
+    }
+
+    #[test]
+    fn a_config_without_a_blocking_reviewer_is_rejected() {
+        let mut config = filled();
+        config.reviewers.retain(|r| !r.stance.blocks_by_default());
+        assert_eq!(config.validate(), Err(ValidationError::NoBlockingReviewer));
+        let mut config = filled();
+        for reviewer in &mut config.reviewers {
+            reviewer.blocking = Some(false);
+        }
+        assert_eq!(config.validate(), Err(ValidationError::NoBlockingReviewer));
+    }
+
+    #[test]
+    fn eval_gate_is_absent_by_default_and_parses_when_present() {
+        assert_eq!(filled().eval_gate, None);
+        let text = format!(
+            "{}\n[eval_gate]\npaths = [\"crates/anvil-core/**\"]\n",
+            FactoryConfig::template("o/r")
+        );
+        let config: FactoryConfig = toml::from_str(&text).expect("parses");
+        config.validate().expect("validates");
+        assert_eq!(
+            config.eval_gate,
+            Some(EvalGateConfig {
+                paths: vec!["crates/anvil-core/**".to_owned()]
+            })
+        );
+    }
+
+    #[test]
+    fn eval_gate_globs_are_checked_and_unknown_keys_rejected() {
+        let mut config = filled();
+        config.eval_gate = Some(EvalGateConfig {
+            paths: vec!["crates/[".to_owned()],
+        });
+        assert!(matches!(
+            config.validate(),
+            Err(ValidationError::InvalidGlob { field: "eval_gate.paths", glob, .. }) if glob == "crates/["
+        ));
+        let text = format!(
+            "{}\n[eval_gate]\npaths = []\nextra = 1\n",
+            FactoryConfig::template("o/r")
+        );
+        assert!(toml::from_str::<FactoryConfig>(&text).is_err());
     }
 
     #[test]

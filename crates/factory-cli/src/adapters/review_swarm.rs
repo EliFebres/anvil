@@ -171,6 +171,7 @@ mod tests {
                 provider: "openai".to_owned(),
                 stance,
                 model: "m".to_owned(),
+                blocking: true,
             },
             outcome: Outcome::Reviewed {
                 review: Review { verdict, findings },

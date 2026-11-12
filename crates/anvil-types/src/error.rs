@@ -136,6 +136,10 @@ pub enum ValidationError {
         found: usize,
     },
 
+    /// Every reviewer is non-blocking, so no review could ever send a change back.
+    #[error("at least one reviewer must be blocking")]
+    NoBlockingReviewer,
+
     /// A numeric field that must be positive is zero.
     #[error("field `{field}` must be at least 1")]
     ZeroField {

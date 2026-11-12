@@ -2,6 +2,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anvil_types::{Stance, Ticket};
 
@@ -137,6 +139,8 @@ pub trait Reviewer: Send + Sync {
 pub struct FakeReviewer {
     id: ReviewerId,
     response: Result<Review, String>,
+    fail_first: usize,
+    calls: Arc<AtomicUsize>,
 }
 
 impl FakeReviewer {
@@ -179,6 +183,8 @@ impl FakeReviewer {
         Self {
             id: Self::id_for(provider, stance),
             response: Ok(Review { verdict, findings }),
+            fail_first: 0,
+            calls: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -197,7 +203,50 @@ impl FakeReviewer {
         Self {
             id: Self::id_for(provider, stance),
             response: Err(message.to_owned()),
+            fail_first: 0,
+            calls: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// A reviewer that fails its first `failures` calls, then approves.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - The provider name to report.
+    /// * `stance` - The stance to report.
+    /// * `failures` - How many calls fail before it approves.
+    ///
+    /// # Returns
+    ///
+    /// The fake.
+    pub fn failing_then_approving(provider: &str, stance: Stance, failures: usize) -> Self {
+        Self {
+            fail_first: failures,
+            ..Self::approving(provider, stance)
+        }
+    }
+
+    /// Overrides whether this reviewer's findings block; the default is the stance's.
+    ///
+    /// # Arguments
+    ///
+    /// * `blocking` - Whether its findings can send the change back.
+    ///
+    /// # Returns
+    ///
+    /// The fake.
+    pub fn blocking(mut self, blocking: bool) -> Self {
+        self.id.blocking = blocking;
+        self
+    }
+
+    /// A handle that counts every call to [`Reviewer::review`], even once the fake is boxed.
+    ///
+    /// # Returns
+    ///
+    /// The shared counter.
+    pub fn call_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.calls)
     }
 
     fn id_for(provider: &str, stance: Stance) -> ReviewerId {
@@ -205,6 +254,7 @@ impl FakeReviewer {
             provider: provider.to_owned(),
             stance,
             model: format!("fake-{provider}"),
+            blocking: stance.blocks_by_default(),
         }
     }
 }
@@ -216,6 +266,12 @@ impl Reviewer for FakeReviewer {
 
     fn review<'a>(&'a self, _request: &'a ReviewRequest) -> ReviewFuture<'a> {
         Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.fail_first {
+                return Err(ReviewError::Scripted {
+                    message: format!("scripted failure {}", call + 1),
+                });
+            }
             match &self.response {
                 Ok(review) => Ok(Reviewed {
                     review: review.clone(),

@@ -1040,6 +1040,7 @@ fn factory_config(real: &FactoryConfig, runtime: ContainerRuntime) -> FactoryCon
     factory.reviewers = vec![ReviewerEntry {
         provider: FAKE_PROVIDER.to_owned(),
         stance: Stance::Correctness,
+        blocking: None,
     }];
     factory.worker.runtime = runtime;
     factory.worker.egress_allow = Vec::new();

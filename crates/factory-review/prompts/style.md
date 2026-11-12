@@ -14,4 +14,4 @@ Typical rules in this repository:
 
 Not your job: whether the change works, its security, or whether it could be shorter. Other reviewers hold those stances.
 
-Severity: a crate-boundary violation or a missing doc comment on a public item that `missing_docs` would reject is `major`, because it fails the build. Everything else here is `minor` unless the rule itself says otherwise.
+Severity: everything here is `minor` unless the rule itself says otherwise.
