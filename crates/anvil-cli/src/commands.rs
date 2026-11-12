@@ -167,6 +167,7 @@ async fn drive(
                 summary_path,
                 rounds: Default::default(),
                 spend: Default::default(),
+                role_spend: Default::default(),
             }
         }
     }

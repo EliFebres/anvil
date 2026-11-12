@@ -340,7 +340,8 @@ impl Wiring {
     ///
     /// # Returns
     ///
-    /// The providers; the reviewer falls back to the coder.
+    /// The providers; the reviewer falls back to the coder, and the planner is
+    /// `None` unless it names a different provider than the coder.
     ///
     /// # Errors
     ///
@@ -357,8 +358,13 @@ impl Wiring {
         } else {
             self.provider(&roles.summarizer)?
         };
+        let planner = match &roles.planner {
+            Some(name) if name != &roles.coder => Some(self.provider(name)?),
+            _ => None,
+        };
         Ok(LoopProviders {
             coder,
+            planner,
             reviewer,
             summarizer,
         })

@@ -347,6 +347,20 @@ pub struct Roles {
     /// Provider that reviews factory pull requests. Only the factory needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
+    /// Provider that plans; the coder when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner: Option<String>,
+}
+
+impl Roles {
+    /// The provider that plans.
+    ///
+    /// # Returns
+    ///
+    /// The `planner` provider name, or the `coder` one when none is set.
+    pub fn planner_or_coder(&self) -> &str {
+        self.planner.as_deref().unwrap_or(&self.coder)
+    }
 }
 
 /// What one agent-loop state may spend before the session ends as incomplete.
@@ -585,7 +599,7 @@ impl AnvilConfig {
     /// # Returns
     ///
     /// `Ok(())` when all providers validate and `coder`, `summarizer` and
-    /// (if set) `reviewer` each name a key in `providers`.
+    /// (if set) `reviewer` and `planner` each name a key in `providers`.
     ///
     /// # Errors
     ///
@@ -598,6 +612,9 @@ impl AnvilConfig {
         self.check_role("summarizer", &self.roles.summarizer)?;
         if let Some(reviewer) = &self.roles.reviewer {
             self.check_role("reviewer", reviewer)?;
+        }
+        if let Some(planner) = &self.roles.planner {
+            self.check_role("planner", planner)?;
         }
         Ok(())
     }

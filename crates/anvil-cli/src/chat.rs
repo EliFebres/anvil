@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use anvil_core::agent::prompts::{self, PromptInputs};
 use anvil_core::agent::turn::complete_turn;
-use anvil_core::agent::{EventSink, LoopEvent, State};
+use anvil_core::agent::{EventSink, LoopEvent, Role, State};
 use anvil_core::context::{Conversation, discover_instructions};
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
@@ -419,6 +419,7 @@ impl ChatSession<'_> {
             };
             self.events.emit(LoopEvent::TurnFinished {
                 state: self.mode,
+                role: Role::Coder,
                 stop_reason: turn.stop_reason.clone(),
                 usage: turn.usage,
                 latency_ms: turn.latency_ms,

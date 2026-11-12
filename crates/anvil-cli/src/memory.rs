@@ -449,6 +449,7 @@ mod skip_tests {
             summary_path: PathBuf::new(),
             rounds: Rounds { review, verify },
             spend: BTreeMap::new(),
+            role_spend: BTreeMap::new(),
         }
     }
 
@@ -584,6 +585,7 @@ mod tests {
             config,
             LoopProviders {
                 coder: coder as Arc<dyn Provider>,
+                planner: None,
                 reviewer: reviewer as Arc<dyn Provider>,
                 summarizer: Arc::new(FakeProvider::new(vec![])) as Arc<dyn Provider>,
             },
