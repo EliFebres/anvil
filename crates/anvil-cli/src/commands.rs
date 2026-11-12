@@ -50,7 +50,9 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
     let wiring = wiring.with_session(&id, &session_dir);
     let task = wiring.expand_slash(&task).unwrap_or(task);
     let status = StatusReporter::start(Setup::from_wiring(&wiring, &id, &session_dir, &task));
-    let result = run_session(&wiring, &id, session_dir, task, yes, ui, &status).await;
+    let result = run_session(&wiring, &id, session_dir, task, yes, ui, &status)
+        .await
+        .map(|result| result.status.exit_code());
     end_status(&status, &result).await;
     result
 }
@@ -73,12 +75,66 @@ async fn run_session(
     yes: bool,
     ui: UiKind,
     status: &StatusReporter,
-) -> anyhow::Result<i32> {
+) -> anyhow::Result<LoopResult> {
+    run_session_in(
+        wiring,
+        id,
+        session_dir,
+        task,
+        SessionOptions {
+            yes,
+            ui,
+            in_build: false,
+        },
+        status,
+    )
+    .await
+}
+
+/// How a session differs between `anvil run` and a work item of `anvil build`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SessionOptions {
+    /// Skip permission prompts and plan approval (`--yes`).
+    pub yes: bool,
+    /// Which front end to use.
+    pub ui: UiKind,
+    /// Run as one work item of a build: the plan is approved at once (the
+    /// owner approved the item list) and nothing interactive follows the
+    /// session, so a long build never waits on a memory question.
+    pub in_build: bool,
+}
+
+/// Runs one fresh session to its end and returns how the loop ended.
+///
+/// # Arguments
+///
+/// * `wiring` - Providers and paths, already bound to the session.
+/// * `id` - The session id.
+/// * `session_dir` - The session folder.
+/// * `task` - The task.
+/// * `options` - What differs inside a build.
+/// * `status` - The running status reporter of the session.
+///
+/// # Errors
+///
+/// When providers, permissions or the front end cannot be set up.
+pub(crate) async fn run_session_in(
+    wiring: &Wiring,
+    id: &str,
+    session_dir: std::path::PathBuf,
+    task: String,
+    options: SessionOptions,
+    status: &StatusReporter,
+) -> anyhow::Result<LoopResult> {
+    let SessionOptions { yes, ui, in_build } = options;
+    let plan_yes = yes || in_build;
     let telemetry =
         SessionTelemetry::start(wiring, id, SessionMode::Run).with_status(status.clone());
     let (frontend, events) =
         Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
-    learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
+    if !in_build {
+        learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
+    }
     telemetry.observe_permissions(wiring);
     let mut registry =
         wiring.registry(telemetry.recording(status.prompt(yes, frontend.prompt(yes))))?;
@@ -104,19 +160,21 @@ async fn run_session(
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
-        status.gate(yes, frontend.gate(yes)),
+        status.gate(plan_yes, frontend.gate(plan_yes)),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
-    remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
-    learn::record_run(wiring, id, &frontend.console()).await;
+    if !in_build {
+        remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
+        learn::record_run(wiring, id, &frontend.console()).await;
+    }
     status.finish_run(&result.status);
     frontend.shutdown(true).await?;
     telemetry.finish_run(&result.status);
-    Ok(result.status.exit_code())
+    Ok(result)
 }
 
 /// Runs the loop to its end or the user's cancel, waits for every event

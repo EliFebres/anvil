@@ -1,6 +1,6 @@
 //! Command-line definition for `anvil`.
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 
 /// A CLI coding agent.
 #[derive(Debug, Parser)]
@@ -43,6 +43,8 @@ pub enum Command {
         #[arg(required = true, trailing_var_arg = true)]
         task: Vec<String>,
     },
+    /// Work through a specification across many sessions until its acceptance checks pass.
+    Build(BuildArgs),
     /// Talk to the model with tools, without the state machine.
     Chat,
     /// Continue a saved session from where it stopped.
@@ -135,6 +137,43 @@ pub enum Command {
         /// Which ticket action to take.
         #[command(subcommand)]
         command: TicketCommand,
+    },
+}
+
+/// Arguments of `anvil build`.
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct BuildArgs {
+    /// The specification, a Markdown file. The planner splits it into work items; each
+    /// runs as a fresh session, and is done when its acceptance command and the project's
+    /// check both exit 0. Needs a git repository with a clean tree.
+    pub spec: Option<std::path::PathBuf>,
+
+    /// Stop between work items once the build's estimated cost reaches this many USD.
+    #[arg(long, global = true, value_name = "USD")]
+    pub budget_usd: Option<f64>,
+
+    /// Stop between work items once the build's weighted tokens reach this number.
+    #[arg(long, global = true, value_name = "N")]
+    pub budget_tokens: Option<u64>,
+
+    /// Resume or inspect a build instead of starting one.
+    #[command(subcommand)]
+    pub command: Option<BuildCommand>,
+}
+
+/// Subcommands under `anvil build`.
+#[derive(Debug, Subcommand)]
+pub enum BuildCommand {
+    /// Continue a build from its first work item that is not done.
+    Resume {
+        /// The build id; the newest unfinished build by default.
+        id: Option<String>,
+    },
+    /// Print a build's work items, their state, attempts, spend and commits.
+    Status {
+        /// The build id; the newest build by default.
+        id: Option<String>,
     },
 }
 
@@ -315,5 +354,35 @@ mod tests {
         assert_eq!(after.allow_tools, vec!["edit_file", "shell"]);
         let none = Cli::try_parse_from(["anvil", "fix it"]).expect("parses");
         assert!(none.allow_tools.is_empty());
+    }
+
+    #[test]
+    fn build_takes_a_spec_or_a_subcommand_with_budgets_either_way() {
+        let start = Cli::try_parse_from(["anvil", "build", "spec.md", "--budget-usd", "2.5"])
+            .expect("parses");
+        let Some(Command::Build(args)) = start.command else {
+            panic!("a build command");
+        };
+        assert_eq!(args.spec.as_deref(), Some(std::path::Path::new("spec.md")));
+        assert_eq!(args.budget_usd, Some(2.5));
+
+        let resume = Cli::try_parse_from(["anvil", "build", "resume", "--budget-tokens", "9"])
+            .expect("parses");
+        let Some(Command::Build(args)) = resume.command else {
+            panic!("a build command");
+        };
+        assert!(matches!(
+            args.command,
+            Some(BuildCommand::Resume { id: None })
+        ));
+        assert_eq!(args.budget_tokens, Some(9));
+
+        let status = Cli::try_parse_from(["anvil", "build", "status", "01ABC"]).expect("parses");
+        let Some(Command::Build(args)) = status.command else {
+            panic!("a build command");
+        };
+        assert!(
+            matches!(args.command, Some(BuildCommand::Status { id: Some(ref id) }) if id == "01ABC")
+        );
     }
 }

@@ -1,0 +1,25 @@
+---
+source: crates/anvil-cli/src/build/tests.rs
+expression: "item_task(TaskInputs\n{\n    number: 2, total: 3, item: &item, spec:\n    \"# Tiny\\n\\nA CLI that prints hello.\\n\", finished:\n    \"- Set up the crate: A new binary crate.\", previous_failure:\n    Some(\"the acceptance command did not exit 0\"),\n})"
+---
+# Work item 2 of 3: Add the greeting
+
+Print hello from main.
+
+Area: src/main.rs
+
+This item is done when this command exits 0: `cargo run -q`
+Make changes only for this item; the other items are handled in their own sessions.
+
+A previous attempt at this item failed:
+the acceptance command did not exit 0
+
+# Already finished
+
+- Set up the crate: A new binary crate.
+
+# Specification
+
+# Tiny
+
+A CLI that prints hello.

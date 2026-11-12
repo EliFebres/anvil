@@ -30,6 +30,7 @@ use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 
 use self::file::StatusFile;
+pub(crate) use self::file::write_atomic;
 use self::herdr::{HerdrEnv, HerdrReporter, Report, report_for};
 use self::notify::{Message, Webhook, webhook_url};
 use self::tracker::{Prices, Snapshot, Tracker, one_line};
@@ -206,6 +207,39 @@ impl StatusReporter {
     /// * `status` - The loop's final status.
     pub fn finish_run(&self, status: &Status) {
         self.update(|tracker| tracker.finish_run(status));
+    }
+
+    /// Says what the session is doing, for a build that drives sessions.
+    ///
+    /// # Arguments
+    ///
+    /// * `detail` - One line.
+    pub fn note_working(&self, detail: &str) {
+        self.update(|tracker| tracker.working(detail));
+    }
+
+    /// Ends the session in a state the caller chose, such as a build that
+    /// stops as `blocked` or `needs_input`.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - The state; `needs_input` stays until the file is replaced,
+    ///   as a question nobody answers.
+    /// * `detail` - Why, in one line.
+    pub fn finish_as(&self, state: SessionState, detail: &str) {
+        self.update(|tracker| match state {
+            SessionState::NeedsInput => tracker.prompt_waiting(detail),
+            _ => tracker.finish(state, detail),
+        });
+    }
+
+    /// What the session has used so far.
+    ///
+    /// # Returns
+    ///
+    /// Tokens and, when a price is configured, cost.
+    pub fn spend(&self) -> anvil_types::SessionSpend {
+        self.lock().tracker.snapshot().spend
     }
 
     /// Ends the session as done, for a chat the owner closed.

@@ -173,6 +173,16 @@ impl Tracker {
         !self.resting.0.is_live()
     }
 
+    /// Says what a working session is doing now, for a caller that drives
+    /// the session without loop events (a build between its sessions).
+    ///
+    /// # Arguments
+    ///
+    /// * `detail` - One line.
+    pub fn working(&mut self, detail: &str) {
+        self.set_working(detail.to_owned());
+    }
+
     fn set_working(&mut self, detail: String) {
         if !self.has_ended() {
             self.resting = (SessionState::Working, one_line(&detail));
