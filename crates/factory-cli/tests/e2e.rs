@@ -8,9 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anvil_types::ticket::dirs::{self, OPEN_DIR, STATE_BRANCH};
-use anvil_types::{
-    FactoryConfig, Priority, Stance, Ticket, TicketKind, TicketOrigin, TicketStatus,
-};
+use anvil_types::{Priority, Ticket, TicketKind, TicketOrigin, TicketStatus};
 use chrono::{Local, TimeZone};
 use eval::{FakeRunner, RunOptions};
 use factory_cli::adapters::eval_gate::{HarnessGate, RunnerSource};
@@ -20,6 +18,7 @@ use factory_core::{
     Event, FactoryHome, Git, Service, ServiceDeps, Tick, TicketQueue, TicketWorker, WorkerDeps,
 };
 use factory_review::{FakeReviewer, Reviewer};
+use factory_types::{FactoryConfig, Stance};
 use ulid::Ulid;
 
 /// The three fixture tasks the eval crate ships for its own tests.

@@ -1,8 +1,9 @@
 //! The swarm end to end: reviewers built from `factory.toml` and the anvil
 //! configuration, talking to one mock server per protocol.
 
-use anvil_types::{AnvilConfig, FactoryConfig};
+use anvil_types::AnvilConfig;
 use factory_review::{Decision, ModelReviewer, ReviewRequest, Severity, TicketSummary};
+use factory_types::FactoryConfig;
 use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

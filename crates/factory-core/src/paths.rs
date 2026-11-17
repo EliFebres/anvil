@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anvil_types::dotenv::{FACTORY_DIR, FACTORY_ENV_FILE};
+use factory_types::dotenv::{FACTORY_DIR, FACTORY_ENV_FILE};
 
 /// Environment variable that overrides the home directory, so tests can
 /// point `~/.factory` at a temp folder.

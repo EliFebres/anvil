@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use anvil_types::factory_config::DEFAULT_EVAL_PARALLEL;
 use clap::{Parser, Subcommand};
 use eval::{
     AnvilOptions, BaselineOptions, EvalError, Progress, ProgressFn, RESULTS_DIR, RunOptions,
     RunResult, TASKS_DIR,
 };
+use factory_types::factory_config::DEFAULT_EVAL_PARALLEL;
 
 /// Scores a model or an anvil build against the fixed task set.
 #[derive(Debug, Parser)]

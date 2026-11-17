@@ -7,8 +7,8 @@ mod support;
 use std::path::Path;
 use std::process::Command;
 
-use anvil_types::github::git_auth_args;
 use factory_core::Git;
+use factory_types::github::git_auth_args;
 use support::{World, git, have_git, write};
 
 /// A `pre-push` hook that records the auth settings git sees. `-c` values

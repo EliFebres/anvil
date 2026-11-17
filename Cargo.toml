@@ -20,6 +20,7 @@ anvil-tui = { path = "crates/anvil-tui" }
 factory-core = { path = "crates/factory-core" }
 factory-review = { path = "crates/factory-review" }
 eval = { path = "crates/eval" }
+factory-types = { path = "crates/factory-types" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

@@ -8,14 +8,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anvil_types::AnvilConfig;
 use anvil_types::config::SETUP_PROVIDERS;
-use anvil_types::{AnvilConfig, ContainerRuntime};
 use factory_core::fakes::FakeRuntime;
 use factory_core::sandbox::{ANVIL_MOUNT, CACHE_VOLUME, SandboxOptions};
 use factory_core::{
     Exit, FactoryError, FactoryHome, Implementer, ImplementerStatus, Sandbox, SandboxConfig,
     ensure_cache_volume, preflight,
 };
+use factory_types::ContainerRuntime;
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");

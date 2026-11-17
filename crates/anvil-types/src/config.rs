@@ -86,6 +86,11 @@ summarizer = "runpod"
 # [tickets]
 # remote = "origin"
 
+# Where `anvil update` looks for releases when this anvil was built from source.
+# Release builds know their repository and ignore this.
+# [update]
+# repo = "owner/repo"
+
 # Post one short message to a Discord, Slack or ntfy webhook when a session needs
 # you, is blocked, finishes or fails. `webhook_env` names the environment
 # variable that holds the URL.
@@ -519,6 +524,16 @@ impl Default for TicketsConfig {
     }
 }
 
+/// Where `anvil update` finds releases.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct UpdateConfig {
+    /// The GitHub `owner/repo` whose releases a source build updates from.
+    /// A release build carries its own and ignores this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
 /// Lines a profile adds to the coder's system prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
@@ -615,6 +630,9 @@ pub struct AnvilConfig {
     /// Where submitted tickets go.
     #[serde(default)]
     pub tickets: TicketsConfig,
+    /// Where `anvil update` finds releases.
+    #[serde(default)]
+    pub update: UpdateConfig,
     /// Extra lines for the coder's system prompt.
     #[serde(default)]
     pub prompt: PromptConfig,
@@ -635,8 +653,9 @@ impl AnvilConfig {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when all providers validate and `coder`, `summarizer` and
-    /// (if set) `reviewer`, `planner` and `worker` each name a key in `providers`.
+    /// `Ok(())` when all providers validate, `coder`, `summarizer` and
+    /// (if set) `reviewer`, `planner` and `worker` each name a key in
+    /// `providers`, and `[update] repo` (if set) is `owner/repo`.
     ///
     /// # Errors
     ///
@@ -655,6 +674,16 @@ impl AnvilConfig {
         }
         if let Some(worker) = &self.roles.worker {
             self.check_role("worker", worker)?;
+        }
+        if let Some(repo) = &self.update.repo {
+            let mut parts = repo.split('/');
+            let valid = matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty()
+            );
+            if !valid {
+                return Err(ValidationError::InvalidUpdateRepo { repo: repo.clone() });
+            }
         }
         Ok(())
     }
@@ -855,6 +884,22 @@ mod tests {
     }
 
     #[test]
+    fn update_repo_must_be_owner_slash_repo() {
+        let mut config: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
+        config.update.repo = Some("owner/repo".to_owned());
+        assert_eq!(config.validate(), Ok(()));
+        for bad in ["owner", "owner/", "/repo", "a/b/c"] {
+            config.update.repo = Some(bad.to_owned());
+            assert_eq!(
+                config.validate(),
+                Err(ValidationError::InvalidUpdateRepo {
+                    repo: bad.to_owned()
+                })
+            );
+        }
+    }
+
+    #[test]
     fn setup_providers_parse_and_validate() {
         let config: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
         config.validate().expect("validates");
@@ -891,14 +936,14 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
         write(home.path(), CONFIG_TEMPLATE);
-        let profile = profile_path(home.path(), "factory");
+        let profile = profile_path(home.path(), "ci");
         std::fs::create_dir_all(profile.parent().expect("parent")).expect("mkdir");
         std::fs::write(
             &profile,
             "[limits]\nsession_tokens = 7\n[permissions]\nallow = [\"shell:cargo *\"]\ndefault = \"deny\"\n",
         )
         .expect("write");
-        let loaded = load_profile(Some(home.path()), cwd.path(), Some("factory")).expect("loads");
+        let loaded = load_profile(Some(home.path()), cwd.path(), Some("ci")).expect("loads");
         assert_eq!(loaded.sources.len(), 2);
         assert_eq!(loaded.sources[1], profile);
         assert_eq!(loaded.config.limits.session_tokens, 7);

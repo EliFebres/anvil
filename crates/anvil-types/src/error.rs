@@ -107,42 +107,11 @@ pub enum ValidationError {
         field: &'static str,
     },
 
-    /// A `github.repo` value is not `owner/repo`.
-    #[error("github.repo `{repo}` must be `owner/repo`")]
-    InvalidRepo {
+    /// `[update] repo` is not `owner/repo`.
+    #[error("update.repo `{repo}` must be `owner/repo`")]
+    InvalidUpdateRepo {
         /// The value as written.
         repo: String,
-    },
-
-    /// A reviewer runs the same model as the coder, so a model would review its own work.
-    #[error(
-        "reviewer `{reviewer}` runs {model}, the same as coder `{coder}`; a reviewer needs a different model"
-    )]
-    ReviewerIsCoderModel {
-        /// The reviewer's provider name.
-        reviewer: String,
-        /// The coder's provider name.
-        coder: String,
-        /// The shared model, as `model at base_url`.
-        model: String,
-    },
-
-    /// The blocking reviewers do not span two models, so one model's blind spots decide every review.
-    #[error("blocking reviewers use {found} distinct model(s); at least 2 are needed")]
-    TooFewReviewerModels {
-        /// How many distinct (base URL, model) pairs the blocking reviewers use.
-        found: usize,
-    },
-
-    /// Every reviewer is non-blocking, so no review could ever send a change back.
-    #[error("at least one reviewer must be blocking")]
-    NoBlockingReviewer,
-
-    /// A numeric field that must be positive is zero.
-    #[error("field `{field}` must be at least 1")]
-    ZeroField {
-        /// Name of the field.
-        field: &'static str,
     },
 
     /// A ticket in some status lacks a field that status implies.
@@ -152,26 +121,6 @@ pub enum ValidationError {
         field: &'static str,
         /// The status that requires it.
         status: crate::ticket::TicketStatus,
-    },
-
-    /// A glob in a list of rules does not compile.
-    #[error("field `{field}` has an invalid glob `{glob}`: {detail}")]
-    InvalidGlob {
-        /// Name of the field holding the list.
-        field: &'static str,
-        /// The glob as written.
-        glob: String,
-        /// Why it does not compile.
-        detail: String,
-    },
-
-    /// A time of day is not `HH:MM`.
-    #[error("field `{field}` must be a time of day as HH:MM, not `{value}`")]
-    InvalidTime {
-        /// Name of the field.
-        field: &'static str,
-        /// The value as written.
-        value: String,
     },
 
     /// A skill name is not kebab-case or is too long.

@@ -14,7 +14,8 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anvil_types::{ContainerRuntime, Protocol, ProviderConfig};
+use anvil_types::{Protocol, ProviderConfig};
+use factory_types::ContainerRuntime;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -117,6 +118,9 @@ pub struct SandboxConfig {
 pub struct SandboxOptions {
     /// Gate A, as a program and its arguments: `just check` in production.
     pub check_command: Vec<String>,
+    /// Runs before Gate A so a formatting-only difference never rejects a
+    /// ticket; the worker commits the result. Empty skips it.
+    pub format_command: Vec<String>,
     /// The named volume that caches the cargo registry.
     pub cache_volume: String,
     /// Whether `prepare` runs `cargo fetch` into the cache volume.
@@ -130,6 +134,7 @@ impl Default for SandboxOptions {
     fn default() -> Self {
         Self {
             check_command: vec!["just".to_owned(), "check".to_owned()],
+            format_command: vec!["cargo".to_owned(), "fmt".to_owned(), "--all".to_owned()],
             cache_volume: CACHE_VOLUME.to_owned(),
             prewarm: true,
             labels: Vec::new(),
@@ -742,13 +747,13 @@ impl Implementer for Sandbox {
         deadline: Instant,
     ) -> BoxFuture<'a, Result<CheckOutcome>> {
         Box::pin(async move {
-            let program: Vec<&str> = self
-                .config
-                .options
-                .check_command
-                .iter()
-                .map(String::as_str)
-                .collect();
+            let options = &self.config.options;
+            if !options.format_command.is_empty() {
+                let format: Vec<&str> = options.format_command.iter().map(String::as_str).collect();
+                // A failure here shows up again in Gate A, with its output.
+                self.run_check(worktree, &format, deadline).await?;
+            }
+            let program: Vec<&str> = options.check_command.iter().map(String::as_str).collect();
             self.run_check(worktree, &program, deadline).await
         })
     }

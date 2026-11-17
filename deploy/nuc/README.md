@@ -47,7 +47,7 @@ Runs the whole worker pipeline once, for real, in a few seconds, and prints `PAS
 
 ## First run
 
-`main` needs an eval result under `eval/results/` before any ticket can pass Gate B; until the baseline commit reaches `main` the service pauses with "no eval result on main". Run `anvil doctor --fix-github` once so `factory/state` exists with its ruleset, then `factory resume`.
+`main` needs an eval result under `eval/results/` before any ticket can pass Gate B; until the baseline commit reaches `main` the service pauses with "no eval result on main". Run `factory doctor --fix-github` once so `factory/state` exists with its ruleset, then `factory resume`.
 
 ## Troubleshooting
 

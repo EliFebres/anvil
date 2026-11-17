@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use anvil_types::config::{SETUP_PROVIDERS, merge_tables};
-use anvil_types::{AnvilConfig, FactoryConfig, Unmatched};
+use anvil_types::{AnvilConfig, Unmatched};
+use factory_types::FactoryConfig;
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -95,12 +96,40 @@ fn the_factory_profile_matches_factory_toml_and_locks_permissions() {
             "{tool} missing from allow"
         );
     }
-    for denied in ["shell:git push*", "shell:git reset --hard*", "shell:*&&*"] {
+    // anvil decides with these lists (deny, then allow, then the default);
+    // the factory cannot link anvil's permission code, so the lists are
+    // checked here and `factory selftest` exercises the decisions for real.
+    for tool in ["read_file", "glob", "grep", "list_dir", "outline"] {
+        assert!(
+            rules.allow.iter().any(|r| r == tool),
+            "{tool} missing from allow"
+        );
+    }
+    for denied in [
+        "shell:git push*",
+        "shell:git reset --hard*",
+        "shell:git clean*",
+        "shell:*&&*",
+        "shell:*;*",
+        "shell:*|*",
+        "shell:*>*",
+        "shell:*<*",
+        "shell:*$(*",
+        "shell:*`*",
+    ] {
         assert!(
             rules.deny.iter().any(|r| r == denied),
             "{denied} missing from deny"
         );
     }
+    assert!(
+        !rules
+            .allow
+            .iter()
+            .any(|r| r.starts_with("delegate") || r == "shell" || r == "shell:*"),
+        "the profile allows delegation or every shell command: {:?}",
+        rules.allow
+    );
 }
 
 #[test]

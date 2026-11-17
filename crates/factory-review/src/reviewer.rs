@@ -5,7 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anvil_types::{Stance, Ticket};
+use anvil_types::Ticket;
+use factory_types::Stance;
 
 use crate::error::ReviewError;
 use crate::verdict::{Decision, Finding, Review, ReviewerId, Usage};

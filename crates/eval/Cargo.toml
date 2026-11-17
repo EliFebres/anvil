@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 anvil-types.workspace = true
+factory-types.workspace = true
 chrono.workspace = true
 clap.workspace = true
 serde.workspace = true

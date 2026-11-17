@@ -11,7 +11,8 @@
 # mode into ~/.local/bin, and anvil once more as a static musl binary that
 # the worker container mounts (the image's glibc is older than the host's;
 # ldd proves it static); builds the worker image; installs the systemd user
-# service; runs anvil doctor.
+# service; writes factory.toml and the env template when absent (factory
+# init); runs anvil doctor and factory doctor.
 set -euo pipefail
 
 REPO_URL="${FACTORY_REPO_URL:-https://github.com/EliFebres/anvil.git}"
@@ -122,6 +123,10 @@ seed_config() {
     # 2 while placeholders remain, which is expected on a fresh machine.
     log "config: anvil setup"
     (cd "$REPO_DIR" && anvil setup) || true
+    # `factory init` writes factory.toml and deploy/nuc/env.template only when
+    # absent; both are committed, so on a clone it changes nothing.
+    log "config: factory init"
+    (cd "$REPO_DIR" && factory init) || true
 }
 
 install_packages
@@ -135,6 +140,7 @@ install_service
 
 log "doctor"
 (cd "$REPO_DIR" && anvil doctor) || true
+(cd "$REPO_DIR" && factory doctor) || true
 
 echo
-echo "Open $FACTORY_ENV, paste the keys, then run: cd $REPO_DIR && anvil doctor"
+echo "Open $FACTORY_ENV, paste the keys, then run: cd $REPO_DIR && anvil doctor && factory doctor"

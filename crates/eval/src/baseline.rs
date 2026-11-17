@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anvil_types::FactoryConfig;
-use anvil_types::factory_config::FACTORY_FILE;
+use factory_types::FactoryConfig;
+use factory_types::factory_config::FACTORY_FILE;
 
 use crate::anvil::{AnvilOptions, AnvilRunner};
 use crate::error::EvalError;

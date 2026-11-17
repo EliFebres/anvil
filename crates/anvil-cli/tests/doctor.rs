@@ -83,8 +83,6 @@ planner = \"bad\"",
         .env("ANVIL_LOG", "off")
         .env("ANVIL_TEST_GOOD_KEY", "good-key")
         .env("ANVIL_TEST_BAD_KEY", "bad-key")
-        .env_remove("GITHUB_TOKEN")
-        .env_remove("FACTORY_GITHUB_TOKEN")
         .arg("doctor")
         .output()
         .expect("anvil runs");
@@ -135,8 +133,6 @@ async fn doctor_reports_the_failing_provider_in_its_row_with_a_fix() {
         .env("ANVIL_LOG", "off")
         .env("ANVIL_TEST_GOOD_KEY", "good-key")
         .env("ANVIL_TEST_BAD_KEY", "bad-key")
-        .env_remove("GITHUB_TOKEN")
-        .env_remove("FACTORY_GITHUB_TOKEN")
         .arg("doctor")
         .output()
         .expect("anvil runs");
@@ -169,7 +165,7 @@ async fn doctor_reports_the_failing_provider_in_its_row_with_a_fix() {
     assert!(good_row.contains(" ms"), "{good_row}");
 
     assert!(stdout.contains("PASS  key:ANVIL_TEST_GOOD_KEY"), "{stdout}");
-    assert!(stdout.contains("SKIP  github:token"), "{stdout}");
+    assert!(!stdout.contains("github:"), "{stdout}");
     assert!(stdout.contains("SKIP  secrets"), "{stdout}");
     assert!(stdout.contains("check(s) failed"), "{stdout}");
 }

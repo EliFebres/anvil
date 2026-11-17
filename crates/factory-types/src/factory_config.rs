@@ -10,22 +10,22 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::AnvilConfig;
-use crate::dotenv::is_placeholder;
 use crate::error::ValidationError;
+use anvil_types::AnvilConfig;
+use anvil_types::dotenv::is_placeholder;
 
 /// File name of the factory configuration at the repository root.
 pub const FACTORY_FILE: &str = "factory.toml";
 
-/// The placeholder `anvil setup` writes when no GitHub remote is found.
+/// The placeholder `factory init` writes when no GitHub remote is found.
 pub const REPO_PLACEHOLDER: &str = "<owner>/<repo>";
 
 /// Eval tasks that run at once when `[eval] parallel` is not set.
 pub const DEFAULT_EVAL_PARALLEL: u32 = 2;
 
-/// The template written by `anvil setup`; `{repo}` is replaced with the
+/// The template written by `factory init`; `{repo}` is replaced with the
 /// `owner/repo` detected from the git remote.
-pub const FACTORY_TEMPLATE: &str = r#"# factory configuration, written by `anvil setup` and committed.
+pub const FACTORY_TEMPLATE: &str = r#"# factory configuration, written by `factory init` and committed.
 # Provider names refer to [providers.<name>] entries in ~/.anvil/config.toml.
 
 [roles]
@@ -754,7 +754,7 @@ mod tests {
     }
 
     fn providers() -> AnvilConfig {
-        toml::from_str(crate::config::SETUP_PROVIDERS).expect("parses")
+        toml::from_str(anvil_types::config::SETUP_PROVIDERS).expect("parses")
     }
 
     fn with_reviewers(coder: &str, reviewers: &[&str]) -> FactoryConfig {

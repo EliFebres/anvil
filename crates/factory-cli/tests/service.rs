@@ -88,7 +88,7 @@ origin = "human"
         let repo = dir.path().join("factory-repo");
         write(
             &repo.join("factory.toml"),
-            &anvil_types::FactoryConfig::template("owner/repo"),
+            &factory_types::FactoryConfig::template("owner/repo"),
         );
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).expect("mkdir");

@@ -222,10 +222,8 @@ dependencies = [
 name = "anvil-types"
 version = "0.1.0"
 dependencies = [
- "base64 0.23.1",
  "chrono",
  "dotenvy",
- "globset",
  "insta",
  "schemars",
  "serde",
@@ -942,6 +940,7 @@ dependencies = [
  "anvil-types",
  "chrono",
  "clap",
+ "factory-types",
  "insta",
  "serde",
  "serde_json",
@@ -964,8 +963,10 @@ dependencies = [
  "eval",
  "factory-core",
  "factory-review",
+ "factory-types",
  "insta",
  "ratatui",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
@@ -986,6 +987,7 @@ version = "0.1.0"
 dependencies = [
  "anvil-types",
  "chrono",
+ "factory-types",
  "globset",
  "insta",
  "octocrab",
@@ -1006,6 +1008,7 @@ name = "factory-review"
 version = "0.1.0"
 dependencies = [
  "anvil-types",
+ "factory-types",
  "futures-util",
  "insta",
  "reqwest",
@@ -1017,6 +1020,20 @@ dependencies = [
  "toml",
  "tracing",
  "wiremock",
+]
+
+[[package]]
+name = "factory-types"
+version = "0.1.0"
+dependencies = [
+ "anvil-types",
+ "base64 0.23.1",
+ "globset",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml",
 ]
 
 [[package]]

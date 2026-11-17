@@ -8,7 +8,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use anvil_types::{AnvilConfig, FactoryConfig, Price, Protocol, ProviderConfig, Stance};
+use anvil_types::{AnvilConfig, Price, Protocol, ProviderConfig};
+use factory_types::{FactoryConfig, Stance};
 use serde_json::{Value, json};
 
 use crate::error::ReviewError;

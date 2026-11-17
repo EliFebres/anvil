@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anvil_types::factory_config::DEFAULT_ANVIL_BIN;
+use factory_types::factory_config::DEFAULT_ANVIL_BIN;
 
 #[test]
 fn the_selftest_merges_its_ticket_on_the_host() {

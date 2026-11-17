@@ -6,6 +6,8 @@
 //! the tests build the same service with fakes.
 
 pub mod adapters;
+pub mod doctor;
+pub mod init;
 pub mod install;
 pub mod logging;
 pub mod reopen;

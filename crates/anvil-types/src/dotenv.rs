@@ -1,42 +1,30 @@
-//! `.env` loading shared by `anvil` and `factory`.
+//! `.env` loading.
 //!
 //! Keys never live in configuration files. Each provider names an
-//! environment variable, and both binaries fill the environment from `.env`
-//! files at startup, in a fixed order where the first definition wins: the
-//! real environment, then `~/.factory/env` (factory only), then
-//! `~/.anvil/.env`, then the project's `.anvil/.env`.
+//! environment variable, and anvil fills the environment from `.env` files
+//! at startup, in a fixed order where the first definition wins: the real
+//! environment, then `~/.anvil/.env`, then the project's `.anvil/.env`.
 
 use std::path::{Path, PathBuf};
 
 use crate::error::DotenvError;
 
-/// Directory under the home directory that holds factory settings.
-pub const FACTORY_DIR: &str = ".factory";
-
-/// File name of the factory's env file inside [`FACTORY_DIR`].
-pub const FACTORY_ENV_FILE: &str = "env";
-
 /// File name of the anvil env file inside `.anvil`.
 pub const ANVIL_ENV_FILE: &str = ".env";
 
-/// The `.env` files a binary loads, in loading order.
+/// The `.env` files anvil loads, in loading order.
 ///
 /// # Arguments
 ///
 /// * `home` - The home directory, if known.
 /// * `cwd` - The project root.
-/// * `factory` - Whether to include `~/.factory/env` (first, since it is the
-///   service-specific file).
 ///
 /// # Returns
 ///
 /// The candidate paths; a missing file is skipped by [`load`].
-pub fn env_files(home: Option<&Path>, cwd: &Path, factory: bool) -> Vec<PathBuf> {
+pub fn env_files(home: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Some(home) = home {
-        if factory {
-            files.push(home.join(FACTORY_DIR).join(FACTORY_ENV_FILE));
-        }
         files.push(home.join(crate::config::CONFIG_DIR).join(ANVIL_ENV_FILE));
     }
     files.push(cwd.join(crate::config::CONFIG_DIR).join(ANVIL_ENV_FILE));
@@ -208,28 +196,17 @@ mod tests {
     }
 
     #[test]
-    fn env_files_order_for_anvil_and_factory() {
+    fn env_files_order() {
         let home = Path::new("/home/u");
         let cwd = Path::new("/proj");
         assert_eq!(
-            env_files(Some(home), cwd, false),
+            env_files(Some(home), cwd),
             vec![
                 home.join(".anvil").join(".env"),
                 cwd.join(".anvil").join(".env")
             ]
         );
-        assert_eq!(
-            env_files(Some(home), cwd, true),
-            vec![
-                home.join(".factory").join("env"),
-                home.join(".anvil").join(".env"),
-                cwd.join(".anvil").join(".env")
-            ]
-        );
-        assert_eq!(
-            env_files(None, cwd, true),
-            vec![cwd.join(".anvil").join(".env")]
-        );
+        assert_eq!(env_files(None, cwd), vec![cwd.join(".anvil").join(".env")]);
     }
 
     #[test]

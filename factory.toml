@@ -1,4 +1,4 @@
-# factory configuration, written by `anvil setup` and committed.
+# factory configuration, written by `factory init` and committed.
 # Provider names refer to [providers.<name>] entries in ~/.anvil/config.toml.
 
 [roles]

@@ -8,11 +8,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anvil_types::ticket::dirs;
-use anvil_types::{FactoryConfig, Priority, Ticket, TicketKind, TicketStatus};
+use anvil_types::{Priority, Ticket, TicketKind, TicketStatus};
 use factory_core::fakes::{
     CallLog, FakeEvalGate, FakeSwarm, LocalHost, ScriptedImplementer, ScriptedRun,
 };
 use factory_core::{GateB, Git, Outcome, TicketQueue, TicketWorker, Worker, WorkerDeps};
+use factory_types::FactoryConfig;
 use support::{World, git, have_git, ticket};
 
 /// A clock that jumps two hours ahead after `ticks_before_jump` reads.
@@ -680,7 +681,7 @@ async fn minor_findings_are_posted_as_a_review_and_denied_hosts_land_in_the_note
 fn gate_config(paths: &[&str]) -> FactoryConfig {
     let mut config: FactoryConfig =
         toml::from_str(&FactoryConfig::template("owner/repo")).expect("template");
-    config.eval_gate = Some(anvil_types::factory_config::EvalGateConfig {
+    config.eval_gate = Some(factory_types::factory_config::EvalGateConfig {
         paths: paths.iter().map(|p| (*p).to_owned()).collect(),
     });
     config

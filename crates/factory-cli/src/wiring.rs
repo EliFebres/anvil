@@ -4,8 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anvil_types::factory_config::FACTORY_FILE;
-use anvil_types::{AnvilConfig, FactoryConfig, config};
+use anvil_types::{AnvilConfig, config};
 use anyhow::Context;
 use factory_core::github::{FALLBACK_TOKEN_ENV, TOKEN_ENV, token_from_env};
 use factory_core::{
@@ -14,6 +13,8 @@ use factory_core::{
     hostname, preflight, system_clock,
 };
 use factory_review::{ModelReviewer, load_rules};
+use factory_types::FactoryConfig;
+use factory_types::factory_config::FACTORY_FILE;
 use tokio::process::Command;
 
 use crate::adapters::eval_gate::{HarnessGate, RunnerSource};
@@ -107,7 +108,7 @@ pub fn repo(root: &Path) -> Git {
 pub fn read_factory(root: &Path) -> anyhow::Result<FactoryConfig> {
     let path = root.join(FACTORY_FILE);
     let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}; run `anvil setup` first", path.display()))?;
+        .with_context(|| format!("reading {}; run `factory init` first", path.display()))?;
     let factory: FactoryConfig =
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     factory

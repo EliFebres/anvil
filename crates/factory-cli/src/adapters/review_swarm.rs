@@ -154,8 +154,8 @@ pub fn blocks(severity: Severity) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anvil_types::Stance;
     use factory_review::{FakeReviewer, Finding, RawVerdict, Review, ReviewerId, Usage};
+    use factory_types::Stance;
 
     fn finding(
         severity: Severity,

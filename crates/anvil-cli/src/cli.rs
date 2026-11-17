@@ -60,16 +60,12 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Write ~/.anvil/.env, ~/.anvil/config.toml, factory.toml and deploy/nuc/env.template
-    /// without overwriting anything already filled in; exit 2 while placeholders remain.
+    /// Write ~/.anvil/.env and ~/.anvil/config.toml without overwriting anything
+    /// already filled in; exit 2 while placeholders remain.
     Setup,
-    /// Check keys, providers, factory.toml, GitHub access, branch protection, tools and
-    /// tracked files, one row per check with the fix for each failure.
-    Doctor {
-        /// Set the `main` branch protection and squash merging through an authenticated `gh`.
-        #[arg(long)]
-        fix_github: bool,
-    },
+    /// Check keys, providers, tools and tracked files, one row per check with the
+    /// fix for each failure.
+    Doctor,
     /// Fail if any tracked file contains an API key (`just check` runs this).
     ScanKeys,
     /// Install, list, inspect and remove skills (Claude Code `SKILL.md` folders).

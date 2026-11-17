@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anvil-types.workspace = true
+factory-types.workspace = true
 chrono.workspace = true
 globset.workspace = true
 # rustls on aws-lc-rs only: the workspace already uses that provider through

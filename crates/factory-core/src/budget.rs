@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use anvil_types::BudgetConfig;
+use factory_types::BudgetConfig;
 
 /// Implementer runs allowed to pass Gate A: the first and one retry.
 pub const MAX_GATE_A_ATTEMPTS: u32 = 2;

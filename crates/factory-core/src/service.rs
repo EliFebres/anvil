@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anvil_types::ticket::dirs;
-use anvil_types::{FactoryConfig, Ticket, TicketKind};
+use anvil_types::{Ticket, TicketKind};
 use chrono::{DateTime, FixedOffset, Local, NaiveTime, Offset, Utc};
+use factory_types::FactoryConfig;
 use serde::Serialize;
 use ulid::Ulid;
 

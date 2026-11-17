@@ -173,7 +173,7 @@ fn run(terminal: &mut DefaultTerminal, options: &WatchOptions) -> anyhow::Result
                 }
             }
             Action::Doctor => {
-                let mut command = Command::new("anvil");
+                let mut command = Command::new("factory");
                 command.arg("doctor");
                 if let Some(notice) = suspend(terminal, command, true) {
                     app.handle(WatchMsg::Notice(notice));

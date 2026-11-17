@@ -18,12 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anvil_types::factory_config::Reviewer as ReviewerEntry;
 use anvil_types::ticket::dirs::{CLAIMED_DIR, MERGED_DIR, OPEN_DIR, REJECTED_DIR, STATE_BRANCH};
-use anvil_types::{
-    AnvilConfig, ContainerRuntime, FactoryConfig, Priority, Stance, Ticket, TicketKind,
-    TicketOrigin, TicketStatus,
-};
+use anvil_types::{AnvilConfig, Priority, Ticket, TicketKind, TicketOrigin, TicketStatus};
 use anyhow::{Context, anyhow, bail};
 use chrono::Utc;
 use factory_core::fakes::LocalHost;
@@ -36,6 +32,8 @@ use factory_core::{
     check_image, hostname, resolve_anvil_bin, system_clock,
 };
 use factory_review::{FakeReviewer, Reviewer};
+use factory_types::factory_config::Reviewer as ReviewerEntry;
+use factory_types::{ContainerRuntime, FactoryConfig, Stance};
 use tokio::process::Command;
 use ulid::Ulid;
 
@@ -400,6 +398,7 @@ impl World {
                 anvil_bin: anvil_bin.to_path_buf(),
                 options: SandboxOptions {
                     check_command: check,
+                    format_command: SandboxOptions::default().format_command,
                     cache_volume: self.volume(),
                     prewarm: false,
                     labels: vec![self.label()],

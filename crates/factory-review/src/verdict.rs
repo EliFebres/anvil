@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use anvil_types::Stance;
+use factory_types::Stance;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 

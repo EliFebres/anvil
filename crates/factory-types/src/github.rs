@@ -1,6 +1,6 @@
-//! What both binaries pass to git so it can reach GitHub with a token.
+//! What the factory passes to git so it can reach GitHub with a token.
 //!
-//! The factory and `anvil doctor` push over HTTPS from machines that have no
+//! The factory and `factory doctor` push over HTTPS from machines that have no
 //! stored credential. Instead of writing the token into a config file, every
 //! remote command carries it on its own command line, which is the only place
 //! it ever exists.

@@ -1,7 +1,7 @@
 //! The merge policy's protected paths: globs from `[protected]` in
 //! `factory.toml`, plus new dependencies in any `Cargo.toml`.
 
-use anvil_types::ProtectedConfig;
+use factory_types::ProtectedConfig;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::error::{FactoryError, Result};

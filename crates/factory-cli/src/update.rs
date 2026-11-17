@@ -15,11 +15,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use anvil_types::factory_config::{DEFAULT_ANVIL_BIN, IMPLEMENTER_TARGET};
-use anvil_types::{ContainerRuntime, FactoryConfig};
 use anyhow::Context;
 use factory_core::sandbox::snap_overrides;
 use factory_core::{FactoryHome, InProgress, ServiceState, service};
+use factory_types::factory_config::{DEFAULT_ANVIL_BIN, IMPLEMENTER_TARGET};
+use factory_types::{ContainerRuntime, FactoryConfig};
 use sha2::{Digest, Sha256};
 
 use crate::install::{InstallOptions, UNIT_NAME, install};

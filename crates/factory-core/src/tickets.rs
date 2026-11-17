@@ -115,7 +115,7 @@ impl TicketQueue {
             let upstream = format!("{remote}/{STATE_BRANCH}");
             if repo.try_rev_parse(&upstream).await.is_none() {
                 return Err(FactoryError::Config(format!(
-                    "{remote} has no `{STATE_BRANCH}` branch; run `anvil doctor --fix-github` to create it"
+                    "{remote} has no `{STATE_BRANCH}` branch; run `factory doctor --fix-github` to create it"
                 )));
             }
             repo.worktree_add_tracking(state_dir, STATE_BRANCH, remote)

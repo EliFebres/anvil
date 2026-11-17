@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use anvil_types::Stance;
+use factory_types::Stance;
 
 use crate::reviewer::ReviewRequest;
 use crate::rules::Rule;

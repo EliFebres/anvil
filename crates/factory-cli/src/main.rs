@@ -5,8 +5,7 @@ mod review;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anvil_types::factory_config::FACTORY_FILE;
-use anvil_types::{ContainerRuntime, dotenv};
+use anvil_types::dotenv;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use factory_cli::install::{InstallOptions, config_home, install};
@@ -16,6 +15,8 @@ use factory_cli::update::{UpdateOptions, update};
 use factory_cli::watch::{WatchOptions, watch};
 use factory_cli::{logging, wiring};
 use factory_core::{FactoryHome, ServiceState, SystemRunner, Tick, preflight, service};
+use factory_types::ContainerRuntime;
+use factory_types::factory_config::FACTORY_FILE;
 
 /// The Dark Factory: works tickets from `tickets/open/` into reviewed pull requests.
 #[derive(Debug, Parser)]
@@ -121,6 +122,18 @@ enum Command {
         /// The variable name.
         name: String,
     },
+    /// Write factory.toml and deploy/nuc/env.template at the repository root
+    /// without overwriting either; exit 2 while placeholders remain.
+    Init,
+    /// Check the env files, the reviewers in factory.toml, GitHub access for both
+    /// tokens, branch protection, the factory/state branch and the host's tools,
+    /// one row per check with the fix for each failure.
+    Doctor {
+        /// Set the `main` branch protection and squash merging, and create the
+        /// `factory/state` branch and its ruleset, through an authenticated `gh`.
+        #[arg(long)]
+        fix_github: bool,
+    },
     /// Run the review swarm on a pull request and post its minor findings as comments.
     ///
     /// Prints the aggregate verdict with every reviewer's raw result. Exits 0
@@ -164,13 +177,13 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
     let cwd = std::env::current_dir()?;
     let home = home_dir();
     let factory_home = home.as_deref().map(FactoryHome::under);
-    let env_files = dotenv::env_files(home.as_deref(), &cwd, true);
+    let env_files = factory_types::dotenv::env_files(home.as_deref(), &cwd);
     if matches!(cli.command, Command::Run { .. })
         && let Some(factory_home) = &factory_home
     {
         check_env_mode(&factory_home.env_file())?;
     }
-    dotenv::load(&env_files)?;
+    let loaded_env = dotenv::load(&env_files)?;
     // The selftest keeps its log in its own temp home, away from the service's.
     let _log_guard = factory_home
         .as_ref()
@@ -197,6 +210,25 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             };
             runtime.block_on(selftest(&options))?;
             Ok(0)
+        }
+        Command::Init => {
+            let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
+            let root = runtime.block_on(wiring::repo_root(&cwd));
+            factory_cli::init::run(&root)
+        }
+        Command::Doctor { fix_github } => {
+            let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
+            let root = runtime.block_on(wiring::repo_root(&cwd));
+            let config = anvil_types::config::load(home.as_deref(), &root)
+                .map(|loaded| loaded.config)
+                .map_err(|error| error.to_string());
+            runtime.block_on(factory_cli::doctor::run(factory_cli::doctor::Options {
+                root: &root,
+                config: config.as_ref().map_err(Clone::clone),
+                env_files: &env_files,
+                loaded_env: &loaded_env,
+                fix_github,
+            }))
         }
         Command::Review { number } => {
             let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;

@@ -19,7 +19,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anvil_types::{FactoryConfig, Ticket};
+use anvil_types::Ticket;
+use factory_types::FactoryConfig;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::board::Stage;

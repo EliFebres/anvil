@@ -9,13 +9,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anvil_types::{ContainerRuntime, ProviderConfig};
+use anvil_types::ProviderConfig;
 use chrono::{DateTime, Utc};
 use factory_core::board::{
     BaselineView, ContainerView, HealthView, ImageView, ProviderLatency, UsageView,
 };
 use factory_core::sandbox::{CACHE_VOLUME, TICKET_LABEL, snap_overrides};
 use factory_core::{BoxFuture, Git, Probe, usage};
+use factory_types::ContainerRuntime;
 use tokio::process::Command;
 
 use super::eval_gate::newest_baseline;

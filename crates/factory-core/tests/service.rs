@@ -5,12 +5,13 @@ mod support;
 use std::sync::Arc;
 
 use anvil_types::ticket::dirs;
-use anvil_types::{FactoryConfig, Priority, TicketKind, TicketStatus};
+use anvil_types::{Priority, TicketKind, TicketStatus};
 use chrono::{DateTime, Local, TimeZone};
 use factory_core::fakes::{FakeHost, RecordingNotifier, ScriptedWorker};
 use factory_core::{
     CiStatus, Event, FactoryError, Outcome, OutcomeKind, Service, ServiceDeps, Tick,
 };
+use factory_types::FactoryConfig;
 use support::{World, have_git, ticket};
 
 /// A local clock stopped at the given hour on 2026-10-31.

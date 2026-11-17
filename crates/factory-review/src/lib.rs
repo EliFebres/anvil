@@ -126,7 +126,7 @@ async fn run_once(request: &ReviewRequest, reviewer: &dyn Reviewer) -> RawVerdic
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anvil_types::Stance;
+    use factory_types::Stance;
     use std::sync::atomic::Ordering;
 
     fn request() -> ReviewRequest {

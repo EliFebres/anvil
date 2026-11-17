@@ -252,8 +252,6 @@ fn setup_is_idempotent_and_keeps_filled_keys() {
     let files = [
         home.join(".anvil").join(".env"),
         home.join(".anvil").join("config.toml"),
-        project.join("factory.toml"),
-        project.join("deploy").join("nuc").join("env.template"),
     ];
     let snapshot = || -> Vec<String> {
         files
@@ -273,11 +271,9 @@ fn setup_is_idempotent_and_keeps_filled_keys() {
     assert!(stdout.contains("ANTHROPIC_API_KEY in"), "{stdout}");
     assert!(stdout.contains("claude-opus-5-5"), "{stdout}");
     let written = snapshot();
-    assert!(written[2].contains("repo = \"o/r\""), "{}", written[2]);
     assert!(
-        written[3].contains("FACTORY_GITHUB_TOKEN="),
-        "{}",
-        written[3]
+        !project.join("factory.toml").exists(),
+        "setup writes only ~/.anvil"
     );
     let config: anvil_types::AnvilConfig = toml::from_str(&written[1]).expect("config parses");
     config.validate().expect("config validates");

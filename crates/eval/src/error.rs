@@ -124,7 +124,7 @@ pub enum EvalError {
 
     /// `factory.toml` failed validation.
     #[error("factory.toml: {0}")]
-    FactoryConfig(#[from] anvil_types::ValidationError),
+    FactoryConfig(#[from] factory_types::ValidationError),
 
     /// A numeric option is zero.
     #[error("{option} must be at least 1")]

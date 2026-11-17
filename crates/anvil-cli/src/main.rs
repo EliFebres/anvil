@@ -85,7 +85,7 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             eprintln!("{line}");
         }
     }
-    let env_files = dotenv::env_files(home.as_deref(), &cwd, false);
+    let env_files = dotenv::env_files(home.as_deref(), &cwd);
     let loaded_env = dotenv::load(&env_files)?;
     let interactive = matches!(
         cli.command,
@@ -124,7 +124,7 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             commands::config_show(&loaded);
             Ok(0)
         }
-        Some(Command::Setup) => setup::run(home, cwd),
+        Some(Command::Setup) => setup::run(home),
         Some(Command::ScanKeys) => secrets::run(cwd, &env.env_files),
         Some(Command::Sessions) => {
             commands::sessions(cwd)?;
@@ -172,10 +172,9 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         }
         Some(Command::Ticket { command }) => ticket::run(command, home, cwd).await,
         Some(Command::Update { exe }) => {
-            let repo = std::fs::read_to_string(cwd.join(anvil_types::factory_config::FACTORY_FILE))
+            let repo = load_config(home, cwd)
                 .ok()
-                .and_then(|text| toml::from_str::<anvil_types::FactoryConfig>(&text).ok())
-                .map(|factory| factory.github.repo);
+                .and_then(|loaded| loaded.config.update.repo);
             let options = update::UpdateOptions::for_this_binary(repo.as_deref(), exe)?;
             update::run(options).await
         }
@@ -185,12 +184,11 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             let config = load_config(home, cwd).ok().map(|loaded| loaded.config);
             commands::compat_check(&path, config.as_ref())
         }
-        Some(Command::Doctor { fix_github }) => {
+        Some(Command::Doctor) => {
             let wiring = Wiring::new(load_config(home, cwd)?.config)?;
             let options = doctor::Options {
                 env_files: &env.env_files,
                 loaded_env: &env.loaded_env,
-                fix_github,
             };
             doctor::run(&wiring, options).await
         }

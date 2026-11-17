@@ -3,8 +3,8 @@
 
 use std::path::Path;
 
-use anvil_types::FactoryConfig;
 use factory_core::ProtectedPaths;
+use factory_types::FactoryConfig;
 
 /// The committed `factory.toml` at the repository root.
 fn config() -> FactoryConfig {

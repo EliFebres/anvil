@@ -110,7 +110,7 @@ impl Git {
         let mut command = Command::new("git");
         command.args(IDENTITY);
         if remote && let Some(token) = &self.token {
-            command.args(anvil_types::github::git_auth_args(token));
+            command.args(factory_types::github::git_auth_args(token));
         }
         command
             .args(args)
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn remote_commands_carry_the_token_and_local_ones_do_not() {
         let git = Git::new(Path::new(".")).with_github_token("fake-token");
-        let expected = anvil_types::github::git_auth_args("fake-token");
+        let expected = factory_types::github::git_auth_args("fake-token");
         let remote = args_of(&git.command(true, &["push", "origin", "main"]));
         assert!(remote.windows(4).any(|w| w == expected), "{remote:?}");
         assert_eq!(&remote[remote.len() - 3..], ["push", "origin", "main"]);

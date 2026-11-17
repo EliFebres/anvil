@@ -61,6 +61,6 @@ pub enum Action {
     OpenTicket(String),
     /// Open a pull request in the browser.
     OpenPr(String),
-    /// Run `anvil doctor`.
+    /// Run `factory doctor`.
     Doctor,
 }
