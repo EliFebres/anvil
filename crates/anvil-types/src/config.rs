@@ -39,8 +39,8 @@ supports_reasoning = true
 # `cached` falls back to `input`.
 # price_per_mtoken = { input = 3.0, output = 15.0, cached = 0.3 }
 
-# Each role names a provider above, so the coder, the summarizer and (in the
-# factory) the reviewer can each be a different model.
+# Each role names a provider above, so the coder, the summarizer and the
+# reviewer can each be a different model.
 [roles]
 coder = "runpod"
 summarizer = "runpod"
@@ -210,8 +210,8 @@ pub enum Protocol {
     Openai,
     /// Anthropic messages style API.
     Anthropic,
-    /// A scripted provider that replays `script` and calls no API: for the
-    /// factory selftest and other offline runs.
+    /// A scripted provider that replays `script` and calls no API: for
+    /// tests and other offline runs.
     Fake,
 }
 
@@ -362,7 +362,8 @@ pub struct Roles {
     pub coder: String,
     /// Provider that compacts context and summarizes.
     pub summarizer: String,
-    /// Provider that reviews factory pull requests. Only the factory needs it.
+    /// Provider that reviews the coder's work in the loop's Review state;
+    /// the coder when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
     /// Provider that plans; the coder when absent.

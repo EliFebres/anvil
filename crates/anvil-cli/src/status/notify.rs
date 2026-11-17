@@ -1,10 +1,8 @@
 //! One short webhook message when a session needs the owner, is blocked,
 //! finishes or fails.
 //!
-//! The payload shapes mirror `factory-core`'s `notify.rs` (Discord wants
-//! `content`, Slack wants `text`, anything else is ntfy with a `Title`
-//! header). The code cannot be shared: `anvil-cli` may not depend on a
-//! `factory-*` crate, and `anvil-types` may not use reqwest.
+//! The payload shape follows the URL: Discord wants `content`, Slack wants
+//! `text`, anything else is ntfy with a `Title` header.
 
 use std::time::Duration;
 

@@ -2,7 +2,7 @@
 //!
 //! The crate consumes telemetry values that the CLI derives from loop events
 //! and never calls into the agent loop, so it depends on `anvil-types` only.
-//! It must never depend on `anvil-core` or any `factory-*` crate.
+//! It must never depend on `anvil-core`.
 //!
 //! Three things live here:
 //!
@@ -14,7 +14,7 @@
 //!   into [`Signal`]s: repeated tool failures, exhausted loops, slow models.
 //! - [`draft_all`] turns signals into [`anvil_types::Ticket`] drafts through
 //!   a [`Drafter`] (the summarizer, supplied by the CLI) and the ticket
-//!   validator, which is the data boundary toward the factory.
+//!   validator, which is the data boundary toward the ticket queue.
 //!
 //! Subagents run with a discarded event sink and are not recorded.
 

@@ -1,3 +1,0 @@
-# shapes
-
-Small geometry helpers.

@@ -1,7 +1,7 @@
 name: release
 
-# Every merge to main becomes a release: anvil for Linux (glibc, and static
-# musl, which is what the factory machine runs) and Windows, tagged
+# Every merge to main becomes a release: anvil for Linux (glibc, and a
+# static musl build that runs on any distribution) and Windows, tagged
 # with the date and the short sha, marked latest. `anvil update` reads the
 # `## SHA256` section of the notes before it swaps a binary in.
 on:

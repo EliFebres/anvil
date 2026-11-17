@@ -89,10 +89,7 @@ async fn update_verifies_the_checksum_swaps_the_binary_and_prints_the_changes() 
     write(
         &dir.path().join("home").join(".anvil").join("config.toml"),
         &format!(
-            "{}
-[update]
-repo = \"owner/repo\"
-",
+            "{}\n[update]\nrepo = \"owner/repo\"\n",
             anvil_types::config::SETUP_PROVIDERS
         ),
     );

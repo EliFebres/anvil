@@ -1,7 +1,7 @@
-//! The data boundary between anvil and the factory.
+//! The data boundary for tickets.
 //!
-//! Ticket text travels from a anvil run on someone's project to the factory,
-//! which must never receive that project's code or paths. These checks are
+//! Ticket text travels from an anvil run on someone's project to a ticket
+//! queue, which must never receive that project's code or paths. These checks are
 //! purely textual so they give the same answer on any machine, with or
 //! without the project present.
 

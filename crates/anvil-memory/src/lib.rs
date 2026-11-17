@@ -20,8 +20,8 @@
 //!
 //! Everything here is plain TOML or Markdown: no database, no embeddings,
 //! no background process. The crate may depend on anvil-types only and in
-//! fact needs nothing from it; never on anvil-core, anvil-compat or any
-//! factory crate. The CLI wires it into anvil-core from the outside.
+//! fact needs nothing from it; never on anvil-core or anvil-compat. The CLI
+//! wires it into anvil-core from the outside.
 
 pub mod corrections;
 pub mod error;

@@ -1,5 +1,5 @@
-//! The palette and small layout helpers shared by anvil's full-screen UI
-//! and `factory watch`.
+//! The palette and small layout helpers anvil's full-screen UI draws with,
+//! kept apart from the terminal so other full-screen front ends can share them.
 //!
 //! Everything here is pure: it builds styles, spans, lines and rectangles
 //! and never touches the terminal.

@@ -271,10 +271,6 @@ fn setup_is_idempotent_and_keeps_filled_keys() {
     assert!(stdout.contains("ANTHROPIC_API_KEY in"), "{stdout}");
     assert!(stdout.contains("claude-opus-5-5"), "{stdout}");
     let written = snapshot();
-    assert!(
-        !project.join("factory.toml").exists(),
-        "setup writes only ~/.anvil"
-    );
     let config: anvil_types::AnvilConfig = toml::from_str(&written[1]).expect("config parses");
     config.validate().expect("config validates");
 

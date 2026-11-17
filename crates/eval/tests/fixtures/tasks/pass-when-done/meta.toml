@@ -1,3 +1,0 @@
-tags = ["fixture", "fast"]
-timeout_s = 60
-max_tokens = 5000
