@@ -20,7 +20,7 @@ pub struct StoredTicket {
 /// Every ticket under `tickets/draft/` and `tickets/open/`.
 #[derive(Debug, Clone)]
 pub struct TicketStore {
-    /// The repository root.
+    /// The store's root, normally `~/.anvil`.
     root: PathBuf,
     /// Drafts, by file name.
     pub drafts: Vec<StoredTicket>,
@@ -33,7 +33,7 @@ impl TicketStore {
     ///
     /// # Arguments
     ///
-    /// * `root` - The repository root.
+    /// * `root` - The store's root, normally `~/.anvil`.
     ///
     /// # Returns
     ///

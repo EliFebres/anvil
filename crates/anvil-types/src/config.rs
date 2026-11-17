@@ -82,9 +82,10 @@ summarizer = "runpod"
 # slow_median_ms = 60000       # median completion latency over the last 20 sessions
 # error_rate_percent = 20      # provider errors as a share of completions
 
-# Where `anvil ticket submit` pushes the `tickets/<id>` branch.
+# The git repository `anvil ticket submit` pushes `tickets/<id>` branches to.
+# Unset by default, and while it is unset nothing is ever sent.
 # [tickets]
-# remote = "origin"
+# queue = "https://github.com/<owner>/<queue-repository>.git"
 
 # Where `anvil update` looks for releases when this anvil was built from source.
 # Release builds know their repository and ignore this.
@@ -197,9 +198,10 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # slow_median_ms = 60000       # median completion latency over the last 20 sessions
 # error_rate_percent = 20      # provider errors as a share of completions
 
-# Where `anvil ticket submit` pushes the `tickets/<id>` branch.
+# The git repository `anvil ticket submit` pushes `tickets/<id>` branches to.
+# Unset by default, and while it is unset nothing is ever sent.
 # [tickets]
-# remote = "origin"
+# queue = "https://github.com/<owner>/<queue-repository>.git"
 "#;
 
 /// Wire protocol a provider speaks.
@@ -510,19 +512,13 @@ impl Default for TelemetryConfig {
 }
 
 /// Where submitted tickets go.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct TicketsConfig {
-    /// The git remote `anvil ticket submit` pushes `tickets/<id>` branches to.
-    pub remote: String,
-}
-
-impl Default for TicketsConfig {
-    fn default() -> Self {
-        Self {
-            remote: "origin".to_owned(),
-        }
-    }
+    /// The git URL of the ticket queue `anvil ticket submit` pushes
+    /// `tickets/<id>` branches to. `None`, the default, sends nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
 }
 
 /// Where `anvil update` finds releases.
@@ -1265,14 +1261,20 @@ delegate_guidance = false
         assert_eq!(config.telemetry, TelemetryConfig::default());
         assert_eq!(config.telemetry.slow_median_ms, 60_000);
         assert_eq!(config.telemetry.error_rate_percent, 20);
-        assert_eq!(config.tickets.remote, "origin");
+        assert_eq!(config.tickets.queue, None, "no queue, so nothing is sent");
         let text = format!(
-            "{CONFIG_TEMPLATE}\n[telemetry]\nslow_median_ms = 5\n[tickets]\nremote = \"anvil\"\n"
+            "{CONFIG_TEMPLATE}\n[telemetry]\nslow_median_ms = 5\n[tickets]\nqueue = \"https://example.com/q.git\"\n"
         );
         let config: AnvilConfig = toml::from_str(&text).expect("parses");
         assert_eq!(config.telemetry.slow_median_ms, 5);
         assert_eq!(config.telemetry.error_rate_percent, 20);
-        assert_eq!(config.tickets.remote, "anvil");
+        assert_eq!(
+            config.tickets.queue.as_deref(),
+            Some("https://example.com/q.git")
+        );
+        let old = format!("{CONFIG_TEMPLATE}\n[tickets]\nremote = \"origin\"\n");
+        let error = toml::from_str::<AnvilConfig>(&old).expect_err("the old key is refused");
+        assert!(error.to_string().contains("queue"), "{error}");
     }
 
     #[test]

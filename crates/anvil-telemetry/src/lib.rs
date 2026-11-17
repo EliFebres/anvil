@@ -35,7 +35,7 @@ pub use draft::{
     parse_draft, relevant_records, user_prompt,
 };
 pub use error::TelemetryError;
-pub use git::publish_ticket;
+pub use git::{QUEUE_REMOTE, publish_ticket, sync_queue};
 pub use record::{
     CheckOrigin, MemorySkipReason, PermissionAnswer, PermissionScope, Record, RecordKind,
     SessionMode, SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass, digest, hex,

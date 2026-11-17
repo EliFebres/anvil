@@ -138,7 +138,7 @@ $ anvil new rust-cli ./my-tool                                              # co
 
 `template save` honors `.gitignore` and skips `.git/` and `.anvil/`, and refuses to overwrite a template without `--force`. `anvil new` creates the directory, or fills an existing one that holds no files other than dot-directories such as `.git`; an unknown name lists the templates you have. When a task starts in such an empty directory, the Plan prompt lists each template's name and description so the plan can start from the one that fits (`anvil new <name> .`); with files present or no templates, the prompt is unchanged.
 
-Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, tools, keys in tracked files), `anvil update` (fetch the latest release and swap the binary), `anvil ticket list|show|review|submit|drop`, `anvil memory learn`, `anvil new`, `anvil template save`.
+Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, tools, keys in tracked files), `anvil update` (fetch the latest release and swap the binary), `anvil ticket list|show|review|submit|drop` (drafts live in `~/.anvil/tickets/`; `submit` sends nothing until `[tickets] queue` names a git repository to push to), `anvil memory learn`, `anvil new`, `anvil template save`.
 
 ## Setup
 

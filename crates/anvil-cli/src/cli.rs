@@ -202,7 +202,7 @@ pub enum MemoryCommand {
 /// Subcommands under `anvil ticket`.
 #[derive(Debug, Subcommand)]
 pub enum TicketCommand {
-    /// Turn recorded signals into ticket drafts under `tickets/draft/` with the summarizer.
+    /// Turn recorded signals into ticket drafts under `~/.anvil/tickets/draft/` with the summarizer.
     Draft,
     /// List drafts and open tickets.
     List,
@@ -211,11 +211,13 @@ pub enum TicketCommand {
         /// A ticket id or a unique prefix of one.
         id: String,
     },
-    /// Validate a draft, move it to `tickets/open/`, commit it on a `tickets/<id>` branch and push.
+    /// Validate a draft, move it to `~/.anvil/tickets/open/`, commit it on a `tickets/<id>`
+    /// branch and push it to the ticket queue named by `[tickets] queue`.
     ///
-    /// This push is the only thing that ever leaves this machine toward the
-    /// factory. The ticket carries no project code, paths or session text;
-    /// the validator refuses one that does. Nothing is fetched.
+    /// With no queue configured nothing is sent. Otherwise the queue is
+    /// fetched into ~/.anvil/queue.git and this push is the only thing that
+    /// ever leaves this machine. The ticket carries no project code, paths
+    /// or session text; the validator refuses one that does.
     Submit {
         /// A ticket id or a unique prefix of one.
         #[arg(required_unless_present = "all")]
