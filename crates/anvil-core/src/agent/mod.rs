@@ -1552,7 +1552,7 @@ mod tests {
         );
         h.git_init();
         let agent = h.default_agent(
-            CheckCommand::Command("test -f fixed.txt".to_owned()),
+            CheckCommand::Command("cat fixed.txt".to_owned()),
             "allow = [\"write_file\"]",
         );
         let result = agent.run().await;
@@ -1631,7 +1631,7 @@ mod tests {
     async fn a_plan_declared_check_runs_with_no_model_turn_in_verify() {
         let mut h = Harness::new(
             vec![
-                plan_with_check("test -f hello.txt"),
+                plan_with_check("cat hello.txt"),
                 FakeProvider::tool_turn(vec![write_call("hello.txt")]),
                 FakeProvider::text_turn("built"),
             ],
@@ -1654,11 +1654,11 @@ mod tests {
         assert!(!result.spend.contains_key(&State::Verify));
         assert_eq!(
             check_events(&events),
-            [(CheckSource::Plan, "test -f hello.txt".to_owned(), true)]
+            [(CheckSource::Plan, "cat hello.txt".to_owned(), true)]
         );
         let brief = format!("{:?}", h.reviewer.requests()[0].messages);
         assert!(brief.contains("# Check"), "{brief}");
-        assert!(brief.contains("`test -f hello.txt` passed"), "{brief}");
+        assert!(brief.contains("`cat hello.txt` passed"), "{brief}");
         let plan_system = &h.coder.requests()[0].system;
         assert!(plan_system.contains("# Check command"), "{plan_system}");
         assert!(
@@ -1671,7 +1671,7 @@ mod tests {
     async fn a_failing_plan_declared_check_sends_its_output_to_build() {
         let mut h = Harness::new(
             vec![
-                plan_with_check("test -f fixed.txt"),
+                plan_with_check("cat fixed.txt"),
                 FakeProvider::tool_turn(vec![write_call("hello.txt")]),
                 FakeProvider::text_turn("built"),
                 FakeProvider::tool_turn(vec![write_call("fixed.txt")]),
@@ -1698,7 +1698,7 @@ mod tests {
         let rebuild = &h.coder.requests()[3];
         assert!(rebuild.messages.iter().any(|m| matches!(
             m,
-            Message::User { text } if text.contains("Verification failed") && text.contains("test -f fixed.txt")
+            Message::User { text } if text.contains("Verification failed") && text.contains("cat fixed.txt")
         )));
         let checks = check_events(&events);
         assert_eq!(
@@ -1714,14 +1714,14 @@ mod tests {
             name: "edit_file".to_owned(),
             arguments_json: serde_json::json!({
                 "path": ".anvil/sessions/t1/plan.md",
-                "old": "Check: test -f wrong-name.txt",
-                "new": "Check: test -f hello.txt"
+                "old": "Check: cat wrong-name.txt",
+                "new": "Check: cat hello.txt"
             })
             .to_string(),
         };
         let mut h = Harness::new(
             vec![
-                plan_with_check("test -f wrong-name.txt"),
+                plan_with_check("cat wrong-name.txt"),
                 FakeProvider::tool_turn(vec![write_call("hello.txt")]),
                 FakeProvider::text_turn("built"),
                 FakeProvider::tool_turn(vec![fix_check]),
@@ -1737,12 +1737,8 @@ mod tests {
         assert_eq!(
             check_events(&events),
             [
-                (
-                    CheckSource::Plan,
-                    "test -f wrong-name.txt".to_owned(),
-                    false
-                ),
-                (CheckSource::Plan, "test -f hello.txt".to_owned(), true)
+                (CheckSource::Plan, "cat wrong-name.txt".to_owned(), false),
+                (CheckSource::Plan, "cat hello.txt".to_owned(), true)
             ]
         );
         let rebuild = &h.coder.requests()[3];
@@ -2807,15 +2803,18 @@ mod tests {
         );
         h.git_init();
         let agent = h.default_agent(
-            CheckCommand::Command("test -f fixed.txt".to_owned()),
+            CheckCommand::Command("cat fixed.txt".to_owned()),
             "allow = [\"write_file\"]",
         );
         assert_eq!(agent.run().await.status, Status::Done);
-        // The prompt files check out with CRLF on Windows; the snapshot must
-        // be the same on every platform.
+        // The prompt files check out with CRLF on Windows, and `cat` words
+        // its error differently in each shell; the snapshot must be the same
+        // on every platform.
         let requests = serde_json::to_string_pretty(&h.coder.requests())
             .expect("requests serialize")
             .replace("\\r\\n", "\\n");
+        let cat_error = regex::Regex::new(r"```\\n[^`]*?\\n\[exit code: 1\]").expect("regex");
+        let requests = cat_error.replace_all(&requests, "```\\n<cat error>\\n[exit code: 1]");
         insta::assert_snapshot!(requests);
     }
 
@@ -2978,7 +2977,7 @@ mod tests {
         );
         h.git_init();
         let agent = h.default_agent(
-            CheckCommand::Command("test -f ok.txt".to_owned()),
+            CheckCommand::Command("cat ok.txt".to_owned()),
             "allow = [\"write_file\"]",
         );
         let result = agent.run().await;
