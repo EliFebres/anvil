@@ -98,7 +98,8 @@ struct SessionInfo {
 /// The directories skills are discovered from.
 ///
 /// The bundled `skills/` directory is the one next to this source tree; it is
-/// only present on a machine that builds anvil from the monorepo.
+/// only present on a machine that builds anvil from a checkout of its
+/// repository.
 ///
 /// # Arguments
 ///

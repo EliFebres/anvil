@@ -53,8 +53,8 @@ pub fn sync_queue(git_dir: &Path, url: &str) -> Result<(), TelemetryError> {
 
 /// Builds the branch `tickets/<id>` holding one submitted ticket and pushes it.
 ///
-/// The base is `refs/remotes/<remote>/factory/state` when that ref exists
-/// (the branch the queue keeps ticket state on), else
+/// The base is the queue's state branch, `refs/remotes/<remote>/<STATE_BRANCH>`,
+/// when that ref exists (the branch the queue keeps ticket state on), else
 /// `refs/remotes/<remote>/main`, else `HEAD`. The ticket lands at
 /// `tickets/open/<id>.toml` in the branch.
 ///
@@ -182,7 +182,7 @@ mod tests {
             .is_ok_and(|output| output.status.success())
     }
 
-    /// A bare queue with `main` and a `factory/state` one commit ahead.
+    /// A bare queue with `main` and a state branch one commit ahead.
     fn queue(temp: &Path) -> Option<std::path::PathBuf> {
         let seed = temp.join("seed");
         let bare = temp.join("queue-remote.git");
@@ -205,7 +205,7 @@ mod tests {
         assert!(setup(&seed, &["commit", "-q", "-m", "state"]));
         assert!(setup(
             &seed,
-            &["push", "-q", "origin", "main:factory/state"]
+            &["push", "-q", "origin", &format!("main:{STATE_BRANCH}")]
         ));
         Some(bare)
     }
@@ -245,7 +245,7 @@ mod tests {
         assert!(listed.contains("README.md"));
         assert!(
             listed.contains("state.txt"),
-            "the branch starts from queue/factory/state, not main: {listed}"
+            "the branch starts from the queue's state branch, not main: {listed}"
         );
         let subject = git(
             &remote,

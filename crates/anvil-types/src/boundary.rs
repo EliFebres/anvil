@@ -19,7 +19,7 @@ pub const MAX_CODE_LINES: usize = 40;
 ///
 /// # Returns
 ///
-/// `Ok(())` when the text names no path outside the monorepo and contains at
+/// `Ok(())` when the text names no path outside the project and contains at
 /// most [`MAX_CODE_LINES`] lines of code. Code lines are the lines inside
 /// ``` fences; when a field has no fences at all, every non-blank line
 /// counts, so unfenced code cannot slip through.
@@ -46,7 +46,7 @@ pub fn check_text(field: &'static str, text: &str) -> Result<(), ValidationError
     Ok(())
 }
 
-/// Returns the first whitespace-delimited token that looks like a path outside the monorepo.
+/// Returns the first whitespace-delimited token that looks like a path outside the project.
 fn find_outside_path(text: &str) -> Option<&str> {
     text.split_whitespace()
         .map(strip_wrapping_punctuation)
@@ -132,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_paths_outside_the_monorepo() {
+    fn rejects_paths_outside_the_project() {
         let leaks = [
             "see /etc/passwd for details",
             "open `C:\\Users\\someone\\secret.rs`",

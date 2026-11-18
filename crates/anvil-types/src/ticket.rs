@@ -193,7 +193,7 @@ impl Ticket {
     ///
     /// `Ok(())` when the title is 1 to [`MAX_TITLE_CHARS`] characters, the
     /// symptom and spec are non-empty, there is at least one acceptance check,
-    /// neither `spec` nor `repro` names a path outside the monorepo or holds
+    /// neither `spec` nor `repro` names a path outside the project or holds
     /// more than [`boundary::MAX_CODE_LINES`] lines of code, and the fields
     /// the status implies are present: `claimed_at` and `claimed_by` from
     /// `claimed` on, `pr` when merged, `note` when waiting or rejected.
@@ -312,7 +312,7 @@ mod tests {
             })
         );
         ticket.claimed_at = Some(ticket.created_at);
-        ticket.claimed_by = Some("nuc".to_owned());
+        ticket.claimed_by = Some("worker-1".to_owned());
         ticket.validate().expect("claimed with both fields");
         ticket.status = TicketStatus::Merged;
         assert!(matches!(

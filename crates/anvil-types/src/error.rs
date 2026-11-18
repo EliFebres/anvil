@@ -37,8 +37,8 @@ pub enum ValidationError {
     #[error("ticket needs at least one acceptance check")]
     EmptyAcceptance,
 
-    /// A ticket text field references a path outside the monorepo.
-    #[error("field `{field}` references a path outside the monorepo: `{path}`")]
+    /// A ticket text field references a file path outside the project.
+    #[error("field `{field}` references a path outside the project: `{path}`")]
     OutsidePath {
         /// Name of the field that holds the path.
         field: &'static str,

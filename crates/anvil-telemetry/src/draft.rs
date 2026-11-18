@@ -612,7 +612,7 @@ mod tests {
         ))
         .expect("draft");
         assert_eq!(report.failed.len(), 1);
-        assert!(report.failed[0].1.contains("outside the monorepo"));
+        assert!(report.failed[0].1.contains("outside the project"));
         assert!(store.drafts.is_empty());
         assert!(!dir.path().join("tickets").exists());
     }
