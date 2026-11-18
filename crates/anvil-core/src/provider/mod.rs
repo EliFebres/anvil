@@ -9,6 +9,7 @@ pub mod budget;
 pub mod error;
 pub mod fake;
 mod http;
+pub mod models;
 pub mod openai;
 pub mod retry;
 pub mod sse;

@@ -68,8 +68,21 @@ pub enum Command {
         command: ConfigCommand,
     },
     /// Write ~/.anvil/.env and ~/.anvil/config.toml without overwriting anything
-    /// already filled in; exit 2 while placeholders remain.
-    Setup,
+    /// already filled in; exit 2 while placeholders remain. With --endpoint, set up
+    /// one OpenAI-compatible server for every role instead of the hosted providers.
+    Setup {
+        /// The base URL of an OpenAI-compatible server, such as
+        /// `https://gpu.example/v1`; its model list is read first.
+        #[arg(long, value_name = "URL")]
+        endpoint: Option<String>,
+        /// The model to use when the server lists several.
+        #[arg(long, requires = "endpoint")]
+        model: Option<String>,
+        /// The environment variable that holds the endpoint's key
+        /// (default ANVIL_ENDPOINT_KEY).
+        #[arg(long, value_name = "NAME", requires = "endpoint")]
+        key_env: Option<String>,
+    },
     /// Check keys, providers, tools and tracked files, one row per check with the
     /// fix for each failure.
     Doctor,

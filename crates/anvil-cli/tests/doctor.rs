@@ -1,5 +1,6 @@
-//! `anvil doctor` against mock providers: the failing one lands in its own
-//! row with a fix, the healthy one passes.
+//! `anvil doctor` and `anvil setup --endpoint` against mock providers: the
+//! failing provider lands in its own row with a fix, the healthy one passes,
+//! an echoed key never shows, and setup writes one provider for every role.
 
 use std::path::Path;
 use std::process::Command;
@@ -213,4 +214,70 @@ async fn a_server_that_echoes_the_key_cannot_put_it_in_output_or_logs() {
             entry.path().display()
         );
     }
+}
+
+#[tokio::test]
+async fn setup_endpoint_probes_the_server_and_points_every_role_at_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"data": [{"id": "qwen-coder", "max_model_len": 65536}]}"#,
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("home");
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(dir.path())
+        .env("ANVIL_HOME", &home)
+        .env("ANVIL_LOG", "off")
+        .env("ANVIL_ENDPOINT_KEY", "endpoint-key")
+        .args(["setup", "--endpoint", &server.uri()])
+        .output()
+        .expect("anvil runs");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(home.join(".anvil").join("config.toml")).expect("config");
+    let config: anvil_types::AnvilConfig = toml::from_str(&text).expect("parses");
+    config.validate().expect("validates");
+    let endpoint = &config.providers["endpoint"];
+    assert_eq!(
+        endpoint.base_url,
+        format!("{}/v1", server.uri()),
+        "fell back to /v1"
+    );
+    assert_eq!(endpoint.model, "qwen-coder");
+    assert_eq!(endpoint.context_window, 65536);
+    assert_eq!(config.roles.coder, "endpoint");
+    assert_eq!(config.roles.summarizer, "endpoint");
+    assert_eq!(config.providers.len(), 1, "no hosted provider was written");
+}
+
+#[test]
+fn setup_endpoint_refuses_plain_http_to_a_remote_host_before_sending() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(dir.path())
+        .env("ANVIL_HOME", dir.path().join("home"))
+        .env("ANVIL_LOG", "off")
+        .args(["setup", "--endpoint", "http://198.51.100.7:8000/v1"])
+        .output()
+        .expect("anvil runs");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("plain http"), "{stderr}");
+    assert!(
+        !dir.path()
+            .join("home")
+            .join(".anvil")
+            .join("config.toml")
+            .exists()
+    );
 }

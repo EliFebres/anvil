@@ -32,6 +32,14 @@ This writes `~/.anvil/.env` (API keys) and `~/.anvil/config.toml` (providers and
 anvil doctor
 ```
 
+For one self-hosted or rented model server instead (vLLM, llama.cpp, an internal gateway), point setup at it. It reads the server's model list, writes one `endpoint` provider with the context size the server reports, and makes it every role:
+
+```sh
+anvil setup --endpoint https://gpu.example/v1 [--model <id>] [--key-env NAME]
+```
+
+The key is read from `ANVIL_ENDPOINT_KEY` (or `--key-env`); set it to any value if the server needs none. Non-loopback endpoints must use https unless `[network] allow_http_hosts` names the host.
+
 Every provider is a `[providers.<name>]` table naming its protocol, base URL, the environment variable that holds its key, the model and its context window; `[roles]` maps `coder`, `summarizer`, `reviewer` and the optional `planner` and `worker` onto those names. An open-weight model behind an OpenAI-compatible server looks like this:
 
 ```toml

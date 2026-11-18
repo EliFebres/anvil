@@ -2,7 +2,10 @@
 //! overwriting a value that is already filled in.
 //!
 //! Files: `~/.anvil/.env` (keys) and `~/.anvil/config.toml` (providers and
-//! roles).
+//! roles). `anvil setup --endpoint <url>` writes one self-hosted provider
+//! instead (see [`endpoint`]).
+
+pub mod endpoint;
 
 use std::path::Path;
 #[cfg(not(unix))]

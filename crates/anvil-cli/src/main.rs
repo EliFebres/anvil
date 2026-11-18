@@ -34,6 +34,7 @@ use std::sync::Arc;
 use anvil_types::config::load_profile;
 use anvil_types::dotenv;
 use anvil_types::policy::LoadedPolicy;
+use anyhow::Context;
 use clap::Parser;
 
 use crate::cli::{
@@ -156,6 +157,25 @@ fn project_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow::
     }
 }
 
+/// The egress rules `anvil setup --endpoint` probes under: the policy's
+/// endpoints, or personal mode with the user's own http hosts if a
+/// configuration already exists.
+fn setup_egress(env: &Env) -> anyhow::Result<anvil_core::provider::Egress> {
+    use anvil_core::provider::Egress;
+    if let Some(loaded) = &env.policy {
+        let endpoints = &loaded.policy.endpoints;
+        return Egress::managed(
+            &endpoints.allowed_base_urls,
+            endpoints.allow_http_hosts.clone(),
+        )
+        .context("[endpoints] in the managed policy");
+    }
+    let hosts = load_profile(env.home.as_deref(), None)
+        .map(|loaded| loaded.config.network.allow_http_hosts)
+        .unwrap_or_default();
+    Ok(Egress::personal(hosts))
+}
+
 /// Deletes this repository's session folders older than the policy's
 /// `retention_days`, before a new session starts.
 fn prune_old_sessions(wiring: &Wiring) {
@@ -203,7 +223,27 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             commands::config_show(&loaded);
             Ok(0)
         }
-        Some(Command::Setup) => setup::run(home),
+        Some(Command::Setup {
+            endpoint,
+            model,
+            key_env,
+        }) => match endpoint {
+            Some(url) => {
+                let egress = setup_egress(&env)?;
+                let args = setup::endpoint::EndpointArgs {
+                    url: &url,
+                    model: model.as_deref(),
+                    key_env: key_env
+                        .as_deref()
+                        .unwrap_or(setup::endpoint::DEFAULT_KEY_ENV),
+                };
+                setup::endpoint::run(home, args, &egress).await
+            }
+            None if env.policy.is_some() => anyhow::bail!(
+                "a managed policy is installed; run `anvil setup --endpoint <url>` with an allowed endpoint instead of writing the hosted providers"
+            ),
+            None => setup::run(home),
+        },
         Some(Command::ScanKeys) => {
             let mut files = env.env_files.clone();
             files.push(dotenv::project_env_file(cwd));
