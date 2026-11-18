@@ -17,6 +17,7 @@ use anvil_core::tools::{
     PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
     SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry, Workspace,
 };
+use anvil_types::policy::LoadedPolicy;
 use anvil_types::trust::user_permissions_path;
 use anvil_types::{AnvilConfig, ProjectRules, PromptConfig};
 use anyhow::Context;
@@ -66,6 +67,8 @@ pub struct Wiring {
     pub project: ProjectAccess,
     /// Where provider requests may go.
     pub egress: Egress,
+    /// The managed policy, when one is installed.
+    pub policy: Option<Arc<LoadedPolicy>>,
     /// The session's token budget, shared by every provider.
     pub budget: SharedBudget,
     /// Skills discovered from the project, the home directory and the bundle.
@@ -131,6 +134,7 @@ pub fn skill_roots(project: Option<&Path>, home: Option<&Path>) -> SkillRoots {
         project: project.map(Path::to_path_buf),
         home: home.map(Path::to_path_buf),
         bundled: bundled.is_dir().then_some(bundled),
+        managed: Vec::new(),
     }
 }
 
@@ -211,11 +215,101 @@ impl Wiring {
             approvals,
             observer: Arc::new(Mutex::new(None)),
             prompt: Arc::new(Mutex::new(None)),
+            policy: None,
         })
+    }
+
+    /// Applies a managed policy to everything this wiring loads and builds.
+    ///
+    /// This is the one place the policy changes a session:
+    ///
+    /// - requests may go only to `allowed_base_urls`;
+    /// - hooks are dropped unless `hooks = true`;
+    /// - MCP servers are dropped unless their command is in `mcp_commands`;
+    /// - skills load only from `skill_dirs`;
+    /// - herdr reporting is off unless `herdr = true`;
+    /// - `permissions.allow_tools` from the configuration is ignored unless
+    ///   `allow_skip_prompts = true`;
+    /// - a forced profile replaces the user's rules (see
+    ///   [`Wiring::registry`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `policy` - The loaded policy.
+    ///
+    /// # Returns
+    ///
+    /// The wiring under the policy.
+    ///
+    /// # Errors
+    ///
+    /// When an allowed endpoint does not parse as a URL.
+    pub fn with_policy(mut self, policy: Arc<LoadedPolicy>) -> anyhow::Result<Self> {
+        let p = &policy.policy;
+        self.egress = Egress::managed(
+            &p.endpoints.allowed_base_urls,
+            p.endpoints.allow_http_hosts.clone(),
+        )
+        .context("[endpoints] in the managed policy")?;
+        if !p.extensions.hooks {
+            self.hooks = Arc::new(HookConfig::default());
+        }
+        for name in self.mcp_servers.retain_commands(&p.extensions.mcp_commands) {
+            eprintln!("note: MCP server `{name}` is not allowed by the managed policy");
+        }
+        self.skills = Arc::new(SkillSet::discover(&SkillRoots {
+            project: None,
+            home: None,
+            bundled: None,
+            managed: p.extensions.skill_dirs.clone(),
+        }));
+        if !p.extensions.herdr {
+            self.config.integrations.herdr = false;
+        }
+        if !p.permissions.allow_skip_prompts {
+            self.approvals = Arc::new(Mutex::new(SessionApprovals::default()));
+        }
+        self.policy = Some(policy);
+        Ok(self)
+    }
+
+    /// The folder this repository's sessions live in: where the policy
+    /// puts transcripts, or `<project>/.anvil/sessions`.
+    ///
+    /// # Returns
+    ///
+    /// The folder.
+    pub fn sessions_root(&self) -> PathBuf {
+        crate::policy::sessions_root(&self.cwd, self.policy.as_deref())
+    }
+
+    /// Whether the automatic summarizer calls at session start and end may
+    /// run: always in personal mode, only when the policy allows it.
+    ///
+    /// # Returns
+    ///
+    /// `true` when they may run.
+    pub fn summarizer_calls_allowed(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_none_or(|loaded| loaded.policy.sessions.summarizer_calls)
+    }
+
+    /// Whether a plan must be approved by a person even under `--yes`.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the policy requires it.
+    pub fn plans_need_a_person(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_some_and(|loaded| loaded.policy.permissions.require_plan_approval)
     }
 
     /// Pre-approves tools for this session on top of `permissions.allow_tools`,
     /// as `--allow-tool` does. Call it before building any registry.
+    /// Under a policy that disables skipping prompts, the configuration's
+    /// list is ignored (the flag itself is refused at startup).
     ///
     /// # Arguments
     ///
@@ -225,7 +319,12 @@ impl Wiring {
     ///
     /// When a name is empty or contains whitespace or a `:`.
     pub fn allow_tools(&mut self, tools: &[String]) -> anyhow::Result<()> {
-        let all = config_allow_tools(&self.config).chain(tools.iter().map(String::as_str));
+        let skipping_allowed = self
+            .policy
+            .as_ref()
+            .is_none_or(|loaded| loaded.policy.permissions.allow_skip_prompts);
+        let from_config = config_allow_tools(&self.config).filter(|_| skipping_allowed);
+        let all = from_config.chain(tools.iter().map(String::as_str));
         let approvals = SessionApprovals::preapproved(all).context("--allow-tool")?;
         self.approvals = Arc::new(Mutex::new(approvals));
         Ok(())
@@ -518,8 +617,27 @@ impl Wiring {
     /// `[permissions]` when it sets any, otherwise the user's file for this
     /// repository under `~/.anvil/permissions/`, which `always` answers
     /// are saved to.
+    ///
+    /// Under a policy with a forced profile, the profile's rules replace
+    /// them, and the user's own `deny`, `ask` and `shell_programs` are added
+    /// on top so they can still tighten.
     fn user_permissions(&self) -> anyhow::Result<Permissions> {
-        if let Some(rules) = self.config.permissions.as_ref().filter(|r| r.has_rules()) {
+        let own = self.config.permissions.as_ref().filter(|r| r.has_rules());
+        if let Some(forced) = self
+            .policy
+            .as_ref()
+            .and_then(|loaded| loaded.profile_rules.as_ref())
+        {
+            let mut permissions =
+                Permissions::from_rules(forced).context("the managed policy's profile")?;
+            if let Some(own) = own {
+                permissions
+                    .tighten(&own.deny, &own.ask, &own.shell_programs)
+                    .context("permissions in the configuration")?;
+            }
+            return Ok(permissions);
+        }
+        if let Some(rules) = own {
             return Permissions::from_rules(rules).context("permissions in the configuration");
         }
         match &self.home {
@@ -649,7 +767,7 @@ impl Wiring {
     /// Its path and id.
     pub fn new_session_dir(&self) -> (PathBuf, String) {
         let id = context::new_session_id();
-        (context::session_dir(&self.cwd, &id), id)
+        (context::session_dir(&self.sessions_root(), &id), id)
     }
 
     /// The permission prompt for this invocation.
@@ -720,6 +838,9 @@ fn profile_section(prompt: &PromptConfig) -> Option<PromptSection> {
 
 #[cfg(test)]
 mod hostile_tests;
+
+#[cfg(test)]
+mod policy_tests;
 
 #[cfg(test)]
 mod tests {

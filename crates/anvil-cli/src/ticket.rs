@@ -55,7 +55,12 @@ then submit again. The draft stays in ~/.anvil/tickets/draft/.";
 /// When the home directory is unknown, the ticket folders cannot be read, a
 /// ticket is not found, submitting has no queue to send to, or drafting
 /// needs a configuration that is missing.
-pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> anyhow::Result<i32> {
+pub async fn run(
+    command: TicketCommand,
+    home: Option<&Path>,
+    cwd: &Path,
+    queue_allowed: bool,
+) -> anyhow::Result<i32> {
     let root = home
         .context("cannot determine the home directory; set ANVIL_HOME")?
         .join(CONFIG_DIR);
@@ -76,6 +81,10 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
             Ok(0)
         }
         TicketCommand::Submit { id, all } => {
+            anyhow::ensure!(
+                queue_allowed,
+                "ticket submission is disabled by the managed policy; nothing was sent"
+            );
             let queue = queue_url(home).context(NO_QUEUE)?;
             let ids: Vec<String> = if all {
                 store
@@ -108,7 +117,7 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
             draft(&wiring, &mut store).await
         }
         TicketCommand::Review => {
-            let queue = queue_url(home);
+            let queue = queue_url(home).filter(|_| queue_allowed);
             review(&mut store, &root.join(QUEUE_CACHE), queue.as_deref())
         }
     }

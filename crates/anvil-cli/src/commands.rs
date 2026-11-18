@@ -127,7 +127,7 @@ pub(crate) async fn run_session_in(
     status: &StatusReporter,
 ) -> anyhow::Result<LoopResult> {
     let SessionOptions { yes, ui, in_build } = options;
-    let plan_yes = yes || in_build;
+    let plan_yes = (yes && !wiring.plans_need_a_person()) || in_build;
     let telemetry =
         SessionTelemetry::start(wiring, id, SessionMode::Run).with_status(status.clone());
     let (frontend, events) =
@@ -246,7 +246,7 @@ async fn remember(
     result: &LoopResult,
 ) {
     let console = frontend.console();
-    match context::load_session(&wiring.cwd, id) {
+    match context::load_session(&wiring.sessions_root(), id) {
         Ok(snapshot) => {
             let diff_lines = match &snapshot.baseline {
                 Some(baseline) => diff::diff_since(&wiring.cwd, &snapshot.dir, baseline)
@@ -306,7 +306,8 @@ async fn run_stop_hooks(
 /// When the session cannot be loaded or providers or the front end cannot
 /// be built.
 pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow::Result<i32> {
-    let snapshot = context::load_session(&wiring.cwd, id).context("loading the session")?;
+    let snapshot =
+        context::load_session(&wiring.sessions_root(), id).context("loading the session")?;
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
     let wiring = wiring.with_session(id, &snapshot.dir);
     let status = StatusReporter::start(Setup::from_wiring(
@@ -362,7 +363,10 @@ async fn resume_session(
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
-        status.gate(yes, frontend.gate(yes)),
+        status.gate(
+            yes && !wiring.plans_need_a_person(),
+            frontend.gate(yes && !wiring.plans_need_a_person()),
+        ),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
@@ -381,18 +385,15 @@ async fn resume_session(
 ///
 /// # Arguments
 ///
-/// * `cwd` - The project root.
+/// * `root` - The folder that holds the project's sessions.
 ///
 /// # Errors
 ///
 /// When the sessions folder cannot be read.
-pub fn sessions(cwd: &Path) -> anyhow::Result<()> {
-    let sessions = context::list_sessions(cwd).context("listing sessions")?;
+pub fn sessions(root: &Path) -> anyhow::Result<()> {
+    let sessions = context::list_sessions(root).context("listing sessions")?;
     if sessions.is_empty() {
-        println!(
-            "no sessions under {}",
-            cwd.join(context::session::SESSIONS_DIR).display()
-        );
+        println!("no sessions under {}", root.display());
         return Ok(());
     }
     for session in sessions {

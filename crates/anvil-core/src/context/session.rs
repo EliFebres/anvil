@@ -228,25 +228,38 @@ pub fn new_session_id() -> String {
     ulid::Ulid::generate().to_string()
 }
 
-/// The folder of a session.
+/// The folder a project's sessions go in by default.
 ///
 /// # Arguments
 ///
 /// * `project_root` - The project root.
+///
+/// # Returns
+///
+/// `<project_root>/.anvil/sessions`. A managed policy can move it.
+pub fn project_sessions_root(project_root: &Path) -> PathBuf {
+    project_root.join(SESSIONS_DIR)
+}
+
+/// The folder of a session.
+///
+/// # Arguments
+///
+/// * `sessions_root` - The folder that holds the project's sessions.
 /// * `id` - The session id.
 ///
 /// # Returns
 ///
-/// `<project_root>/.anvil/sessions/<id>`.
-pub fn session_dir(project_root: &Path, id: &str) -> PathBuf {
-    project_root.join(SESSIONS_DIR).join(id)
+/// `<sessions_root>/<id>`.
+pub fn session_dir(sessions_root: &Path, id: &str) -> PathBuf {
+    sessions_root.join(id)
 }
 
 /// Reads a session log back.
 ///
 /// # Arguments
 ///
-/// * `project_root` - The project root.
+/// * `sessions_root` - The folder that holds the project's sessions.
 /// * `id` - The session id.
 ///
 /// # Returns
@@ -257,13 +270,13 @@ pub fn session_dir(project_root: &Path, id: &str) -> PathBuf {
 ///
 /// [`SessionError::NotFound`] when there is no such session, or a read or
 /// parse error.
-pub fn load_session(project_root: &Path, id: &str) -> Result<SessionSnapshot, SessionError> {
-    let dir = session_dir(project_root, id);
+pub fn load_session(sessions_root: &Path, id: &str) -> Result<SessionSnapshot, SessionError> {
+    let dir = session_dir(sessions_root, id);
     let path = dir.join(LOG_FILE);
     if !path.is_file() {
         return Err(SessionError::NotFound {
             id: id.to_owned(),
-            dir: project_root.join(SESSIONS_DIR),
+            dir: sessions_root.to_path_buf(),
         });
     }
     let records = read_records(&path)?;
@@ -299,7 +312,7 @@ pub fn load_session(project_root: &Path, id: &str) -> Result<SessionSnapshot, Se
 ///
 /// # Arguments
 ///
-/// * `project_root` - The project root.
+/// * `sessions_root` - The folder that holds the project's sessions.
 ///
 /// # Returns
 ///
@@ -308,8 +321,8 @@ pub fn load_session(project_root: &Path, id: &str) -> Result<SessionSnapshot, Se
 /// # Errors
 ///
 /// [`SessionError::Io`] when the sessions folder exists but cannot be read.
-pub fn list_sessions(project_root: &Path) -> Result<Vec<SessionSummary>, SessionError> {
-    let root = project_root.join(SESSIONS_DIR);
+pub fn list_sessions(sessions_root: &Path) -> Result<Vec<SessionSummary>, SessionError> {
+    let root = sessions_root.to_path_buf();
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -323,7 +336,7 @@ pub fn list_sessions(project_root: &Path) -> Result<Vec<SessionSummary>, Session
     let mut sessions = Vec::new();
     for entry in entries.filter_map(Result::ok) {
         let id = entry.file_name().to_string_lossy().into_owned();
-        match load_session(project_root, &id) {
+        match load_session(sessions_root, &id) {
             Ok(snapshot) => sessions.push(SessionSummary {
                 meta: snapshot.meta,
                 last_state: snapshot.last_state,

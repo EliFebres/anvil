@@ -8,6 +8,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use anvil_types::policy::LoadedPolicy;
 use anvil_types::{LoopState, SessionSpend, SessionStatus};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -100,14 +101,15 @@ pub fn projects(cwd: &Path, home: Option<&Path>, all: bool) -> Vec<PathBuf> {
 /// # Arguments
 ///
 /// * `projects` - Project roots.
+/// * `policy` - The managed policy, which may keep sessions elsewhere.
 ///
 /// # Returns
 ///
 /// The rows, ordered by start time, newest first; ties by session id.
-pub fn collect(projects: &[PathBuf]) -> Vec<Row> {
+pub fn collect(projects: &[PathBuf], policy: Option<&LoadedPolicy>) -> Vec<Row> {
     let mut rows: Vec<Row> = projects
         .iter()
-        .flat_map(|project| session_dirs(project))
+        .flat_map(|project| session_dirs(&crate::policy::sessions_root(project, policy)))
         .filter_map(|dir| read_status(&dir).map(|status| Row::new(status, lock_is_free(&dir))))
         .collect();
     rows.sort_by(|a, b| (b.started_at, &b.session_id).cmp(&(a.started_at, &a.session_id)));
@@ -123,6 +125,7 @@ pub fn collect(projects: &[PathBuf]) -> Vec<Row> {
 /// * `all` - Whether to include every project that ran a session.
 /// * `json` - Print a JSON array instead of lines.
 /// * `now` - The time ages are measured to.
+/// * `policy` - The managed policy, which may keep sessions elsewhere.
 /// * `out` - Where to print.
 ///
 /// # Errors
@@ -134,9 +137,10 @@ pub fn run(
     all: bool,
     json: bool,
     now: DateTime<Utc>,
+    policy: Option<&LoadedPolicy>,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
-    let rows = collect(&projects(cwd, home, all));
+    let rows = collect(&projects(cwd, home, all), policy);
     if json {
         writeln!(out, "{}", serde_json::to_string_pretty(&rows)?)?;
     } else if rows.is_empty() {
@@ -248,7 +252,16 @@ mod tests {
 
     fn render(cwd: &Path, home: Option<&Path>, all: bool, json: bool) -> String {
         let mut out = Vec::new();
-        run(cwd, home, all, json, at("2026-11-01T12:00:00Z"), &mut out).expect("run");
+        run(
+            cwd,
+            home,
+            all,
+            json,
+            at("2026-11-01T12:00:00Z"),
+            None,
+            &mut out,
+        )
+        .expect("run");
         String::from_utf8(out).expect("utf8").replace(
             &cwd.display().to_string().replace('\\', "\\\\"),
             "<project>",
@@ -287,7 +300,7 @@ mod tests {
         std::fs::create_dir_all(project.join(SESSIONS_DIR).join("00OLD")).expect("old");
         let json = render(project, None, false, true);
         insta::assert_snapshot!("status_json", json);
-        let rows: Vec<Row> = collect(&[project.to_path_buf()]);
+        let rows: Vec<Row> = collect(&[project.to_path_buf()], None);
         let order: Vec<_> = rows.iter().map(|row| row.session_id.as_str()).collect();
         assert_eq!(order, ["01B", "01C", "01A"]);
         let states: Vec<_> = rows.iter().map(|row| row.state.as_str()).collect();
@@ -334,9 +347,9 @@ mod tests {
         register_project(home.path(), one.path()).expect("register");
         register_project(home.path(), two.path()).expect("register");
 
-        let here = collect(&projects(one.path(), Some(home.path()), false));
+        let here = collect(&projects(one.path(), Some(home.path()), false), None);
         assert_eq!(here.len(), 1);
-        let everywhere = collect(&projects(one.path(), Some(home.path()), true));
+        let everywhere = collect(&projects(one.path(), Some(home.path()), true), None);
         let ids: Vec<_> = everywhere
             .iter()
             .map(|row| row.session_id.as_str())

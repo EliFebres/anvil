@@ -45,6 +45,8 @@ pub struct SkillRoots {
     pub home: Option<PathBuf>,
     /// anvil's own `skills/` directory, when it exists on this machine.
     pub bundled: Option<PathBuf>,
+    /// Folders a managed policy names; each holds skills directly.
+    pub managed: Vec<PathBuf>,
 }
 
 impl SkillRoots {
@@ -58,6 +60,11 @@ impl SkillRoots {
         if let Some(bundled) = &self.bundled {
             roots.push((bundled.clone(), Origin::Bundled));
         }
+        roots.extend(
+            self.managed
+                .iter()
+                .map(|dir| (dir.clone(), Origin::Managed)),
+        );
         roots
     }
 }
@@ -541,6 +548,7 @@ mod tests {
             project: Some(project.to_path_buf()),
             home: home.map(Path::to_path_buf),
             bundled: None,
+            managed: Vec::new(),
         }
     }
 

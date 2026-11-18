@@ -84,6 +84,7 @@ fn repo() -> tempfile::TempDir {
 fn settings(cwd: &Path, check: CheckCommand) -> Settings {
     Settings {
         cwd: cwd.to_path_buf(),
+        sessions_root: anvil_core::context::project_sessions_root(cwd),
         shell: Shell::for_platform(),
         check,
         session_tokens: 1_000_000,

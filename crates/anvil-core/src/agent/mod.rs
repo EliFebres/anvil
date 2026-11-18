@@ -1449,8 +1449,12 @@ mod tests {
             }
         }
 
+        fn sessions_root(&self) -> PathBuf {
+            self.dir.path().join(".anvil").join("sessions")
+        }
+
         fn session_dir(&self) -> PathBuf {
-            self.dir.path().join(".anvil").join("sessions").join("t1")
+            self.sessions_root().join("t1")
         }
 
         fn config(&self, check: CheckCommand) -> LoopConfig {
@@ -2488,7 +2492,7 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, LoopEvent::Compacted { dropped_messages, .. } if *dropped_messages > 0)
         ));
-        let snapshot = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        let snapshot = crate::context::load_session(&h.sessions_root(), "t1").expect("log");
         assert!(
             matches!(&snapshot.messages[0], Message::User { text } if text.contains("compacted"))
         );
@@ -2611,7 +2615,7 @@ mod tests {
         let first = agent.run().await;
         assert!(matches!(first.status, Status::Incomplete { .. }));
 
-        let snapshot = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        let snapshot = crate::context::load_session(&h.sessions_root(), "t1").expect("log");
         assert_eq!(snapshot.meta.task, "add a --dry-run flag");
         assert_eq!(snapshot.last_state, Some(State::Build));
         assert_eq!(
@@ -2619,7 +2623,7 @@ mod tests {
             5,
             "task, plan, intro, tool call, results"
         );
-        let sessions = crate::context::list_sessions(h.dir.path()).expect("list");
+        let sessions = crate::context::list_sessions(&h.sessions_root()).expect("list");
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].meta.id, "t1");
 
@@ -2658,7 +2662,7 @@ mod tests {
             m,
             Message::User { text } if text.contains("This session was resumed")
         )));
-        let reloaded = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        let reloaded = crate::context::load_session(&h.sessions_root(), "t1").expect("log");
         assert_eq!(reloaded.status, Some(Status::Done));
         assert!(reloaded.messages.len() > request.messages.len());
     }
@@ -3143,7 +3147,7 @@ mod tests {
             .await;
         assert!(matches!(first.status, Status::Incomplete { .. }));
 
-        let snapshot = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        let snapshot = crate::context::load_session(&h.sessions_root(), "t1").expect("log");
         assert_eq!(snapshot.last_state, Some(State::Build));
         assert_eq!(
             snapshot.messages.len(),

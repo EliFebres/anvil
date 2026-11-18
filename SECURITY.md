@@ -64,6 +64,26 @@ The `.gitignore` of this repository keeps `.anvil/telemetry/`, `.anvil/sessions/
 - `--yes` answers every prompt with yes and approves plans; deny rules and the refused commands still apply. `--allow-tool <name>` or `permissions.allow_tools` pre-approves a tool for one session. In the Plan state a tool that may write is refused.
 - The Verify state runs the project's check command. A command you set in `[tools] check` runs as you set it. A command anvil detects from the repository's files (`just check`, `cargo test`, `npm test`, `python -m pytest`) runs the repository's own code, so it is asked about like any `shell` call (`crates/anvil-core/src/agent/mod.rs`).
 
+## Managed policy
+
+An administrator can install a policy file that the user cannot override (`crates/anvil-types/src/policy.rs`, `crates/anvil-cli/src/policy.rs`). `docs/enterprise/policy.example.toml` lists every key with its default.
+
+- **Location.** `C:\ProgramData\Anvil\policy.toml` on Windows, `/Library/Application Support/Anvil/policy.toml` on macOS, `/etc/anvil/policy.toml` on Linux. The path is fixed in the code. No environment variable or flag points anvil at another file, and the Windows path is not read from `%ProgramData%`, which a user can change for their own processes. On Windows, a non-administrator can create `C:\ProgramData\Anvil` when it does not exist yet. That user can only restrict themselves, but an administrator should create the folder with an access list that lets only administrators write.
+- **Precedence.** The policy is a floor. The user's configuration and the repository can add restrictions and cannot remove one.
+- **Failure.** A policy file that exists but cannot be read or is invalid stops anvil before it does anything else, with the reason. Without a policy file anvil runs in personal mode.
+- **Defaults.** Only `[endpoints] allowed_base_urls` is required. Every other key defaults to the restrictive choice: with a policy installed, hooks, MCP servers, skills, herdr reporting, the ticket queue, the automatic summarizer calls and every flag that skips a prompt are off until the policy turns them on.
+- **What each key does.**
+  - `[endpoints] allowed_base_urls`: providers outside these base URLs are refused before any request (`Egress::managed`). `allow_http_hosts` replaces the user's list.
+  - `[project] config = false`: the repository's `.anvil/` is not read and nothing it ships loads, whatever the user's trust decision.
+  - `[permissions] allow_skip_prompts = false`: `--yes`, `--allow-tool` and `--profile` stop anvil with an error naming the policy, and `permissions.allow_tools` in the user's configuration is ignored.
+  - `[permissions] profile`: a profile file in the policy's own folder whose `[permissions]` table replaces the user's rules; the user's `deny`, `ask` and `shell_programs` still apply on top.
+  - `[permissions] require_plan_approval`: a plan is asked about even under `--yes`.
+  - `[extensions] hooks`, `mcp_commands`, `skill_dirs`, `herdr`: hooks run only when allowed, MCP servers start only when their command is listed, skills load only from the listed folders, herdr reports only when allowed.
+  - `[tickets] queue = false`: `anvil ticket submit` refuses and sends nothing.
+  - `[sessions] transcript_dir`: session folders (transcripts, tool output, status) go there, one subfolder per repository. `retention_days`: older session folders are deleted when a session starts. `summarizer_calls`: whether the session-start rule proposals and the session-end memory extraction run; off by default under a policy, on in personal mode.
+- **Review.** `anvil doctor` prints the policy's path, its profile and transcript folder, and one line per thing it disables.
+- **Where it is applied.** The keys that change a session are applied in one function, `Wiring::with_policy` in `crates/anvil-cli/src/wiring.rs`; the flags, `project.config`, the summarizer calls, the queue, plan approval and retention are applied at startup in `crates/anvil-cli/src/main.rs`. Tests: `crates/anvil-cli/src/wiring/policy_tests.rs`, `crates/anvil-cli/src/policy.rs`, `crates/anvil-types/src/policy.rs`.
+
 ## Running in a repository you do not trust
 
 A repository you clone cannot change how anvil treats you:

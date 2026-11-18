@@ -195,7 +195,10 @@ pub async fn at_session_start(
     let Some(home) = wiring.home.as_deref() else {
         return;
     };
-    if yes || !paths::corrections_path(home, &wiring.cwd).is_file() {
+    if yes
+        || !wiring.summarizer_calls_allowed()
+        || !paths::corrections_path(home, &wiring.cwd).is_file()
+    {
         return;
     }
     let console = frontend.console();
@@ -222,7 +225,7 @@ pub async fn at_session_start(
 /// * `id` - The session id.
 /// * `console` - Where a warning goes.
 pub async fn record_run(wiring: &Wiring, id: &str, console: &Console) {
-    match context::load_session(&wiring.cwd, id) {
+    match context::load_session(&wiring.sessions_root(), id) {
         Ok(snapshot) => {
             record_session_end(wiring, &snapshot.dir, snapshot.baseline.as_deref(), console).await;
         }

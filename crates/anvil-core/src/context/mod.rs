@@ -11,5 +11,5 @@ pub use conversation::{
 pub use instructions::discover_instructions;
 pub use session::{
     SessionError, SessionLog, SessionMeta, SessionRecord, SessionSnapshot, SessionSummary,
-    list_sessions, load_session, new_session_id, session_dir,
+    list_sessions, load_session, new_session_id, project_sessions_root, session_dir,
 };

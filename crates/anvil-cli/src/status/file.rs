@@ -6,7 +6,6 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anvil_core::context::session::SESSIONS_DIR;
 use anvil_types::SessionStatus;
 use anvil_types::status::{LOCK_FILE, STATUS_FILE};
 use sha2::{Digest, Sha256};
@@ -151,13 +150,13 @@ pub fn read_status(dir: &Path) -> Option<SessionStatus> {
 ///
 /// # Arguments
 ///
-/// * `project` - The project root.
+/// * `sessions_root` - The folder that holds the project's sessions.
 ///
 /// # Returns
 ///
-/// Every directory under the project's sessions folder; empty when there is none.
-pub fn session_dirs(project: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(project.join(SESSIONS_DIR)) else {
+/// Every directory in it; empty when there is none.
+pub fn session_dirs(sessions_root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(sessions_root) else {
         return Vec::new();
     };
     entries

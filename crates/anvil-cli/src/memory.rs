@@ -414,6 +414,10 @@ pub async fn finish_session(
     console: &Console,
     telemetry: Option<&SessionTelemetry>,
 ) {
+    if !wiring.summarizer_calls_allowed() {
+        console.notice("memory: skipped (the managed policy turns the summarizer off)");
+        return;
+    }
     let outcome = async {
         let name = &wiring.config.roles.summarizer;
         let mut summarizer = wiring.provider(name)?;
@@ -696,7 +700,12 @@ mod tests {
             EventSink::discard(),
         );
         assert_eq!(agent.run().await.status, Status::Done);
-        let messages = load_session(cwd.path(), "t1").expect("session").messages;
+        let messages = load_session(
+            &anvil_core::context::project_sessions_root(cwd.path()),
+            "t1",
+        )
+        .expect("session")
+        .messages;
 
         let summarizer = FakeProvider::new(vec![FakeProvider::text_turn(
             "tooling: The user runs tests with just check.\n\

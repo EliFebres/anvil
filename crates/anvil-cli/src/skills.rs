@@ -102,6 +102,7 @@ fn scope(project: bool) -> Scope {
 pub fn source_label(skill: &Skill) -> String {
     match skill.source {
         Origin::Bundled => "bundled skills/".to_owned(),
+        Origin::Managed => "policy skill folder".to_owned(),
         origin => format!("{origin}/skills"),
     }
 }

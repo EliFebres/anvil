@@ -106,6 +106,7 @@ mod tests {
             project: Some(project.path().to_path_buf()),
             home: None,
             bundled: None,
+            managed: Vec::new(),
         });
         // The tempdir may go away now; the body is already in memory.
         Arc::new(set)

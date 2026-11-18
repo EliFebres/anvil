@@ -88,6 +88,8 @@ pub trait Env {
 pub struct Settings {
     /// The project root.
     pub cwd: PathBuf,
+    /// The folder each item's session folder goes in.
+    pub sessions_root: PathBuf,
     /// The shell that runs acceptance and project checks.
     pub shell: Shell,
     /// How the project's own check is found.
@@ -546,7 +548,7 @@ async fn run_item<E: Env>(
         };
         let request = SessionRequest {
             task,
-            session_dir: session_dir(&settings.cwd, &new_session_id()),
+            session_dir: session_dir(&settings.sessions_root, &new_session_id()),
             token_limit: session_share(state, settings),
         };
         let report = env.run_session(request).await;

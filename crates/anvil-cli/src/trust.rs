@@ -41,6 +41,7 @@ pub fn shipped(root: &Path) -> Vec<String> {
         project: Some(root.to_path_buf()),
         home: None,
         bundled: None,
+        managed: Vec::new(),
     });
     for skill in skills.skills() {
         items.push(format!("skill {}: {}", skill.name(), skill.dir.display()));

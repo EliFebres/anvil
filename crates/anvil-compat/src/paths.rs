@@ -21,6 +21,8 @@ pub enum Origin {
     HomeClaude,
     /// Shipped with anvil.
     Bundled,
+    /// A folder the managed policy names.
+    Managed,
 }
 
 impl fmt::Display for Origin {
@@ -31,6 +33,7 @@ impl fmt::Display for Origin {
             Self::HomeAnvil => "~/.anvil",
             Self::HomeClaude => "~/.claude",
             Self::Bundled => "bundled",
+            Self::Managed => "policy",
         })
     }
 }

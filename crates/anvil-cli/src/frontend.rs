@@ -354,7 +354,7 @@ pub fn session_info(
                 .collect()
         })
         .unwrap_or_default();
-    let recent_sessions = anvil_core::context::list_sessions(&wiring.cwd)
+    let recent_sessions = anvil_core::context::list_sessions(&wiring.sessions_root())
         .unwrap_or_default()
         .into_iter()
         .take(RECENT_SESSIONS)

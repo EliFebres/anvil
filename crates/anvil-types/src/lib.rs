@@ -12,6 +12,7 @@ pub mod child_env;
 pub mod config;
 pub mod dotenv;
 pub mod error;
+pub mod policy;
 pub mod project;
 pub mod schema;
 pub mod skill;

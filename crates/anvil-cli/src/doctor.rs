@@ -160,6 +160,17 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
     let config = &wiring.config;
     let root = secrets::git_toplevel(&wiring.cwd);
 
+    for line in crate::policy::report(wiring.policy.as_deref()) {
+        println!("{line}");
+    }
+    println!(
+        "repository: {}",
+        if wiring.project.trusted {
+            "trusted; what it ships is loaded"
+        } else {
+            "not trusted; nothing it ships is loaded"
+        }
+    );
     report_env(&mut report, options.env_files, options.loaded_env);
     report_legacy(&mut report, wiring.home.as_deref(), &wiring.cwd);
     let bad_keys = report_keys(&mut report, config);

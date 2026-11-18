@@ -90,6 +90,29 @@ pub struct ServerSet {
 }
 
 impl ServerSet {
+    /// Keeps only the servers whose `command` is one of `allowed`, compared
+    /// without regard to case, as a managed policy requires.
+    ///
+    /// # Arguments
+    ///
+    /// * `allowed` - The program names or paths a policy allows.
+    ///
+    /// # Returns
+    ///
+    /// The names of the servers that were dropped.
+    pub fn retain_commands(&mut self, allowed: &[String]) -> Vec<String> {
+        let mut dropped = Vec::new();
+        self.servers.retain(|server| {
+            let Transport::Stdio { command, .. } = &server.transport;
+            let keep = allowed.iter().any(|a| a.eq_ignore_ascii_case(command));
+            if !keep {
+                dropped.push(server.name.clone());
+            }
+            keep
+        });
+        dropped
+    }
+
     /// The definition files consulted, in priority order.
     ///
     /// # Arguments
