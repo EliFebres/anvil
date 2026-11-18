@@ -8,7 +8,7 @@ A coding agent for your own projects. Point it at a repository, give it a task, 
 
 ## Install
 
-A release build: download `anvil-x86_64-unknown-linux-gnu`, `anvil-x86_64-unknown-linux-musl` (static, any distribution) or `anvil-x86_64-pc-windows-msvc.exe` from the [releases page](https://github.com/EliFebres/anvil/releases), check it against the `## SHA256` section of the release notes, rename it to `anvil` (`anvil.exe`) and put it on your `PATH`. `anvil update` later fetches the newest release and checks the same hash before it swaps the binary.
+A release build: download `anvil-x86_64-unknown-linux-gnu`, `anvil-x86_64-unknown-linux-musl` (static, any distribution) or `anvil-x86_64-pc-windows-msvc.exe` from the [releases page](https://github.com/EliFebres/anvil/releases), check it against the `## SHA256` section of the release notes, rename it to `anvil` (`anvil.exe`) and put it on your `PATH`. anvil does not update itself: a newer version comes from wherever you got this one.
 
 From source, with a Rust toolchain (edition 2024, rust-version 1.89 or newer) and git; Windows, macOS and Linux all work, and HTTP uses rustls, so there is no OpenSSL to install:
 
@@ -17,8 +17,6 @@ git clone https://github.com/EliFebres/anvil
 cd anvil
 cargo build --release      # target/release/anvil
 ```
-
-A source build does not know where its releases live; set `[update] repo = "EliFebres/anvil"` in the configuration if you want `anvil update` to work.
 
 ## Configure a provider
 
@@ -76,7 +74,7 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 
 ## Security model
 
-- anvil sends prompts, and the files and command output its tools read, to the providers you configure. It has no telemetry upload and no update check at startup; everything else that reaches the network (MCP servers, `anvil update`, webhooks, `anvil ticket submit`) is something you configure or run.
+- anvil sends prompts, and the files and command output its tools read, to the providers you configure. It has no telemetry upload, no self-update and no update check; the only other thing that reaches the network is `anvil ticket submit`, which you run yourself after configuring a queue.
 - File writes, edits and shell commands ask first. Rules in `.anvil/permissions.toml` or a `--profile` change that; a few destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `Remove-Item -Recurse`) are refused even under `--yes` unless a rule names them.
 - Keys are read from the environment and `.env` files, never from configuration.
 - anvil trusts the repository it runs in: that repository's `.anvil/` and `.claude/` files can change providers, permissions, hooks and MCP servers. Read them before running anvil in code you did not write.
@@ -148,21 +146,16 @@ Every `run`, `resume` and `chat` keeps a `status.json` in its session folder (`.
 
 `anvil status` lists the sessions of the current project from those files; `--json` prints them as a JSON array and `--all` covers every project that has run a session. A session that says `working` or `needs_input` but whose process is gone shows as `stale` (the running process holds a lock on `status.lock`; `stale` is never written to the file). Sessions from before status files existed are skipped.
 
-Two optional tables in `config.toml` make a session reach you:
+One optional table in `config.toml` reports the session to a terminal multiplexer:
 
 ```toml
-# One short message (Discord, Slack or ntfy, chosen by the URL) when a session
-# needs you, is blocked, finishes or fails. Nothing for `working`.
-[notify]
-webhook_env = "ANVIL_WEBHOOK_URL"   # the environment variable that holds the URL
-
 # Report the session to herdr when it runs in a herdr pane: working, blocked
 # (with the reason) or idle, released when the session exits.
 [integrations]
 herdr = false
 ```
 
-A failing webhook or a missing `herdr` never affects the session.
+A missing `herdr` never affects the session.
 
 #### Long builds
 
@@ -228,7 +221,7 @@ queue = "https://github.com/<owner>/<queue-repository>.git"
 
 The key is unset by default, so a stock install never pushes anywhere; `submit` then says what to set and sends nothing. With a queue set, it fetches the queue into `~/.anvil/queue.git` and pushes the ticket there as a `tickets/<id>` branch with your own git credentials. The current project's remotes are never used.
 
-Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, tools, keys in tracked files), `anvil update` (fetch the latest release and swap the binary), `anvil ticket` (above), `anvil memory learn`, `anvil new`, `anvil template save`.
+Other commands: `anvil skill add|list|show|remove` (install Claude Code skills from a local folder), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, tools, keys in tracked files), `anvil ticket` (above), `anvil memory learn`, `anvil new`, `anvil template save`.
 
 ## Repository layout
 
@@ -260,4 +253,4 @@ just check
 
 That runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all`, the key scan, and a grep that keeps the program's old name out of the tree. CI runs the same on Ubuntu and Windows, and `main` is protected: code reaches it only through pull requests. Prompts and tool schemas are pinned with `insta` snapshots; `cargo insta review` after a deliberate change.
 
-Releases are built by `.github/workflows/release.yml`; `anvil update` downloads the latest one for your platform, verifies its SHA256 and swaps the binary in place.
+Releases are built by `.github/workflows/release.yml`; each release lists the SHA256 of every binary in its notes.

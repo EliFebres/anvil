@@ -24,7 +24,6 @@ mod templates;
 mod terminal;
 mod ticket;
 mod tui;
-mod update;
 mod wiring;
 
 use std::path::{Path, PathBuf};
@@ -171,13 +170,6 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             Ok(0)
         }
         Some(Command::Ticket { command }) => ticket::run(command, home, cwd).await,
-        Some(Command::Update { exe }) => {
-            let repo = load_config(home, cwd)
-                .ok()
-                .and_then(|loaded| loaded.config.update.repo);
-            let options = update::UpdateOptions::for_this_binary(repo.as_deref(), exe)?;
-            update::run(options).await
-        }
         Some(Command::Compat {
             command: CompatCommand::Check { path },
         }) => {

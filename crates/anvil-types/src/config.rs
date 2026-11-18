@@ -87,17 +87,6 @@ summarizer = "runpod"
 # [tickets]
 # queue = "https://github.com/<owner>/<queue-repository>.git"
 
-# Where `anvil update` looks for releases when this anvil was built from source.
-# Release builds know their repository and ignore this.
-# [update]
-# repo = "owner/repo"
-
-# Post one short message to a Discord, Slack or ntfy webhook when a session needs
-# you, is blocked, finishes or fails. `webhook_env` names the environment
-# variable that holds the URL.
-# [notify]
-# webhook_env = "ANVIL_WEBHOOK_URL"
-
 # Report the session to herdr (a terminal multiplexer for coding agents) when it
 # runs in a herdr pane.
 # [integrations]
@@ -109,6 +98,21 @@ summarizer = "runpod"
 # notes = ["Shell commands are a single program with arguments."]
 # delegate_guidance = true   # tell the model when delegating to a subagent pays off
 "#;
+
+/// Sections older versions of anvil read, each with the reason it is gone.
+///
+/// A file that still sets one fails to load with that reason, so nobody
+/// believes a feature is on when it no longer exists.
+const REMOVED_SECTIONS: [(&str, &str); 2] = [
+    (
+        "update",
+        "self-update was removed; updates come from whoever distributes the anvil binary",
+    ),
+    (
+        "notify",
+        "webhook notifications were removed; anvil no longer posts session updates anywhere",
+    ),
+];
 
 /// The provider entries and roles `anvil setup` adds to `~/.anvil/config.toml`.
 ///
@@ -474,14 +478,6 @@ pub struct MemoryConfig {
     pub always_summarize: bool,
 }
 
-/// Where session status messages are posted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SessionNotifyConfig {
-    /// Environment variable that holds the webhook URL.
-    pub webhook_env: String,
-}
-
 /// Optional reports to other tools.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
@@ -519,16 +515,6 @@ pub struct TicketsConfig {
     /// `tickets/<id>` branches to. `None`, the default, sends nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
-}
-
-/// Where `anvil update` finds releases.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, default)]
-pub struct UpdateConfig {
-    /// The GitHub `owner/repo` whose releases a source build updates from.
-    /// A release build carries its own and ignores this.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo: Option<String>,
 }
 
 /// Lines a profile adds to the coder's system prompt.
@@ -627,9 +613,6 @@ pub struct AnvilConfig {
     /// Where submitted tickets go.
     #[serde(default)]
     pub tickets: TicketsConfig,
-    /// Where `anvil update` finds releases.
-    #[serde(default)]
-    pub update: UpdateConfig,
     /// Extra lines for the coder's system prompt.
     #[serde(default)]
     pub prompt: PromptConfig,
@@ -637,9 +620,6 @@ pub struct AnvilConfig {
     /// Normally set by a profile, not by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionRules>,
-    /// Where session status messages are posted; none by default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notify: Option<SessionNotifyConfig>,
     /// Optional reports to other tools.
     #[serde(default)]
     pub integrations: IntegrationsConfig,
@@ -652,7 +632,7 @@ impl AnvilConfig {
     ///
     /// `Ok(())` when all providers validate, `coder`, `summarizer` and
     /// (if set) `reviewer`, `planner` and `worker` each name a key in
-    /// `providers`, and `[update] repo` (if set) is `owner/repo`.
+    /// `providers`.
     ///
     /// # Errors
     ///
@@ -671,16 +651,6 @@ impl AnvilConfig {
         }
         if let Some(worker) = &self.roles.worker {
             self.check_role("worker", worker)?;
-        }
-        if let Some(repo) = &self.update.repo {
-            let mut parts = repo.split('/');
-            let valid = matches!(
-                (parts.next(), parts.next(), parts.next()),
-                (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty()
-            );
-            if !valid {
-                return Err(ValidationError::InvalidUpdateRepo { repo: repo.clone() });
-            }
         }
         Ok(())
     }
@@ -818,6 +788,7 @@ pub fn load_profile(
             path: path.clone(),
             source,
         })?;
+        reject_removed_sections(&table, &path)?;
         merge_tables(&mut merged, table);
         sources.push(path);
     }
@@ -861,6 +832,20 @@ pub fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
     }
 }
 
+/// Fails when `table` sets a section listed in [`REMOVED_SECTIONS`].
+fn reject_removed_sections(table: &toml::Table, path: &Path) -> Result<(), ConfigError> {
+    for (section, reason) in REMOVED_SECTIONS {
+        if table.contains_key(section) {
+            return Err(ConfigError::RemovedSection {
+                path: path.to_path_buf(),
+                section,
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Lists the source paths for error messages.
 fn describe(sources: &[PathBuf]) -> String {
     sources
@@ -881,18 +866,18 @@ mod tests {
     }
 
     #[test]
-    fn update_repo_must_be_owner_slash_repo() {
-        let mut config: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
-        config.update.repo = Some("owner/repo".to_owned());
-        assert_eq!(config.validate(), Ok(()));
-        for bad in ["owner", "owner/", "/repo", "a/b/c"] {
-            config.update.repo = Some(bad.to_owned());
-            assert_eq!(
-                config.validate(),
-                Err(ValidationError::InvalidUpdateRepo {
-                    repo: bad.to_owned()
-                })
+    fn removed_sections_fail_with_the_reason() {
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        for (section, expected) in [("update", "self-update was removed"), ("notify", "webhook")] {
+            let text = format!("{SETUP_PROVIDERS}\n[{section}]\n");
+            write(home.path(), &text);
+            let error = load(Some(home.path()), project.path()).expect_err("removed section");
+            assert!(
+                matches!(error, ConfigError::RemovedSection { .. }),
+                "{section}: {error:?}"
             );
+            assert!(error.to_string().contains(expected), "{error}");
         }
     }
 

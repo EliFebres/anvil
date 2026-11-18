@@ -107,13 +107,6 @@ pub enum ValidationError {
         field: &'static str,
     },
 
-    /// `[update] repo` is not `owner/repo`.
-    #[error("update.repo `{repo}` must be `owner/repo`")]
-    InvalidUpdateRepo {
-        /// The value as written.
-        repo: String,
-    },
-
     /// A ticket in some status lacks a field that status implies.
     #[error("a ticket with status `{status:?}` needs `{field}`")]
     MissingForStatus {
@@ -171,6 +164,17 @@ pub enum ConfigError {
         /// The TOML error.
         #[source]
         source: toml::de::Error,
+    },
+
+    /// A file still sets a section that anvil no longer has.
+    #[error("{path}: the [{section}] section was removed: {reason}")]
+    RemovedSection {
+        /// The file that sets it.
+        path: PathBuf,
+        /// The section name.
+        section: &'static str,
+        /// What replaced it, in one sentence.
+        reason: &'static str,
     },
 
     /// The profile named on the command line has no file.

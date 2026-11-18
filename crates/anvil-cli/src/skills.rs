@@ -34,7 +34,6 @@ pub async fn run(command: SkillCommand, home: Option<&Path>, cwd: &Path) -> anyh
             let source = Source::parse(&source, cwd)?;
             let scope = scope(project);
             let installed = install::install(&source, scope, home, cwd, force)
-                .await
                 .with_context(|| format!("installing {source}"))?;
             let verb = if installed.replaced {
                 "replaced"
@@ -52,7 +51,7 @@ pub async fn run(command: SkillCommand, home: Option<&Path>, cwd: &Path) -> anyh
         SkillCommand::List => {
             let set = SkillSet::discover(&skill_roots(cwd, home));
             if set.is_empty() {
-                println!("no skills found; `anvil skill add <path | git URL | owner/repo>`");
+                println!("no skills found; `anvil skill add <directory>`");
             }
             for skill in set.skills() {
                 println!(

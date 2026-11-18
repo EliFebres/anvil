@@ -7,9 +7,12 @@
 //! so the list is cached under `.anvil/mcp-cache/` keyed by a hash of the
 //! server's definition. A server with a fresh cache entry is not started
 //! until one of its tools is called.
+//!
+//! Only local servers that anvil starts as a child process (stdio) are
+//! supported. A definition with a `url` is refused, so no MCP server can
+//! make anvil contact a host other than the model endpoint.
 
 pub mod client;
-pub mod http;
 pub mod jsonrpc;
 pub mod stdio;
 pub mod tool;
@@ -36,7 +39,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Where tool lists are cached, relative to the project root.
 pub const CACHE_DIR: &str = ".anvil/mcp-cache";
 
-/// How to reach a server.
+/// How to reach a server. Stdio is the only transport.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Transport {
     /// A child process speaking JSON-RPC over stdin and stdout.
@@ -47,13 +50,6 @@ pub enum Transport {
         args: Vec<String>,
         /// Extra environment variables.
         env: BTreeMap<String, String>,
-    },
-    /// A remote endpoint speaking streamable HTTP.
-    Http {
-        /// The URL.
-        url: String,
-        /// Extra request headers.
-        headers: BTreeMap<String, String>,
     },
 }
 
@@ -296,24 +292,12 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
         .and_then(Value::as_f64)
         .filter(|secs| *secs > 0.0)
         .map_or(DEFAULT_TIMEOUT, Duration::from_secs_f64);
-    let kind = string("type").unwrap_or_default();
     let transport = match (string("url"), string("command")) {
-        (Some(url), _)
-            if kind.is_empty()
-                || kind == "http"
-                || kind == "streamable-http"
-                || kind == "streamable_http" =>
-        {
-            Transport::Http {
-                url,
-                headers: map("headers"),
-            }
-        }
         (Some(_), _) => {
             return Err(McpError::Config {
                 path: path.to_path_buf(),
                 detail: format!(
-                    "server `{name}` has type `{kind}`; anvil supports stdio and streamable HTTP"
+                    "server `{name}` is remote; anvil starts only local stdio servers and contacts no MCP URL"
                 ),
             });
         }
@@ -586,7 +570,7 @@ mod tests {
             "broken": {"args": ["x"]}
         }}"#;
         let servers = parse_definitions(json, Path::new(".mcp.json")).expect("parses");
-        assert_eq!(server_names(&servers), ["playwright", "remote"]);
+        assert_eq!(server_names(&servers), ["playwright"]);
         assert_eq!(
             servers[0].transport,
             Transport::Stdio {
@@ -595,10 +579,6 @@ mod tests {
                 env: BTreeMap::new(),
             }
         );
-        let Transport::Http { headers, .. } = &servers[1].transport else {
-            panic!("expected http");
-        };
-        assert_eq!(headers["Authorization"], "Bearer anon");
         assert_eq!(servers[0].timeout, DEFAULT_TIMEOUT);
 
         let settings = r#"{"theme": "dark", "mcpServers": {"fs": {"command": "server-fs", "args": ["."], "env": {"X": "1"}}}}"#;
@@ -612,7 +592,12 @@ mod tests {
 
         let toml = "[servers.docs]\nurl = \"http://localhost:3000/mcp\"\ntimeout_secs = 5\n\n[servers.local]\ncommand = \"python\"\nargs = [\"server.py\"]\n";
         let servers = parse_definitions(toml, Path::new("mcp.toml")).expect("parses");
-        assert_eq!(server_names(&servers), ["docs", "local"]);
+        assert_eq!(server_names(&servers), ["local"]);
+        let toml = "[servers.local]
+command = \"python\"
+timeout_secs = 5
+";
+        let servers = parse_definitions(toml, Path::new("mcp.toml")).expect("parses");
         assert_eq!(servers[0].timeout, Duration::from_secs(5));
         assert!(parse_definitions("{not json", Path::new(".mcp.json")).is_err());
     }

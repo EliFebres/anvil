@@ -7,7 +7,6 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::http::HttpTransport;
 use super::jsonrpc::{McpError, PROTOCOL_VERSION, Response};
 use super::stdio::StdioTransport;
 use super::{McpServer, Transport};
@@ -111,9 +110,6 @@ impl McpClient {
                 env,
                 cwd,
             )?),
-            Transport::Http { url, headers } => {
-                Box::new(HttpTransport::new(&server.name, url, headers)?)
-            }
         };
         let mut client = Self {
             name: server.name.clone(),

@@ -523,7 +523,6 @@ impl Checker<'_> {
                                 Transport::Stdio { command, args, .. } => {
                                     format!("stdio: {command} {}", args.join(" "))
                                 }
-                                Transport::Http { url, .. } => format!("http: {url}"),
                             };
                             self.push(
                                 Status::Loads,
@@ -536,7 +535,7 @@ impl Checker<'_> {
                             Status::Error,
                             "mcp",
                             path,
-                            format!("`{name}`: needs a `command` or an http `url`; sse-only servers are not supported"),
+                            format!("`{name}`: needs a `command`; remote (url) servers are not supported"),
                         ),
                     }
                 }

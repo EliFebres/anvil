@@ -121,13 +121,6 @@ pub enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Download the latest release for this platform, verify its SHA256, swap the binary
-    /// and print the changes since the installed version.
-    Update {
-        /// The binary to replace instead of this executable (for tests).
-        #[arg(long, hide = true)]
-        exe: Option<std::path::PathBuf>,
-    },
     /// Draft, review and submit improvement tickets from this project's telemetry.
     Ticket {
         /// Which ticket action to take.
@@ -284,7 +277,8 @@ pub enum CompatCommand {
 pub enum SkillCommand {
     /// Copy a skill folder into `~/.anvil/skills/<name>` (or the project with --project).
     Add {
-        /// A directory, a git URL, or a GitHub `owner/repo[/subdir]` shorthand.
+        /// A directory on this machine that holds `SKILL.md`. anvil does not
+        /// download skills; clone a repository yourself and pass the folder.
         source: String,
         /// Install into the project's `.anvil/skills` instead of the home directory.
         #[arg(long)]

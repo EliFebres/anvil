@@ -2,8 +2,8 @@ name: release
 
 # Every merge to main becomes a release: anvil for Linux (glibc, and a
 # static musl build that runs on any distribution) and Windows, tagged
-# with the date and the short sha, marked latest. `anvil update` reads the
-# `## SHA256` section of the notes before it swaps a binary in.
+# with the date and the short sha, marked latest. The notes carry a
+# `## SHA256` section so whoever installs a binary can check it.
 on:
   push:
     branches: [main]
@@ -54,10 +54,6 @@ jobs:
           key: ${{ matrix.target }}
       - name: build
         shell: bash
-        env:
-          # Baked into the binary so `anvil update` knows what is installed.
-          ANVIL_BUILD_SHA: ${{ github.sha }}
-          ANVIL_RELEASE_REPO: ${{ github.repository }}
         run: |
           cargo build --release -p anvil-cli ${{ matrix.cargo_target }}
           mkdir -p dist

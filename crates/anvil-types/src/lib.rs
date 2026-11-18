@@ -17,8 +17,8 @@ pub mod ticket;
 
 pub use config::{
     AnvilConfig, IntegrationsConfig, LimitsConfig, LoadedConfig, PermissionRules, Price,
-    PromptConfig, Protocol, ProviderConfig, Roles, SessionNotifyConfig, StateBudget,
-    TelemetryConfig, TicketsConfig, ToolsConfig, Unmatched, UpdateConfig,
+    PromptConfig, Protocol, ProviderConfig, Roles, StateBudget, TelemetryConfig, TicketsConfig,
+    ToolsConfig, Unmatched,
 };
 pub use error::{ConfigError, DotenvError, ValidationError};
 pub use skill::SkillManifest;
