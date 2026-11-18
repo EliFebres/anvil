@@ -5,6 +5,7 @@
 //! roles).
 
 use std::path::Path;
+#[cfg(not(unix))]
 use std::process::Command;
 
 use anvil_types::AnvilConfig;
