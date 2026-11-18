@@ -1,3 +1,0 @@
-tags = ["rust", "docs"]
-timeout_s = 600
-max_tokens = 400000

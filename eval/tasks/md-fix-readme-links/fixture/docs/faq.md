@@ -1,3 +1,0 @@
-# FAQ
-
-Common problems.

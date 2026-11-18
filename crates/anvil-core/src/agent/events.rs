@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use super::checks::CheckSource;
+use super::role::{EscalationReason, Role};
 use super::state::{State, Status};
 use super::verdict::ReviewVerdict;
 use crate::provider::{StopReason, ToolCall, Usage};
@@ -35,6 +36,8 @@ pub enum LoopEvent {
     TurnFinished {
         /// The state it ran in.
         state: State,
+        /// The job it was made for, which says whose provider served it.
+        role: Role,
         /// Why the model stopped.
         stop_reason: StopReason,
         /// Tokens it used, when the provider reported them.
@@ -101,6 +104,13 @@ pub enum LoopEvent {
         summary_path: PathBuf,
         /// Tokens the summarizer used, when reported.
         usage: Option<Usage>,
+    },
+    /// The next build round runs on the planner because the coder is stuck.
+    Escalated {
+        /// What got the coder stuck.
+        reason: EscalationReason,
+        /// The build visit that runs on the planner, counting from 1.
+        round: u32,
     },
     /// Something non-fatal worth telling the user.
     Warning(String),

@@ -244,6 +244,7 @@ impl CommandRun {
         ToolOutput {
             content: text,
             is_error: failed,
+            model_turns: Vec::new(),
         }
     }
 }

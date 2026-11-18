@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use anvil_core::agent::{LoopEvent, PlanDecision, State};
+use anvil_core::agent::{LoopEvent, PlanDecision, Role, State};
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -480,11 +480,13 @@ impl App {
         match event {
             LoopEvent::StateEntered { state, .. } => self.set_state(*state),
             LoopEvent::TurnFinished {
+                role,
+                usage: Some(usage),
+                ..
+            } => self.status.record_for(*role, *usage),
+            LoopEvent::Compacted {
                 usage: Some(usage), ..
-            }
-            | LoopEvent::Compacted {
-                usage: Some(usage), ..
-            } => self.status.record(*usage),
+            } => self.status.record_for(Role::Summarizer, *usage),
             _ => {}
         }
         self.transcript.apply(event, self.now);
@@ -702,7 +704,7 @@ mod tests {
     use crate::tui::welcome::LOGO;
     use crate::tui::{MemoryAnswer, RecentSession};
     use anvil_core::agent::{
-        AgentLoop, AutoApprove, CheckCommand, EventSink, LoopConfig, LoopProviders,
+        AgentLoop, AutoApprove, CheckCommand, EventSink, LoopConfig, LoopProviders, Role,
     };
     use anvil_core::provider::{Event, FakeProvider, Provider, StopReason, ToolCall, Usage};
     use anvil_core::tools::{
@@ -723,6 +725,7 @@ mod tests {
             model: "main (test-model)".to_owned(),
             context_window: 100_000,
             price: None,
+            role_prices: Default::default(),
             permission_mode: PermissionMode::Ask,
             initial_state: State::Build,
             slash_commands: vec!["/plan".to_owned(), "/plain".to_owned()],
@@ -869,12 +872,14 @@ mod tests {
             extra_instructions: Vec::new(),
             sections: Vec::new(),
             review_sections: Vec::new(),
+            delegate_guidance: false,
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let agent = AgentLoop::new(
             config,
             LoopProviders {
                 coder: coder as Arc<dyn Provider>,
+                planner: None,
                 reviewer: reviewer as Arc<dyn Provider>,
                 summarizer: Arc::new(FakeProvider::new(vec![])) as Arc<dyn Provider>,
             },
@@ -1161,6 +1166,7 @@ mod tests {
         app.handle(UiMsg::Loop(LoopEvent::TextDelta(plan.to_owned())));
         app.handle(UiMsg::Loop(LoopEvent::TurnFinished {
             state: State::Plan,
+            role: Role::Coder,
             stop_reason: StopReason::EndTurn,
             usage: Some(Usage {
                 input: 1_200,

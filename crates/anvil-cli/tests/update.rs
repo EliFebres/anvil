@@ -85,9 +85,13 @@ async fn update_verifies_the_checksum_swaps_the_binary_and_prints_the_changes() 
 
     let dir = tempfile::tempdir().expect("tempdir");
     let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir");
     write(
-        &project.join("factory.toml"),
-        &anvil_types::FactoryConfig::template("owner/repo"),
+        &dir.path().join("home").join(".anvil").join("config.toml"),
+        &format!(
+            "{}\n[update]\nrepo = \"owner/repo\"\n",
+            anvil_types::config::SETUP_PROVIDERS
+        ),
     );
     let exe = dir.path().join("bin").join("anvil.exe");
     write(&exe, "old binary");

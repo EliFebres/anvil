@@ -32,6 +32,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::status::StatusReporter;
 use crate::wiring::Wiring;
 
 /// How far back the cross-session history reaches.
@@ -41,6 +42,8 @@ const HISTORY_DAYS: i64 = 90;
 #[derive(Debug, Clone)]
 struct Roles {
     coder: String,
+    planner: Option<String>,
+    worker: Option<String>,
     reviewer: String,
     summarizer: String,
 }
@@ -56,6 +59,8 @@ pub struct SessionTelemetry {
     /// Provider name to model name, from config.
     models: Arc<BTreeMap<String, String>>,
     thresholds: TelemetryConfig,
+    /// Told of every loop event, so the session's `status.json` follows the loop.
+    status: Option<StatusReporter>,
 }
 
 impl SessionTelemetry {
@@ -86,6 +91,8 @@ impl SessionTelemetry {
                 .collect(),
             wiring.config.telemetry,
         );
+        this.set_planner(wiring.config.roles.planner.as_deref());
+        this.set_worker(wiring.config.roles.worker.as_deref());
         this.record(RecordKind::SessionStarted { mode });
         this
     }
@@ -106,12 +113,29 @@ impl SessionTelemetry {
             recorder: Arc::new(Recorder::open(cwd, home, session)),
             roles: Arc::new(Mutex::new(Roles {
                 coder: coder.to_owned(),
+                planner: None,
+                worker: None,
                 reviewer: reviewer.unwrap_or(coder).to_owned(),
                 summarizer: summarizer.to_owned(),
             })),
             models: Arc::new(models),
             thresholds,
+            status: None,
         }
+    }
+
+    /// Makes the event tee keep a status file current.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The session's status reporter.
+    ///
+    /// # Returns
+    ///
+    /// The handle, to be used before [`SessionTelemetry::sink`].
+    pub fn with_status(mut self, status: StatusReporter) -> Self {
+        self.status = Some(status);
+        self
     }
 
     /// Records one event.
@@ -131,6 +155,28 @@ impl SessionTelemetry {
     pub fn set_coder(&self, name: &str) {
         if let Ok(mut roles) = self.roles.lock() {
             roles.coder = name.to_owned();
+        }
+    }
+
+    /// Sets the planner, which serves Plan turns when present.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The provider name, or `None` when the coder plans.
+    pub fn set_planner(&self, name: Option<&str>) {
+        if let Ok(mut roles) = self.roles.lock() {
+            roles.planner = name.map(str::to_owned);
+        }
+    }
+
+    /// Sets the worker, which serves delegated turns when present.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The provider name, or `None` when the coder works.
+    pub fn set_worker(&self, name: Option<&str>) {
+        if let Ok(mut roles) = self.roles.lock() {
+            roles.worker = name.map(str::to_owned);
         }
     }
 
@@ -208,6 +254,9 @@ impl SessionTelemetry {
         let this = self.clone();
         let task = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
+                if let Some(status) = &this.status {
+                    status.observe(&event);
+                }
                 if let Some(kind) = this.translate(&event) {
                     this.record(kind);
                 }
@@ -298,12 +347,14 @@ impl SessionTelemetry {
         self.recorder.project_dir().to_path_buf()
     }
 
-    /// The provider and model that serve a state.
-    fn provider_for(&self, state: &str) -> (String, String) {
+    /// The provider and model that serve a role.
+    fn provider_for(&self, role: &str) -> (String, String) {
         let name = match self.roles.lock() {
-            Ok(roles) => match state {
-                "review" => roles.reviewer.clone(),
-                "compact" => roles.summarizer.clone(),
+            Ok(roles) => match role {
+                "planner" => roles.planner.clone().unwrap_or_else(|| roles.coder.clone()),
+                "worker" => roles.worker.clone().unwrap_or_else(|| roles.coder.clone()),
+                "reviewer" => roles.reviewer.clone(),
+                "summarizer" => roles.summarizer.clone(),
                 _ => roles.coder.clone(),
             },
             Err(_) => String::new(),
@@ -323,13 +374,15 @@ impl SessionTelemetry {
             LoopEvent::TurnFinished {
                 state,
                 stop_reason,
+                role,
                 usage,
                 latency_ms,
                 retries,
             } => {
-                let (provider, model) = self.provider_for(&state.to_string());
+                let (provider, model) = self.provider_for(role.name());
                 RecordKind::Turn {
                     state: state.to_string(),
+                    role: Some(role.name().to_owned()),
                     provider,
                     model,
                     tokens: usage.map(tokens).unwrap_or_default(),
@@ -377,7 +430,7 @@ impl SessionTelemetry {
                 usage,
                 ..
             } => {
-                let (provider, model) = self.provider_for("compact");
+                let (provider, model) = self.provider_for("summarizer");
                 RecordKind::Compacted {
                     dropped: *dropped_messages,
                     provider,
@@ -395,6 +448,7 @@ impl SessionTelemetry {
             | LoopEvent::PlanUpdated { .. }
             | LoopEvent::CheckStarted { .. }
             | LoopEvent::ProposedEdit { .. }
+            | LoopEvent::Escalated { .. }
             | LoopEvent::Finished { .. } => return None,
         })
     }
@@ -464,6 +518,7 @@ impl Provider for RecordedProvider {
                     Ok(Event::Retried { retries: count }) => retries = *count,
                     Ok(Event::Done { stop_reason }) => telemetry.record(RecordKind::Turn {
                         state: state.to_owned(),
+                        role: Some("summarizer".to_owned()),
                         provider: provider.clone(),
                         model: model.clone(),
                         tokens: usage,
@@ -568,7 +623,7 @@ mod tests {
         AgentLoop, AutoApprove, CheckCommand, LoopConfig, LoopProviders, State,
     };
     use anvil_core::provider::{FakeProvider, ToolCall};
-    use anvil_core::tools::{Permissions, StaticPrompt, ToolContext};
+    use anvil_core::tools::{Permissions, PromptAnswer, StaticPrompt, ToolContext};
     use anvil_telemetry::{DraftFuture, Drafter, Signal, SignalKind, TicketStore, draft_all};
     use anvil_types::LimitsConfig;
 
@@ -742,7 +797,7 @@ mod tests {
 
         let secret_name = format!("{MARKER}-file.txt");
         std::fs::write(cwd.path().join(&secret_name), format!("{MARKER}\n")).expect("write");
-        let subagent = SubagentEnv::registry(&wiring.clone()).expect("subagent registry");
+        let subagent = SubagentEnv::registry(&wiring.clone(), false).expect("subagent registry");
         let call = tool_call(
             "s1",
             "edit_file",
@@ -762,6 +817,92 @@ mod tests {
             assert!(!text.contains(MARKER), "{}: {text}", file.display());
             assert!(!text.contains("file.txt"), "{}: {text}", file.display());
         }
+    }
+
+    #[tokio::test]
+    async fn each_turn_is_attributed_to_the_role_and_provider_that_served_it() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let telemetry = SessionTelemetry::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "cheap",
+            Some("judge"),
+            "cheap",
+            BTreeMap::from([
+                ("cheap".to_owned(), "small-model".to_owned()),
+                ("dear".to_owned(), "big-model".to_owned()),
+                ("judge".to_owned(), "judge-model".to_owned()),
+            ]),
+            TelemetryConfig::default(),
+        );
+        telemetry.set_planner(Some("dear"));
+        let planner = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
+            "# Plan\n\n1. [ ] x\n",
+        )]));
+        let coder = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn("built")]));
+        let reviewer = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
+            "```json\n{\"verdict\": \"approve\"}\n```",
+        )]));
+        let config = LoopConfig {
+            task: "t".to_owned(),
+            cwd: cwd.path().to_path_buf(),
+            session_dir: cwd.path().join(".anvil").join("sessions").join(&session),
+            limits: LimitsConfig::default(),
+            check: CheckCommand::Command("exit 0".to_owned()),
+            context_window: 100_000,
+            home_dir: None,
+            extra_instructions: Vec::new(),
+            sections: Vec::new(),
+            review_sections: Vec::new(),
+            delegate_guidance: false,
+        };
+        let (sink, task) = telemetry.sink(None);
+        let agent = AgentLoop::new(
+            config,
+            LoopProviders {
+                coder: coder as Arc<dyn Provider>,
+                planner: Some(planner as Arc<dyn Provider>),
+                reviewer: reviewer as Arc<dyn Provider>,
+                summarizer: Arc::new(FakeProvider::new(vec![])) as Arc<dyn Provider>,
+            },
+            ToolRegistry::with_builtins(
+                Permissions::empty(),
+                Box::new(StaticPrompt(PromptAnswer::No)),
+            ),
+            ToolContext::new(cwd.path()),
+            Box::new(AutoApprove),
+            sink,
+        );
+        agent.run().await;
+        task.await.expect("tee ends");
+
+        let records = load_records(&telemetry.project_dir(), None).expect("records");
+        let turns: Vec<(String, String, String)> = records
+            .iter()
+            .filter_map(|record| match &record.kind {
+                RecordKind::Turn {
+                    role: Some(role),
+                    provider,
+                    model,
+                    ..
+                } => Some((role.clone(), provider.clone(), model.clone())),
+                _ => None,
+            })
+            .collect();
+        let turn = |role: &str, provider: &str, model: &str| {
+            (role.to_owned(), provider.to_owned(), model.to_owned())
+        };
+        assert_eq!(
+            turns,
+            [
+                turn("planner", "dear", "big-model"),
+                turn("coder", "cheap", "small-model"),
+                turn("reviewer", "judge", "judge-model"),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -816,6 +957,7 @@ mod tests {
             extra_instructions: Vec::new(),
             sections: Vec::new(),
             review_sections: Vec::new(),
+            delegate_guidance: false,
         };
         let prompt = RecordingPrompt {
             inner: Box::new(StaticPrompt(PromptAnswer::Yes)),
@@ -826,6 +968,7 @@ mod tests {
             config,
             LoopProviders {
                 coder: coder as Arc<dyn Provider>,
+                planner: None,
                 reviewer: reviewer as Arc<dyn Provider>,
                 summarizer: Arc::new(FakeProvider::new(vec![])) as Arc<dyn Provider>,
             },

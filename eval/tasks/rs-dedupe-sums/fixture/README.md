@@ -1,3 +1,0 @@
-# sums
-
-Sums of slices.

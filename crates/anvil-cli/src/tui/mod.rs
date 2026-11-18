@@ -19,10 +19,11 @@ pub mod status;
 pub mod transcript;
 pub mod welcome;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anvil_core::agent::{LoopEvent, PlanDecision, State};
+use anvil_core::agent::{LoopEvent, PlanDecision, Role, State};
 use anvil_core::tools::{PermissionRequest, PromptAnswer};
 use anvil_types::Price;
 use crossterm::event::{KeyEvent, MouseEvent};
@@ -109,6 +110,10 @@ pub struct SessionInfo {
     pub context_window: u32,
     /// The coder's price, for the cost estimate; `None` hides it.
     pub price: Option<Price>,
+    /// Each role's own price when a planner is configured, so every turn is
+    /// priced by the provider that served it; empty prices everything at
+    /// `price`.
+    pub role_prices: BTreeMap<Role, Option<Price>>,
     /// The permission mode shown in the status line.
     pub permission_mode: PermissionMode,
     /// The state shown in the prompt before the first event.

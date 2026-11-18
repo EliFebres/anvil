@@ -12,6 +12,7 @@ pub mod events;
 pub mod gate;
 pub mod plan;
 pub mod prompts;
+pub mod role;
 pub mod state;
 pub mod turn;
 pub mod verdict;
@@ -22,12 +23,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anvil_types::LimitsConfig;
+use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 pub use checks::{ChangeCheckFailure, ChangeChecks, CheckCommand, CheckSource};
 pub use events::{EventSink, LoopEvent};
 pub use gate::{AutoApprove, PlanDecision, PlanGate, ScriptedGate};
 pub use prompts::{Instruction, PromptSection};
+pub use role::{
+    ESCALATE_AFTER_CHECK_FAILURES, ESCALATE_AFTER_REVIEW_CHANGES, EscalationReason, Role,
+};
 pub use state::{IncompleteReason, Rounds, State, Status};
 pub use verdict::{ReviewVerdict, VerifyVerdict};
 
@@ -40,9 +45,9 @@ use crate::context::{
     Conversation, SessionLog, SessionMeta, SessionRecord, SessionSnapshot, discover_instructions,
 };
 use crate::provider::{
-    CompletionRequest, Message, Provider, ProviderError, ToolCall, ToolResult, ToolSpec,
+    CompletionRequest, Message, Provider, ProviderError, ToolCall, ToolResult, ToolSpec, Usage,
 };
-use crate::tools::{Access, ToolContext, ToolRegistry, shell};
+use crate::tools::{Access, Execution, ModelTurn, ToolContext, ToolRegistry, shell};
 
 /// File name of the plan inside the session folder.
 pub const PLAN_FILE: &str = "plan.md";
@@ -55,6 +60,9 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Lines of check output shown to the model after a failure.
 const CHECK_TAIL_LINES: usize = 80;
+
+/// Most tool calls of one model turn that run at the same time.
+const MAX_PARALLEL_CALLS: usize = 4;
 
 /// The tool whose permission rules cover a check command a plan declares.
 const SHELL_TOOL: &str = "shell";
@@ -84,13 +92,19 @@ pub struct LoopConfig {
     pub sections: Vec<PromptSection>,
     /// Sections appended to the reviewer's prompt.
     pub review_sections: Vec<PromptSection>,
+    /// Whether the Plan and Build prompts say when delegating pays off, when
+    /// the `delegate` tool is offered.
+    pub delegate_guidance: bool,
 }
 
 /// The models a run talks to.
 #[derive(Clone)]
 pub struct LoopProviders {
-    /// Plans, builds and verifies.
+    /// Plans (unless `planner` is set), builds and verifies.
     pub coder: Arc<dyn Provider>,
+    /// Plans, and takes build rounds the coder is stuck on. `None` means the
+    /// coder plans, in one conversation shared with Build.
+    pub planner: Option<Arc<dyn Provider>>,
     /// Reviews the diff. May be the same provider as `coder`.
     pub reviewer: Arc<dyn Provider>,
     /// Writes compaction summaries. May be the same provider as `coder`.
@@ -119,6 +133,8 @@ pub struct LoopResult {
     pub rounds: Rounds,
     /// Spend per state.
     pub spend: BTreeMap<State, Spend>,
+    /// Spend per role, by whose provider served the completion.
+    pub role_spend: BTreeMap<Role, Spend>,
 }
 
 /// How a run of model turns in one state ended.
@@ -160,6 +176,7 @@ pub struct AgentLoop {
     /// Where the run starts: Plan, or the restored state when resuming.
     start_state: State,
     spend: BTreeMap<State, Spend>,
+    role_spend: BTreeMap<Role, Spend>,
     visits: BTreeMap<State, u32>,
     rounds: Rounds,
     /// Whether any tool call was denied, declined or blocked.
@@ -182,6 +199,16 @@ pub struct AgentLoop {
     /// The path the last finished build takes through review and checks.
     lane: Lane,
     last_text: String,
+    /// Whether the coder's build conversation (with a planner) already exists.
+    build_seeded: bool,
+    /// Verify -> Build edges taken in a row, for escalation.
+    check_failures: u32,
+    /// Review -> Build edges taken in a row, for escalation.
+    review_changes: u32,
+    /// Whether the coming Build round runs on the planner.
+    escalate_build: bool,
+    /// One line per escalation, for the summary.
+    escalations: Vec<String>,
 }
 
 impl AgentLoop {
@@ -259,6 +286,7 @@ impl AgentLoop {
             log,
             start_state: State::Plan,
             spend: BTreeMap::new(),
+            role_spend: BTreeMap::new(),
             visits: BTreeMap::new(),
             rounds: Rounds::default(),
             denial_seen: false,
@@ -272,6 +300,11 @@ impl AgentLoop {
             review_notes: Vec::new(),
             lane: Lane::Full,
             last_text: String::new(),
+            build_seeded: false,
+            check_failures: 0,
+            review_changes: 0,
+            escalate_build: false,
+            escalations: Vec::new(),
         }
     }
 
@@ -303,6 +336,10 @@ impl AgentLoop {
         let mut agent = Self::new(config, providers, registry, ctx, gate, events);
         agent.conversation = Conversation::from_messages(snapshot.messages);
         agent.baseline = snapshot.baseline;
+        agent.build_seeded = matches!(
+            snapshot.last_state,
+            Some(State::Build | State::Review | State::Verify | State::Done)
+        );
         agent.plan = std::fs::read_to_string(snapshot.dir.join(PLAN_FILE)).ok();
         if let Some(plan) = agent.plan.clone() {
             agent.adopt_plan_check(&plan);
@@ -380,6 +417,7 @@ impl AgentLoop {
                         from: state,
                         to: next,
                     });
+                    self.track_retries(state, next);
                     state = next;
                     self.enter(state);
                 }
@@ -392,6 +430,35 @@ impl AgentLoop {
                 }
             }
         }
+    }
+
+    /// Counts consecutive failures and, when the coder is stuck and there is
+    /// a planner, marks the coming Build round to run on it.
+    fn track_retries(&mut self, from: State, to: State) {
+        match (from, to) {
+            (State::Verify, State::Build) => self.check_failures += 1,
+            (State::Review, State::Build) => self.review_changes += 1,
+            (State::Verify, _) => self.check_failures = 0,
+            (State::Review, _) => self.review_changes = 0,
+            _ => {}
+        }
+        if to != State::Build || self.providers.planner.is_none() {
+            return;
+        }
+        let reason = if self.check_failures >= ESCALATE_AFTER_CHECK_FAILURES {
+            self.check_failures = 0;
+            EscalationReason::CheckFailures
+        } else if self.review_changes >= ESCALATE_AFTER_REVIEW_CHANGES {
+            self.review_changes = 0;
+            EscalationReason::ReviewChanges
+        } else {
+            return;
+        };
+        let round = self.visits.get(&State::Build).copied().unwrap_or(0) + 1;
+        self.escalate_build = true;
+        self.escalations
+            .push(format!("Build round {round} ran on the planner: {reason}"));
+        self.events.emit(LoopEvent::Escalated { reason, round });
     }
 
     /// Records a state entry.
@@ -432,6 +499,11 @@ impl AgentLoop {
         if state == State::Plan {
             sections.push(self.check_section());
         }
+        sections.extend(prompts::delegate_guidance(
+            state,
+            tools,
+            self.config.delegate_guidance,
+        ));
         system_prompt(&PromptInputs {
             state,
             instructions: &instructions,
@@ -498,6 +570,31 @@ impl AgentLoop {
             .collect()
     }
 
+    /// The provider that serves completions for a role.
+    fn provider_for(&self, role: Role) -> &dyn Provider {
+        match role {
+            Role::Planner => self
+                .providers
+                .planner
+                .as_deref()
+                .unwrap_or(&*self.providers.coder),
+            Role::Coder => &*self.providers.coder,
+            Role::Reviewer => &*self.providers.reviewer,
+            Role::Summarizer => &*self.providers.summarizer,
+            // Worker turns are made by the delegate tool with its own provider.
+            Role::Worker => &*self.providers.coder,
+        }
+    }
+
+    /// The role that plans: the planner when there is one, else the coder.
+    fn plan_role(&self) -> Role {
+        if self.providers.planner.is_some() {
+            Role::Planner
+        } else {
+            Role::Coder
+        }
+    }
+
     /// Compacts the conversation when the next request would be too large.
     async fn compact_if_needed(&mut self, system: &str) {
         if !self
@@ -509,10 +606,11 @@ impl AgentLoop {
         let max_chars = usize::try_from(self.config.context_window)
             .unwrap_or(usize::MAX)
             .saturating_mul(2);
+        let summarizer = Arc::clone(&self.providers.summarizer);
         let result = self
             .conversation
             .compact(
-                &*self.providers.summarizer,
+                &*summarizer,
                 &self.config.task,
                 &self.config.session_dir,
                 max_chars,
@@ -524,6 +622,7 @@ impl AgentLoop {
                     messages: self.conversation.messages().to_vec(),
                     summary_path: compaction.summary_path.clone(),
                 });
+                self.add_role_spend(Role::Summarizer, compaction.usage);
                 self.events.emit(LoopEvent::Compacted {
                     dropped_messages: compaction.dropped_messages,
                     summary_path: compaction.summary_path,
@@ -556,7 +655,7 @@ impl AgentLoop {
         let mut intro = None;
         loop {
             let text = match self
-                .run_model_state(State::Plan, intro.take(), tools.clone())
+                .run_model_state(State::Plan, self.plan_role(), intro.take(), tools.clone())
                 .await
             {
                 ModelEnd::Finished(text) => text,
@@ -586,6 +685,14 @@ impl AgentLoop {
 
     /// Build: implement the plan, or address feedback from Review or Verify.
     async fn run_build(&mut self) -> StateOutcome {
+        if self.providers.planner.is_some() && !self.build_seeded {
+            self.seed_build_conversation();
+        }
+        let role = if std::mem::take(&mut self.escalate_build) {
+            Role::Planner
+        } else {
+            Role::Coder
+        };
         let intro = self.pending_feedback.take().unwrap_or_else(|| {
             format!(
                 "The plan above was approved. Implement it now without reading it back; its file is `{}`.",
@@ -593,7 +700,7 @@ impl AgentLoop {
             )
         });
         if let ModelEnd::Interrupted(outcome) = self
-            .run_model_state(State::Build, Some(intro), self.all_tools())
+            .run_model_state(State::Build, role, Some(intro), self.all_tools())
             .await
         {
             return outcome;
@@ -613,6 +720,18 @@ impl AgentLoop {
         } else {
             StateOutcome::Finished
         }
+    }
+
+    /// Starts the coder's own conversation from the task and the approved
+    /// plan, because it cannot continue the planner's.
+    fn seed_build_conversation(&mut self) {
+        let plan = self.plan.as_deref().unwrap_or("# Plan\n\n(no plan)\n");
+        let seed = Message::user(format!("# Task\n\n{}\n\n{plan}", self.config.task));
+        self.conversation = Conversation::from_messages(vec![seed.clone()]);
+        self.log(SessionRecord::Rebased {
+            messages: vec![seed],
+        });
+        self.build_seeded = true;
     }
 
     /// Review: one separate completion against the reviewer with the diff.
@@ -642,11 +761,13 @@ impl AgentLoop {
                 tools: Vec::new(),
                 max_output_tokens: None,
             };
-            let turn = match complete_turn(&*self.providers.reviewer, request, &self.events).await {
+            let turn = match complete_turn(self.provider_for(Role::Reviewer), request, &self.events)
+                .await
+            {
                 Ok(turn) => turn,
                 Err(error) => return self.provider_failure(error),
             };
-            self.record_turn(State::Review, &turn);
+            self.record_turn(State::Review, Role::Reviewer, &turn);
             verdict = parse_verdict::<ReviewVerdict>(&turn.text);
             if verdict.is_some() {
                 break;
@@ -835,7 +956,12 @@ impl AgentLoop {
     async fn run_model_verify(&mut self) -> StateOutcome {
         let intro = "No test runner was detected. Verify the change as described, then end with the JSON verdict.";
         let text = match self
-            .run_model_state(State::Verify, Some(intro.to_owned()), self.all_tools())
+            .run_model_state(
+                State::Verify,
+                Role::Coder,
+                Some(intro.to_owned()),
+                self.all_tools(),
+            )
             .await
         {
             ModelEnd::Finished(text) => text,
@@ -860,10 +986,11 @@ impl AgentLoop {
         }
     }
 
-    /// Runs coder turns in `state` until the model stops calling tools.
+    /// Runs `role`'s turns in `state` until the model stops calling tools.
     async fn run_model_state(
         &mut self,
         state: State,
+        role: Role,
         intro: Option<String>,
         tools: Vec<ToolSpec>,
     ) -> ModelEnd {
@@ -883,11 +1010,11 @@ impl AgentLoop {
                 tools: tools.clone(),
                 max_output_tokens: None,
             };
-            let turn = match complete_turn(&*self.providers.coder, request, &self.events).await {
+            let turn = match complete_turn(self.provider_for(role), request, &self.events).await {
                 Ok(turn) => turn,
                 Err(error) => return ModelEnd::Interrupted(self.provider_failure(error)),
             };
-            self.record_turn(state, &turn);
+            self.record_turn(state, role, &turn);
             if let Some(usage) = turn.usage {
                 self.conversation.record_usage(request_len, usage);
             }
@@ -896,53 +1023,129 @@ impl AgentLoop {
             if turn.tool_calls.is_empty() {
                 return ModelEnd::Finished(turn.text);
             }
-            let results = self.run_tools(&turn.tool_calls).await;
+            let results = self.run_tools(state, &turn.tool_calls).await;
             self.push_message(Message::ToolResults { results });
         }
     }
 
     /// Executes each call through the registry and reports it.
-    async fn run_tools(&mut self, calls: &[ToolCall]) -> Vec<ToolResult> {
+    ///
+    /// Consecutive calls that a tool says may run together (read-only
+    /// delegations) run concurrently, at most [`MAX_PARALLEL_CALLS`] at a
+    /// time; every other call runs alone, in order. Results keep call order.
+    async fn run_tools(&mut self, state: State, calls: &[ToolCall]) -> Vec<ToolResult> {
         let mut results = Vec::with_capacity(calls.len());
-        for call in calls {
-            self.events
-                .emit(LoopEvent::ToolStarted { call: call.clone() });
-            if let Some(edit) = crate::tools::preview::proposed_edit(call, &self.ctx) {
-                self.events.emit(edit);
+        let mut next = 0;
+        while next < calls.len() {
+            let together = calls[next..]
+                .iter()
+                .take_while(|call| self.registry.runs_in_parallel(call))
+                .count();
+            if together < 2 {
+                let call = &calls[next];
+                self.announce(call);
+                let execution = if state == State::Plan && self.registry.may_write(call) {
+                    Execution::not_run(
+                        call,
+                        format!(
+                            "`{}` may change files, so it is not available while planning; put this step in the plan instead",
+                            call.name
+                        ),
+                    )
+                } else {
+                    self.registry.execute(call, &self.ctx).await
+                };
+                results.push(self.finish_call(state, call, execution));
+                next += 1;
+                continue;
             }
-            let execution = self.registry.execute(call, &self.ctx).await;
-            if execution.outcome.is_denial() {
-                self.denial_seen = true;
+            let batch = &calls[next..next + together];
+            for call in batch {
+                self.announce(call);
             }
-            if matches!(call.name.as_str(), "read_file" | "write_file" | "edit_file") {
-                for path in file_paths(&call.arguments_json) {
-                    self.touched.insert(self.ctx.resolve(&path));
-                    if call.name != "read_file" {
-                        self.written.insert(path);
-                    }
-                }
+            let executions: Vec<Execution> = {
+                let (registry, ctx) = (&self.registry, &self.ctx);
+                stream::iter(batch)
+                    .map(|call| registry.execute(call, ctx))
+                    .buffered(MAX_PARALLEL_CALLS)
+                    .collect()
+                    .await
+            };
+            for (call, execution) in batch.iter().zip(executions) {
+                results.push(self.finish_call(state, call, execution));
             }
-            self.events.emit(LoopEvent::ToolFinished {
-                call_id: call.id.clone(),
-                name: call.name.clone(),
-                outcome: execution.outcome,
-                preview: preview(&execution.result.content),
-                stats: execution.stats,
-            });
-            results.push(execution.result);
+            next += together;
         }
         results
     }
 
-    /// Adds a turn to the state's spend and reports it.
-    fn record_turn(&mut self, state: State, turn: &Turn) {
+    /// Reports that a call is about to run.
+    fn announce(&self, call: &ToolCall) {
+        self.events
+            .emit(LoopEvent::ToolStarted { call: call.clone() });
+        if let Some(edit) = crate::tools::preview::proposed_edit(call, &self.ctx) {
+            self.events.emit(edit);
+        }
+    }
+
+    /// Books a finished call: denials, touched files, the completions the
+    /// tool made itself (as worker turns) and the finish event.
+    fn finish_call(&mut self, state: State, call: &ToolCall, execution: Execution) -> ToolResult {
+        if execution.outcome.is_denial() {
+            self.denial_seen = true;
+        }
+        if matches!(call.name.as_str(), "read_file" | "write_file" | "edit_file") {
+            for path in file_paths(&call.arguments_json) {
+                self.touched.insert(self.ctx.resolve(&path));
+                if call.name != "read_file" {
+                    self.written.insert(path);
+                }
+            }
+        }
+        for turn in &execution.model_turns {
+            self.record_completion(state, Role::Worker, turn);
+        }
+        self.events.emit(LoopEvent::ToolFinished {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            outcome: execution.outcome,
+            preview: preview(&execution.result.content),
+            stats: execution.stats,
+        });
+        execution.result
+    }
+
+    /// Adds a completion to a role's spend.
+    fn add_role_spend(&mut self, role: Role, usage: Option<Usage>) {
+        let spend = self.role_spend.entry(role).or_default();
+        spend.turns += 1;
+        spend.tokens = spend
+            .tokens
+            .saturating_add(usage.map(|usage| usage.weighted()).unwrap_or(0));
+    }
+
+    /// Adds a turn to the state's and the role's spend and reports it.
+    fn record_turn(&mut self, state: State, role: Role, turn: &Turn) {
+        let completion = ModelTurn {
+            stop_reason: turn.stop_reason.clone(),
+            usage: turn.usage,
+            latency_ms: turn.latency_ms,
+            retries: turn.retries,
+        };
+        self.record_completion(state, role, &completion);
+    }
+
+    /// Adds one completion to the state's and the role's spend and reports it.
+    fn record_completion(&mut self, state: State, role: Role, turn: &ModelTurn) {
         let spend = self.spend.entry(state).or_default();
         spend.turns += 1;
         spend.tokens = spend
             .tokens
             .saturating_add(turn.usage.map(|usage| usage.weighted()).unwrap_or(0));
+        self.add_role_spend(role, turn.usage);
         self.events.emit(LoopEvent::TurnFinished {
             state,
+            role,
             stop_reason: turn.stop_reason.clone(),
             usage: turn.usage,
             latency_ms: turn.latency_ms,
@@ -1054,6 +1257,7 @@ impl AgentLoop {
             summary_path,
             rounds: self.rounds,
             spend: self.spend,
+            role_spend: self.role_spend,
         }
     }
 
@@ -1068,6 +1272,20 @@ impl AgentLoop {
                 "- {state}: {} turn(s), {} tokens\n",
                 spend.turns, spend.tokens
             ));
+        }
+        if self.providers.planner.is_some() || self.role_spend.contains_key(&Role::Worker) {
+            for (role, spend) in &self.role_spend {
+                text.push_str(&format!(
+                    "- role {role}: {} turn(s), {} tokens\n",
+                    spend.turns, spend.tokens
+                ));
+            }
+        }
+        if !self.escalations.is_empty() {
+            text.push_str("\n## Escalations\n\n");
+            for line in &self.escalations {
+                text.push_str(&format!("- {line}\n"));
+            }
         }
         if !self.written.is_empty() {
             text.push_str("\n## Files written\n\n");
@@ -1171,6 +1389,8 @@ mod tests {
         coder: Arc<FakeProvider>,
         reviewer: Arc<FakeProvider>,
         summarizer: Arc<FakeProvider>,
+        /// The planner the next agent gets; `None` leaves the coder planning.
+        planner: Option<Arc<FakeProvider>>,
         events: mpsc::UnboundedReceiver<LoopEvent>,
     }
 
@@ -1192,6 +1412,7 @@ mod tests {
                 coder: Arc::new(FakeProvider::new(coder)),
                 reviewer: Arc::new(FakeProvider::new(reviewer)),
                 summarizer: Arc::new(FakeProvider::new(summarizer)),
+                planner: None,
                 events: rx,
             }
         }
@@ -1212,6 +1433,7 @@ mod tests {
                 extra_instructions: Vec::new(),
                 sections: Vec::new(),
                 review_sections: Vec::new(),
+                delegate_guidance: false,
             }
         }
 
@@ -1232,6 +1454,10 @@ mod tests {
                 config,
                 LoopProviders {
                     coder,
+                    planner: self
+                        .planner
+                        .clone()
+                        .map(|planner| planner as Arc<dyn Provider>),
                     reviewer: Arc::clone(&self.reviewer) as Arc<dyn Provider>,
                     summarizer: Arc::clone(&self.summarizer) as Arc<dyn Provider>,
                 },
@@ -2280,6 +2506,7 @@ mod tests {
             config,
             LoopProviders {
                 coder: Arc::clone(&h.coder) as Arc<dyn Provider>,
+                planner: None,
                 reviewer: Arc::clone(&h.reviewer) as Arc<dyn Provider>,
                 summarizer: Arc::clone(&h.summarizer) as Arc<dyn Provider>,
             },
@@ -2361,6 +2588,7 @@ mod tests {
             config,
             LoopProviders {
                 coder: Arc::clone(&resumed_coder) as Arc<dyn Provider>,
+                planner: None,
                 reviewer: Arc::clone(&h.reviewer) as Arc<dyn Provider>,
                 summarizer: Arc::clone(&h.summarizer) as Arc<dyn Provider>,
             },
@@ -2562,6 +2790,621 @@ mod tests {
         assert!(
             review.ends_with("# Standing rules\n\ncite [tidy] on violations"),
             "{review}"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_planner_the_coder_requests_do_not_change() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![write_call("a.txt")]),
+                FakeProvider::text_turn("built"),
+                FakeProvider::tool_turn(vec![write_call("fixed.txt")]),
+                FakeProvider::text_turn("fixed"),
+            ],
+            vec![approve()],
+        );
+        h.git_init();
+        let agent = h.default_agent(
+            CheckCommand::Command("test -f fixed.txt".to_owned()),
+            "allow = [\"write_file\"]",
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+        // The prompt files check out with CRLF on Windows; the snapshot must
+        // be the same on every platform.
+        let requests = serde_json::to_string_pretty(&h.coder.requests())
+            .expect("requests serialize")
+            .replace("\\r\\n", "\\n");
+        insta::assert_snapshot!(requests);
+    }
+
+    /// Gives the next agent a planner that replays `scripts`.
+    fn add_planner(h: &mut Harness, scripts: Vec<Script>) -> Arc<FakeProvider> {
+        let planner = Arc::new(FakeProvider::new(scripts));
+        h.planner = Some(Arc::clone(&planner));
+        planner
+    }
+
+    fn list_dir_turn() -> Script {
+        FakeProvider::tool_turn(vec![ToolCall {
+            id: "ls".to_owned(),
+            name: "list_dir".to_owned(),
+            arguments_json: "{}".to_owned(),
+        }])
+    }
+
+    #[tokio::test]
+    async fn a_planner_plans_and_the_coder_builds_from_the_approved_plan() {
+        let mut h = Harness::new(vec![FakeProvider::text_turn("built")], vec![approve()]);
+        let planner = add_planner(&mut h, vec![list_dir_turn(), FakeProvider::text_turn(PLAN)]);
+        let agent = h.default_agent(CheckCommand::Command("exit 0".to_owned()), "");
+        assert_eq!(agent.run().await.status, Status::Done);
+
+        assert_eq!(planner.calls(), 2, "exploration and the plan");
+        assert_eq!(h.coder.calls(), 1, "only the build");
+        let first = &h.coder.requests()[0];
+        assert_eq!(first.messages.len(), 2, "seed and build intro only");
+        let Message::User { text } = &first.messages[0] else {
+            panic!("the seed is a user message: {:?}", first.messages[0]);
+        };
+        assert!(text.contains("add a --dry-run flag"), "{text}");
+        assert!(text.contains("1. [ ] Write hello.txt"), "{text}");
+        assert!(
+            first
+                .messages
+                .iter()
+                .all(|m| matches!(m, Message::User { .. })),
+            "no planner turns leak into the build conversation"
+        );
+        assert!(matches!(
+            &first.messages[1],
+            Message::User { text } if text.contains("The plan above was approved")
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_plan_revision_stays_on_the_planner() {
+        let mut h = Harness::new(vec![FakeProvider::text_turn("built")], vec![approve()]);
+        let planner = add_planner(
+            &mut h,
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("# Plan\n\n1. [ ] shorter\n"),
+            ],
+        );
+        let config = h.config(CheckCommand::Command("exit 0".to_owned()));
+        let coder = Arc::clone(&h.coder) as Arc<dyn Provider>;
+        let gate = ScriptedGate::new(vec![PlanDecision::Revise("make it shorter".to_owned())]);
+        let agent = h.agent(config, coder, "", Box::new(gate));
+        assert_eq!(agent.run().await.status, Status::Done);
+
+        assert_eq!(planner.calls(), 2);
+        assert!(planner.requests()[1].messages.iter().any(|m| matches!(
+            m,
+            Message::User { text } if text.contains("make it shorter")
+        )));
+        assert_eq!(h.coder.calls(), 1);
+        let seed = format!("{:?}", h.coder.requests()[0].messages[0]);
+        assert!(seed.contains("shorter"), "{seed}");
+        assert!(!seed.contains("Write hello.txt"), "{seed}");
+    }
+
+    /// Runs a planner session whose reviewer asks for changes three times
+    /// and then approves, so the third build escalates.
+    async fn review_escalation_run() -> (Harness, Arc<FakeProvider>, LoopResult) {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn("b1"),
+                FakeProvider::text_turn("b2"),
+                FakeProvider::text_turn("b4"),
+            ],
+            vec![changes(), changes(), changes(), approve()],
+        );
+        let planner = add_planner(
+            &mut h,
+            vec![FakeProvider::text_turn(PLAN), FakeProvider::text_turn("b3")],
+        );
+        let agent = h.default_agent(CheckCommand::Command("exit 0".to_owned()), "");
+        let result = agent.run().await;
+        (h, planner, result)
+    }
+
+    #[tokio::test]
+    async fn two_review_change_requests_send_one_build_round_to_the_planner() {
+        let (mut h, planner, result) = review_escalation_run().await;
+        assert_eq!(result.status, Status::Done);
+        assert_eq!(planner.calls(), 2, "the plan and build round 3");
+        assert_eq!(h.coder.calls(), 3, "rounds 1, 2 and 4");
+
+        let escalated = &planner.requests()[1];
+        assert!(matches!(
+            &escalated.messages[0],
+            Message::User { text } if text.contains("# Task")
+        ));
+        assert!(
+            escalated.messages.iter().any(|m| matches!(
+                m,
+                Message::User { text } if text.contains("reviewer requested changes")
+            )),
+            "the escalated round continues the build conversation"
+        );
+        let after = &h.coder.requests()[2];
+        assert!(
+            after
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::Assistant { .. })),
+            "the coder returns to the same conversation"
+        );
+
+        let events = h.drain();
+        let escalations: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, LoopEvent::Escalated { .. }))
+            .collect();
+        assert_eq!(
+            escalations,
+            [&LoopEvent::Escalated {
+                reason: EscalationReason::ReviewChanges,
+                round: 3
+            }]
+        );
+        assert!(
+            result.summary.contains("## Escalations"),
+            "{}",
+            result.summary
+        );
+        assert!(
+            result.summary.contains("Build round 3 ran on the planner"),
+            "{}",
+            result.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn two_failed_checks_send_the_next_build_round_to_the_planner() {
+        let mut h = Harness::new(
+            vec![FakeProvider::text_turn("b1"), FakeProvider::text_turn("b2")],
+            vec![approve()],
+        );
+        let planner = add_planner(
+            &mut h,
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![write_call("ok.txt")]),
+                FakeProvider::text_turn("b3"),
+            ],
+        );
+        h.git_init();
+        let agent = h.default_agent(
+            CheckCommand::Command("test -f ok.txt".to_owned()),
+            "allow = [\"write_file\"]",
+        );
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        assert_eq!(result.rounds.verify, 2);
+        assert_eq!(planner.calls(), 3, "the plan and two turns of round 3");
+        assert_eq!(h.coder.calls(), 2);
+        assert!(h.drain().contains(&LoopEvent::Escalated {
+            reason: EscalationReason::CheckFailures,
+            round: 3
+        }));
+        assert!(
+            result.summary.contains("## Escalations"),
+            "{}",
+            result.summary
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_planner_nothing_escalates() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("b1"),
+                FakeProvider::text_turn("b2"),
+                FakeProvider::text_turn("b3"),
+            ],
+            vec![],
+        );
+        let agent = h.default_agent(CheckCommand::Command("exit 1".to_owned()), "");
+        let result = agent.run().await;
+        assert_eq!(result.rounds.verify, 2);
+        assert!(
+            !h.drain()
+                .iter()
+                .any(|e| matches!(e, LoopEvent::Escalated { .. }))
+        );
+        assert!(!result.summary.contains("Escalations"));
+        assert!(!result.summary.contains("- role "), "{}", result.summary);
+        assert_eq!(h.coder.calls(), 4, "the coder plans and builds three times");
+    }
+
+    #[tokio::test]
+    async fn spend_is_attributed_to_the_role_whose_provider_served_it() {
+        let (_h, _planner, result) = review_escalation_run().await;
+        let turns = |role| result.role_spend.get(&role).map(|spend| spend.turns);
+        assert_eq!(
+            turns(Role::Planner),
+            Some(2),
+            "plan and the escalated round"
+        );
+        assert_eq!(turns(Role::Coder), Some(3));
+        assert_eq!(turns(Role::Reviewer), Some(4));
+        assert_eq!(turns(Role::Summarizer), None);
+        assert_eq!(result.role_spend[&Role::Planner].tokens, 30);
+        assert_eq!(
+            result.spend[&State::Build].turns,
+            4,
+            "per-state spend stays"
+        );
+        for line in [
+            "- role planner: 2 turn(s), 30 tokens",
+            "- role coder: 3 turn(s), 45 tokens",
+            "- role reviewer: 4 turn(s), 60 tokens",
+        ] {
+            assert!(result.summary.contains(line), "{}", result.summary);
+        }
+    }
+
+    #[tokio::test]
+    async fn compaction_spend_goes_to_the_summarizer() {
+        let mut h = Harness::with_summarizer(
+            vec![
+                heavy_tool_turn("t1", 100),
+                heavy_tool_turn("t2", 100),
+                heavy_tool_turn("t3", 100),
+                heavy_tool_turn("t4", 100),
+                heavy_tool_turn("t5", 900),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+            vec![FakeProvider::text_turn("## Task\nsummary of earlier work")],
+        );
+        add_planner(&mut h, vec![FakeProvider::text_turn(PLAN)]);
+        let mut config = h.config(CheckCommand::Command("exit 0".to_owned()));
+        config.context_window = 1000;
+        let coder = Arc::clone(&h.coder) as Arc<dyn Provider>;
+        let agent = h.agent(config, coder, "", Box::new(AutoApprove));
+        let result = agent.run().await;
+        assert_eq!(result.status, Status::Done);
+        let turns = |role| result.role_spend.get(&role).map(|spend| spend.turns);
+        assert_eq!(turns(Role::Summarizer), Some(1));
+        assert_eq!(turns(Role::Planner), Some(1));
+        assert_eq!(turns(Role::Coder), Some(6));
+    }
+
+    #[tokio::test]
+    async fn resuming_in_build_restores_the_build_conversation_not_the_planners() {
+        let mut h = Harness::new(vec![list_dir_turn()], vec![]);
+        add_planner(&mut h, vec![list_dir_turn(), FakeProvider::text_turn(PLAN)]);
+        let mut config = h.config(CheckCommand::Command("exit 0".to_owned()));
+        config.limits.build.max_turns = 1;
+        let coder = Arc::clone(&h.coder) as Arc<dyn Provider>;
+        let first = h
+            .agent(config, coder, "", Box::new(AutoApprove))
+            .run()
+            .await;
+        assert!(matches!(first.status, Status::Incomplete { .. }));
+
+        let snapshot = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        assert_eq!(snapshot.last_state, Some(State::Build));
+        assert_eq!(
+            snapshot.messages.len(),
+            4,
+            "seed, intro, tool call and results; the planner's turns are gone"
+        );
+        assert!(matches!(
+            &snapshot.messages[0],
+            Message::User { text } if text.contains("# Task") && text.contains("Write hello.txt")
+        ));
+
+        let resumed_coder = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn("done")]));
+        let resumed_planner = Arc::new(FakeProvider::new(vec![]));
+        h.reviewer = Arc::new(FakeProvider::new(vec![approve()]));
+        let (tx, rx) = mpsc::unbounded_channel();
+        h.events = rx;
+        let agent = AgentLoop::resume(
+            snapshot,
+            h.config(CheckCommand::Command("exit 0".to_owned())),
+            LoopProviders {
+                coder: Arc::clone(&resumed_coder) as Arc<dyn Provider>,
+                planner: Some(Arc::clone(&resumed_planner) as Arc<dyn Provider>),
+                reviewer: Arc::clone(&h.reviewer) as Arc<dyn Provider>,
+                summarizer: Arc::clone(&h.summarizer) as Arc<dyn Provider>,
+            },
+            ToolRegistry::with_builtins(
+                Permissions::empty(),
+                Box::new(StaticPrompt(PromptAnswer::No)),
+            ),
+            ToolContext::new(h.dir.path()),
+            Box::new(AutoApprove),
+            EventSink::new(tx),
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+        assert_eq!(resumed_planner.calls(), 0);
+        let request = &resumed_coder.requests()[0];
+        assert!(matches!(
+            &request.messages[0],
+            Message::User { text } if text.contains("# Task") && text.contains("Write hello.txt")
+        ));
+        assert_eq!(request.messages.len(), 5, "saved 4 and the resume note");
+    }
+
+    /// A tool for the concurrency tests. Its `parallel` argument is what
+    /// [`Tool::parallel_safe`] answers; each call logs when it starts and
+    /// ends, yields so that overlapping calls interleave, and tracks how
+    /// many calls are inside it at once.
+    struct Probe {
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+        inside: Arc<std::sync::atomic::AtomicUsize>,
+        most_inside: Arc<std::sync::atomic::AtomicUsize>,
+        /// When set, a call waits here until every party has arrived.
+        rendezvous: Option<Arc<tokio::sync::Barrier>>,
+    }
+
+    impl Probe {
+        fn new() -> Self {
+            Self {
+                log: Arc::default(),
+                inside: Arc::default(),
+                most_inside: Arc::default(),
+                rendezvous: None,
+            }
+        }
+    }
+
+    impl crate::tools::Tool for Probe {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn access(&self) -> Access {
+            Access::Read
+        }
+
+        fn parallel_safe(&self, args: &serde_json::Value) -> bool {
+            args["parallel"].as_bool().unwrap_or(false)
+        }
+
+        fn run<'a>(
+            &'a self,
+            args: serde_json::Value,
+            _ctx: &'a ToolContext,
+        ) -> crate::tools::ToolFuture<'a> {
+            use std::sync::atomic::Ordering;
+            Box::pin(async move {
+                let id = args["id"].as_str().unwrap_or("?").to_owned();
+                self.log.lock().expect("lock").push(format!("start {id}"));
+                let now = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
+                self.most_inside.fetch_max(now, Ordering::SeqCst);
+                if let Some(barrier) = &self.rendezvous {
+                    // Only a failure guard: the barrier opens when both calls are inside.
+                    let met = tokio::time::timeout(Duration::from_secs(30), barrier.wait()).await;
+                    if met.is_err() {
+                        self.inside.fetch_sub(1, Ordering::SeqCst);
+                        return crate::tools::ToolOutput::error("the calls did not overlap");
+                    }
+                }
+                for _ in 0..20 {
+                    tokio::task::yield_now().await;
+                }
+                self.inside.fetch_sub(1, Ordering::SeqCst);
+                self.log.lock().expect("lock").push(format!("end {id}"));
+                let mut output = crate::tools::ToolOutput::ok(format!("done {id}"));
+                output.model_turns = vec![ModelTurn {
+                    stop_reason: StopReason::EndTurn,
+                    usage: Some(Usage {
+                        input: 10,
+                        output: 5,
+                        ..Usage::default()
+                    }),
+                    latency_ms: 1,
+                    retries: 0,
+                }];
+                output
+            })
+        }
+    }
+
+    fn probe_call(id: &str, parallel: bool) -> ToolCall {
+        ToolCall {
+            id: id.to_owned(),
+            name: "probe".to_owned(),
+            arguments_json: serde_json::json!({"id": id, "parallel": parallel}).to_string(),
+        }
+    }
+
+    fn contents(results: &[ToolResult]) -> Vec<String> {
+        results
+            .iter()
+            .map(|result| result.content.clone())
+            .collect()
+    }
+
+    /// The tool events in `events`, as `started <id>` / `finished <id>`.
+    fn tool_events(events: Vec<LoopEvent>) -> Vec<String> {
+        events
+            .into_iter()
+            .filter_map(|event| match event {
+                LoopEvent::ToolStarted { call } => Some(format!("started {}", call.id)),
+                LoopEvent::ToolFinished { call_id, .. } => Some(format!("finished {call_id}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn two_parallel_safe_calls_run_at_the_same_time_and_return_in_call_order() {
+        let mut h = Harness::new(vec![], vec![]);
+        let mut agent = h.default_agent(CheckCommand::Command("true".to_owned()), "");
+        let mut probe = Probe::new();
+        probe.rendezvous = Some(Arc::new(tokio::sync::Barrier::new(2)));
+        agent.registry.register(Box::new(probe));
+        let calls = [probe_call("a", true), probe_call("b", true)];
+        let results = agent.run_tools(State::Build, &calls).await;
+        assert_eq!(contents(&results), ["done a", "done b"]);
+        assert!(results.iter().all(|result| !result.is_error));
+        let ids: Vec<&str> = results.iter().map(|r| r.call_id.as_str()).collect();
+        assert_eq!(ids, ["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn every_parallel_call_gets_a_start_and_a_finish_event() {
+        let mut h = Harness::new(vec![], vec![]);
+        let mut agent = h.default_agent(CheckCommand::Command("true".to_owned()), "");
+        agent.registry.register(Box::new(Probe::new()));
+        let calls = [probe_call("a", true), probe_call("b", true)];
+        agent.run_tools(State::Build, &calls).await;
+        assert_eq!(
+            tool_events(h.drain()),
+            ["started a", "started b", "finished a", "finished b"]
+        );
+    }
+
+    #[tokio::test]
+    async fn sequential_calls_keep_the_start_finish_pairs_of_today() {
+        let mut h = Harness::new(vec![], vec![]);
+        let mut agent = h.default_agent(CheckCommand::Command("true".to_owned()), "");
+        agent.registry.register(Box::new(Probe::new()));
+        let calls = [probe_call("a", false), probe_call("b", false)];
+        agent.run_tools(State::Build, &calls).await;
+        assert_eq!(
+            tool_events(h.drain()),
+            ["started a", "finished a", "started b", "finished b"]
+        );
+    }
+
+    #[tokio::test]
+    async fn calls_that_may_write_never_overlap_and_keep_their_order() {
+        let mut h = Harness::new(vec![], vec![]);
+        let mut agent = h.default_agent(CheckCommand::Command("true".to_owned()), "");
+        let probe = Probe::new();
+        let (log, most_inside) = (Arc::clone(&probe.log), Arc::clone(&probe.most_inside));
+        agent.registry.register(Box::new(probe));
+        let calls = [
+            probe_call("w1", false),
+            probe_call("w2", false),
+            probe_call("w3", false),
+        ];
+        let results = agent.run_tools(State::Build, &calls).await;
+        assert_eq!(contents(&results), ["done w1", "done w2", "done w3"]);
+        assert_eq!(most_inside.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            *log.lock().expect("lock"),
+            [
+                "start w1", "end w1", "start w2", "end w2", "start w3", "end w3"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_writing_call_between_parallel_ones_splits_the_runs() {
+        let mut h = Harness::new(vec![], vec![]);
+        let mut agent = h.default_agent(CheckCommand::Command("true".to_owned()), "");
+        let probe = Probe::new();
+        let log = Arc::clone(&probe.log);
+        agent.registry.register(Box::new(probe));
+        let calls = [
+            probe_call("p1", true),
+            probe_call("p2", true),
+            probe_call("w", false),
+            probe_call("p3", true),
+        ];
+        let results = agent.run_tools(State::Build, &calls).await;
+        assert_eq!(
+            contents(&results),
+            ["done p1", "done p2", "done w", "done p3"]
+        );
+        let log = log.lock().expect("lock").clone();
+        let at = |entry: &str| log.iter().position(|line| line == entry).expect(entry);
+        assert!(at("start p2") < at("end p1"), "p1 and p2 overlap: {log:?}");
+        assert!(at("end p1") < at("start w") && at("end p2") < at("start w"));
+        assert!(at("end w") < at("start p3"));
+    }
+
+    #[tokio::test]
+    async fn at_most_the_cap_of_calls_run_at_once() {
+        let mut h = Harness::new(vec![], vec![]);
+        let mut agent = h.default_agent(CheckCommand::Command("true".to_owned()), "");
+        let probe = Probe::new();
+        let most_inside = Arc::clone(&probe.most_inside);
+        agent.registry.register(Box::new(probe));
+        let calls: Vec<ToolCall> = (0..9).map(|i| probe_call(&format!("c{i}"), true)).collect();
+        let results = agent.run_tools(State::Build, &calls).await;
+        assert_eq!(results.len(), 9);
+        assert_eq!(
+            most_inside.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_PARALLEL_CALLS
+        );
+    }
+
+    #[tokio::test]
+    async fn turns_a_tool_made_count_as_worker_spend_in_the_totals_and_events() {
+        let mut h = Harness::new(vec![], vec![]);
+        let mut agent = h.default_agent(CheckCommand::Command("true".to_owned()), "");
+        agent.registry.register(Box::new(Probe::new()));
+        let calls = [probe_call("a", true), probe_call("b", true)];
+        agent.run_tools(State::Build, &calls).await;
+        assert_eq!(
+            agent.role_spend[&Role::Worker],
+            Spend {
+                turns: 2,
+                tokens: 30
+            }
+        );
+        assert_eq!(agent.spend[&State::Build].turns, 2);
+        let worker_turns = h
+            .drain()
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    LoopEvent::TurnFinished {
+                        role: Role::Worker,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(worker_turns, 2);
+    }
+
+    #[tokio::test]
+    async fn delegate_guidance_reaches_the_prompt_only_when_asked_for_and_offered() {
+        let mut h = Harness::new(vec![], vec![]);
+        let mut agent = h.default_agent(CheckCommand::Command("true".to_owned()), "");
+        let tools = [ToolSpec {
+            name: "delegate".to_owned(),
+            description: "d".to_owned(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        agent.config.delegate_guidance = true;
+        assert!(
+            agent
+                .system_prompt_for(State::Build, &tools)
+                .contains("# Delegation")
+        );
+        assert!(
+            !agent
+                .system_prompt_for(State::Build, &[])
+                .contains("# Delegation"),
+            "no delegate tool, no guidance"
+        );
+        agent.config.delegate_guidance = false;
+        assert!(
+            !agent
+                .system_prompt_for(State::Build, &tools)
+                .contains("# Delegation")
         );
     }
 

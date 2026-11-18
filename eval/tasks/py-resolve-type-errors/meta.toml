@@ -1,3 +1,0 @@
-tags = ["python", "types"]
-timeout_s = 300
-max_tokens = 300000

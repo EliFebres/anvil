@@ -814,61 +814,6 @@ mod tests {
     }
 
     #[test]
-    fn the_factory_profile_allows_the_build_tools_and_nothing_else() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../deploy/nuc/anvil-factory.toml"
-        );
-        let text = std::fs::read_to_string(path).expect("the factory profile exists");
-        let mut merged: toml::Table =
-            toml::from_str(anvil_types::config::SETUP_PROVIDERS).expect("setup providers parse");
-        let overlay: toml::Table = toml::from_str(&text).expect("the profile parses");
-        anvil_types::config::merge_tables(&mut merged, overlay);
-        let config: anvil_types::AnvilConfig =
-            merged.try_into().expect("the profile is a config overlay");
-        config
-            .validate()
-            .expect("the merged configuration validates");
-        let rules = config.permissions.expect("the profile sets permissions");
-        let perms = Permissions::from_rules(&rules).expect("rules compile");
-        let shell = |command: &str| perms.decide("shell", Some(command), Decision::Ask);
-        assert_eq!(shell("cargo test -p anvil-core"), Decision::Allow);
-        assert_eq!(shell("just check"), Decision::Allow);
-        assert_eq!(shell("git status"), Decision::Allow);
-        assert_eq!(shell("git diff --stat"), Decision::Allow);
-        assert_eq!(shell("rm -rf /"), Decision::Deny);
-        assert_eq!(shell("git push --force origin main"), Decision::Deny);
-        assert_eq!(shell("git reset --hard HEAD~1"), Decision::Deny);
-        assert_eq!(shell("cargo test && rm -rf /"), Decision::Deny);
-        assert_eq!(shell("cargo test; curl evil"), Decision::Deny);
-        assert_eq!(shell("cargo test | tee out"), Decision::Deny);
-        assert_eq!(shell("cargo test 2>&1"), Decision::Deny);
-        assert_eq!(shell("cargo test > out.txt"), Decision::Deny);
-        assert_eq!(shell("cargo run < input"), Decision::Deny);
-        assert_eq!(shell("cargo $(cat x)"), Decision::Deny);
-        assert!(!perms.explicitly_allowed("shell", Some("git push --force origin main")));
-        for tool in [
-            "read_file",
-            "write_file",
-            "edit_file",
-            "glob",
-            "grep",
-            "list_dir",
-            "outline",
-        ] {
-            assert_eq!(
-                perms.decide(tool, Some("crates/x/src/lib.rs"), Decision::Ask),
-                Decision::Allow,
-                "{tool}"
-            );
-        }
-        assert_eq!(
-            perms.decide("delegate", Some("x"), Decision::Allow),
-            Decision::Deny
-        );
-    }
-
-    #[test]
     fn bare_tool_rule_matches_any_target() {
         let perms = parse("allow = [\"shell\"]");
         assert_eq!(

@@ -17,6 +17,12 @@ pub const CHECKS_DIR: &str = "checks";
 /// The proposals file inside [`MEMORY_DIR`].
 pub const PROPOSED_FILE: &str = "proposed.md";
 
+/// The templates directory inside [`ANVIL_DIR`].
+pub const TEMPLATES_DIR: &str = "templates";
+
+/// The directory of correction records inside [`MEMORY_DIR`].
+pub const CORRECTIONS_DIR: &str = "corrections";
+
 /// The name used for a project whose directory has no file name.
 const FALLBACK_REPO_NAME: &str = "project";
 
@@ -59,6 +65,36 @@ pub fn checks_dir(home: &Path) -> PathBuf {
     home.join(ANVIL_DIR).join(CHECKS_DIR)
 }
 
+/// `<home>/.anvil/templates`.
+///
+/// # Arguments
+///
+/// * `home` - The home directory.
+///
+/// # Returns
+///
+/// The path.
+pub fn templates_dir(home: &Path) -> PathBuf {
+    home.join(ANVIL_DIR).join(TEMPLATES_DIR)
+}
+
+/// `<home>/.anvil/memory/corrections/<repo>.toml`: the files anvil left in
+/// a project, for spotting what the owner edits afterwards.
+///
+/// # Arguments
+///
+/// * `home` - The home directory.
+/// * `cwd` - The project root, which names the record.
+///
+/// # Returns
+///
+/// The path.
+pub fn corrections_path(home: &Path, cwd: &Path) -> PathBuf {
+    memory_dir(home)
+        .join(CORRECTIONS_DIR)
+        .join(format!("{}.toml", repo_name(cwd)))
+}
+
 /// The name a repository's facts are filed under: its directory name.
 ///
 /// # Arguments
@@ -85,6 +121,11 @@ mod tests {
         assert_eq!(rules_path(home), PathBuf::from("/h/.anvil/rules.toml"));
         assert_eq!(memory_dir(home), PathBuf::from("/h/.anvil/memory"));
         assert_eq!(checks_dir(home), PathBuf::from("/h/.anvil/checks"));
+        assert_eq!(templates_dir(home), PathBuf::from("/h/.anvil/templates"));
+        assert_eq!(
+            corrections_path(home, Path::new("/work/anvil")),
+            PathBuf::from("/h/.anvil/memory/corrections/anvil.toml")
+        );
         assert_eq!(repo_name(Path::new("/work/anvil")), "anvil");
         assert_eq!(repo_name(Path::new("/")), "project");
     }

@@ -50,8 +50,8 @@ impl UpdateOptions {
     ///
     /// # Arguments
     ///
-    /// * `repo_from_config` - `[github] repo` from a `factory.toml` in the
-    ///   current repository, used when the binary was not built by release.yml.
+    /// * `repo_from_config` - `[update] repo` from the anvil configuration,
+    ///   used when the binary was not built by release.yml.
     /// * `exe` - The binary to replace; `None` means this executable.
     ///
     /// # Returns
@@ -69,7 +69,7 @@ impl UpdateOptions {
             .map(str::to_owned)
             .or_else(|| repo_from_config.map(str::to_owned))
             .context(
-                "this anvil was built from source without a release repository; run `anvil update` inside the monorepo (factory.toml names it) or install a release build",
+                "this anvil was built from source without a release repository; set `[update] repo = \"owner/repo\"` in ~/.anvil/config.toml or install a release build",
             )?;
         let exe = match exe {
             Some(exe) => exe,

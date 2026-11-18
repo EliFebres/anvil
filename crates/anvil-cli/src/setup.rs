@@ -1,17 +1,16 @@
 //! `anvil setup`: writes every file a key or setting lives in, never
 //! overwriting a value that is already filled in.
 //!
-//! Files: `~/.anvil/.env` (keys), `~/.anvil/config.toml` (providers and
-//! roles), `factory.toml` at the repository root and
-//! `deploy/nuc/env.template` (what the NUC copies to `~/.factory/env`).
+//! Files: `~/.anvil/.env` (keys) and `~/.anvil/config.toml` (providers and
+//! roles).
 
 use std::path::Path;
+#[cfg(not(unix))]
 use std::process::Command;
 
+use anvil_types::AnvilConfig;
 use anvil_types::config::{self, CONFIG_DIR, OPTIONAL_SECTIONS, SETUP_PROVIDERS};
 use anvil_types::dotenv::{ANVIL_ENV_FILE, is_placeholder, read_values};
-use anvil_types::factory_config::{FACTORY_FILE, REPO_PLACEHOLDER};
-use anvil_types::{AnvilConfig, FactoryConfig};
 use anyhow::Context;
 use toml_edit::{DocumentMut, Item, Table};
 
@@ -25,26 +24,10 @@ ANTHROPIC_API_KEY="<console.anthropic.com -> API keys>"
 OPENAI_API_KEY="<platform.openai.com -> API keys>"
 GEMINI_API_KEY="<aistudio.google.com -> Get API key>"
 
-# GitHub, your personal fine-grained token, scoped to the monorepo only:
-# Contents read, Pull requests read and write
-GITHUB_TOKEN="<github.com -> Settings -> Developer settings -> Fine-grained tokens>"
-
-# Optional: Discord, Slack or ntfy webhook for factory notifications
-# WEBHOOK_URL=
-
 # Prompt 7, leave blank for now
 # RUNPOD_API_KEY=
 # HF_TOKEN=
 "#;
-
-/// The block `deploy/nuc/env.template` adds after [`ENV_TEMPLATE`]. The
-/// factory's token is separate from the personal one so it can be revoked alone.
-pub const FACTORY_ENV_BLOCK: &str = r#"# The factory's own token, separate from GITHUB_TOKEN so it can be revoked alone.
-FACTORY_GITHUB_TOKEN="<fine-grained token for the factory, scoped to the monorepo only: Contents read and write, Pull requests read and write, Workflows read>"
-"#;
-
-/// Where the template goes inside the repository.
-pub const NUC_ENV_TEMPLATE: &str = "deploy/nuc/env.template";
 
 /// What happened to one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +55,6 @@ impl std::fmt::Display for Outcome {
 /// # Arguments
 ///
 /// * `home` - The home directory.
-/// * `cwd` - The current directory; the repository root is found from it.
 ///
 /// # Returns
 ///
@@ -82,7 +64,7 @@ impl std::fmt::Display for Outcome {
 ///
 /// When the home directory is unknown, a file cannot be written, or an
 /// existing file is malformed.
-pub fn run(home: Option<&Path>, cwd: &Path) -> anyhow::Result<i32> {
+pub fn run(home: Option<&Path>) -> anyhow::Result<i32> {
     let home = home.context("cannot determine the home directory")?;
     let anvil_dir = home.join(CONFIG_DIR);
     std::fs::create_dir_all(&anvil_dir)
@@ -99,25 +81,9 @@ pub fn run(home: Option<&Path>, cwd: &Path) -> anyhow::Result<i32> {
     let outcome = write_config(&config_path)?;
     println!("{}: {outcome}", config_path.display());
 
-    let root = crate::secrets::git_toplevel(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let repo = github_repo(&root);
-    let factory_path = root.join(FACTORY_FILE);
-    let outcome = write_if_absent(
-        &factory_path,
-        &FactoryConfig::template(repo.as_deref().unwrap_or(REPO_PLACEHOLDER)),
-    )?;
-    println!("{}: {outcome}", factory_path.display());
-
-    let template_path = root.join(NUC_ENV_TEMPLATE);
-    let outcome = write_if_absent(
-        &template_path,
-        &format!("{ENV_TEMPLATE}\n{FACTORY_ENV_BLOCK}"),
-    )?;
-    println!("{}: {outcome}", template_path.display());
-
     print_models();
 
-    let unfilled = unfilled(&env_path, &factory_path)?;
+    let unfilled = unfilled(&env_path)?;
     if unfilled.is_empty() {
         println!("every placeholder is filled; run `anvil doctor`");
         return Ok(0);
@@ -241,19 +207,6 @@ fn write_config(path: &Path) -> anyhow::Result<Outcome> {
     Ok(Outcome::Extended(added))
 }
 
-/// Writes `text` to `path` unless the file exists.
-fn write_if_absent(path: &Path, text: &str) -> anyhow::Result<Outcome> {
-    if path.exists() {
-        return Ok(Outcome::Kept);
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
-    Ok(Outcome::Written)
-}
-
 /// Makes a secrets file private, or says how to.
 ///
 /// On Unix the mode is set to 600. On Windows the ACL is inspected with
@@ -315,37 +268,6 @@ fn shared_grants(listing: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// The `owner/repo` of the `origin` remote, when it is on GitHub.
-fn github_repo(root: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(root)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_github_remote(String::from_utf8_lossy(&out.stdout).trim())
-}
-
-/// Extracts `owner/repo` from an https, ssh or scp-style GitHub URL.
-fn parse_github_remote(url: &str) -> Option<String> {
-    let rest = url
-        .strip_prefix("https://github.com/")
-        .or_else(|| url.strip_prefix("http://github.com/"))
-        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| url.strip_prefix("git@github.com:"))?;
-    let rest = rest.trim_end_matches('/');
-    let rest = rest.strip_suffix(".git").unwrap_or(rest);
-    let mut parts = rest.split('/');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(owner), Some(repo), None) if !owner.is_empty() && !repo.is_empty() => {
-            Some(format!("{owner}/{repo}"))
-        }
-        _ => None,
-    }
-}
-
 /// Prints the models and prices the template uses, so they can be changed.
 fn print_models() {
     let Ok(config) = toml::from_str::<AnvilConfig>(SETUP_PROVIDERS) else {
@@ -363,31 +285,26 @@ fn print_models() {
         );
     }
     println!(
-        "  roles: coder={} reviewer={} summarizer={}",
+        "  roles: coder={} reviewer={} summarizer={}{}",
         config.roles.coder,
         config.roles.reviewer.as_deref().unwrap_or("(coder)"),
-        config.roles.summarizer
+        config.roles.summarizer,
+        config
+            .roles
+            .planner
+            .as_deref()
+            .map(|planner| format!(" planner={planner}"))
+            .unwrap_or_default()
     );
 }
 
-/// The placeholders still present in the env file and `factory.toml`.
-fn unfilled(env_path: &Path, factory_path: &Path) -> anyhow::Result<Vec<String>> {
-    let mut items: Vec<String> = read_values(env_path)?
+/// The placeholders still present in the env file.
+fn unfilled(env_path: &Path) -> anyhow::Result<Vec<String>> {
+    Ok(read_values(env_path)?
         .into_iter()
         .filter(|(_, value)| is_placeholder(value))
         .map(|(name, _)| format!("{name} in {}", env_path.display()))
-        .collect();
-    if let Ok(text) = std::fs::read_to_string(factory_path) {
-        let factory: FactoryConfig =
-            toml::from_str(&text).with_context(|| format!("parsing {}", factory_path.display()))?;
-        items.extend(
-            factory
-                .unfilled()
-                .into_iter()
-                .map(|field| format!("{field} in {}", factory_path.display())),
-        );
-    }
-    Ok(items)
+        .collect())
 }
 
 #[cfg(test)]
@@ -407,12 +324,7 @@ mod tests {
         let names: Vec<&str> = values.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(
             names,
-            [
-                "ANTHROPIC_API_KEY",
-                "OPENAI_API_KEY",
-                "GEMINI_API_KEY",
-                "GITHUB_TOKEN"
-            ]
+            ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
         );
         assert!(values.iter().all(|(_, v)| is_placeholder(v)));
         assert_eq!(
@@ -432,7 +344,6 @@ mod tests {
             Outcome::Extended(vec![
                 "ANTHROPIC_API_KEY".to_owned(),
                 "GEMINI_API_KEY".to_owned(),
-                "GITHUB_TOKEN".to_owned(),
                 "RUNPOD_API_KEY".to_owned(),
                 "HF_TOKEN".to_owned(),
             ])
@@ -484,24 +395,6 @@ mod tests {
         let config: AnvilConfig =
             toml::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parses");
         assert_eq!(config.providers.len(), 3);
-    }
-
-    #[test]
-    fn github_remotes_parse() {
-        for url in [
-            "https://github.com/EliFebres/anvil.git",
-            "https://github.com/EliFebres/anvil",
-            "git@github.com:EliFebres/anvil.git",
-            "ssh://git@github.com/EliFebres/anvil.git",
-        ] {
-            assert_eq!(
-                parse_github_remote(url).as_deref(),
-                Some("EliFebres/anvil"),
-                "{url}"
-            );
-        }
-        assert_eq!(parse_github_remote("https://gitlab.com/a/b.git"), None);
-        assert_eq!(parse_github_remote("https://github.com/only"), None);
     }
 
     #[test]

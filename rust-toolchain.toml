@@ -1,10 +1,6 @@
-# One toolchain everywhere: the host, the factory's worker image
-# (deploy/nuc/Containerfile) and CI, so `cargo fmt` formats identically on all
-# three. The Containerfile reads this file at build time and `factory update`
-# rebuilds the image when it changes; tests in anvil-types fail when a workflow
-# names another version, and `factory selftest` when the image runs one. The
-# musl target is for the static anvil that `factory update` and the CI
-# selftest mount into the worker container.
+# One toolchain everywhere: the host and CI, so `cargo fmt` formats
+# identically on both. Tests in anvil-types fail when a workflow names another
+# version. The musl target is for the static Linux release build.
 [toolchain]
 channel = "1.99.1"
 components = ["rustfmt", "clippy"]

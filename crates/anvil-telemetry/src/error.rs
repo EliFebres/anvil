@@ -31,7 +31,7 @@ pub enum TelemetryError {
         detail: String,
     },
 
-    /// A drafted ticket failed the anvil/factory data boundary.
+    /// A drafted ticket failed the ticket data boundary.
     #[error("draft rejected by the ticket validator: {0}")]
     Validation(#[from] ValidationError),
 

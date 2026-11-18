@@ -5,7 +5,7 @@
 //! into `anvil-core` from the outside: skills become a `skill` tool and a
 //! short list in the system prompt, subagents a `delegate` tool, nothing in
 //! the agent loop knows they exist. Depends on anvil-types and anvil-core
-//! only; never on any factory crate, anvil-memory or anvil-telemetry.
+//! only; never on anvil-memory or anvil-telemetry.
 
 pub mod agents;
 pub mod check;

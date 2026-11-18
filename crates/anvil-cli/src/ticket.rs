@@ -1,21 +1,24 @@
 //! `anvil ticket`: drafting, reviewing and submitting improvement tickets.
 //!
 //! Drafts are written by the summarizer from recorded signals and live in
-//! `tickets/draft/` on this machine only. Submitting validates a draft,
-//! moves it to `tickets/open/` and pushes it on its own branch; that push
-//! is the only thing that leaves the machine toward the factory.
+//! `~/.anvil/tickets/draft/` on this machine only. Submitting validates a
+//! draft, moves it to `~/.anvil/tickets/open/` and pushes it on its own
+//! branch to the ticket queue named by `[tickets] queue`; that push is the
+//! only thing that leaves the machine. With no queue configured nothing is
+//! sent.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anvil_core::context::collect_text;
 use anvil_core::provider::{CompletionRequest, Message, Provider};
-use anvil_telemetry::paths::{project_telemetry_dir, signals_file};
+use anvil_telemetry::paths::{DRAFT_DIR, project_telemetry_dir, signals_file};
 use anvil_telemetry::{
-    DraftFuture, Drafter, StoredTicket, TicketStore, draft_all, load_records, load_signals,
-    load_ticket, publish_ticket, save_signals,
+    DraftFuture, Drafter, QUEUE_REMOTE, StoredTicket, TicketStore, draft_all, load_records,
+    load_signals, load_ticket, publish_ticket, save_signals, sync_queue,
 };
-use anvil_types::{AnvilConfig, TicketStatus};
+use anvil_types::TicketStatus;
+use anvil_types::config::CONFIG_DIR;
 use anyhow::{Context, bail};
 use chrono::Utc;
 
@@ -23,13 +26,25 @@ use crate::cli::TicketCommand;
 use crate::terminal::read_line;
 use crate::wiring::Wiring;
 
+/// The bare cache of the ticket queue, inside the anvil home.
+const QUEUE_CACHE: &str = "queue.git";
+
+/// What `submit` says when `[tickets] queue` is not set.
+const NO_QUEUE: &str =
+    "no ticket queue is configured, so nothing was sent; set it in ~/.anvil/config.toml:
+
+[tickets]
+queue = \"https://github.com/<owner>/<queue-repository>.git\"
+
+then submit again. The draft stays in ~/.anvil/tickets/draft/.";
+
 /// Runs one `anvil ticket` subcommand.
 ///
 /// # Arguments
 ///
 /// * `command` - The subcommand.
-/// * `home` - The home directory, if known.
-/// * `cwd` - The repository root.
+/// * `home` - The home directory, if known; tickets live under `<home>/.anvil`.
+/// * `cwd` - The project directory, for its telemetry and configuration.
 ///
 /// # Returns
 ///
@@ -37,10 +52,15 @@ use crate::wiring::Wiring;
 ///
 /// # Errors
 ///
-/// When the ticket folders cannot be read, a ticket is not found, or
-/// drafting needs a configuration that is missing.
+/// When the home directory is unknown, the ticket folders cannot be read, a
+/// ticket is not found, submitting has no queue to send to, or drafting
+/// needs a configuration that is missing.
 pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> anyhow::Result<i32> {
-    let mut store = TicketStore::load(cwd).context("reading the ticket folders")?;
+    let root = home
+        .context("cannot determine the home directory; set ANVIL_HOME")?
+        .join(CONFIG_DIR);
+    migrate_project_drafts(cwd, &root)?;
+    let mut store = TicketStore::load(&root).context("reading the ticket folders")?;
     match command {
         TicketCommand::List => {
             list(&store);
@@ -56,10 +76,7 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
             Ok(0)
         }
         TicketCommand::Submit { id, all } => {
-            let config = anvil_types::config::load(home, cwd)
-                .ok()
-                .map(|loaded| loaded.config);
-            let remote = remote_name(config.as_ref());
+            let queue = queue_url(home, cwd).context(NO_QUEUE)?;
             let ids: Vec<String> = if all {
                 store
                     .drafts
@@ -73,9 +90,12 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
                 println!("no drafts to submit");
                 return Ok(0);
             }
+            let cache = root.join(QUEUE_CACHE);
+            sync_queue(&cache, &queue)
+                .with_context(|| format!("fetching the ticket queue {queue}; nothing was sent"))?;
             let mut failures = 0;
             for id in ids {
-                if let Err(error) = submit(&mut store, cwd, &remote, &id) {
+                if let Err(error) = submit(&mut store, &cache, &queue, &id) {
                     eprintln!("error: {error:#}");
                     failures += 1;
                 }
@@ -87,19 +107,70 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
             draft(&wiring, &mut store).await
         }
         TicketCommand::Review => {
-            let config = anvil_types::config::load(home, cwd)
-                .ok()
-                .map(|loaded| loaded.config);
-            review(&mut store, cwd, &remote_name(config.as_ref()))
+            let queue = queue_url(home, cwd);
+            review(&mut store, &root.join(QUEUE_CACHE), queue.as_deref())
         }
     }
 }
 
-/// The remote to push to, `origin` without a configuration.
-fn remote_name(config: Option<&AnvilConfig>) -> String {
-    config
-        .map(|config| config.tickets.remote.clone())
-        .unwrap_or_else(|| "origin".to_owned())
+/// `[tickets] queue` from the configuration; `None` when it is unset or
+/// there is no configuration.
+fn queue_url(home: Option<&Path>, cwd: &Path) -> Option<String> {
+    anvil_types::config::load(home, cwd)
+        .ok()
+        .and_then(|loaded| loaded.config.tickets.queue)
+}
+
+/// Moves drafts an earlier anvil wrote to `<project>/tickets/draft/` into
+/// the store under the anvil home, once. A draft whose file already exists
+/// there is left where it is.
+///
+/// # Arguments
+///
+/// * `cwd` - The project directory.
+/// * `root` - The store's root, `~/.anvil`.
+///
+/// # Errors
+///
+/// When a draft cannot be moved.
+fn migrate_project_drafts(cwd: &Path, root: &Path) -> anyhow::Result<()> {
+    let old = cwd.join(DRAFT_DIR);
+    let Ok(entries) = std::fs::read_dir(&old) else {
+        return Ok(());
+    };
+    let new = root.join(DRAFT_DIR);
+    let mut moved = 0;
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("listing {}", old.display()))?
+            .path();
+        let Some(name) = path
+            .file_name()
+            .filter(|_| path.extension().is_some_and(|ext| ext == "toml"))
+        else {
+            continue;
+        };
+        let dest: PathBuf = new.join(name);
+        if dest.exists() {
+            continue;
+        }
+        std::fs::create_dir_all(&new).with_context(|| format!("creating {}", new.display()))?;
+        // A rename cannot cross drives, so copy and remove instead.
+        std::fs::copy(&path, &dest)
+            .with_context(|| format!("copying {} to {}", path.display(), dest.display()))?;
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        moved += 1;
+    }
+    if moved > 0 {
+        println!(
+            "moved {moved} draft(s) from {} to {}",
+            old.display(),
+            new.display()
+        );
+    }
+    // Only an empty folder is removed; one that still holds files stays.
+    let _ = std::fs::remove_dir(&old);
+    Ok(())
 }
 
 /// Prints one line per ticket, drafts first.
@@ -145,18 +216,28 @@ fn render(stored: &StoredTicket) -> String {
 }
 
 /// Validates, moves and publishes one draft.
-fn submit(store: &mut TicketStore, cwd: &Path, remote: &str, id: &str) -> anyhow::Result<()> {
+///
+/// # Arguments
+///
+/// * `store` - The ticket folders.
+/// * `cache` - The queue's bare cache, already fetched.
+/// * `queue` - The queue's URL, for the message.
+/// * `id` - The draft's id or a prefix of it.
+fn submit(store: &mut TicketStore, cache: &Path, queue: &str, id: &str) -> anyhow::Result<()> {
     let stored = store
         .submit(id)
         .with_context(|| format!("submitting `{id}`"))?;
     let id = stored.ticket.id.to_string();
-    let branch = publish_ticket(cwd, remote, &id, &stored.ticket.title).with_context(|| {
-        format!(
-            "the ticket is in tickets/open/ but the push failed; fix the remote and run `git push {remote} tickets/{id}` by hand"
-        )
-    })?;
+    let branch = publish_ticket(cache, QUEUE_REMOTE, &stored.path, &id, &stored.ticket.title)
+        .with_context(|| {
+            format!(
+                "the ticket is in {} but the push failed; fix the cause and run `git --git-dir {} push {QUEUE_REMOTE} tickets/{id}` by hand",
+                store.open_dir().display(),
+                cache.display()
+            )
+        })?;
     println!(
-        "submitted {id}: {} (pushed {branch} to {remote})",
+        "submitted {id}: {} (pushed {branch} to {queue})",
         stored.ticket.title
     );
     Ok(())
@@ -201,7 +282,13 @@ async fn draft(wiring: &Wiring, store: &mut TicketStore) -> anyhow::Result<i32> 
 }
 
 /// Walks the drafts and asks what to do with each.
-fn review(store: &mut TicketStore, cwd: &Path, remote: &str) -> anyhow::Result<i32> {
+///
+/// # Arguments
+///
+/// * `store` - The ticket folders.
+/// * `cache` - Where the queue's bare cache lives.
+/// * `queue` - `[tickets] queue`; submitting is refused while it is `None`.
+fn review(store: &mut TicketStore, cache: &Path, queue: Option<&str>) -> anyhow::Result<i32> {
     if store.drafts.is_empty() {
         println!("no drafts to review");
         return Ok(0);
@@ -218,7 +305,14 @@ fn review(store: &mut TicketStore, cwd: &Path, remote: &str) -> anyhow::Result<i
             let answer = read_line("[s]ubmit / [d]rop / [e]dit / [n]ext / [q]uit: ");
             match answer.trim().to_ascii_lowercase().as_str() {
                 "s" | "submit" => {
-                    if let Err(error) = submit(store, cwd, remote, &id) {
+                    let Some(queue) = queue else {
+                        eprintln!("error: {NO_QUEUE}");
+                        continue;
+                    };
+                    let sent = sync_queue(cache, queue)
+                        .with_context(|| format!("fetching the ticket queue {queue}"))
+                        .and_then(|()| submit(store, cache, queue, &id));
+                    if let Err(error) = sent {
                         eprintln!("error: {error:#}");
                     }
                     break;

@@ -1,4 +1,0 @@
-foo at the start
-nothing here
-another foo line
-bar only

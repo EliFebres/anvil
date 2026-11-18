@@ -1,10 +1,14 @@
-//! Publishing a submitted ticket on its own branch without touching the
-//! working tree.
+//! Publishing a submitted ticket to the ticket queue.
+//!
+//! The queue is a git repository named by `[tickets] queue` in the anvil
+//! configuration; nothing is sent while that key is unset. anvil keeps a
+//! bare cache of it under `~/.anvil/queue.git`, fetched before each
+//! submission, so the current project's remotes are never used.
 //!
 //! The commit is built with plumbing: the ticket file becomes a blob, the
 //! blob is added to a temporary index read from the base commit, and the
-//! resulting tree is committed on top of that base. The current branch, the
-//! real index and the working tree are never checked out or changed.
+//! resulting tree is committed on top of that base. No working tree is
+//! checked out or changed.
 
 use std::path::Path;
 use std::process::Command;
@@ -14,16 +18,51 @@ use anvil_types::ticket::dirs::STATE_BRANCH;
 use crate::error::TelemetryError;
 use crate::paths::OPEN_DIR;
 
-/// Builds the branch `tickets/<id>` holding one submitted ticket and pushes it.
-///
-/// The base is `refs/remotes/<remote>/factory/state` when that ref exists
-/// (the branch the factory reads tickets from), else `refs/remotes/<remote>/main`,
-/// else `HEAD`. The push is the only network operation; nothing is fetched.
+/// The remote name the cache gives the queue.
+pub const QUEUE_REMOTE: &str = "queue";
+
+/// Creates the bare cache of the queue when it is missing, points its
+/// remote at `url`, and fetches it.
 ///
 /// # Arguments
 ///
-/// * `root` - The repository root; the ticket is at `tickets/open/<id>.toml`.
+/// * `git_dir` - The cache, normally `~/.anvil/queue.git`.
+/// * `url` - The queue repository, as `[tickets] queue` names it.
+///
+/// # Errors
+///
+/// [`TelemetryError::Git`] naming the step that failed, or
+/// [`TelemetryError::Io`] when the cache folder cannot be created.
+pub fn sync_queue(git_dir: &Path, url: &str) -> Result<(), TelemetryError> {
+    if !git_dir.join("HEAD").exists() {
+        std::fs::create_dir_all(git_dir).map_err(|e| TelemetryError::io(git_dir, &e))?;
+        git(git_dir, None, &["init", "-q", "--bare"])?;
+    }
+    if git(git_dir, None, &["remote", "get-url", QUEUE_REMOTE]).is_ok() {
+        git(git_dir, None, &["remote", "set-url", QUEUE_REMOTE, url])?;
+    } else {
+        git(git_dir, None, &["remote", "add", QUEUE_REMOTE, url])?;
+    }
+    git(
+        git_dir,
+        None,
+        &["fetch", "--quiet", "--prune", QUEUE_REMOTE],
+    )?;
+    Ok(())
+}
+
+/// Builds the branch `tickets/<id>` holding one submitted ticket and pushes it.
+///
+/// The base is the queue's state branch, `refs/remotes/<remote>/<STATE_BRANCH>`,
+/// when that ref exists (the branch the queue keeps ticket state on), else
+/// `refs/remotes/<remote>/main`, else `HEAD`. The ticket lands at
+/// `tickets/open/<id>.toml` in the branch.
+///
+/// # Arguments
+///
+/// * `git_dir` - The repository the branch is built in: the queue's cache.
 /// * `remote` - The git remote to push to.
+/// * `ticket_file` - The submitted ticket on disk.
 /// * `id` - The ticket id.
 /// * `title` - The ticket title, for the commit message.
 ///
@@ -36,8 +75,9 @@ use crate::paths::OPEN_DIR;
 /// [`TelemetryError::Git`] naming the step that failed, or
 /// [`TelemetryError::Io`] when the temporary index cannot be removed.
 pub fn publish_ticket(
-    root: &Path,
+    git_dir: &Path,
     remote: &str,
+    ticket_file: &Path,
     id: &str,
     title: &str,
 ) -> Result<String, TelemetryError> {
@@ -45,7 +85,8 @@ pub fn publish_ticket(
     let branch = format!("tickets/{id}");
     let index = std::env::temp_dir().join(format!("anvil-ticket-{id}.index"));
     let index_text = index.to_string_lossy().into_owned();
-    let result = build_and_push(root, remote, &file, &branch, title, &index_text);
+    let source = ticket_file.to_string_lossy();
+    let result = build_and_push(git_dir, remote, &source, &file, &branch, title, &index_text);
     if index.exists() {
         std::fs::remove_file(&index).map_err(|e| TelemetryError::io(&index, &e))?;
     }
@@ -57,12 +98,13 @@ pub fn publish_ticket(
 fn build_and_push(
     root: &Path,
     remote: &str,
+    source: &str,
     file: &str,
     branch: &str,
     title: &str,
     index: &str,
 ) -> Result<(), TelemetryError> {
-    let blob = git(root, None, &["hash-object", "-w", file])?;
+    let blob = git(root, None, &["hash-object", "-w", source])?;
     let base = base_commit(root, remote)?;
     git(root, Some(index), &["read-tree", &base])?;
     let cacheinfo = format!("100644,{blob},{file}");
@@ -83,7 +125,7 @@ fn build_and_push(
     )?;
     let reference = format!("refs/heads/{branch}");
     git(root, None, &["update-ref", &reference, &commit])?;
-    git(root, None, &["push", remote, &reference])?;
+    git(root, None, &["push", "--quiet", remote, &reference])?;
     Ok(())
 }
 
@@ -133,53 +175,63 @@ mod tests {
     /// Runs git in a folder for test setup; `false` when git is unavailable.
     fn setup(dir: &Path, args: &[&str]) -> bool {
         Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
             .args(args)
             .current_dir(dir)
             .output()
             .is_ok_and(|output| output.status.success())
     }
 
-    #[test]
-    fn publishes_the_ticket_on_its_own_branch_without_checkout() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let repo = temp.path().join("repo");
-        let bare = temp.path().join("remote.git");
-        std::fs::create_dir_all(&repo).expect("mkdir");
+    /// A bare queue with `main` and a state branch one commit ahead.
+    fn queue(temp: &Path) -> Option<std::path::PathBuf> {
+        let seed = temp.join("seed");
+        let bare = temp.join("queue-remote.git");
+        std::fs::create_dir_all(&seed).expect("mkdir");
         std::fs::create_dir_all(&bare).expect("mkdir");
-        if !setup(&repo, &["init", "-q", "-b", "main"]) {
-            eprintln!("git not available; skipping");
-            return;
+        if !setup(&seed, &["init", "-q", "-b", "main"]) {
+            return None;
         }
         assert!(setup(&bare, &["init", "-q", "--bare", "-b", "main"]));
-        assert!(setup(&repo, &["config", "user.email", "t@example.com"]));
-        assert!(setup(&repo, &["config", "user.name", "t"]));
-        std::fs::write(repo.join("README.md"), "hello\n").expect("write");
-        assert!(setup(&repo, &["add", "README.md"]));
-        assert!(setup(&repo, &["commit", "-q", "-m", "init"]));
+        std::fs::write(seed.join("README.md"), "hello\n").expect("write");
+        assert!(setup(&seed, &["add", "README.md"]));
+        assert!(setup(&seed, &["commit", "-q", "-m", "init"]));
         assert!(setup(
-            &repo,
+            &seed,
             &["remote", "add", "origin", &bare.to_string_lossy()]
         ));
-        assert!(setup(&repo, &["push", "-q", "origin", "main"]));
-        std::fs::write(repo.join("state.txt"), "state\n").expect("write");
-        assert!(setup(&repo, &["add", "state.txt"]));
-        assert!(setup(&repo, &["commit", "-q", "-m", "state"]));
+        assert!(setup(&seed, &["push", "-q", "origin", "main"]));
+        std::fs::write(seed.join("state.txt"), "state\n").expect("write");
+        assert!(setup(&seed, &["add", "state.txt"]));
+        assert!(setup(&seed, &["commit", "-q", "-m", "state"]));
         assert!(setup(
-            &repo,
-            &["push", "-q", "origin", "main:factory/state"]
+            &seed,
+            &["push", "-q", "origin", &format!("main:{STATE_BRANCH}")]
         ));
-        assert!(setup(&repo, &["reset", "-q", "--hard", "HEAD~1"]));
+        Some(bare)
+    }
+
+    #[test]
+    fn publishes_the_ticket_on_its_own_branch_from_the_queue_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let Some(remote) = queue(temp.path()) else {
+            eprintln!("git not available; skipping");
+            return;
+        };
+        let cache = temp.path().join("home").join("queue.git");
+        let url = remote.to_string_lossy().into_owned();
+        sync_queue(&cache, &url).expect("first sync creates the cache");
+        sync_queue(&cache, &url).expect("a second sync reuses it");
+        assert!(setup(&cache, &["config", "user.email", "t@example.com"]));
+        assert!(setup(&cache, &["config", "user.name", "t"]));
 
         let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
-        let open = repo.join(OPEN_DIR);
-        std::fs::create_dir_all(&open).expect("mkdir");
-        std::fs::write(open.join(format!("{id}.toml")), "title = \"t\"\n").expect("write");
-        std::fs::write(repo.join("dirty.txt"), "uncommitted\n").expect("write");
-
-        let branch = publish_ticket(&repo, "origin", id, "Missing tool `x`").expect("publish");
+        let ticket = temp.path().join(format!("{id}.toml"));
+        std::fs::write(&ticket, "title = \"t\"\n").expect("write");
+        let branch =
+            publish_ticket(&cache, QUEUE_REMOTE, &ticket, id, "Missing tool `x`").expect("publish");
         assert_eq!(branch, format!("tickets/{id}"));
         let listed = git(
-            &bare,
+            &remote,
             None,
             &[
                 "ls-tree",
@@ -193,23 +245,15 @@ mod tests {
         assert!(listed.contains("README.md"));
         assert!(
             listed.contains("state.txt"),
-            "the branch starts from origin/factory/state, not main: {listed}"
+            "the branch starts from the queue's state branch, not main: {listed}"
         );
-        assert!(!listed.contains("dirty.txt"));
         let subject = git(
-            &bare,
+            &remote,
             None,
             &["log", "-1", "--format=%s", &format!("refs/heads/{branch}")],
         )
         .expect("log");
         assert_eq!(subject, format!("Add ticket {id}: Missing tool `x`"));
-        assert_eq!(
-            git(&repo, None, &["branch", "--show-current"]).expect("branch"),
-            "main"
-        );
-        assert!(repo.join("dirty.txt").exists());
-        let status = git(&repo, None, &["status", "--porcelain"]).expect("status");
-        assert!(status.contains("dirty.txt"), "{status}");
         assert!(
             !std::env::temp_dir()
                 .join(format!("anvil-ticket-{id}.index"))
@@ -225,7 +269,7 @@ mod tests {
             return;
         }
         assert!(matches!(
-            publish_ticket(temp.path(), "origin", "NOPE", "t"),
+            publish_ticket(temp.path(), "origin", &temp.path().join("NOPE.toml"), "NOPE", "t"),
             Err(TelemetryError::Git { command, .. }) if command.starts_with("hash-object")
         ));
     }

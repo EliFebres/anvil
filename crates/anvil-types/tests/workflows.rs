@@ -192,7 +192,7 @@ fn pinned_toolchain() -> String {
 }
 
 /// Every Rust install in a workflow names the pinned version, so CI formats
-/// and lints with the same toolchain as the host and the worker image.
+/// and lints with the same toolchain as the host.
 #[test]
 fn every_workflow_installs_the_pinned_toolchain() {
     let pinned = pinned_toolchain();

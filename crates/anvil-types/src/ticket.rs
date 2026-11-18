@@ -1,4 +1,4 @@
-//! The ticket: the unit of work handed from anvil to the factory.
+//! The ticket: the unit of work anvil drafts and submits to a ticket queue.
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -77,7 +77,7 @@ pub mod dirs {
     /// The folder that holds every state folder.
     pub const TICKETS_DIR: &str = "tickets";
 
-    /// Submitted tickets waiting for the factory.
+    /// Submitted tickets waiting to be worked.
     pub const OPEN_DIR: &str = "tickets/open";
 
     /// Tickets a worker has taken, including those with an open pull request.
@@ -89,7 +89,7 @@ pub mod dirs {
     /// Tickets whose pull request merged.
     pub const MERGED_DIR: &str = "tickets/merged";
 
-    /// Tickets the factory gave up on; `<id>.notes.md` sits next to each.
+    /// Tickets that were given up on; `<id>.notes.md` sits next to each.
     pub const REJECTED_DIR: &str = "tickets/rejected";
 
     /// Every committed state folder.
@@ -187,13 +187,13 @@ pub struct Ticket {
 }
 
 impl Ticket {
-    /// Checks the ticket's invariants and the anvil/factory data boundary.
+    /// Checks the ticket's invariants and the ticket data boundary.
     ///
     /// # Returns
     ///
     /// `Ok(())` when the title is 1 to [`MAX_TITLE_CHARS`] characters, the
     /// symptom and spec are non-empty, there is at least one acceptance check,
-    /// neither `spec` nor `repro` names a path outside the monorepo or holds
+    /// neither `spec` nor `repro` names a path outside the project or holds
     /// more than [`boundary::MAX_CODE_LINES`] lines of code, and the fields
     /// the status implies are present: `claimed_at` and `claimed_by` from
     /// `claimed` on, `pr` when merged, `note` when waiting or rejected.
@@ -312,7 +312,7 @@ mod tests {
             })
         );
         ticket.claimed_at = Some(ticket.created_at);
-        ticket.claimed_by = Some("nuc".to_owned());
+        ticket.claimed_by = Some("worker-1".to_owned());
         ticket.validate().expect("claimed with both fields");
         ticket.status = TicketStatus::Merged;
         assert!(matches!(

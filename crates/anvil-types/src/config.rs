@@ -39,12 +39,18 @@ supports_reasoning = true
 # `cached` falls back to `input`.
 # price_per_mtoken = { input = 3.0, output = 15.0, cached = 0.3 }
 
-# Each role names a provider above, so the coder, the summarizer and (in the
-# factory) the reviewer can each be a different model.
+# Each role names a provider above, so the coder, the summarizer and the
+# reviewer can each be a different model.
 [roles]
 coder = "runpod"
 summarizer = "runpod"
 # reviewer = "runpod"
+# Optional: a model that plans, and takes a build round when the coder is
+# stuck. The coder plans when this is absent.
+# planner = "runpod"
+# Optional: a model for delegated work, the `explore` and `implement`
+# subagents and any agent file with `model: worker`. The coder when absent.
+# worker = "runpod"
 
 # Optional. The shell program behind the `shell` tool: "powershell", "pwsh",
 # "sh", "bash", "zsh" or "cmd". Default: PowerShell on Windows, sh elsewhere.
@@ -76,14 +82,32 @@ summarizer = "runpod"
 # slow_median_ms = 60000       # median completion latency over the last 20 sessions
 # error_rate_percent = 20      # provider errors as a share of completions
 
-# Where `anvil ticket submit` pushes the `tickets/<id>` branch.
+# The git repository `anvil ticket submit` pushes `tickets/<id>` branches to.
+# Unset by default, and while it is unset nothing is ever sent.
 # [tickets]
-# remote = "origin"
+# queue = "https://github.com/<owner>/<queue-repository>.git"
+
+# Where `anvil update` looks for releases when this anvil was built from source.
+# Release builds know their repository and ignore this.
+# [update]
+# repo = "owner/repo"
+
+# Post one short message to a Discord, Slack or ntfy webhook when a session needs
+# you, is blocked, finishes or fails. `webhook_env` names the environment
+# variable that holds the URL.
+# [notify]
+# webhook_env = "ANVIL_WEBHOOK_URL"
+
+# Report the session to herdr (a terminal multiplexer for coding agents) when it
+# runs in a herdr pane.
+# [integrations]
+# herdr = false
 
 # Lines added to the coder's system prompt, one instruction each. Profiles use
 # this to explain their own rules.
 # [prompt]
 # notes = ["Shell commands are a single program with arguments."]
+# delegate_guidance = true   # tell the model when delegating to a subagent pays off
 "#;
 
 /// The provider entries and roles `anvil setup` adds to `~/.anvil/config.toml`.
@@ -134,6 +158,12 @@ price_per_mtoken = { input = 2.0, output = 10.0 }
 coder = "anthropic"
 reviewer = "openai"
 summarizer = "anthropic"
+# Optional: a model that plans, and takes a build round when the coder is
+# stuck. The coder plans when this is absent.
+# planner = "anthropic"
+# Optional: a model for delegated work (the `explore` and `implement`
+# subagents). The coder when absent.
+# worker = "anthropic"
 "#;
 
 /// The optional, commented sections `anvil setup` appends to a new config file.
@@ -168,9 +198,10 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # slow_median_ms = 60000       # median completion latency over the last 20 sessions
 # error_rate_percent = 20      # provider errors as a share of completions
 
-# Where `anvil ticket submit` pushes the `tickets/<id>` branch.
+# The git repository `anvil ticket submit` pushes `tickets/<id>` branches to.
+# Unset by default, and while it is unset nothing is ever sent.
 # [tickets]
-# remote = "origin"
+# queue = "https://github.com/<owner>/<queue-repository>.git"
 "#;
 
 /// Wire protocol a provider speaks.
@@ -181,8 +212,8 @@ pub enum Protocol {
     Openai,
     /// Anthropic messages style API.
     Anthropic,
-    /// A scripted provider that replays `script` and calls no API: for the
-    /// factory selftest and other offline runs.
+    /// A scripted provider that replays `script` and calls no API: for
+    /// tests and other offline runs.
     Fake,
 }
 
@@ -333,9 +364,36 @@ pub struct Roles {
     pub coder: String,
     /// Provider that compacts context and summarizes.
     pub summarizer: String,
-    /// Provider that reviews factory pull requests. Only the factory needs it.
+    /// Provider that reviews the coder's work in the loop's Review state;
+    /// the coder when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<String>,
+    /// Provider that plans; the coder when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner: Option<String>,
+    /// Provider that runs delegated subagents; the coder when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
+}
+
+impl Roles {
+    /// The provider that plans.
+    ///
+    /// # Returns
+    ///
+    /// The `planner` provider name, or the `coder` one when none is set.
+    pub fn planner_or_coder(&self) -> &str {
+        self.planner.as_deref().unwrap_or(&self.coder)
+    }
+
+    /// The provider that runs delegated subagents.
+    ///
+    /// # Returns
+    ///
+    /// The `worker` provider name, or the `coder` one when none is set.
+    pub fn worker_or_coder(&self) -> &str {
+        self.worker.as_deref().unwrap_or(&self.coder)
+    }
 }
 
 /// What one agent-loop state may spend before the session ends as incomplete.
@@ -416,6 +474,22 @@ pub struct MemoryConfig {
     pub always_summarize: bool,
 }
 
+/// Where session status messages are posted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionNotifyConfig {
+    /// Environment variable that holds the webhook URL.
+    pub webhook_env: String,
+}
+
+/// Optional reports to other tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct IntegrationsConfig {
+    /// Report the session's state to herdr when running in a herdr pane.
+    pub herdr: bool,
+}
+
 /// Lines above which provider statistics become tickets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
@@ -438,27 +512,43 @@ impl Default for TelemetryConfig {
 }
 
 /// Where submitted tickets go.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct TicketsConfig {
-    /// The git remote `anvil ticket submit` pushes `tickets/<id>` branches to.
-    pub remote: String,
+    /// The git URL of the ticket queue `anvil ticket submit` pushes
+    /// `tickets/<id>` branches to. `None`, the default, sends nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
 }
 
-impl Default for TicketsConfig {
-    fn default() -> Self {
-        Self {
-            remote: "origin".to_owned(),
-        }
-    }
+/// Where `anvil update` finds releases.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct UpdateConfig {
+    /// The GitHub `owner/repo` whose releases a source build updates from.
+    /// A release build carries its own and ignores this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
 }
 
 /// Lines a profile adds to the coder's system prompt.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct PromptConfig {
     /// One instruction per entry, shown under a "Profile notes" heading.
     pub notes: Vec<String>,
+    /// Whether the Plan and Build prompts say when delegating to a subagent
+    /// pays off. Only has an effect when the `delegate` tool is available.
+    pub delegate_guidance: bool,
+}
+
+impl Default for PromptConfig {
+    fn default() -> Self {
+        Self {
+            notes: Vec::new(),
+            delegate_guidance: true,
+        }
+    }
 }
 
 /// What a call gets when no permission rule matches it.
@@ -537,6 +627,9 @@ pub struct AnvilConfig {
     /// Where submitted tickets go.
     #[serde(default)]
     pub tickets: TicketsConfig,
+    /// Where `anvil update` finds releases.
+    #[serde(default)]
+    pub update: UpdateConfig,
     /// Extra lines for the coder's system prompt.
     #[serde(default)]
     pub prompt: PromptConfig,
@@ -544,6 +637,12 @@ pub struct AnvilConfig {
     /// Normally set by a profile, not by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionRules>,
+    /// Where session status messages are posted; none by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<SessionNotifyConfig>,
+    /// Optional reports to other tools.
+    #[serde(default)]
+    pub integrations: IntegrationsConfig,
 }
 
 impl AnvilConfig {
@@ -551,8 +650,9 @@ impl AnvilConfig {
     ///
     /// # Returns
     ///
-    /// `Ok(())` when all providers validate and `coder`, `summarizer` and
-    /// (if set) `reviewer` each name a key in `providers`.
+    /// `Ok(())` when all providers validate, `coder`, `summarizer` and
+    /// (if set) `reviewer`, `planner` and `worker` each name a key in
+    /// `providers`, and `[update] repo` (if set) is `owner/repo`.
     ///
     /// # Errors
     ///
@@ -565,6 +665,22 @@ impl AnvilConfig {
         self.check_role("summarizer", &self.roles.summarizer)?;
         if let Some(reviewer) = &self.roles.reviewer {
             self.check_role("reviewer", reviewer)?;
+        }
+        if let Some(planner) = &self.roles.planner {
+            self.check_role("planner", planner)?;
+        }
+        if let Some(worker) = &self.roles.worker {
+            self.check_role("worker", worker)?;
+        }
+        if let Some(repo) = &self.update.repo {
+            let mut parts = repo.split('/');
+            let valid = matches!(
+                (parts.next(), parts.next(), parts.next()),
+                (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty()
+            );
+            if !valid {
+                return Err(ValidationError::InvalidUpdateRepo { repo: repo.clone() });
+            }
         }
         Ok(())
     }
@@ -765,6 +881,22 @@ mod tests {
     }
 
     #[test]
+    fn update_repo_must_be_owner_slash_repo() {
+        let mut config: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
+        config.update.repo = Some("owner/repo".to_owned());
+        assert_eq!(config.validate(), Ok(()));
+        for bad in ["owner", "owner/", "/repo", "a/b/c"] {
+            config.update.repo = Some(bad.to_owned());
+            assert_eq!(
+                config.validate(),
+                Err(ValidationError::InvalidUpdateRepo {
+                    repo: bad.to_owned()
+                })
+            );
+        }
+    }
+
+    #[test]
     fn setup_providers_parse_and_validate() {
         let config: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
         config.validate().expect("validates");
@@ -801,14 +933,14 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
         write(home.path(), CONFIG_TEMPLATE);
-        let profile = profile_path(home.path(), "factory");
+        let profile = profile_path(home.path(), "ci");
         std::fs::create_dir_all(profile.parent().expect("parent")).expect("mkdir");
         std::fs::write(
             &profile,
             "[limits]\nsession_tokens = 7\n[permissions]\nallow = [\"shell:cargo *\"]\ndefault = \"deny\"\n",
         )
         .expect("write");
-        let loaded = load_profile(Some(home.path()), cwd.path(), Some("factory")).expect("loads");
+        let loaded = load_profile(Some(home.path()), cwd.path(), Some("ci")).expect("loads");
         assert_eq!(loaded.sources.len(), 2);
         assert_eq!(loaded.sources[1], profile);
         assert_eq!(loaded.config.limits.session_tokens, 7);
@@ -1016,6 +1148,37 @@ mod tests {
     }
 
     #[test]
+    fn the_worker_is_optional_defaults_to_the_coder_and_must_exist() {
+        let mut config = template();
+        assert_eq!(config.roles.worker, None);
+        assert_eq!(config.roles.worker_or_coder(), config.roles.coder);
+        config.roles.worker = Some("runpod".to_owned());
+        config.validate().expect("a declared worker is valid");
+        assert_eq!(config.roles.worker_or_coder(), "runpod");
+        config.roles.worker = Some("nope".to_owned());
+        assert_eq!(
+            config.validate(),
+            Err(ValidationError::UnknownProvider {
+                role: "worker",
+                provider: "nope".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn delegate_guidance_defaults_on_and_can_be_turned_off() {
+        assert!(template().prompt.delegate_guidance);
+        let text = format!(
+            "{CONFIG_TEMPLATE}
+[prompt]
+delegate_guidance = false
+"
+        );
+        let off: AnvilConfig = toml::from_str(&text).expect("parses");
+        assert!(!off.prompt.delegate_guidance);
+    }
+
+    #[test]
     fn unknown_keys_are_rejected() {
         let text = format!("{CONFIG_TEMPLATE}\n[roles]\nplanner = \"runpod\"\n");
         assert!(toml::from_str::<AnvilConfig>(&text).is_err());
@@ -1098,14 +1261,20 @@ mod tests {
         assert_eq!(config.telemetry, TelemetryConfig::default());
         assert_eq!(config.telemetry.slow_median_ms, 60_000);
         assert_eq!(config.telemetry.error_rate_percent, 20);
-        assert_eq!(config.tickets.remote, "origin");
+        assert_eq!(config.tickets.queue, None, "no queue, so nothing is sent");
         let text = format!(
-            "{CONFIG_TEMPLATE}\n[telemetry]\nslow_median_ms = 5\n[tickets]\nremote = \"anvil\"\n"
+            "{CONFIG_TEMPLATE}\n[telemetry]\nslow_median_ms = 5\n[tickets]\nqueue = \"https://example.com/q.git\"\n"
         );
         let config: AnvilConfig = toml::from_str(&text).expect("parses");
         assert_eq!(config.telemetry.slow_median_ms, 5);
         assert_eq!(config.telemetry.error_rate_percent, 20);
-        assert_eq!(config.tickets.remote, "anvil");
+        assert_eq!(
+            config.tickets.queue.as_deref(),
+            Some("https://example.com/q.git")
+        );
+        let old = format!("{CONFIG_TEMPLATE}\n[tickets]\nremote = \"origin\"\n");
+        let error = toml::from_str::<AnvilConfig>(&old).expect_err("the old key is refused");
+        assert!(error.to_string().contains("queue"), "{error}");
     }
 
     #[test]

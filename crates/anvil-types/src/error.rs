@@ -19,6 +19,13 @@ pub enum ValidationError {
         max: usize,
     },
 
+    /// A session `status.json` breaks a rule of the format.
+    #[error("session status: {reason}")]
+    Status {
+        /// What is wrong, naming the field.
+        reason: String,
+    },
+
     /// A required text field is empty or only whitespace.
     #[error("field `{field}` must not be empty")]
     EmptyField {
@@ -30,8 +37,8 @@ pub enum ValidationError {
     #[error("ticket needs at least one acceptance check")]
     EmptyAcceptance,
 
-    /// A ticket text field references a path outside the monorepo.
-    #[error("field `{field}` references a path outside the monorepo: `{path}`")]
+    /// A ticket text field references a file path outside the project.
+    #[error("field `{field}` references a path outside the project: `{path}`")]
     OutsidePath {
         /// Name of the field that holds the path.
         field: &'static str,
@@ -100,47 +107,11 @@ pub enum ValidationError {
         field: &'static str,
     },
 
-    /// A `github.repo` value is not `owner/repo`.
-    #[error("github.repo `{repo}` must be `owner/repo`")]
-    InvalidRepo {
+    /// `[update] repo` is not `owner/repo`.
+    #[error("update.repo `{repo}` must be `owner/repo`")]
+    InvalidUpdateRepo {
         /// The value as written.
         repo: String,
-    },
-
-    /// A reviewer sits on the same base URL as the coder, so a model would review its own work.
-    #[error("reviewer `{reviewer}` shares base_url {base_url} with coder `{coder}`")]
-    ReviewerSharesCoderUrl {
-        /// The reviewer's provider name.
-        reviewer: String,
-        /// The coder's provider name.
-        coder: String,
-        /// The shared URL.
-        base_url: String,
-    },
-
-    /// Two differently named reviewers sit on one base URL.
-    #[error("reviewers `{first}` and `{second}` share base_url {base_url}")]
-    ReviewersShareUrl {
-        /// The reviewer seen first.
-        first: String,
-        /// The reviewer seen second.
-        second: String,
-        /// The shared URL.
-        base_url: String,
-    },
-
-    /// The reviewers do not span two base URLs, so one model's blind spots decide every review.
-    #[error("reviewers use {found} distinct base_url(s); at least 2 are needed")]
-    TooFewReviewerUrls {
-        /// How many distinct base URLs the reviewers use.
-        found: usize,
-    },
-
-    /// A numeric field that must be positive is zero.
-    #[error("field `{field}` must be at least 1")]
-    ZeroField {
-        /// Name of the field.
-        field: &'static str,
     },
 
     /// A ticket in some status lacks a field that status implies.
@@ -150,26 +121,6 @@ pub enum ValidationError {
         field: &'static str,
         /// The status that requires it.
         status: crate::ticket::TicketStatus,
-    },
-
-    /// A glob in a list of rules does not compile.
-    #[error("field `{field}` has an invalid glob `{glob}`: {detail}")]
-    InvalidGlob {
-        /// Name of the field holding the list.
-        field: &'static str,
-        /// The glob as written.
-        glob: String,
-        /// Why it does not compile.
-        detail: String,
-    },
-
-    /// A time of day is not `HH:MM`.
-    #[error("field `{field}` must be a time of day as HH:MM, not `{value}`")]
-    InvalidTime {
-        /// Name of the field.
-        field: &'static str,
-        /// The value as written.
-        value: String,
     },
 
     /// A skill name is not kebab-case or is too long.

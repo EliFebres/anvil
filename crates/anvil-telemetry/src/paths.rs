@@ -10,11 +10,11 @@ pub const TELEMETRY_DIR: &str = ".anvil/telemetry";
 /// The signals file inside a telemetry folder.
 pub const SIGNALS_FILE: &str = "signals.jsonl";
 
-/// Drafted tickets, relative to the repository root. Per machine, not committed.
+/// Drafted tickets, relative to the ticket store's root (`~/.anvil`).
 pub const DRAFT_DIR: &str = "tickets/draft";
 
-/// Submitted tickets, relative to the repository root. Committed on the
-/// `factory/state` branch; the name is shared with the factory.
+/// Submitted tickets, relative to the ticket store's root, and the folder a
+/// submitted ticket lands in on the queue's state branch.
 pub use anvil_types::ticket::dirs::OPEN_DIR;
 
 /// The telemetry folder of a project.

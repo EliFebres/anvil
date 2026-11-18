@@ -31,17 +31,11 @@ rustc-ice-*.txt
 # secrets: keys live in .env files, never in the repository
 .env
 .anvil/.env
-.factory/env
-deploy/nuc/env
 *.local.toml
 
 # insta pending snapshots
 *.snap.new
 .anvil/mcp-cache/
 
-# anvil ticket drafts are per machine; only tickets/open/ is committed
-tickets/draft/
-
-# eval fixtures run in temp copies, but a hand run in place leaves these behind
 __pycache__/
 .pytest_cache/

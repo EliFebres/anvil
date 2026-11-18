@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{ANY_LANGUAGE, Check, Rule, RuleSet};
+pub use crate::languages::language_of;
 
 /// Lines of command output kept in a failure.
 const OUTPUT_TAIL_LINES: usize = 80;
@@ -24,33 +25,6 @@ pub struct CheckFailure {
     pub rule_id: String,
     /// The matches or the command output.
     pub output: String,
-}
-
-/// The language tag of a file, by extension.
-///
-/// # Arguments
-///
-/// * `path` - The file.
-///
-/// # Returns
-///
-/// A tag such as `python` or `rust`, or `None` for an unknown extension.
-pub fn language_of(path: &Path) -> Option<&'static str> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    let language = match extension.as_str() {
-        "py" | "pyi" => "python",
-        "rs" => "rust",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" | "mjs" | "cjs" => "javascript",
-        "go" => "go",
-        "java" => "java",
-        "rb" => "ruby",
-        "sh" | "bash" => "shell",
-        "toml" => "toml",
-        "md" => "markdown",
-        _ => return None,
-    };
-    Some(language)
 }
 
 impl Rule {

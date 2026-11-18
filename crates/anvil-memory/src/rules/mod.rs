@@ -7,11 +7,13 @@
 
 pub mod check;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::error::MemoryError;
+use crate::languages::is_detectable;
 
 /// Longest allowed rule id, in characters.
 pub const MAX_ID_LEN: usize = 64;
@@ -132,6 +134,29 @@ impl Rule {
             Some(Check::Command(_)) | None => {}
         }
         Ok(())
+    }
+
+    /// Whether the rule belongs in a prompt for a project in these languages.
+    ///
+    /// A rule for a language no scan can detect is always kept: hiding it
+    /// would silently drop a rule the owner wrote on purpose.
+    ///
+    /// # Arguments
+    ///
+    /// * `present` - The languages found in the project.
+    ///
+    /// # Returns
+    ///
+    /// `true` for `*`, for a listed language that is present and for a
+    /// listed language that cannot be detected.
+    pub fn is_relevant_to(&self, present: &BTreeSet<&str>) -> bool {
+        self.languages.iter().any(|listed| {
+            listed == ANY_LANGUAGE
+                || !is_detectable(listed)
+                || present
+                    .iter()
+                    .any(|found| found.eq_ignore_ascii_case(listed))
+        })
     }
 
     /// The language list as shown in prompts: `python, rust` or `all languages`.
@@ -389,6 +414,31 @@ impl RuleSet {
         Ok(self.rules.remove(index))
     }
 
+    /// The rules that matter in a project, in file order.
+    ///
+    /// # Arguments
+    ///
+    /// * `present` - The languages found in the project. When none were
+    ///   found (an empty project) nothing is filtered, because the project
+    ///   may take any language.
+    ///
+    /// # Returns
+    ///
+    /// A copy holding every rule that [`Rule::is_relevant_to`] the project.
+    pub fn relevant_to(&self, present: &BTreeSet<&str>) -> RuleSet {
+        if present.is_empty() {
+            return self.clone();
+        }
+        RuleSet {
+            rules: self
+                .rules
+                .iter()
+                .filter(|rule| rule.is_relevant_to(present))
+                .cloned()
+                .collect(),
+        }
+    }
+
     /// The numbered list for the coder's system prompt.
     ///
     /// # Returns
@@ -422,8 +472,12 @@ impl RuleSet {
         ))
     }
 
-    /// `1. [id] (languages) rule` lines.
-    fn numbered_list(&self) -> String {
+    /// The rules as `1. [id] (languages) rule` lines.
+    ///
+    /// # Returns
+    ///
+    /// One line per rule, in file order; empty without rules.
+    pub fn numbered_list(&self) -> String {
         self.rules
             .iter()
             .enumerate()
@@ -717,6 +771,50 @@ mod tests {
         insta::assert_snapshot!("review_section", seed.review_section().expect("section"));
         assert_eq!(RuleSet::default().prompt_section(), None);
         assert_eq!(RuleSet::default().review_section(), None);
+    }
+
+    fn rule_for(id: &str, languages: &[&str]) -> Rule {
+        Rule {
+            id: id.to_owned(),
+            languages: languages.iter().map(|tag| (*tag).to_owned()).collect(),
+            rule: format!("Rule {id}."),
+            check: None,
+        }
+    }
+
+    #[test]
+    fn rules_are_filtered_by_project_language() {
+        let set = RuleSet {
+            rules: vec![
+                rule_for("py-only", &["python"]),
+                rule_for("any", &["*"]),
+                rule_for("both", &["Python", "rust"]),
+                rule_for("cobol-only", &["cobol"]),
+            ],
+        };
+        let ids = |present: &[&str]| -> Vec<String> {
+            set.relevant_to(&present.iter().copied().collect())
+                .rules
+                .into_iter()
+                .map(|rule| rule.id)
+                .collect()
+        };
+        assert_eq!(ids(&["rust"]), vec!["any", "both", "cobol-only"]);
+        assert_eq!(
+            ids(&["python"]),
+            vec!["py-only", "any", "both", "cobol-only"]
+        );
+        assert_eq!(ids(&[]), vec!["py-only", "any", "both", "cobol-only"]);
+    }
+
+    #[test]
+    fn nothing_filtered_means_identical_sections() {
+        let seed = RuleSet::seed();
+        let present: BTreeSet<&str> = ["python", "rust"].into_iter().collect();
+        let kept = seed.relevant_to(&present);
+        assert_eq!(kept, seed);
+        assert_eq!(kept.prompt_section(), seed.prompt_section());
+        assert_eq!(kept.review_section(), seed.review_section());
     }
 
     #[test]

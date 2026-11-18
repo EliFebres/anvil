@@ -1,0 +1,5 @@
+---
+source: crates/anvil-cli/src/status/list.rs
+expression: text
+---
+blocked     build    30s  12.3k tok $0.42  task of 01B  01B
