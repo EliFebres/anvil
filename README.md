@@ -1,10 +1,87 @@
 # Anvil
 
-Anvil is a coding agent you run from the terminal, written in Rust. Models are configuration, not code: any OpenAI- or Anthropic-protocol endpoint can play any role. [SECURITY.md](SECURITY.md) lists everything it reads, stores and sends.
+Anvil is a coding agent you run from the terminal, written in Rust. It works with open-weight models served behind an OpenAI-compatible endpoint (vLLM, llama.cpp, a rented GPU) and with hosted APIs (Anthropic, OpenAI, Google). Models are configuration, not code: any endpoint can play any role.
 
 ## What it is
 
-A coding agent for your own projects. Point it at a repository, give it a task, and it plans, builds, reviews and verifies the change with a real tool set (shell, files, search) under a permission model you control. It reads Claude Code's conventions (`CLAUDE.md`, `SKILL.md`, `.claude/commands`, `.claude/agents`, hooks, MCP servers), so an existing Claude Code setup works as is. It remembers standing rules and facts across sessions, and it records what it does (sizes, tokens, latencies, outcomes), never what it works on.
+A coding agent for your own projects. Point it at a repository, give it a task, and it plans, builds, reviews and verifies the change with a real tool set (shell, files, search) under a permission model you control. It reads Claude Code's conventions (`CLAUDE.md`, `SKILL.md`, `.claude/commands`, `.claude/agents`, hooks, MCP servers), so an existing Claude Code setup works as is. It remembers standing rules and facts across sessions, and it records what it does (sizes, tokens, latencies, outcomes), never what it works on. It is one binary with no background process and no account.
+
+## Install
+
+A release build: download `anvil-x86_64-unknown-linux-gnu`, `anvil-x86_64-unknown-linux-musl` (static, any distribution) or `anvil-x86_64-pc-windows-msvc.exe` from the [releases page](https://github.com/EliFebres/anvil/releases), check it against the `## SHA256` section of the release notes, rename it to `anvil` (`anvil.exe`) and put it on your `PATH`. `anvil update` later fetches the newest release and checks the same hash before it swaps the binary.
+
+From source, with a Rust toolchain (edition 2024, rust-version 1.89 or newer) and git; Windows, macOS and Linux all work, and HTTP uses rustls, so there is no OpenSSL to install:
+
+```sh
+git clone https://github.com/EliFebres/anvil
+cd anvil
+cargo build --release      # target/release/anvil
+```
+
+A source build does not know where its releases live; set `[update] repo = "EliFebres/anvil"` in the configuration if you want `anvil update` to work.
+
+## Configure a provider
+
+Let anvil write its configuration:
+
+```sh
+anvil setup
+```
+
+This writes `~/.anvil/.env` (API keys) and `~/.anvil/config.toml` (providers and roles), never overwriting a value that is already filled in, and exits 2 while placeholders remain. Fill in the keys you have, then check everything:
+
+```sh
+anvil doctor
+```
+
+Every provider is a `[providers.<name>]` table naming its protocol, base URL, the environment variable that holds its key, the model and its context window; `[roles]` maps `coder`, `summarizer`, `reviewer` and the optional `planner` and `worker` onto those names. An open-weight model behind an OpenAI-compatible server looks like this:
+
+```toml
+[providers.local]
+protocol = "openai"
+base_url = "http://localhost:8000/v1"
+api_key_env = "ANVIL_LOCAL_KEY"   # any value your server accepts
+model = "<model name as served>"
+context_window = 131072
+supports_tools = true
+supports_reasoning = false
+
+[roles]
+coder = "local"
+summarizer = "local"
+```
+
+A project can add `.anvil/config.toml` to override the global file, and `anvil config init` writes a commented template for either. Keys never live in configuration files: they come from the environment, `~/.anvil/.env` or the project's `.anvil/.env`, and `anvil scan-keys` fails if a tracked file contains one.
+
+## Basic use
+
+Work on a task in any repository:
+
+```sh
+cd ~/some-project
+anvil "add a --json flag to the list command"
+```
+
+Or talk to it:
+
+```sh
+anvil chat
+```
+
+Scripts and CI get the line renderer automatically, or ask for it:
+
+```sh
+anvil --yes --plain run "bump the dependencies" > answer.txt
+```
+
+## Security model
+
+- anvil sends prompts, and the files and command output its tools read, to the providers you configure. It has no telemetry upload and no update check at startup; everything else that reaches the network (MCP servers, `anvil update`, webhooks, `anvil ticket submit`) is something you configure or run.
+- File writes, edits and shell commands ask first. Rules in `.anvil/permissions.toml` or a `--profile` change that; a few destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `Remove-Item -Recurse`) are refused even under `--yes` unless a rule names them.
+- Keys are read from the environment and `.env` files, never from configuration.
+- anvil trusts the repository it runs in: that repository's `.anvil/` and `.claude/` files can change providers, permissions, hooks and MCP servers. Read them before running anvil in code you did not write.
+
+[SECURITY.md](SECURITY.md) has the details, with file references: every network destination and what triggers it, what is stored where, where keys come from, the permission defaults, and how releases are built and verified.
 
 ## What it does
 
@@ -138,52 +215,20 @@ $ anvil new rust-cli ./my-tool                                              # co
 
 `template save` honors `.gitignore` and skips `.git/` and `.anvil/`, and refuses to overwrite a template without `--force`. `anvil new` creates the directory, or fills an existing one that holds no files other than dot-directories such as `.git`; an unknown name lists the templates you have. When a task starts in such an empty directory, the Plan prompt lists each template's name and description so the plan can start from the one that fits (`anvil new <name> .`); with files present or no templates, the prompt is unchanged.
 
-Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, tools, keys in tracked files), `anvil update` (fetch the latest release and swap the binary), `anvil ticket list|show|review|submit|drop` (drafts live in `~/.anvil/tickets/`; `submit` sends nothing until `[tickets] queue` names a git repository to push to), `anvil memory learn`, `anvil new`, `anvil template save`.
+#### Tickets
 
-## Setup
+`anvil ticket draft` has the summarizer turn telemetry signals into improvement tickets: a symptom, the interface wanted, an optional synthetic reproduction and acceptance checks, never project code or paths (a validator refuses a ticket that names a path outside the project or holds more than 40 lines of code). Drafts stay on your machine in `~/.anvil/tickets/draft/`; `anvil ticket list|show|review|drop` manage them.
 
-You need a Rust toolchain (edition 2024, rust-version 1.89 or newer), git, and [`just`](https://github.com/casey/just). Windows, macOS and Linux all work; HTTP uses rustls, so there is no OpenSSL to install.
+`anvil ticket submit` sends a ticket only when `[tickets] queue` names a git repository to receive it:
 
-```sh
-git clone https://github.com/EliFebres/anvil
-cd anvil
-cargo build --release
+```toml
+[tickets]
+queue = "https://github.com/<owner>/<queue-repository>.git"
 ```
 
-Then let anvil write its own configuration:
+The key is unset by default, so a stock install never pushes anywhere; `submit` then says what to set and sends nothing. With a queue set, it fetches the queue into `~/.anvil/queue.git` and pushes the ticket there as a `tickets/<id>` branch with your own git credentials. The current project's remotes are never used.
 
-```sh
-anvil setup
-```
-
-This writes `~/.anvil/.env` (API keys) and `~/.anvil/config.toml` (providers and roles), never overwriting a value that is already filled in, and exits 2 while placeholders remain. Fill in the keys you have, then check everything:
-
-```sh
-anvil doctor
-```
-
-Every provider is a `[providers.<name>]` table naming its protocol, base URL, the environment variable that holds its key, the model and its context window; `[roles]` maps `coder`, `summarizer`, `reviewer` and an optional `planner` (an expensive model that plans, while the coder builds and takes over a round only when the coder is stuck) onto those names. A project can add `.anvil/config.toml` to override the global file, and `anvil config init` writes a template for either. Keys never live in config: `anvil scan-keys` fails if a tracked file contains one.
-
-## Running
-
-Work on a task in any repository:
-
-```sh
-cd ~/some-project
-anvil "add a --json flag to the list command"
-```
-
-Or talk to it:
-
-```sh
-anvil chat
-```
-
-Scripts and CI get the line renderer automatically, or ask for it:
-
-```sh
-anvil --yes --plain run "bump the dependencies" > answer.txt
-```
+Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, tools, keys in tracked files), `anvil update` (fetch the latest release and swap the binary), `anvil ticket` (above), `anvil memory learn`, `anvil new`, `anvil template save`.
 
 ## Repository layout
 
@@ -206,6 +251,8 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 MIT or Apache-2.0, at your option: see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE). Contributions are accepted under the same terms.
 
 ## Development
+
+With [`just`](https://github.com/casey/just) installed:
 
 ```sh
 just check
