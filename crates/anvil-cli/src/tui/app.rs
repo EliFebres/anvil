@@ -818,6 +818,7 @@ mod tests {
                 tool: "shell".to_owned(),
                 target: Some(command.to_owned()),
                 arguments: serde_json::json!({ "command": command }),
+                needs_person: false,
             },
             reply: tx,
         }));
@@ -1074,6 +1075,7 @@ mod tests {
                 tool: "edit_file".to_owned(),
                 target: Some("src/lib.rs".to_owned()),
                 arguments: serde_json::json!({"path": "src/lib.rs", "old": "fn b() {}", "new": "fn beta() {}"}),
+                needs_person: false,
             },
             reply: tx,
         }));
@@ -1115,6 +1117,7 @@ mod tests {
                 tool: "shell".to_owned(),
                 target: Some("cargo test".to_owned()),
                 arguments: serde_json::json!({"command": "cargo test"}),
+                needs_person: false,
             },
             reply: tx,
         }));

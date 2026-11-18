@@ -61,7 +61,7 @@ The model misunderstands the task, deletes or breaks files, runs a harmful comma
 **Stopped today**
 - Writes and shell commands ask first unless the developer's own rules allow them; a policy can force a strict profile and require a person to approve plans (in `anvil build`, only the top-level plan).
 - `shell_programs` limits commands to single listed programs without chaining, redirection or substitution; no answer or `--yes` lifts it.
-- File tools cannot write outside the workspace, and never write inside `.git`, so a session cannot plant a git hook or change the repository's git config.
+- File tools cannot write outside the workspace, and never write inside `.git`, so a session cannot plant a git hook or change the repository's git config. A write to a settings file that defines anvil or Claude Code hooks always needs a person's answer, even under `--yes`.
 - The loop plans before it builds, runs the project's checks, and has the change reviewed before it finishes. Every change is an ordinary diff in the working tree.
 
 **Not stopped**

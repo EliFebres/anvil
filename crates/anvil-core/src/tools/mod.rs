@@ -858,8 +858,19 @@ impl ToolRegistry {
                 ToolOutcome::Blocked,
             ));
         }
+        // A write to a hook settings file always asks a person: no allow
+        // rule, pre-approved tool, session approval or `--yes` covers it.
+        let needs_person = tool.access() == Access::Write
+            && tool.target_is_path()
+            && target
+                .and_then(|target| permissions::resolve_path(&workspace::canonical(root), target))
+                .is_some_and(|resolved| workspace::is_hook_settings(&resolved));
         let by_rule = permissions.rule_decision(name, target);
-        match by_rule.unwrap_or(tool.access().default_decision()) {
+        let decision = match by_rule.unwrap_or(tool.access().default_decision()) {
+            Decision::Allow if needs_person => Decision::Ask,
+            decision => decision,
+        };
+        match decision {
             Decision::Allow => {
                 if by_rule.is_some() {
                     self.observe(name, DecisionScope::Rule, true);
@@ -878,7 +889,7 @@ impl ToolRegistry {
                 // Held across the prompt so a registry sharing these approvals
                 // waits for this answer and then rechecks, instead of prompting too.
                 let mut approvals = lock_or_recover(&self.approvals);
-                if approvals.covers(name, target, root, tool.target_is_path()) {
+                if !needs_person && approvals.covers(name, target, root, tool.target_is_path()) {
                     self.observe(name, DecisionScope::Session, true);
                     return None;
                 }
@@ -886,17 +897,27 @@ impl ToolRegistry {
                     tool: name.to_owned(),
                     target: target.map(str::to_owned),
                     arguments: args.clone(),
+                    needs_person,
                 };
                 match self.prompt.ask(&request) {
                     PromptAnswer::Yes => {
                         self.observe(name, DecisionScope::Once, false);
                         None
                     }
+                    PromptAnswer::Session | PromptAnswer::Always if needs_person => {
+                        self.observe(name, DecisionScope::Once, false);
+                        None
+                    }
                     PromptAnswer::No => {
                         self.observe(name, DecisionScope::Deny, false);
                         tracing::info!(tool = name, ?target, "declined by user");
+                        let message = if needs_person {
+                            "this call writes a settings file that can define hooks, so a person must approve it, and no one did"
+                        } else {
+                            "the user declined this call"
+                        };
                         Some((
-                            ToolOutput::error("the user declined this call".to_owned()),
+                            ToolOutput::error(message.to_owned()),
                             ToolOutcome::DeclinedByUser,
                         ))
                     }
@@ -1924,6 +1945,125 @@ mod tests {
             assert_eq!(run.outcome, ToolOutcome::Blocked, "{command}");
             assert!(!run.result.content.contains("pwned\n"), "{command} ran");
         }
+    }
+
+    /// The settings files that can define hooks, as a model might name them.
+    const HOOK_SETTINGS: [&str; 6] = [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".anvil/settings.json",
+        ".anvil/settings.local.json",
+        ".claude/../.claude/settings.json",
+        ".CLAUDE/Settings.JSON",
+    ];
+
+    /// Writes `path` through `write_file` and then `edit_file`, returning
+    /// both outcomes.
+    async fn write_and_edit(
+        registry: &ToolRegistry,
+        ctx: &ToolContext,
+        path: &str,
+    ) -> [ToolOutcome; 2] {
+        let mut outcomes = [ToolOutcome::Completed, ToolOutcome::Completed];
+        for (slot, (tool, args)) in outcomes.iter_mut().zip([
+            (
+                "write_file",
+                serde_json::json!({"path": path, "content": "{\"hooks\": {}}"}),
+            ),
+            (
+                "edit_file",
+                serde_json::json!({"path": path, "old": "{}", "new": "{\"x\": 1}"}),
+            ),
+        ]) {
+            let call = ToolCall {
+                id: "h1".to_owned(),
+                name: tool.to_owned(),
+                arguments_json: args.to_string(),
+            };
+            *slot = registry.execute(&call, ctx).await.outcome;
+        }
+        outcomes
+    }
+
+    #[tokio::test]
+    async fn hook_settings_writes_are_refused_without_a_person() {
+        let project = tempfile::tempdir().expect("project");
+        let ctx = ToolContext::new(project.path());
+        let rules = "default = \"allow\"\nallow = [\"write_file\", \"edit_file\"]\n";
+        let unattended = ToolRegistry::with_builtins(
+            Permissions::from_toml(rules, None).expect("rules"),
+            Box::new(StaticPrompt(PromptAnswer::Yes)),
+        )
+        .with_session_approvals(Arc::new(Mutex::new(
+            SessionApprovals::preapproved(["write_file", "edit_file"]).expect("valid"),
+        )));
+        for path in HOOK_SETTINGS {
+            assert_eq!(
+                write_and_edit(&unattended, &ctx, path).await,
+                [ToolOutcome::DeclinedByUser, ToolOutcome::DeclinedByUser],
+                "{path}"
+            );
+        }
+        assert!(
+            !project
+                .path()
+                .join(".claude")
+                .join("settings.json")
+                .exists()
+        );
+        assert!(!project.path().join(".anvil").join("settings.json").exists());
+
+        // Other files in the same folders are not affected.
+        for path in [".claude/agents/a.md", ".anvil/config.toml", "settings.json"] {
+            let [write, _] = write_and_edit(&unattended, &ctx, path).await;
+            assert_eq!(write, ToolOutcome::Completed, "{path}");
+        }
+
+        // A deny rule still refuses without asking.
+        let prompt = Arc::new(ScriptedPrompt::new(vec![]));
+        let denied = ToolRegistry::with_builtins(
+            Permissions::from_toml("deny = [\"write_file\", \"edit_file\"]", None).expect("rules"),
+            Box::new(SharedPrompt(Arc::clone(&prompt))),
+        );
+        assert_eq!(
+            write_and_edit(&denied, &ctx, HOOK_SETTINGS[0]).await,
+            [ToolOutcome::DeniedByRule, ToolOutcome::DeniedByRule]
+        );
+        assert!(prompt.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_person_is_asked_about_every_hook_settings_write() {
+        let project = tempfile::tempdir().expect("project");
+        let ctx = ToolContext::new(project.path());
+        let prompt = Arc::new(ScriptedPrompt::new(vec![
+            PromptAnswer::Session,
+            PromptAnswer::Always,
+            PromptAnswer::No,
+            PromptAnswer::No,
+        ]));
+        let registry = ToolRegistry::with_builtins(
+            Permissions::from_toml("allow = [\"write_file\", \"edit_file\"]", None).expect("rules"),
+            Box::new(SharedPrompt(Arc::clone(&prompt))),
+        );
+        let path = ".claude/settings.json";
+        assert_eq!(
+            write_and_edit(&registry, &ctx, path).await,
+            [ToolOutcome::Completed, ToolOutcome::Completed],
+            "a person answered session, then always"
+        );
+        assert_eq!(
+            write_and_edit(&registry, &ctx, path).await,
+            [ToolOutcome::DeclinedByUser, ToolOutcome::DeclinedByUser],
+            "neither answer carried over to the next call"
+        );
+        let requests = prompt.requests();
+        assert_eq!(requests.len(), 4, "every call asked");
+        assert!(requests.iter().all(|request| request.needs_person));
+        assert_eq!(
+            std::fs::read_to_string(project.path().join(path)).expect("written"),
+            "{\"hooks\": {\"x\": 1}}"
+        );
     }
 
     /// Runs plain git for test setup; `false` when git is unavailable.

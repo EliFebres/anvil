@@ -120,6 +120,34 @@ fn is_git_directory(dir: &Path) -> bool {
     dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
 }
 
+/// Folders whose settings files can define hooks, lower-cased.
+const HOOK_SETTINGS_DIRS: &[&str] = &[".claude", ".anvil"];
+
+/// Settings file names that can define hooks, lower-cased.
+const HOOK_SETTINGS_FILES: &[&str] = &["settings.json", "settings.local.json"];
+
+/// Whether `path` is a settings file that can define hooks:
+/// `settings.json` or `settings.local.json` in a `.claude` or `.anvil`
+/// folder, anywhere. A hook written there runs in a later session without
+/// a prompt, so a write to one always needs a person's answer.
+///
+/// # Arguments
+///
+/// * `path` - The path, already resolved.
+///
+/// # Returns
+///
+/// `true` for such a file.
+pub fn is_hook_settings(path: &Path) -> bool {
+    let lower = |part: Option<&std::ffi::OsStr>| {
+        part.map(|part| part.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    };
+    let name = lower(path.file_name());
+    let folder = lower(path.parent().and_then(Path::file_name));
+    HOOK_SETTINGS_FILES.contains(&name.as_str()) && HOOK_SETTINGS_DIRS.contains(&folder.as_str())
+}
+
 /// Whether a lower-cased file name is `.env` or a `.env.*` that is not an example.
 fn is_env_file(name: &str) -> bool {
     name == ".env"

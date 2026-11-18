@@ -10,7 +10,7 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 ## Isolation
 
 - **Operating-system sandboxing of shell commands.** An approved command runs with the developer's rights today; a sandbox (a restricted token or AppContainer on Windows, Seatbelt on macOS, namespaces or Landlock on Linux) would confine its files and network the way the file tools are already confined.
-- **Protect a trusted repository's hook settings from tool writes.** A model that edits `.claude/settings.json` or `.anvil/settings.json` in a trusted repository adds a hook that runs in the next session without a new trust prompt. (Writes into `.git`, hooks included, are already refused.)
+- **A policy key for an administrator-owned git hooks path.** anvil's own git calls turn hooks off, so firm-required commit hooks (secret scanning, commit message checks) do not run on `anvil build` commits today; a policy key naming a hooks folder the administrator owns would let anvil pass that folder as `core.hooksPath` instead.
 
 ## Distribution and supply chain
 
