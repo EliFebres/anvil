@@ -12,6 +12,7 @@ A cloned repository tries to make anvil act against the developer: send the API 
 - Hooks, MCP servers, skills, commands, agents and instruction files load only after the developer trusts the repository, from a prompt that lists each of them with its command line. Without a terminal, nothing loads. A policy can forbid repository content entirely.
 - A repository instruction file cannot `@import` a file outside the repository.
 - A check command detected from the repository's files is asked about before it runs.
+- anvil's own git calls in the project run no hooks and none of the programs a repository's `.git/config` can name (file system monitor, pager, editor, external diff, text conversion, SSH command); a repository whose config names a filter or signing program is refused.
 - Tests build a hostile repository that tries each of these and assert it is refused.
 
 **Not stopped**
@@ -58,9 +59,9 @@ A tampered anvil binary, a malicious dependency, or a compromised build.
 The model misunderstands the task, deletes or breaks files, runs a harmful command, or writes insecure code.
 
 **Stopped today**
-- Writes and shell commands ask first unless the developer's own rules allow them; a policy can force a strict profile and require a person to approve every plan.
+- Writes and shell commands ask first unless the developer's own rules allow them; a policy can force a strict profile and require a person to approve plans (in `anvil build`, only the top-level plan).
 - `shell_programs` limits commands to single listed programs without chaining, redirection or substitution; no answer or `--yes` lifts it.
-- File tools cannot write outside the workspace.
+- File tools cannot write outside the workspace, and never write inside `.git`, so a session cannot plant a git hook or change the repository's git config.
 - The loop plans before it builds, runs the project's checks, and has the change reviewed before it finishes. Every change is an ordinary diff in the working tree.
 
 **Not stopped**

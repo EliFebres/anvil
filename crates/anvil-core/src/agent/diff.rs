@@ -55,7 +55,10 @@ pub async fn snapshot_tree(cwd: &Path, session_dir: &Path) -> Option<String> {
 pub async fn diff_since(cwd: &Path, session_dir: &Path, baseline: &str) -> Option<String> {
     let current = snapshot_tree(cwd, session_dir).await?;
     let index = session_dir.join(INDEX_FILE);
-    let diff = git(cwd, &index, &["diff", "--no-color", baseline, &current]).await?;
+    let mut args = vec!["diff", "--no-color"];
+    args.extend(crate::git::NO_DIFF_PROGRAMS);
+    args.extend([baseline, current.as_str()]);
+    let diff = git(cwd, &index, &args).await?;
     Some(cap(diff))
 }
 
@@ -125,7 +128,14 @@ pub async fn changed_files(cwd: &Path, session_dir: &Path, baseline: &str) -> Op
 
 /// Runs git with a private index file and returns stdout on success.
 async fn git(cwd: &Path, index: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
+    let command = match crate::git::command(cwd) {
+        Ok(command) => command,
+        Err(error) => {
+            tracing::warn!(%error, "the session diff is skipped");
+            return None;
+        }
+    };
+    let output = Command::from(command)
         .args(args)
         .current_dir(cwd)
         .env("GIT_INDEX_FILE", absolute(index))

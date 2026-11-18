@@ -274,8 +274,9 @@ impl ToolContext {
     /// The path is resolved the way the file system will see it, symlinks
     /// and `..` included, so neither can lead out of the workspace. It must
     /// then lie inside `cwd`, the session folder or an extra folder, or,
-    /// for a read, a read-only folder; and it must not hold secrets (see
-    /// [`workspace::holds_secrets`]).
+    /// for a read, a read-only folder; it must not hold secrets (see
+    /// [`workspace::holds_secrets`]); and a write must not land in a git
+    /// directory (see [`workspace::inside_git_dir`]).
     ///
     /// # Arguments
     ///
@@ -297,6 +298,11 @@ impl ToolContext {
         if workspace::holds_secrets(&resolved) {
             return Err(format!(
                 "`{path}` holds secrets or credentials; anvil's file tools never open it"
+            ));
+        }
+        if write && workspace::inside_git_dir(&resolved) {
+            return Err(format!(
+                "`{path}` is inside a git directory (hooks, config and the rest of .git); anvil's file tools never write there"
             ));
         }
         let mut allowed: Vec<&Path> = vec![&self.cwd];
@@ -1918,6 +1924,225 @@ mod tests {
             assert_eq!(run.outcome, ToolOutcome::Blocked, "{command}");
             assert!(!run.result.content.contains("pwned\n"), "{command} ran");
         }
+    }
+
+    /// Runs plain git for test setup; `false` when git is unavailable.
+    fn git_setup(dir: &Path, args: &[&str]) -> bool {
+        std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(["-c", "protocol.file.allow=always"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    /// A git repository with one commit, or `None` without git.
+    fn committed_repository(dir: &Path) -> Option<()> {
+        if !git_setup(dir, &["init", "-q"]) {
+            eprintln!("git not available; skipping");
+            return None;
+        }
+        std::fs::write(dir.join("a.txt"), "one\n").expect("write");
+        assert!(git_setup(dir, &["add", "a.txt"]));
+        assert!(git_setup(dir, &["commit", "-q", "-m", "init"]));
+        Some(())
+    }
+
+    /// Asserts that `write_file` and `edit_file` both refuse `path` as a
+    /// git directory.
+    async fn assert_git_write_refused(ctx: &ToolContext, path: &str) {
+        for (tool, args) in [
+            (
+                "write_file",
+                serde_json::json!({"path": path, "content": "x"}),
+            ),
+            (
+                "edit_file",
+                serde_json::json!({"path": path, "old": "[core]", "new": "x"}),
+            ),
+        ] {
+            let run = jailed(ctx, tool, args).await;
+            assert!(run.result.is_error, "{tool} {path}: {}", run.result.content);
+            assert!(
+                run.result.content.contains("inside a git directory"),
+                "{tool} {path}: {}",
+                run.result.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn writes_to_git_config_and_hooks_are_refused() {
+        let project = tempfile::tempdir().expect("project");
+        let root = project.path();
+        let Some(()) = committed_repository(root) else {
+            return;
+        };
+        let config = root.join(".git").join("config");
+        let before = std::fs::read_to_string(&config).expect("config");
+        let ctx = ToolContext::new(root);
+        let absolute = config.display().to_string();
+        for path in [
+            ".git/config",
+            ".git/hooks/pre-commit",
+            ".git/hooks/post-checkout",
+            ".git/info/exclude",
+            ".git/info/attributes",
+            ".git/HEAD",
+            "./.git/config",
+            "src/../.git/config",
+            ".GIT/config",
+            absolute.as_str(),
+        ] {
+            assert_git_write_refused(&ctx, path).await;
+        }
+        assert_eq!(
+            std::fs::read_to_string(&config).expect("config"),
+            before,
+            "the config is unchanged"
+        );
+        assert!(!root.join(".git").join("hooks").join("pre-commit").exists());
+
+        let read = jailed(
+            &ctx,
+            "read_file",
+            serde_json::json!({"path": ".git/config"}),
+        )
+        .await;
+        assert!(read.result.content.contains("[core]"), "reads stay allowed");
+        for path in [".gitignore", ".github/workflows/ci.yml", "git/notes.md"] {
+            let run = jailed(
+                &ctx,
+                "write_file",
+                serde_json::json!({"path": path, "content": "x"}),
+            )
+            .await;
+            assert!(!run.result.is_error, "{path}: {}", run.result.content);
+        }
+    }
+
+    #[tokio::test]
+    async fn writes_to_worktree_and_submodule_git_directories_are_refused() {
+        let project = tempfile::tempdir().expect("project");
+        let root = project.path();
+        let Some(()) = committed_repository(root) else {
+            return;
+        };
+        let library = tempfile::tempdir().expect("library");
+        assert!(committed_repository(library.path()).is_some());
+        let library_path = library.path().to_string_lossy().replace('\\', "/");
+        assert!(git_setup(root, &["worktree", "add", "-q", "wt"]));
+        assert!(git_setup(
+            root,
+            &["submodule", "add", "-q", &library_path, "vendor/lib"]
+        ));
+        assert!(root.join("wt").join(".git").is_file(), "a worktree link");
+        assert!(root.join("vendor/lib/.git").is_file(), "a submodule link");
+
+        let ctx = ToolContext::new(root);
+        for path in [
+            "wt/.git",
+            ".git/worktrees/wt/HEAD",
+            ".git/worktrees/wt/commondir",
+            "vendor/lib/.git",
+            ".git/modules/vendor/lib/config",
+            ".git/modules/vendor/lib/hooks/pre-commit",
+        ] {
+            assert_git_write_refused(&ctx, path).await;
+        }
+        let in_worktree = ToolContext::new(root.join("wt"));
+        assert_git_write_refused(&in_worktree, ".git").await;
+        let ok = jailed(
+            &in_worktree,
+            "write_file",
+            serde_json::json!({"path": "a.txt", "content": "two\n"}),
+        )
+        .await;
+        assert!(!ok.result.is_error, "{}", ok.result.content);
+    }
+
+    #[tokio::test]
+    async fn writes_to_bare_and_separate_git_directories_are_refused() {
+        let project = tempfile::tempdir().expect("project");
+        let root = project.path();
+        if !git_setup(root, &["init", "-q", "--bare", "store.git"]) {
+            eprintln!("git not available; skipping");
+            return;
+        }
+        assert!(git_setup(
+            root,
+            &["init", "-q", "--separate-git-dir", "meta", "checkout"]
+        ));
+        let ctx = ToolContext::new(root);
+        for path in [
+            "store.git/config",
+            "store.git/hooks/post-receive",
+            "meta/config",
+            "meta/hooks/pre-commit",
+            "checkout/.git",
+        ] {
+            assert_git_write_refused(&ctx, path).await;
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_junction_that_points_outside_is_refused() {
+        let (project, outside, ctx) = workspace_with_outside();
+        let link = project.path().join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(outside.path())
+            .output()
+            .expect("cmd runs");
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        assert!(link.join("out.txt").is_file(), "the junction works");
+        for (tool, args) in [
+            ("read_file", serde_json::json!({"path": "link/out.txt"})),
+            ("outline", serde_json::json!({"path": "link/out.txt"})),
+            ("list_dir", serde_json::json!({"path": "link"})),
+            ("glob", serde_json::json!({"pattern": "*", "path": "link"})),
+            (
+                "grep",
+                serde_json::json!({"pattern": "outside", "path": "link"}),
+            ),
+            (
+                "write_file",
+                serde_json::json!({"path": "link/out.txt", "content": "x"}),
+            ),
+            (
+                "write_file",
+                serde_json::json!({"path": "link/new.txt", "content": "x"}),
+            ),
+            (
+                "edit_file",
+                serde_json::json!({"path": "link/out.txt", "old": "outside", "new": "x"}),
+            ),
+        ] {
+            let run = jailed(&ctx, tool, args).await;
+            assert!(
+                run.result.content.contains("outside the workspace"),
+                "{tool}: {}",
+                run.result.content
+            );
+        }
+        let search = jailed(&ctx, "grep", serde_json::json!({"pattern": "outside"})).await;
+        assert!(
+            !search.result.content.contains("out.txt"),
+            "a search from the root does not follow the junction: {}",
+            search.result.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("out.txt")).expect("read"),
+            "outside\n"
+        );
+        assert!(!outside.path().join("new.txt").exists());
     }
 
     #[cfg(unix)]

@@ -33,7 +33,9 @@ allow_skip_prompts = false
 # user's rules; the user's own deny, ask and shell_programs still apply.
 # Copy profiles/strict.toml from the anvil repository next to this file.
 profile = "strict.toml"
-# Whether a plan needs a person even under --yes (default: false).
+# Whether a plan needs a person even under --yes (default: false). In
+# anvil build this is the top-level plan only; per-item sessions approve
+# their own plans.
 require_plan_approval = true
 
 [extensions]

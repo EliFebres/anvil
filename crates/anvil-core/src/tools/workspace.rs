@@ -92,6 +92,34 @@ pub fn holds_secrets(path: &Path) -> bool {
     })
 }
 
+/// Whether `path` is, or lies inside, a git directory: a `.git` folder or
+/// file at any depth (which covers worktrees and submodules, whose git
+/// directories live under the main `.git`), or a folder git itself would
+/// take for one because it holds `HEAD`, `objects` and `refs` (a bare
+/// repository or a separate git directory).
+///
+/// Writing there could plant a hook or change the config that git, and
+/// anvil's own git calls, read.
+///
+/// # Arguments
+///
+/// * `path` - The path, already resolved.
+///
+/// # Returns
+///
+/// `true` when the file tools must not write to it.
+pub fn inside_git_dir(path: &Path) -> bool {
+    let named_git = path.components().any(
+        |component| matches!(component, Component::Normal(part) if part.eq_ignore_ascii_case(".git")),
+    );
+    named_git || path.ancestors().any(is_git_directory)
+}
+
+/// Whether `dir` has the three entries git checks to recognise a git directory.
+fn is_git_directory(dir: &Path) -> bool {
+    dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
+}
+
 /// Whether a lower-cased file name is `.env` or a `.env.*` that is not an example.
 fn is_env_file(name: &str) -> bool {
     name == ".env"

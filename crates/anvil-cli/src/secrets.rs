@@ -3,7 +3,6 @@
 //! A hit is reported by path, line and kind, never by value.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anvil_types::dotenv::{is_placeholder, read_values};
 use anyhow::{Context, bail};
@@ -92,9 +91,9 @@ pub fn run(cwd: &Path, env_files: &[PathBuf]) -> anyhow::Result<i32> {
 ///
 /// The root, or `None` outside a repository or without git.
 pub fn git_toplevel(cwd: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
+    let out = anvil_core::git::command(cwd)
+        .ok()?
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
         .output()
         .ok()?;
     if !out.status.success() {
@@ -152,9 +151,8 @@ pub fn env_values(env_files: &[PathBuf]) -> anyhow::Result<Vec<(String, String)>
 ///
 /// When `git ls-files` fails.
 pub fn scan_tree(root: &Path, values: &[(String, String)]) -> anyhow::Result<Vec<Hit>> {
-    let out = Command::new("git")
+    let out = anvil_core::git::command(root)?
         .args(["ls-files", "-z"])
-        .current_dir(root)
         .output()
         .context("running git ls-files")?;
     if !out.status.success() {
@@ -224,6 +222,7 @@ fn scan_text(path: &str, text: &str, needles: &[Needle]) -> Vec<Hit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn fake(prefix: &str, len: usize) -> String {
         format!("{prefix}{}", "a".repeat(len))

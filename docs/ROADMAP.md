@@ -10,7 +10,7 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 ## Isolation
 
 - **Operating-system sandboxing of shell commands.** An approved command runs with the developer's rights today; a sandbox (a restricted token or AppContainer on Windows, Seatbelt on macOS, namespaces or Landlock on Linux) would confine its files and network the way the file tools are already confined.
-- **Protect `.git` and the repository's own anvil and hook files from tool writes.** A model that edits `.git/hooks` or a trusted repository's hook settings gets code run later outside any prompt.
+- **Protect a trusted repository's hook settings from tool writes.** A model that edits `.claude/settings.json` or `.anvil/settings.json` in a trusted repository adds a hook that runs in the next session without a new trust prompt. (Writes into `.git`, hooks included, are already refused.)
 
 ## Distribution and supply chain
 

@@ -6,18 +6,16 @@
 //! as they like.
 
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, bail};
 
 /// The pathspec that leaves anvil's own folder out of status and `add`.
 const NOT_ANVIL: &str = ":(exclude).anvil";
 
-/// Runs `git` in `cwd` and returns its trimmed stdout.
+/// Runs `git` in `cwd`, through `anvil_core::git`, and returns its trimmed stdout.
 fn git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git")
+    let output = anvil_core::git::command(cwd)?
         .args(args)
-        .current_dir(cwd)
         .output()
         .with_context(|| format!("cannot run `git {}`", args.join(" ")))?;
     if !output.status.success() {

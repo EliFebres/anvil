@@ -122,8 +122,9 @@ pub struct PermissionsPolicy {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// Whether a plan must be approved by a person even under `--yes`.
-    /// Default `false`; without `allow_skip_prompts` every plan is asked
-    /// about anyway.
+    /// In `anvil build` this covers the top-level build plan only; the
+    /// per-item sessions approve their own plans. Default `false`; without
+    /// `allow_skip_prompts` every plan is asked about anyway.
     pub require_plan_approval: bool,
 }
 
