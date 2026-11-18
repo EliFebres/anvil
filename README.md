@@ -82,14 +82,14 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 
 ## Security model
 
-- anvil sends prompts, and the files and command output its tools read, to the providers you configure. It has no telemetry upload, no self-update and no update check; the only other thing that reaches the network is `anvil ticket submit`, which you run yourself after configuring a queue.
+- anvil never runs a model. It sends prompts, and the files and command output its tools read, over HTTPS to the endpoints you configure, through one HTTP client that does not follow redirects. It has no telemetry upload, no self-update and no update check; the only other thing that reaches the network is `anvil ticket submit`, which you run yourself after configuring a queue.
 - File writes, edits and shell commands ask first. Your own rules (in `~/.anvil/config.toml`, a `--profile`, or what `always` saved under `~/.anvil/permissions/`) change that; a repository can only add `deny` and `ask` rules; a few destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `Remove-Item -Recurse`) are refused even under `--yes` unless a rule names them.
 - Keys are read from the environment and `~/.anvil/.env`, never from configuration, and are not passed to the commands anvil runs: those get a short list of variables plus `[tools] pass_env`.
 - The file tools stay inside the project (plus `[tools] extra_dirs`), reads included, and never open `.env` files, SSH or cloud credentials, browser profiles or keychains. `profiles/strict.toml` limits `shell` to single listed programs. An approved shell command still runs with your own rights; anvil does not sandbox it.
 - An administrator can install a managed policy (`C:\ProgramData\Anvil\policy.toml`, `/etc/anvil/policy.toml` or `/Library/Application Support/Anvil/policy.toml`) that limits endpoints, extensions, prompts, tickets and transcripts, and that the user cannot override; see SECURITY.md and `docs/enterprise/policy.example.toml`. `anvil doctor` shows it.
 - anvil does not trust the repository it runs in. Its hooks, MCP servers, skills, commands, agents and instruction files load only after you answer the trust prompt, which lists each of them; `anvil trust` asks again and `anvil trust --revoke` withdraws it. Without a terminal, an undecided repository is untrusted.
 
-[SECURITY.md](SECURITY.md) has the details, with file references: every network destination and what triggers it, what is stored where, where keys come from, the permission defaults, and how releases are built and verified.
+[SECURITY.md](SECURITY.md) has the details, with file references and the test behind each control: what is enforced and what is not, every network destination and what triggers it, what is stored where, where keys come from, the permission defaults, the managed policy, and how releases are built. For a firm's reviewers, `docs/enterprise/` holds the data flow, the threat model, a pilot scope template and an example policy; `docs/ROADMAP.md` lists what is deliberately not done yet; `docs/CODE_TOUR.md` walks one request through the code.
 
 ## What it does
 
@@ -245,7 +245,9 @@ Other commands: `anvil skill add|list|show|remove` (install Claude Code skills f
 | `crates/anvil-tui` | The palette and pure layout helpers the full-screen UI draws with. |
 | `crates/anvil-cli` | The `anvil` binary: argument parsing, wiring, the line renderer and the full-screen UI. |
 | `skills/` | Claude Code-format skills that ship with anvil. |
-| `SECURITY.md` | Network destinations, telemetry, keys, permissions and the release build, for a reviewer. |
+| `SECURITY.md` | What is enforced and what is not, network destinations, stored files, keys, permissions, the managed policy and the release build, for a reviewer. |
+| `docs/` | `enterprise/` (data flow, threat model, pilot scope, example policy), `ROADMAP.md`, `CODE_TOUR.md`. |
+| `profiles/` | Profiles that ship with anvil, such as `strict.toml`. |
 
 `CLAUDE.md` is the contract: conventions, which crate may depend on which, and what every check enforces.
 
