@@ -76,7 +76,8 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 
 - anvil sends prompts, and the files and command output its tools read, to the providers you configure. It has no telemetry upload, no self-update and no update check; the only other thing that reaches the network is `anvil ticket submit`, which you run yourself after configuring a queue.
 - File writes, edits and shell commands ask first. Your own rules (in `~/.anvil/config.toml`, a `--profile`, or what `always` saved under `~/.anvil/permissions/`) change that; a repository can only add `deny` and `ask` rules; a few destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `Remove-Item -Recurse`) are refused even under `--yes` unless a rule names them.
-- Keys are read from the environment and `.env` files, never from configuration.
+- Keys are read from the environment and `~/.anvil/.env`, never from configuration, and are not passed to the commands anvil runs: those get a short list of variables plus `[tools] pass_env`.
+- The file tools stay inside the project (plus `[tools] extra_dirs`), reads included, and never open `.env` files, SSH or cloud credentials, browser profiles or keychains. `profiles/strict.toml` limits `shell` to single listed programs. An approved shell command still runs with your own rights; anvil does not sandbox it.
 - anvil does not trust the repository it runs in. Its hooks, MCP servers, skills, commands, agents and instruction files load only after you answer the trust prompt, which lists each of them; `anvil trust` asks again and `anvil trust --revoke` withdraws it. Without a terminal, an undecided repository is untrusted.
 
 [SECURITY.md](SECURITY.md) has the details, with file references: every network destination and what triggers it, what is stored where, where keys come from, the permission defaults, and how releases are built and verified.

@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Access, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for};
+use super::{Access, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for, workspace};
 
 /// Most paths returned before the list is cut.
 pub const MAX_RESULTS: usize = 1000;
@@ -57,7 +57,10 @@ impl Tool for Glob {
                     return ToolOutput::error(format!("invalid glob `{}`: {error}", args.pattern));
                 }
             };
-            let root = ctx.resolve(args.path.as_deref().unwrap_or("."));
+            let root = match ctx.checked_path(args.path.as_deref().unwrap_or("."), false) {
+                Ok(root) => root,
+                Err(reason) => return ToolOutput::error(reason),
+            };
             if !root.is_dir() {
                 return ToolOutput::error(format!(
                     "{} is not a directory",
@@ -92,7 +95,8 @@ impl Tool for Glob {
     }
 }
 
-/// Walks `root` respecting `.gitignore`, skipping hidden entries and the root itself.
+/// Walks `root` respecting `.gitignore`, skipping hidden entries, the root
+/// itself and anything that holds secrets. Symlinks are not followed.
 pub(crate) fn walk(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
     ignore::WalkBuilder::new(root)
         .require_git(false)
@@ -100,6 +104,7 @@ pub(crate) fn walk(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
         .build()
         .filter_map(Result::ok)
         .filter(|entry| entry.depth() > 0)
+        .filter(|entry| !workspace::holds_secrets(entry.path()))
 }
 
 /// The path relative to `root` with forward slashes.

@@ -44,7 +44,10 @@ impl Tool for WriteFile {
                 Ok(args) => args,
                 Err(output) => return output,
             };
-            let path = ctx.resolve(&args.path);
+            let path = match ctx.checked_path(&args.path, true) {
+                Ok(path) => path,
+                Err(reason) => return ToolOutput::error(reason),
+            };
             let shown = ctx.display_path(&path);
             if let Some(parent) = path.parent()
                 && let Err(error) = std::fs::create_dir_all(parent)

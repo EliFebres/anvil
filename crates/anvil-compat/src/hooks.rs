@@ -543,6 +543,8 @@ impl HookRunner {
         let mut child = self
             .shell
             .command(&command.command)
+            .env_clear()
+            .envs(anvil_types::child_env::vars())
             .current_dir(&self.cwd)
             .env("CLAUDE_PROJECT_DIR", &self.cwd)
             .env("ANVIL_PROJECT_DIR", &self.cwd)

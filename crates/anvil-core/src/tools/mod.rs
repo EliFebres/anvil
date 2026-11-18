@@ -27,6 +27,8 @@ pub mod preview;
 pub mod read_file;
 /// The `shell` tool and the shell program behind it.
 pub mod shell;
+/// The workspace jail: which paths the file tools may open.
+pub mod workspace;
 /// The `write_file` tool.
 pub mod write_file;
 
@@ -50,6 +52,7 @@ pub use permissions::{
     SessionApprovals, StaticPrompt,
 };
 pub use shell::Shell;
+pub use workspace::Workspace;
 
 /// Byte cap applied to a tool's output unless the tool overrides it.
 pub const DEFAULT_OUTPUT_CAP: usize = 30 * 1024;
@@ -243,6 +246,8 @@ pub struct ToolContext {
     pub session_dir: Option<PathBuf>,
     /// The shell behind the `shell` tool.
     pub shell: Shell,
+    /// Folders outside `cwd` the file tools may also open.
+    pub workspace: Workspace,
 }
 
 impl ToolContext {
@@ -260,7 +265,56 @@ impl ToolContext {
             cwd: cwd.into(),
             session_dir: None,
             shell: Shell::for_platform(),
+            workspace: Workspace::default(),
         }
+    }
+
+    /// Resolves a path argument and checks that a file tool may open it.
+    ///
+    /// The path is resolved the way the file system will see it, symlinks
+    /// and `..` included, so neither can lead out of the workspace. It must
+    /// then lie inside `cwd`, the session folder or an extra folder, or,
+    /// for a read, a read-only folder; and it must not hold secrets (see
+    /// [`workspace::holds_secrets`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Relative or absolute path as the model wrote it.
+    /// * `write` - Whether the tool will write to it.
+    ///
+    /// # Returns
+    ///
+    /// The path joined to `cwd`, for opening and display.
+    ///
+    /// # Errors
+    ///
+    /// A message for the model saying why the path is refused.
+    pub fn checked_path(&self, path: &str, write: bool) -> Result<PathBuf, String> {
+        let root = workspace::canonical(&self.cwd);
+        let resolved = permissions::resolve_path(&root, path).ok_or_else(|| {
+            format!("`{path}` cannot be resolved safely (a dangling or looping link)")
+        })?;
+        if workspace::holds_secrets(&resolved) {
+            return Err(format!(
+                "`{path}` holds secrets or credentials; anvil's file tools never open it"
+            ));
+        }
+        let mut allowed: Vec<&Path> = vec![&self.cwd];
+        allowed.extend(self.session_dir.as_deref());
+        allowed.extend(self.workspace.extra_dirs.iter().map(PathBuf::as_path));
+        if !write {
+            allowed.extend(self.workspace.read_only_dirs.iter().map(PathBuf::as_path));
+        }
+        if allowed
+            .iter()
+            .any(|dir| workspace::is_within(dir, &resolved))
+        {
+            return Ok(self.resolve(path));
+        }
+        Err(format!(
+            "`{path}` is outside the workspace {}; anvil's file tools stay inside it unless `[tools] extra_dirs` in ~/.anvil/config.toml lists the folder",
+            self.cwd.display()
+        ))
     }
 
     /// Resolves a path argument against `cwd`.
@@ -779,6 +833,13 @@ impl ToolRegistry {
     ) -> Option<(ToolOutput, ToolOutcome)> {
         let name = tool.name();
         let mut permissions = lock_or_recover(&self.permissions);
+        if name == shell::SHELL_TOOL_NAME
+            && let Some(reason) = target.and_then(|command| permissions.shell_refusal(command))
+        {
+            tracing::info!(tool = name, ?target, reason, "refused by shell_programs");
+            self.observe(name, DecisionScope::Blocked, false);
+            return Some((ToolOutput::error(reason), ToolOutcome::Blocked));
+        }
         if let Some(reason) = tool.blocked_reason(args)
             && !permissions.explicitly_allowed(name, target)
         {
@@ -1669,5 +1730,211 @@ mod tests {
         assert_eq!(ctx.display_path(Path::new("/elsewhere/x")), "/elsewhere/x");
         assert_eq!(ctx.resolve("/abs"), PathBuf::from("/abs"));
         assert_eq!(ctx.resolve("rel"), PathBuf::from("/proj").join("rel"));
+    }
+
+    /// Runs one built-in tool with every call allowed by the rules, so only
+    /// the workspace jail can stop it.
+    async fn jailed(ctx: &ToolContext, tool: &str, args: Value) -> Execution {
+        let permissions = Permissions::from_toml("default = \"allow\"", None).expect("rules");
+        let registry =
+            ToolRegistry::with_builtins(permissions, Box::new(ScriptedPrompt::new(vec![])));
+        let call = ToolCall {
+            id: "j1".to_owned(),
+            name: tool.to_owned(),
+            arguments_json: args.to_string(),
+        };
+        registry.execute(&call, ctx).await
+    }
+
+    fn workspace_with_outside() -> (tempfile::TempDir, tempfile::TempDir, ToolContext) {
+        let project = tempfile::tempdir().expect("project");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(project.path().join("in.txt"), "inside\n").expect("write");
+        std::fs::write(outside.path().join("out.txt"), "outside\n").expect("write");
+        let ctx = ToolContext::new(project.path());
+        (project, outside, ctx)
+    }
+
+    #[tokio::test]
+    async fn file_tools_refuse_paths_outside_the_workspace_reads_included() {
+        let (project, outside, ctx) = workspace_with_outside();
+        let absolute = outside.path().join("out.txt").display().to_string();
+        let dotted = format!(
+            "../{}/out.txt",
+            outside.path().file_name().expect("name").to_string_lossy()
+        );
+        for path in [absolute.as_str(), dotted.as_str()] {
+            for (tool, args) in [
+                ("read_file", serde_json::json!({"path": path})),
+                (
+                    "write_file",
+                    serde_json::json!({"path": path, "content": "x"}),
+                ),
+                (
+                    "edit_file",
+                    serde_json::json!({"path": path, "old": "outside", "new": "x"}),
+                ),
+                (
+                    "grep",
+                    serde_json::json!({"pattern": "outside", "path": path}),
+                ),
+                ("outline", serde_json::json!({"path": path})),
+            ] {
+                let run = jailed(&ctx, tool, args).await;
+                assert!(run.result.is_error, "{tool} {path}: {}", run.result.content);
+                assert!(
+                    run.result.content.contains("outside the workspace"),
+                    "{tool} {path}: {}",
+                    run.result.content
+                );
+            }
+        }
+        let parent = outside.path().display().to_string();
+        for (tool, args) in [
+            ("list_dir", serde_json::json!({"path": parent})),
+            ("glob", serde_json::json!({"pattern": "*", "path": parent})),
+        ] {
+            let run = jailed(&ctx, tool, args).await;
+            assert!(
+                run.result.content.contains("outside the workspace"),
+                "{tool}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("out.txt")).expect("read"),
+            "outside\n",
+            "nothing outside was changed"
+        );
+        let inside = jailed(&ctx, "read_file", serde_json::json!({"path": "in.txt"})).await;
+        assert!(
+            inside.result.content.contains("inside"),
+            "{}",
+            inside.result.content
+        );
+        drop(project);
+    }
+
+    #[tokio::test]
+    async fn extra_dirs_open_outside_folders_and_read_only_dirs_refuse_writes() {
+        let (_project, outside, mut ctx) = workspace_with_outside();
+        let file = outside.path().join("out.txt").display().to_string();
+        ctx.workspace.read_only_dirs = vec![outside.path().to_path_buf()];
+        let read = jailed(&ctx, "read_file", serde_json::json!({"path": file})).await;
+        assert!(
+            read.result.content.contains("outside"),
+            "{}",
+            read.result.content
+        );
+        let write = jailed(
+            &ctx,
+            "write_file",
+            serde_json::json!({"path": file, "content": "x"}),
+        )
+        .await;
+        assert!(write.result.content.contains("outside the workspace"));
+
+        ctx.workspace.read_only_dirs.clear();
+        ctx.workspace.extra_dirs = vec![outside.path().to_path_buf()];
+        let write = jailed(
+            &ctx,
+            "write_file",
+            serde_json::json!({"path": file, "content": "x"}),
+        )
+        .await;
+        assert!(!write.result.is_error, "{}", write.result.content);
+    }
+
+    #[tokio::test]
+    async fn the_session_folder_is_writable_even_outside_the_project() {
+        let (_project, outside, mut ctx) = workspace_with_outside();
+        ctx.session_dir = Some(outside.path().to_path_buf());
+        let plan = outside.path().join("plan.md").display().to_string();
+        let run = jailed(
+            &ctx,
+            "write_file",
+            serde_json::json!({"path": plan, "content": "x"}),
+        )
+        .await;
+        assert!(!run.result.is_error, "{}", run.result.content);
+    }
+
+    #[tokio::test]
+    async fn secrets_are_refused_inside_the_workspace_and_skipped_by_searches() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::write(project.path().join(".env"), "API_KEY=needle\n").expect("write");
+        std::fs::create_dir_all(project.path().join(".ssh")).expect("mkdir");
+        std::fs::write(project.path().join(".ssh").join("id_ed25519"), "needle").expect("write");
+        std::fs::write(project.path().join("notes.txt"), "needle here\n").expect("write");
+        let ctx = ToolContext::new(project.path());
+        for path in [".env", "./.env", ".ssh/id_ed25519", "sub/../.env"] {
+            let run = jailed(&ctx, "read_file", serde_json::json!({"path": path})).await;
+            assert!(
+                run.result.content.contains("holds secrets"),
+                "{path}: {}",
+                run.result.content
+            );
+        }
+        let grep = jailed(&ctx, "grep", serde_json::json!({"pattern": "needle"})).await;
+        assert!(
+            grep.result.content.contains("notes.txt"),
+            "{}",
+            grep.result.content
+        );
+        assert!(
+            !grep.result.content.contains(".env"),
+            "{}",
+            grep.result.content
+        );
+        let grep_hidden = jailed(
+            &ctx,
+            "grep",
+            serde_json::json!({"pattern": "needle", "path": ".env"}),
+        )
+        .await;
+        assert!(grep_hidden.result.content.contains("holds secrets"));
+    }
+
+    #[tokio::test]
+    async fn shell_programs_beat_an_allow_rule_and_a_yes_to_everything() {
+        let rules = "allow = [\"shell\"]\nshell_programs = [\"git\"]\n";
+        let permissions = Permissions::from_toml(rules, None).expect("rules");
+        let registry = ToolRegistry::with_builtins(
+            permissions,
+            Box::new(crate::tools::StaticPrompt(PromptAnswer::Yes)),
+        );
+        let dir = tempfile::tempdir().expect("dir");
+        let ctx = ToolContext::new(dir.path());
+        for command in [
+            "git --version && echo pwned",
+            "echo pwned",
+            "git log; echo pwned",
+        ] {
+            let call = ToolCall {
+                id: "s1".to_owned(),
+                name: "shell".to_owned(),
+                arguments_json: serde_json::json!({ "command": command }).to_string(),
+            };
+            let run = registry.execute(&call, &ctx).await;
+            assert_eq!(run.outcome, ToolOutcome::Blocked, "{command}");
+            assert!(!run.result.content.contains("pwned\n"), "{command} ran");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_that_points_outside_is_refused() {
+        let (project, outside, ctx) = workspace_with_outside();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("link")).expect("symlink");
+        let run = jailed(
+            &ctx,
+            "read_file",
+            serde_json::json!({"path": "link/out.txt"}),
+        )
+        .await;
+        assert!(
+            run.result.content.contains("outside the workspace"),
+            "{}",
+            run.result.content
+        );
     }
 }

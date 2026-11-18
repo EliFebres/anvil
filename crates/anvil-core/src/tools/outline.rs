@@ -52,7 +52,10 @@ impl Tool for Outline {
                 Err(output) => return output,
             };
             let depth = args.depth.unwrap_or(DEFAULT_DEPTH);
-            let path = ctx.resolve(&args.path);
+            let path = match ctx.checked_path(&args.path, false) {
+                Ok(path) => path,
+                Err(reason) => return ToolOutput::error(reason),
+            };
             let shown = ctx.display_path(&path);
             if path.is_dir() {
                 let files: Vec<String> = walk(&path)

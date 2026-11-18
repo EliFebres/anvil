@@ -65,7 +65,7 @@ const CHECK_TAIL_LINES: usize = 80;
 const MAX_PARALLEL_CALLS: usize = 4;
 
 /// The tool whose permission rules cover a check command a plan declares.
-const SHELL_TOOL: &str = "shell";
+const SHELL_TOOL: &str = shell::SHELL_TOOL_NAME;
 
 /// Settings for one run.
 #[derive(Debug, Clone)]

@@ -1,0 +1,30 @@
+# anvil strict profile.
+#
+# Copy this file to ~/.anvil/profiles/strict.toml and run anvil with
+# `--profile strict`, or have an administrator force it through the
+# managed policy. It replaces your own [permissions] table for the run.
+#
+# - Reading tools run without asking; they stay inside the workspace jail.
+# - Everything else asks first, including every MCP tool.
+# - `shell` may run only one program from `shell_programs`, with plain
+#   arguments. `&&`, `||`, `;`, `|`, `&`, `>`, `<`, backticks, `$(`, `${`,
+#   `@(` and `(` are refused, in sh, PowerShell and cmd alike, and no answer
+#   or `--yes` lifts that. Each allowed call still asks.
+# - The substring blocklist (`rm -rf`, `git push --force`, ...) stays on as
+#   a second layer; it is not what makes this profile strict.
+#
+# An allowed program can still run code it is given: `cargo build` runs
+# build scripts, `cargo test` runs tests, `just` runs recipes. Keep the list
+# to the programs the work needs.
+
+[permissions]
+default = "ask"
+allow = ["read_file", "glob", "grep", "list_dir", "outline", "skill"]
+deny = ["shell:git push*", "shell:git remote*", "shell:git config*"]
+shell_programs = ["cargo", "git", "just", "rustc"]
+
+[prompt]
+notes = [
+    "Shell commands are a single program with plain arguments: no &&, ;, |, redirection or substitution.",
+    "Only these programs may run in the shell: cargo, git, just, rustc.",
+]

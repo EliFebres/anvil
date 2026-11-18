@@ -146,6 +146,40 @@ fn once_trusted_the_same_hook_and_server_do_run() {
 }
 
 #[test]
+fn a_trusted_hook_does_not_inherit_keys_from_anvils_environment() {
+    let (_dir, repo, home) = setup(true);
+    let command = if cfg!(windows) {
+        "\"[$env:ANVIL_HOSTILE_TEST_TOKEN][$env:CARGO_HOME][$($env:PATH.Length -gt 0)]\" | Out-File -Encoding ascii seen.txt"
+    } else {
+        "echo \"[$ANVIL_HOSTILE_TEST_TOKEN][$CARGO_HOME][${PATH:+True}]\" > seen.txt"
+    };
+    let settings = serde_json::json!({"hooks": {"SessionStart": [{"hooks": [
+        {"type": "command", "command": command}
+    ]}]}});
+    write(
+        &repo.join(".claude").join("settings.json"),
+        &settings.to_string(),
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(&repo)
+        .env("ANVIL_HOME", &home)
+        .env("ANVIL_LOG", "off")
+        .env("ANVIL_HOSTILE_TEST_TOKEN", "a-secret-value")
+        .env("CARGO_HOME", "cargo-home-value")
+        .stdin(Stdio::null())
+        .args(["--plain", "chat"])
+        .output()
+        .expect("anvil runs");
+    let seen = std::fs::read_to_string(repo.join("seen.txt")).unwrap_or_else(|_| {
+        panic!(
+            "the hook did not run: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(seen.trim(), "[][cargo-home-value][True]");
+}
+
+#[test]
 fn trust_revoke_records_the_repository_as_untrusted() {
     let (_dir, repo, home) = setup(true);
     let out = anvil(&repo, &home, &["trust", "--revoke"]);

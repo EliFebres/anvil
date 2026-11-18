@@ -610,9 +610,8 @@ async fn verify(settings: &Settings, item: &WorkItem) -> Result<(), String> {
         commands.push(("project check", check));
     }
     let ctx = ToolContext {
-        cwd: settings.cwd.clone(),
-        session_dir: None,
         shell: settings.shell.clone(),
+        ..ToolContext::new(settings.cwd.clone())
     };
     for (what, command) in commands {
         match shell::run_command(&ctx, &command, CHECK_TIMEOUT).await {

@@ -140,6 +140,8 @@ fn run_command(command: &str, cwd: &Path, home: Option<&Path>, files: &[&Path]) 
     let output = Command::new(&program)
         .args(&tokens)
         .args(files.iter().map(|file| display(file, cwd)))
+        .env_clear()
+        .envs(anvil_types::child_env::vars())
         .current_dir(cwd)
         .output();
     match output {

@@ -92,7 +92,10 @@ impl Tool for Grep {
                 Some(Err(error)) => return ToolOutput::error(error),
                 None => None,
             };
-            let root = ctx.resolve(args.path.as_deref().unwrap_or("."));
+            let root = match ctx.checked_path(args.path.as_deref().unwrap_or("."), false) {
+                Ok(root) => root,
+                Err(reason) => return ToolOutput::error(reason),
+            };
             if !root.exists() {
                 return ToolOutput::error(format!("{} does not exist", ctx.display_path(&root)));
             }

@@ -59,6 +59,11 @@ summarizer = "runpod"
 # "sh", "bash", "zsh" or "cmd". Default: PowerShell on Windows, sh elsewhere.
 # [tools]
 # shell = "pwsh"
+# Folders outside the project the file tools may open; nothing else outside is.
+# extra_dirs = ["C:/shared/specs"]
+# Variables shell commands and hooks receive on top of the built-in list
+# (PATH, HOME, TEMP, the toolchain folders). Others, keys included, are not passed.
+# pass_env = ["JAVA_HOME"]
 
 # Every key is optional; these are the defaults.
 # [limits]
@@ -179,6 +184,11 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # "sh", "bash", "zsh" or "cmd". Default: PowerShell on Windows, sh elsewhere.
 # [tools]
 # shell = "pwsh"
+# Folders outside the project the file tools may open; nothing else outside is.
+# extra_dirs = ["C:/shared/specs"]
+# Variables shell commands and hooks receive on top of the built-in list
+# (PATH, HOME, TEMP, the toolchain folders). Others, keys included, are not passed.
+# pass_env = ["JAVA_HOME"]
 
 # Every key is optional; these are the defaults.
 # [limits]
@@ -470,6 +480,15 @@ pub struct ToolsConfig {
     /// detect it from the project files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
+    /// Folders outside the project the file tools may read and write. The
+    /// tools refuse every other path outside the project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra_dirs: Vec<PathBuf>,
+    /// Environment variables shell commands, hooks, checks and MCP servers
+    /// receive on top of the built-in list. A name here is passed even when
+    /// it looks like a secret (`*TOKEN*`, `*KEY*` and so on).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pass_env: Vec<String>,
 }
 
 /// When the end-of-session memory summarizer runs.
@@ -575,6 +594,11 @@ pub struct PermissionRules {
     /// `--allow-tool <name>`. Kept in memory, never written back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allow_tools: Vec<String>,
+    /// When not empty, a `shell` call must be one program from this list
+    /// with plain arguments: no `&&`, `;`, `|`, redirection, substitution or
+    /// their PowerShell and cmd forms. No rule, answer or `--yes` lifts it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shell_programs: Vec<String>,
 }
 
 impl PermissionRules {
@@ -589,6 +613,7 @@ impl PermissionRules {
             || !self.ask.is_empty()
             || !self.deny.is_empty()
             || self.unmatched.is_some()
+            || !self.shell_programs.is_empty()
     }
 }
 
@@ -934,6 +959,21 @@ mod tests {
             load_profile(None, Some("work")),
             Err(ConfigError::ProfileNotFound { .. })
         ));
+    }
+
+    #[test]
+    fn the_shipped_strict_profile_loads_as_a_profile() {
+        let home = tempfile::tempdir().expect("home");
+        write(home.path(), CONFIG_TEMPLATE);
+        let profile = profile_path(home.path(), "strict");
+        std::fs::create_dir_all(profile.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&profile, include_str!("../../../profiles/strict.toml")).expect("write");
+        let loaded = load_profile(Some(home.path()), Some("strict")).expect("loads");
+        let rules = loaded.config.permissions.expect("a [permissions] table");
+        assert_eq!(rules.unmatched, Some(Unmatched::Ask));
+        assert!(rules.shell_programs.contains(&"cargo".to_owned()));
+        assert!(!rules.allow.iter().any(|rule| rule.starts_with("shell")));
+        assert!(rules.has_rules());
     }
 
     #[test]

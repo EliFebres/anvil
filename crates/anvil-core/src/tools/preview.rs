@@ -24,7 +24,7 @@ const MAX_PREVIEW_BYTES: u64 = 1024 * 1024;
 /// The event to emit, if the call edits a file.
 pub fn proposed_edit(call: &ToolCall, ctx: &ToolContext) -> Option<LoopEvent> {
     let args: Value = serde_json::from_str(&call.arguments_json).ok()?;
-    let path = ctx.resolve(args.get("path")?.as_str()?);
+    let path = ctx.checked_path(args.get("path")?.as_str()?, true).ok()?;
     match call.name.as_str() {
         "write_file" => {
             let new = args.get("content")?.as_str()?.to_owned();

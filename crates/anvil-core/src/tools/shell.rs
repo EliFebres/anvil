@@ -1,6 +1,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use anvil_types::child_env;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -11,6 +12,9 @@ use super::{Access, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schem
 
 /// Timeout when the model does not set one.
 pub const DEFAULT_TIMEOUT_S: u64 = 120;
+
+/// The name the `shell` tool is registered and matched under.
+pub const SHELL_TOOL_NAME: &str = "shell";
 
 /// Longest timeout the model may request.
 pub const MAX_TIMEOUT_S: u64 = 600;
@@ -132,7 +136,7 @@ pub struct ShellTool;
 
 impl Tool for ShellTool {
     fn name(&self) -> &str {
-        "shell"
+        SHELL_TOOL_NAME
     }
 
     fn description(&self) -> &str {
@@ -271,11 +275,10 @@ pub async fn run_command(
     timeout: Duration,
 ) -> std::io::Result<CommandRun> {
     let mut command = ctx.shell.command(script);
+    command.env_clear().envs(child_env::vars());
     // Bytecode caches written by a test run would land in the session's diff,
     // where the reviewer reads them as unrelated changes.
-    if std::env::var_os(NO_BYTECODE).is_none() {
-        command.env(NO_BYTECODE, "1");
-    }
+    command.env(NO_BYTECODE, "1");
     let mut child = command
         .current_dir(&ctx.cwd)
         .stdin(Stdio::null())
@@ -437,12 +440,35 @@ mod tests {
         } else {
             "echo $PYTHONDONTWRITEBYTECODE"
         };
-        let expected = std::env::var(NO_BYTECODE).unwrap_or_else(|_| "1".to_owned());
         let run = run_command(&ctx(), command, Duration::from_secs(30))
             .await
             .expect("spawns");
         let output = run.into_output().content;
-        assert!(output.starts_with(&expected), "{output}");
+        assert!(output.starts_with('1'), "{output}");
+    }
+
+    #[tokio::test]
+    async fn commands_see_only_the_passed_variables() {
+        let command = if cfg!(windows) {
+            "Get-ChildItem env: | ForEach-Object { $_.Name }"
+        } else {
+            "env | cut -d= -f1"
+        };
+        let run = run_command(&ctx(), command, Duration::from_secs(30))
+            .await
+            .expect("spawns");
+        let output = run.into_output().content;
+        let names: Vec<&str> = output.lines().map(str::trim).collect();
+        assert!(
+            names.iter().any(|name| name.eq_ignore_ascii_case("PATH")),
+            "{output}"
+        );
+        for name in &names {
+            assert!(
+                !child_env::looks_secret(name),
+                "{name} reached the command:\n{output}"
+            );
+        }
     }
 
     #[tokio::test]

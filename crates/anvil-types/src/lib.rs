@@ -8,6 +8,7 @@
 //! depends on no other workspace crate, and never on tokio or reqwest.
 
 pub mod boundary;
+pub mod child_env;
 pub mod config;
 pub mod dotenv;
 pub mod error;

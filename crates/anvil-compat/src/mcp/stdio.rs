@@ -66,6 +66,8 @@ impl StdioTransport {
         let program = resolve_program(command);
         let mut child = Command::new(&program)
             .args(args)
+            .env_clear()
+            .envs(anvil_types::child_env::vars())
             .envs(env)
             .current_dir(cwd)
             .stdin(Stdio::piped())

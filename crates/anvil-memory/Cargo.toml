@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Cross-project memory and coding-style rules for anvil."
 
 [dependencies]
+anvil-types.workspace = true
 ignore.workspace = true
 regex.workspace = true
 serde.workspace = true

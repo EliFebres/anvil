@@ -167,6 +167,8 @@ pub struct Permissions {
     deny: Vec<Rule>,
     /// `ask` rules added by [`Permissions::tighten`]; they beat `allow`.
     forced_ask: Vec<Rule>,
+    /// The programs `shell` is limited to, or `None` for no limit.
+    shell_programs: Option<Vec<String>>,
 }
 
 impl Permissions {
@@ -184,6 +186,7 @@ impl Permissions {
             ask: Vec::new(),
             deny: Vec::new(),
             forced_ask: Vec::new(),
+            shell_programs: None,
         }
     }
 
@@ -213,6 +216,8 @@ impl Permissions {
             ask: parse_all(&rules.ask)?,
             deny: parse_all(&rules.deny)?,
             forced_ask: Vec::new(),
+            shell_programs: (!rules.shell_programs.is_empty())
+                .then(|| rules.shell_programs.clone()),
             unmatched: rules.unmatched.map(Decision::from),
             file: rules.clone(),
         })
@@ -282,18 +287,82 @@ impl Permissions {
     ///
     /// * `deny` - Rules for calls to refuse.
     /// * `ask` - Rules for calls to ask about.
+    /// * `shell_programs` - Programs `shell` is limited to; empty adds no
+    ///   limit. With a limit already in place, only programs on both lists
+    ///   stay allowed.
     ///
     /// # Errors
     ///
     /// [`PermissionError::InvalidRule`] for a glob that does not compile.
-    pub fn tighten(&mut self, deny: &[String], ask: &[String]) -> Result<(), PermissionError> {
+    pub fn tighten(
+        &mut self,
+        deny: &[String],
+        ask: &[String],
+        shell_programs: &[String],
+    ) -> Result<(), PermissionError> {
         for rule in deny {
             self.deny.push(Rule::parse(rule)?);
         }
         for rule in ask {
             self.forced_ask.push(Rule::parse(rule)?);
         }
+        if !shell_programs.is_empty() {
+            self.shell_programs = Some(match self.shell_programs.take() {
+                Some(current) => current
+                    .into_iter()
+                    .filter(|program| {
+                        shell_programs
+                            .iter()
+                            .any(|p| p.eq_ignore_ascii_case(program))
+                    })
+                    .collect(),
+                None => shell_programs.to_vec(),
+            });
+        }
         Ok(())
+    }
+
+    /// Why a `shell` command is refused under a `shell_programs` limit.
+    ///
+    /// The command must be one program from the list, named as found on
+    /// `PATH` (not by a path), followed by plain arguments. Anything that
+    /// chains, redirects or substitutes commands in sh, PowerShell or cmd
+    /// is refused, because it would run a second program.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command line.
+    ///
+    /// # Returns
+    ///
+    /// The reason, or `None` when there is no limit or the command fits it.
+    pub fn shell_refusal(&self, command: &str) -> Option<String> {
+        let programs = self.shell_programs.as_ref()?;
+        if let Some(operator) = SHELL_OPERATORS.iter().find(|op| command.contains(**op)) {
+            return Some(format!(
+                "`{}` is not allowed: under `shell_programs` a command is one program with plain arguments",
+                operator.escape_debug()
+            ));
+        }
+        let first = command.split_whitespace().next().unwrap_or_default();
+        let program = first.trim_matches(['"', '\'']);
+        if program.contains(['/', '\\']) {
+            return Some(format!(
+                "`{program}` is a path; under `shell_programs` name a program found on PATH"
+            ));
+        }
+        let name = program_name(program);
+        if programs
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(&name))
+        {
+            None
+        } else {
+            Some(format!(
+                "`{name}` is not one of the allowed programs ({})",
+                programs.join(", ")
+            ))
+        }
     }
 
     /// Decides one call: `deny` beats a tightening `ask`, which beats
@@ -421,6 +490,26 @@ impl Permissions {
     pub fn rules(&self) -> &PermissionsFile {
         &self.file
     }
+}
+
+/// Text that chains, redirects or substitutes commands in sh, PowerShell or
+/// cmd: `&&`, `||`, `;`, `|`, `&` (also PowerShell's call operator), `>`,
+/// `<`, the backtick (sh substitution, PowerShell escape), `$(`, `${`,
+/// PowerShell's `@(` and `(`, which runs a command inside an argument, and
+/// line breaks.
+pub const SHELL_OPERATORS: [&str; 14] = [
+    "&&", "||", ";", "|", "&", ">", "<", "`", "$(", "${", "@(", "(", "\n", "\r",
+];
+
+/// A program's name without the extension Windows adds, in lower case.
+fn program_name(program: &str) -> String {
+    let lower = program.to_ascii_lowercase();
+    for extension in [".exe", ".cmd", ".bat", ".com", ".ps1"] {
+        if let Some(stem) = lower.strip_suffix(extension) {
+            return stem.to_owned();
+        }
+    }
+    lower
 }
 
 /// The rule an `always` answer records.
@@ -965,6 +1054,7 @@ mod tests {
             .tighten(
                 &["shell:curl*".to_owned()],
                 &["write_file:src/**".to_owned()],
+                &[],
             )
             .expect("valid rules");
         assert_eq!(
@@ -988,7 +1078,60 @@ mod tests {
             perms.rules().deny.is_empty(),
             "tightening rules are not part of the user's file"
         );
-        assert!(perms.tighten(&["shell:[".to_owned()], &[]).is_err());
+        assert!(perms.tighten(&["shell:[".to_owned()], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn shell_programs_allow_one_listed_program_with_plain_arguments() {
+        let perms = parse("shell_programs = [\"cargo\", \"git\"]\n");
+        for ok in [
+            "cargo test -p anvil-core",
+            "git status",
+            "CARGO.EXE build",
+            "\"git\" log -1",
+        ] {
+            assert_eq!(perms.shell_refusal(ok), None, "{ok}");
+        }
+        for (bad, why) in [
+            ("cargo test && curl x", "&&"),
+            ("cargo test; rm -rf /", ";"),
+            ("git log | sh", "|"),
+            ("git log > out.txt", ">"),
+            ("cargo run < input", "<"),
+            ("cargo $(curl x)", "$("),
+            ("cargo `curl x`", "`"),
+            ("cargo (Remove-Item x)", "("),
+            ("git log & calc", "&"),
+            ("git log\ncurl x", "\\n"),
+            ("./cargo build", "path"),
+            ("C:\\tools\\git.exe status", "path"),
+            ("npm test", "not one of"),
+            ("powershell -c x", "not one of"),
+        ] {
+            let reason = perms
+                .shell_refusal(bad)
+                .unwrap_or_else(|| panic!("{bad} allowed"));
+            assert!(reason.contains(why), "{bad}: {reason}");
+        }
+        assert_eq!(parse("").shell_refusal("a && b"), None, "no list, no limit");
+    }
+
+    #[test]
+    fn tightening_shell_programs_only_narrows() {
+        let mut perms = parse("shell_programs = [\"cargo\", \"git\"]\n");
+        perms
+            .tighten(&[], &[], &["git".to_owned(), "npm".to_owned()])
+            .expect("tightens");
+        assert_eq!(perms.shell_refusal("git status"), None);
+        assert!(perms.shell_refusal("cargo test").is_some());
+        assert!(
+            perms.shell_refusal("npm test").is_some(),
+            "npm was not the user's"
+        );
+        let mut open = parse("");
+        open.tighten(&[], &[], &["cargo".to_owned()])
+            .expect("tightens");
+        assert!(open.shell_refusal("git status").is_some());
     }
 
     #[test]

@@ -15,7 +15,7 @@ use anvil_core::context;
 use anvil_core::provider::{self, Provider, SharedBudget, TokenBudget};
 use anvil_core::tools::{
     PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
-    SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry,
+    SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry, Workspace,
 };
 use anvil_types::trust::user_permissions_path;
 use anvil_types::{AnvilConfig, ProjectRules, PromptConfig};
@@ -179,6 +179,7 @@ impl Wiring {
         config: AnvilConfig,
         project: ProjectAccess,
     ) -> anyhow::Result<Self> {
+        anvil_types::child_env::set_pass_env(config.tools.pass_env.clone());
         let budget = TokenBudget::shared(config.limits.session_tokens);
         let shipped = project.trusted.then_some(cwd.as_path());
         let skills = Arc::new(SkillSet::discover(&skill_roots(shipped, home.as_deref())));
@@ -484,7 +485,11 @@ impl Wiring {
     ) -> anyhow::Result<ToolRegistry> {
         let mut permissions = self.user_permissions()?;
         permissions
-            .tighten(&self.project.rules.deny, &self.project.rules.ask)
+            .tighten(
+                &self.project.rules.deny,
+                &self.project.rules.ask,
+                &self.project.rules.shell_programs,
+            )
             .context("the repository's permission rules")?;
         let mut registry = ToolRegistry::with_builtins(permissions, prompt)
             .with_session_approvals(Arc::clone(&self.approvals));
@@ -550,12 +555,17 @@ impl Wiring {
     ///
     /// # Returns
     ///
-    /// The context, with the configured shell.
+    /// The context, with the configured shell and the folders outside the
+    /// project the file tools may open: `[tools] extra_dirs`, and the
+    /// loaded skills' folders for reading their supporting files.
     pub fn tool_context(&self) -> ToolContext {
         ToolContext {
-            cwd: self.cwd.clone(),
-            session_dir: None,
             shell: Shell::from_config(self.config.tools.shell.as_deref()),
+            workspace: Workspace {
+                extra_dirs: self.config.tools.extra_dirs.clone(),
+                read_only_dirs: self.skills.skills().iter().map(|s| s.dir.clone()).collect(),
+            },
+            ..ToolContext::new(self.cwd.clone())
         }
     }
 

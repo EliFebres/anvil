@@ -156,7 +156,7 @@ fn read_many(files: &[FileRange], ctx: &ToolContext) -> ToolOutput {
 
 /// Reads one range of one file, numbered, in at most `max_bytes`.
 fn read_range(range: &FileRange, ctx: &ToolContext, max_bytes: usize) -> Result<String, String> {
-    let path = ctx.resolve(&range.path);
+    let path = ctx.checked_path(&range.path, false)?;
     let shown = ctx.display_path(&path);
     let bytes = std::fs::read(&path).map_err(|error| format!("cannot read {shown}: {error}"))?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{shown} is not valid UTF-8 text"))?;

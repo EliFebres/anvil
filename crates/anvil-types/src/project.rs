@@ -16,7 +16,7 @@ use crate::error::ConfigError;
 pub const PROJECT_PERMISSIONS_FILE: &str = ".anvil/permissions.toml";
 
 /// The permission keys a repository may set; each one only tightens.
-pub const PROJECT_RULE_KEYS: [&str; 2] = ["deny", "ask"];
+pub const PROJECT_RULE_KEYS: [&str; 3] = ["deny", "ask", "shell_programs"];
 
 /// The commented template `anvil config init` writes into a repository.
 pub const PROJECT_TEMPLATE: &str = r#"# anvil settings for this repository.
@@ -31,6 +31,8 @@ pub const PROJECT_TEMPLATE: &str = r#"# anvil settings for this repository.
 [permissions]
 # deny = ["shell:git push*"]
 # ask = ["write_file:migrations/**"]
+# Limit `shell` to single programs from this list (it can only narrow yours).
+# shell_programs = ["cargo", "git"]
 "#;
 
 /// The tightening rules a repository supplies.
@@ -40,6 +42,9 @@ pub struct ProjectRules {
     pub deny: Vec<String>,
     /// Calls the repository wants asked about, even when the user allows them.
     pub ask: Vec<String>,
+    /// Programs the repository limits `shell` to; it can only narrow the
+    /// user's own list.
+    pub shell_programs: Vec<String>,
     /// One line per key that was ignored, to show the user.
     pub ignored: Vec<String>,
 }
@@ -48,7 +53,8 @@ pub struct ProjectRules {
 ///
 /// From `config.toml` only the `[permissions]` table is read; from
 /// `permissions.toml` the whole file is the table. In both, `deny` and `ask`
-/// are kept and every other key is recorded in [`ProjectRules::ignored`].
+/// and `shell_programs` are kept and every other key is recorded in
+/// [`ProjectRules::ignored`].
 ///
 /// # Arguments
 ///
@@ -62,7 +68,7 @@ pub struct ProjectRules {
 ///
 /// [`ConfigError::Read`] when a file exists but cannot be read,
 /// [`ConfigError::Parse`] when it is not TOML, and [`ConfigError::Project`]
-/// when `deny` or `ask` is not an array of strings.
+/// when a kept key is not an array of strings.
 pub fn load(root: &Path) -> Result<ProjectRules, ConfigError> {
     let mut rules = ProjectRules::default();
     let config_file = root.join(CONFIG_DIR).join(CONFIG_FILE);
@@ -99,9 +105,10 @@ fn take_rules(
         let target = match key.as_str() {
             "deny" => &mut rules.deny,
             "ask" => &mut rules.ask,
+            "shell_programs" => &mut rules.shell_programs,
             _ => {
                 rules.ignored.push(format!(
-                    "{}: permission key `{key}` is ignored; a repository can only add `deny` and `ask` rules",
+                    "{}: permission key `{key}` is ignored; a repository can only add `deny`, `ask` and `shell_programs`",
                     path.display()
                 ));
                 continue;

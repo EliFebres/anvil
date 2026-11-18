@@ -50,7 +50,10 @@ impl Tool for EditFile {
                 Ok(args) => args,
                 Err(output) => return output,
             };
-            let path = ctx.resolve(&args.path);
+            let path = match ctx.checked_path(&args.path, true) {
+                Ok(path) => path,
+                Err(reason) => return ToolOutput::error(reason),
+            };
             let shown = ctx.display_path(&path);
             if args.old.is_empty() {
                 return ToolOutput::error("old must not be empty");
