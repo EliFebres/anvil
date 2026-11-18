@@ -22,6 +22,8 @@ use std::time::Duration;
 use anvil_types::{LimitsConfig, Protocol, ProviderConfig};
 use futures_util::Stream;
 
+pub use crate::net::Egress;
+
 pub use anthropic::AnthropicProvider;
 pub use budget::{Budgeted, SharedBudget, TokenBudget};
 pub use error::ProviderError;
@@ -82,6 +84,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// * `cfg` - The entry.
 /// * `limits` - Retry, timeout and budget settings.
 /// * `budget` - The session budget shared by every provider.
+/// * `egress` - Where requests may go; the entry's `base_url` is checked
+///   before anything else, so a refused endpoint never sees a request.
 ///
 /// # Returns
 ///
@@ -89,6 +93,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// # Errors
 ///
+/// [`ProviderError::Refused`] when `egress` does not allow the endpoint,
 /// [`ProviderError::MissingApiKey`] when the configured environment variable
 /// is unset or empty, or [`ProviderError::Transport`] when the HTTP client
 /// cannot be built.
@@ -97,11 +102,19 @@ pub fn from_config(
     cfg: &ProviderConfig,
     limits: &LimitsConfig,
     budget: SharedBudget,
+    egress: &Egress,
 ) -> Result<Box<dyn Provider>, ProviderError> {
-    // A fake provider replays its script and has no key to read.
+    // A fake provider replays its script, sends nothing and has no key.
     let api_key = match cfg.protocol {
         Protocol::Fake => String::new(),
-        Protocol::Openai | Protocol::Anthropic => read_api_key(&cfg.api_key_env)?,
+        Protocol::Openai | Protocol::Anthropic => {
+            egress
+                .check(&cfg.base_url)
+                .map_err(|error| ProviderError::Refused {
+                    detail: format!("provider `{name}`: {error}"),
+                })?;
+            read_api_key(&cfg.api_key_env)?
+        }
     };
     build(name, cfg, api_key, limits, budget)
 }
@@ -124,9 +137,7 @@ pub(crate) fn build(
     limits: &LimitsConfig,
     budget: SharedBudget,
 ) -> Result<Box<dyn Provider>, ProviderError> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
+    let client = crate::net::http_client(CONNECT_TIMEOUT)
         .map_err(|error| ProviderError::transport(error.to_string()))?;
     let adapter: Box<dyn Provider> = match cfg.protocol {
         Protocol::Openai => Box::new(OpenAiProvider::new(name, cfg, api_key, limits, client)),
@@ -176,6 +187,7 @@ mod tests {
             &config(Protocol::Openai, true),
             &LimitsConfig::default(),
             TokenBudget::shared(10),
+            &Egress::default(),
         );
         assert!(matches!(
             result,

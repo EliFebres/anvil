@@ -20,9 +20,9 @@ pub mod ticket;
 pub mod trust;
 
 pub use config::{
-    AnvilConfig, IntegrationsConfig, LimitsConfig, LoadedConfig, PermissionRules, Price,
-    PromptConfig, Protocol, ProviderConfig, Roles, StateBudget, TelemetryConfig, TicketsConfig,
-    ToolsConfig, Unmatched,
+    AnvilConfig, IntegrationsConfig, LimitsConfig, LoadedConfig, NetworkConfig, PermissionRules,
+    Price, PromptConfig, Protocol, ProviderConfig, Roles, StateBudget, TelemetryConfig,
+    TicketsConfig, ToolsConfig, Unmatched,
 };
 pub use error::{ConfigError, DotenvError, ValidationError};
 pub use project::ProjectRules;

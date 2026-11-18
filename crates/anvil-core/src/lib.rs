@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod context;
+pub mod net;
 pub mod outline;
 pub mod provider;
 pub mod tools;

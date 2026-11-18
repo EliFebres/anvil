@@ -169,3 +169,48 @@ async fn doctor_reports_the_failing_provider_in_its_row_with_a_fix() {
     assert!(stdout.contains("SKIP  secrets"), "{stdout}");
     assert!(stdout.contains("check(s) failed"), "{stdout}");
 }
+
+#[tokio::test]
+async fn a_server_that_echoes_the_key_cannot_put_it_in_output_or_logs() {
+    const KEY: &str = "echoed-secret-value-1234567890";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_raw(
+            format!(r#"{{"error":{{"message":"bad key Bearer {KEY}"}}}}"#),
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir");
+    write(
+        &home.join(".anvil").join("config.toml"),
+        &config(&server.uri(), &server.uri()),
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(&project)
+        .env("ANVIL_HOME", &home)
+        .env("ANVIL_LOG", "debug")
+        .env("ANVIL_TEST_GOOD_KEY", KEY)
+        .env("ANVIL_TEST_BAD_KEY", KEY)
+        .arg("doctor")
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("[redacted]"), "{stdout}");
+    assert!(!stdout.contains(KEY), "{stdout}");
+    assert!(!stderr.contains(KEY), "{stderr}");
+    let logs = project.join(".anvil").join("logs");
+    for entry in std::fs::read_dir(&logs).expect("logs written").flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        assert!(
+            !text.contains(KEY),
+            "{} holds the key",
+            entry.path().display()
+        );
+    }
+}

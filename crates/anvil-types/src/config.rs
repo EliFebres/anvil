@@ -100,6 +100,11 @@ summarizer = "runpod"
 # [integrations]
 # herdr = false
 
+# Hosts a provider may be reached on over plain http, such as a GPU server on
+# your own network. Everything else must use https, except localhost.
+# [network]
+# allow_http_hosts = ["gpu.lan"]
+
 # Lines added to the coder's system prompt, one instruction each. Profiles use
 # this to explain their own rules.
 # [prompt]
@@ -500,6 +505,16 @@ pub struct MemoryConfig {
     pub always_summarize: bool,
 }
 
+/// Rules for anvil's outbound requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, default)]
+pub struct NetworkConfig {
+    /// Hosts a provider may be reached on over plain http. Every other
+    /// endpoint must use https, except loopback (`localhost`, `127.0.0.1`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow_http_hosts: Vec<String>,
+}
+
 /// Optional reports to other tools.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields, default)]
@@ -651,6 +666,9 @@ pub struct AnvilConfig {
     /// Optional reports to other tools.
     #[serde(default)]
     pub integrations: IntegrationsConfig,
+    /// Rules for outbound requests.
+    #[serde(default)]
+    pub network: NetworkConfig,
 }
 
 impl AnvilConfig {

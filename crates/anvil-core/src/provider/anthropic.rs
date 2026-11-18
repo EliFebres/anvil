@@ -91,7 +91,7 @@ impl Provider for AnthropicProvider {
                 .header("x-api-key", &api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .json(&body);
-            http::send_attempt(builder)
+            http::send_attempt(builder, api_key.clone())
         };
         http::start(
             self.stream_cfg.clone(),
@@ -817,7 +817,7 @@ mod tests {
             script: None,
         };
         let limits = LimitsConfig::default();
-        let client = reqwest::Client::new();
+        let client = crate::net::http_client(std::time::Duration::from_secs(1)).expect("client");
         let provider = AnthropicProvider::new("a", &cfg, "k".to_owned(), &limits, client.clone());
         assert_eq!(provider.max_output_tokens, DEFAULT_MAX_TOKENS);
         assert_eq!(provider.url, "https://api.anthropic.com/v1/messages");

@@ -174,12 +174,18 @@ async fn forward(tx: &mpsc::Sender<Result<Event, ProviderError>>, items: Items) 
 /// # Arguments
 ///
 /// * `builder` - The fully prepared request.
+/// * `api_key` - The key the request carries; removed from any error body
+///   the server returns, so a server that echoes it cannot put it in a log
+///   or a transcript.
 ///
 /// # Returns
 ///
 /// The body byte stream on 2xx; `Retry` on connection failures, 408, 429 and
 /// 5xx; `Fatal` on every other status or an unbuildable request.
-pub(crate) async fn send_attempt(builder: reqwest::RequestBuilder) -> Attempt<ByteStream> {
+pub(crate) async fn send_attempt(
+    builder: reqwest::RequestBuilder,
+    api_key: String,
+) -> Attempt<ByteStream> {
     let response = match builder.send().await {
         Ok(response) => response,
         Err(error) if error.is_builder() => {
@@ -207,7 +213,10 @@ pub(crate) async fn send_attempt(builder: reqwest::RequestBuilder) -> Attempt<By
             .get("retry-after")
             .and_then(|value| value.to_str().ok()),
     );
-    let body = response.text().await.unwrap_or_default();
+    let mut body = response.text().await.unwrap_or_default();
+    if !api_key.is_empty() {
+        body = body.replace(&api_key, "[redacted]");
+    }
     let error = ProviderError::Http {
         status,
         body: truncate(body),

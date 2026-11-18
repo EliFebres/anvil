@@ -21,6 +21,8 @@ pub struct OpenAiProvider {
     url: String,
     /// `Authorization` header value.
     authorization: String,
+    /// The key inside `authorization`, removed from error bodies.
+    api_key: String,
     /// Model name as the server expects it.
     model: String,
     /// Default output cap, if configured.
@@ -54,6 +56,7 @@ impl OpenAiProvider {
             client,
             url: format!("{}/chat/completions", cfg.base_url.trim_end_matches('/')),
             authorization: format!("Bearer {api_key}"),
+            api_key,
             model: cfg.model.clone(),
             max_output_tokens: cfg.max_output_tokens,
             stream_cfg: StreamConfig {
@@ -72,13 +75,14 @@ impl Provider for OpenAiProvider {
         let client = self.client.clone();
         let url = self.url.clone();
         let authorization = self.authorization.clone();
+        let api_key = self.api_key.clone();
         let attempt = move |index: u32| {
             tracing::debug!(attempt = index, url = %url, "sending chat completion");
             let builder = client
                 .post(&url)
                 .header("authorization", &authorization)
                 .json(&body);
-            http::send_attempt(builder)
+            http::send_attempt(builder, api_key.clone())
         };
         http::start(self.stream_cfg.clone(), attempt, OpenAiDecoder::default())
     }

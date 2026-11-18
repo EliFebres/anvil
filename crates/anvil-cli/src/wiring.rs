@@ -12,7 +12,7 @@ use anvil_core::agent::{
     ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders, PromptSection,
 };
 use anvil_core::context;
-use anvil_core::provider::{self, Provider, SharedBudget, TokenBudget};
+use anvil_core::provider::{self, Egress, Provider, SharedBudget, TokenBudget};
 use anvil_core::tools::{
     PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
     SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry, Workspace,
@@ -64,6 +64,8 @@ pub struct Wiring {
     pub config: AnvilConfig,
     /// What the repository may contribute.
     pub project: ProjectAccess,
+    /// Where provider requests may go.
+    pub egress: Egress,
     /// The session's token budget, shared by every provider.
     pub budget: SharedBudget,
     /// Skills discovered from the project, the home directory and the bundle.
@@ -191,11 +193,13 @@ impl Wiring {
             SessionApprovals::preapproved(config_allow_tools(&config))
                 .context("permissions.allow_tools in the configuration")?,
         ));
+        let egress = Egress::personal(config.network.allow_http_hosts.clone());
         Ok(Self {
             cwd,
             home,
             config,
             project,
+            egress,
             budget,
             skills,
             commands,
@@ -393,9 +397,14 @@ impl Wiring {
             .providers
             .get(name)
             .with_context(|| format!("no provider named `{name}` in [providers]"))?;
-        let provider =
-            provider::from_config(name, entry, &self.config.limits, Arc::clone(&self.budget))
-                .with_context(|| format!("building provider `{name}`"))?;
+        let provider = provider::from_config(
+            name,
+            entry,
+            &self.config.limits,
+            Arc::clone(&self.budget),
+            &self.egress,
+        )
+        .with_context(|| format!("building provider `{name}`"))?;
         Ok(Arc::from(provider))
     }
 
@@ -904,6 +913,27 @@ mod tests {
         assert_eq!(run.result.as_deref(), Ok("all done"));
         assert_eq!(run.turns.len(), 2);
         assert_eq!(wiring.budget.lock().expect("lock").used(), 30);
+    }
+
+    #[test]
+    fn plain_http_to_a_lan_host_is_refused_unless_the_user_lists_it() {
+        // `PATH` stands in for a key variable that is always set.
+        let endpoint = r#"
+[providers.gpu]
+protocol = "openai"
+base_url = "http://10.0.0.5:8000/v1"
+api_key_env = "PATH"
+model = "m"
+context_window = 1000
+supports_tools = true
+supports_reasoning = false
+"#;
+        let wiring = Wiring::new(config(endpoint), ProjectAccess::default()).expect("wiring");
+        let error = wiring.provider("gpu").err().expect("refused");
+        assert!(format!("{error:#}").contains("plain http"), "{error:#}");
+        let listed = format!("{endpoint}\n[network]\nallow_http_hosts = [\"10.0.0.5\"]\n");
+        let wiring = Wiring::new(config(&listed), ProjectAccess::default()).expect("wiring");
+        assert!(wiring.provider("gpu").is_ok());
     }
 
     #[test]
