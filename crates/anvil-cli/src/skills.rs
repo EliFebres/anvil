@@ -49,7 +49,7 @@ pub async fn run(command: SkillCommand, home: Option<&Path>, cwd: &Path) -> anyh
             Ok(0)
         }
         SkillCommand::List => {
-            let set = SkillSet::discover(&skill_roots(cwd, home));
+            let set = SkillSet::discover(&skill_roots(Some(cwd), home));
             if set.is_empty() {
                 println!("no skills found; `anvil skill add <directory>`");
             }
@@ -75,7 +75,7 @@ pub async fn run(command: SkillCommand, home: Option<&Path>, cwd: &Path) -> anyh
             Ok(0)
         }
         SkillCommand::Show { name } => {
-            let set = SkillSet::discover(&skill_roots(cwd, home));
+            let set = SkillSet::discover(&skill_roots(Some(cwd), home));
             let skill = set.get(&name).with_context(|| {
                 format!("no skill named `{name}`; `anvil skill list` shows them")
             })?;

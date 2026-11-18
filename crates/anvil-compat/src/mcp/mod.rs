@@ -94,18 +94,20 @@ impl ServerSet {
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and its servers may not load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The paths, whether or not they exist.
-    pub fn definition_files(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-        let mut files = vec![
-            cwd.join(".mcp.json"),
-            cwd.join(".claude").join("settings.json"),
-            cwd.join(".claude").join("settings.local.json"),
-        ];
+    pub fn definition_files(project: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        if let Some(project) = project {
+            files.push(project.join(".mcp.json"));
+            files.push(project.join(".claude").join("settings.json"));
+            files.push(project.join(".claude").join("settings.local.json"));
+        }
         if let Some(home) = home {
             files.push(home.join(".anvil").join("mcp.toml"));
         }
@@ -116,15 +118,16 @@ impl ServerSet {
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and its servers may not load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The set. Missing files are skipped; broken ones are listed in `errors`.
-    pub fn load(cwd: &Path, home: Option<&Path>) -> Self {
+    pub fn load(project: Option<&Path>, home: Option<&Path>) -> Self {
         let mut set = Self::default();
-        for path in Self::definition_files(cwd, home) {
+        for path in Self::definition_files(project, home) {
             let text = match std::fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -617,7 +620,7 @@ timeout_secs = 5
             "[servers.a]\ncommand = \"home-a\"\n[servers.b]\ncommand = \"home-b\"\n",
         )
         .expect("write");
-        let set = ServerSet::load(project.path(), Some(home.path()));
+        let set = ServerSet::load(Some(project.path()), Some(home.path()));
         assert_eq!(server_names(set.servers()), ["a", "b"]);
         assert!(
             matches!(&set.get("a").expect("a").transport, Transport::Stdio { command, .. } if command == "project-a")

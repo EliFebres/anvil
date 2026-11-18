@@ -10,8 +10,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub yes: bool,
 
-    /// A named profile, `~/.anvil/profiles/<name>.toml`, layered over the global and
-    /// project configuration; its `[permissions]` table replaces `.anvil/permissions.toml`.
+    /// A named profile, `~/.anvil/profiles/<name>.toml`, layered over `~/.anvil/config.toml`;
+    /// its `[permissions]` table replaces your saved rules for the repository.
     #[arg(long, global = true, value_name = "NAME")]
     pub profile: Option<String>,
 
@@ -54,6 +54,13 @@ pub enum Command {
     },
     /// List saved sessions, newest first.
     Sessions,
+    /// Show what this repository ships (hooks, MCP servers, skills, commands,
+    /// agents, instruction files) and decide whether anvil may load it.
+    Trust {
+        /// Record the repository as not trusted, without asking.
+        #[arg(long)]
+        revoke: bool,
+    },
     /// Manage anvil configuration.
     Config {
         /// Which configuration action to take.
@@ -309,11 +316,12 @@ pub enum SkillCommand {
 pub enum ConfigCommand {
     /// Write a template config file. Refuses to overwrite an existing one.
     Init {
-        /// Write the global `~/.anvil/config.toml` instead of the project `.anvil/config.toml`.
+        /// Write your own `~/.anvil/config.toml` instead of the repository's
+        /// `.anvil/config.toml`, which may only add deny and ask rules.
         #[arg(long)]
         global: bool,
     },
-    /// Print the merged configuration (project over global) as TOML.
+    /// Print your configuration (and profile, if given) as TOML.
     Show,
 }
 

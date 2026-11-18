@@ -24,7 +24,7 @@ use chrono::Utc;
 
 use crate::cli::TicketCommand;
 use crate::terminal::read_line;
-use crate::wiring::Wiring;
+use crate::wiring::{ProjectAccess, Wiring};
 
 /// The bare cache of the ticket queue, inside the anvil home.
 const QUEUE_CACHE: &str = "queue.git";
@@ -76,7 +76,7 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
             Ok(0)
         }
         TicketCommand::Submit { id, all } => {
-            let queue = queue_url(home, cwd).context(NO_QUEUE)?;
+            let queue = queue_url(home).context(NO_QUEUE)?;
             let ids: Vec<String> = if all {
                 store
                     .drafts
@@ -103,11 +103,12 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
             Ok(i32::from(failures > 0))
         }
         TicketCommand::Draft => {
-            let wiring = Wiring::new(anvil_types::config::load(home, cwd)?.config)?;
+            let config = anvil_types::config::load(home)?.config;
+            let wiring = Wiring::new(config, ProjectAccess::default())?;
             draft(&wiring, &mut store).await
         }
         TicketCommand::Review => {
-            let queue = queue_url(home, cwd);
+            let queue = queue_url(home);
             review(&mut store, &root.join(QUEUE_CACHE), queue.as_deref())
         }
     }
@@ -115,8 +116,8 @@ pub async fn run(command: TicketCommand, home: Option<&Path>, cwd: &Path) -> any
 
 /// `[tickets] queue` from the configuration; `None` when it is unset or
 /// there is no configuration.
-fn queue_url(home: Option<&Path>, cwd: &Path) -> Option<String> {
-    anvil_types::config::load(home, cwd)
+fn queue_url(home: Option<&Path>) -> Option<String> {
+    anvil_types::config::load(home)
         .ok()
         .and_then(|loaded| loaded.config.tickets.queue)
 }

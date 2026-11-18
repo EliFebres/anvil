@@ -162,14 +162,18 @@ impl HookConfig {
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and its hooks may not load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The paths, whether or not they exist.
-    pub fn settings_files(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = PROJECT_SETTINGS.iter().map(|name| cwd.join(name)).collect();
+    pub fn settings_files(project: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        if let Some(project) = project {
+            files.extend(PROJECT_SETTINGS.iter().map(|name| project.join(name)));
+        }
         if let Some(home) = home {
             files.extend(HOME_SETTINGS.iter().map(|name| home.join(name)));
         }
@@ -180,16 +184,17 @@ impl HookConfig {
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and its hooks may not load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The config. Files that do not exist are skipped; files that do not
     /// parse are listed in `errors`.
-    pub fn load(cwd: &Path, home: Option<&Path>) -> Self {
+    pub fn load(project: Option<&Path>, home: Option<&Path>) -> Self {
         let mut config = Self::default();
-        for path in Self::settings_files(cwd, home) {
+        for path in Self::settings_files(project, home) {
             let text = match std::fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -715,7 +720,7 @@ mod tests {
         std::fs::create_dir_all(project.path().join(".anvil")).expect("mkdir");
         std::fs::write(project.path().join(".anvil/settings.json"), "{not json").expect("write");
 
-        let config = HookConfig::load(project.path(), Some(home.path()));
+        let config = HookConfig::load(Some(project.path()), Some(home.path()));
         assert_eq!(config.events(), [HookEvent::PreToolUse, HookEvent::Stop]);
         assert_eq!(config.command_count(), 3);
         let pre = config.groups(HookEvent::PreToolUse);

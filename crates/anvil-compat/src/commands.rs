@@ -98,15 +98,16 @@ impl CommandSet {
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and nothing it ships may load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The set. Nothing here fails: broken files are listed in `errors`.
-    pub fn discover(cwd: &Path, home: Option<&Path>) -> Self {
+    pub fn discover(project: Option<&Path>, home: Option<&Path>) -> Self {
         let mut set = Self::default();
-        for (dir, origin) in config_dirs(cwd, home, COMMANDS_DIR) {
+        for (dir, origin) in config_dirs(project, home, COMMANDS_DIR) {
             if !dir.is_dir() {
                 continue;
             }
@@ -291,7 +292,7 @@ mod tests {
             "---\n- not: [a map\n---\n",
         );
 
-        let set = CommandSet::discover(project.path(), Some(home.path()));
+        let set = CommandSet::discover(Some(project.path()), Some(home.path()));
         let names: Vec<&str> = set.commands().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["hello", "lint", "review"]);
         let hello = set.get("hello").expect("hello");
@@ -339,7 +340,7 @@ mod tests {
             &project.path().join(".claude/commands/hello.md"),
             "---\ndescription: Say hello\nargument-hint: \"[name]\"\n---\nHello $ARGUMENTS!\n",
         );
-        let set = CommandSet::discover(project.path(), None);
+        let set = CommandSet::discover(Some(project.path()), None);
         assert_eq!(
             set.expand_slash("/hello  Eli ").as_deref(),
             Some("Hello Eli!\n")

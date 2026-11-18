@@ -133,7 +133,7 @@ async fn run_loop_planning(
         gate: Arc::clone(&gate),
         dir: dir.path().to_path_buf(),
     });
-    let agents = Arc::new(AgentSet::discover(dir.path(), None));
+    let agents = Arc::new(AgentSet::discover(Some(dir.path()), None));
     let mut registry = ToolRegistry::with_builtins(
         Permissions::empty(),
         Box::new(StaticPrompt(PromptAnswer::No)),
@@ -168,6 +168,7 @@ async fn run_loop_planning(
         check: CheckCommand::None,
         context_window: 100_000,
         home_dir: None,
+        trusted_project: true,
         extra_instructions: Vec::new(),
         sections: Vec::new(),
         review_sections: Vec::new(),

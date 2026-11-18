@@ -1,8 +1,10 @@
 //! Provider and role configuration: which model does which job.
 //!
-//! Lives at `~/.anvil/config.toml` (global) and `.anvil/config.toml`
-//! (project, overrides global). Models are swapped by editing these files,
-//! never by changing code.
+//! Lives in the user's own `~/.anvil/config.toml`, optionally with a named
+//! profile on top. A repository's `.anvil/config.toml` is not part of it:
+//! a repository can only add permission rules that tighten (see
+//! [`crate::project`]). Models are swapped by editing these files, never by
+//! changing code.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, ValidationError};
 
-/// Directory that holds anvil configuration, both globally and per project.
+/// Directory that holds anvil configuration, in the home directory and in a repository.
 pub const CONFIG_DIR: &str = ".anvil";
 
 /// File name of the configuration file inside [`CONFIG_DIR`].
@@ -21,9 +23,10 @@ pub const CONFIG_FILE: &str = "config.toml";
 /// Folder of named profiles under the home directory: `~/.anvil/profiles/<name>.toml`.
 pub const PROFILES_DIR: &str = ".anvil/profiles";
 
-/// The commented template written by `anvil config init`.
-pub const CONFIG_TEMPLATE: &str = r#"# anvil configuration.
-# Global: ~/.anvil/config.toml   Project: .anvil/config.toml (project overrides global).
+/// The commented template written by `anvil config init --global`.
+pub const CONFIG_TEMPLATE: &str = r#"# anvil configuration: ~/.anvil/config.toml.
+# A repository's own .anvil/config.toml cannot change anything here; it can
+# only add permission rules that refuse calls or make them ask first.
 # Swap models by editing this file; no code changes are needed.
 
 [providers.runpod]
@@ -679,13 +682,13 @@ pub struct LoadedConfig {
     pub merged: toml::Table,
 }
 
-/// The global or project configuration path.
+/// The user's or the repository's configuration path.
 ///
 /// # Arguments
 ///
 /// * `home` - The home directory, if known.
 /// * `global` - When true, `~/.anvil/config.toml`; otherwise `.anvil/config.toml`
-///   relative to the current directory.
+///   relative to the current directory, which holds only tightening rules.
 ///
 /// # Returns
 ///
@@ -699,26 +702,21 @@ pub fn config_path(home: Option<&Path>, global: bool) -> Option<PathBuf> {
     Some(base.join(CONFIG_DIR).join(CONFIG_FILE))
 }
 
-/// Loads `~/.anvil/config.toml` and `.anvil/config.toml` and merges them.
-///
-/// Tables merge key by key, so a project file can override one provider
-/// field or one limit without repeating the rest. Scalars and arrays from
-/// the project file replace the global ones.
+/// Loads `~/.anvil/config.toml`.
 ///
 /// # Arguments
 ///
 /// * `home` - The home directory, if known.
-/// * `cwd` - The project root.
 ///
 /// # Returns
 ///
-/// The merged configuration.
+/// The configuration.
 ///
 /// # Errors
 ///
-/// When neither file exists, a file does not parse, or validation fails.
-pub fn load(home: Option<&Path>, cwd: &Path) -> Result<LoadedConfig, ConfigError> {
-    load_profile(home, cwd, None)
+/// When the file does not exist, does not parse, or validation fails.
+pub fn load(home: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
+    load_profile(home, None)
 }
 
 /// The path of a named profile.
@@ -735,17 +733,18 @@ pub fn profile_path(home: &Path, name: &str) -> PathBuf {
     home.join(PROFILES_DIR).join(format!("{name}.toml"))
 }
 
-/// Loads the global and project files, then a named profile on top.
+/// Loads `~/.anvil/config.toml`, then a named profile on top.
 ///
-/// A profile is a third layer, `~/.anvil/profiles/<name>.toml`, with the
-/// same shape as the other two. Unlike them it is required when named:
+/// A profile is a second layer, `~/.anvil/profiles/<name>.toml`, with the
+/// same shape. Tables merge key by key, so a profile can override one
+/// provider field or one limit without repeating the rest; scalars and
+/// arrays replace. Unlike the config file a profile is required when named:
 /// running with a profile that does not exist would silently drop the
 /// restrictions the caller asked for.
 ///
 /// # Arguments
 ///
 /// * `home` - The home directory, if known.
-/// * `cwd` - The project root.
 /// * `profile` - The profile name, if any.
 ///
 /// # Returns
@@ -758,17 +757,19 @@ pub fn profile_path(home: &Path, name: &str) -> PathBuf {
 /// `home` is unknown), and the errors of [`load`].
 pub fn load_profile(
     home: Option<&Path>,
-    cwd: &Path,
     profile: Option<&str>,
 ) -> Result<LoadedConfig, ConfigError> {
     let mut merged = toml::Table::new();
     let mut sources = Vec::new();
     let profile_file = match profile {
         Some(name) => {
-            let path = home
-                .map(|home| profile_path(home, name))
-                .unwrap_or_else(|| PathBuf::from(PROFILES_DIR).join(format!("{name}.toml")));
-            if !path.is_file() {
+            let path = match home {
+                Some(home) => profile_path(home, name),
+                None => PathBuf::from("~")
+                    .join(PROFILES_DIR)
+                    .join(format!("{name}.toml")),
+            };
+            if home.is_none() || !path.is_file() {
                 return Err(ConfigError::ProfileNotFound { path });
             }
             Some(path)
@@ -777,7 +778,6 @@ pub fn load_profile(
     };
     let candidates = [
         home.map(|home| home.join(CONFIG_DIR).join(CONFIG_FILE)),
-        Some(cwd.join(CONFIG_DIR).join(CONFIG_FILE)),
         profile_file,
     ];
     for path in candidates.into_iter().flatten() {
@@ -868,11 +868,10 @@ mod tests {
     #[test]
     fn removed_sections_fail_with_the_reason() {
         let home = tempfile::tempdir().expect("home");
-        let project = tempfile::tempdir().expect("project");
         for (section, expected) in [("update", "self-update was removed"), ("notify", "webhook")] {
             let text = format!("{SETUP_PROVIDERS}\n[{section}]\n");
             write(home.path(), &text);
-            let error = load(Some(home.path()), project.path()).expect_err("removed section");
+            let error = load(Some(home.path())).expect_err("removed section");
             assert!(
                 matches!(error, ConfigError::RemovedSection { .. }),
                 "{section}: {error:?}"
@@ -895,37 +894,20 @@ mod tests {
     }
 
     #[test]
-    fn project_overrides_global_key_by_key() {
+    fn profile_overrides_the_config_key_by_key_and_must_exist() {
         let home = tempfile::tempdir().expect("home");
-        let cwd = tempfile::tempdir().expect("cwd");
-        write(home.path(), CONFIG_TEMPLATE);
-        write(
-            cwd.path(),
-            "[providers.runpod]\nmodel = \"local-model\"\n\n[limits]\nmax_retries = 1\n",
-        );
-        let loaded = load(Some(home.path()), cwd.path()).expect("loads");
-        assert_eq!(loaded.sources.len(), 2);
-        let runpod = &loaded.config.providers["runpod"];
-        assert_eq!(runpod.model, "local-model");
-        assert_eq!(runpod.context_window, 131_072, "global field kept");
-        assert_eq!(loaded.config.limits.max_retries, 1);
-        assert_eq!(loaded.config.limits.request_timeout_s, 600);
-        assert_eq!(loaded.config.roles.coder, "runpod");
-    }
-
-    #[test]
-    fn profile_is_a_third_layer_and_must_exist() {
-        let home = tempfile::tempdir().expect("home");
-        let cwd = tempfile::tempdir().expect("cwd");
         write(home.path(), CONFIG_TEMPLATE);
         let profile = profile_path(home.path(), "ci");
         std::fs::create_dir_all(profile.parent().expect("parent")).expect("mkdir");
         std::fs::write(
             &profile,
-            "[limits]\nsession_tokens = 7\n[permissions]\nallow = [\"shell:cargo *\"]\ndefault = \"deny\"\n",
+            "[providers.runpod]\nmodel = \"local-model\"\n[limits]\nsession_tokens = 7\n[permissions]\nallow = [\"shell:cargo *\"]\ndefault = \"deny\"\n",
         )
         .expect("write");
-        let loaded = load_profile(Some(home.path()), cwd.path(), Some("ci")).expect("loads");
+        let loaded = load_profile(Some(home.path()), Some("ci")).expect("loads");
+        let runpod = &loaded.config.providers["runpod"];
+        assert_eq!(runpod.model, "local-model");
+        assert_eq!(runpod.context_window, 131_072, "config field kept");
         assert_eq!(loaded.sources.len(), 2);
         assert_eq!(loaded.sources[1], profile);
         assert_eq!(loaded.config.limits.session_tokens, 7);
@@ -936,20 +918,20 @@ mod tests {
         assert_eq!(rules.allow, vec!["shell:cargo *".to_owned()]);
         assert_eq!(rules.unmatched, Some(Unmatched::Deny));
         assert!(
-            load(Some(home.path()), cwd.path())
+            load(Some(home.path()))
                 .expect("no profile")
                 .config
                 .permissions
                 .is_none()
         );
 
-        let error = load_profile(Some(home.path()), cwd.path(), Some("work")).expect_err("missing");
+        let error = load_profile(Some(home.path()), Some("work")).expect_err("missing");
         assert!(
             matches!(&error, ConfigError::ProfileNotFound { path } if path.ends_with("work.toml")),
             "{error}"
         );
         assert!(matches!(
-            load_profile(None, cwd.path(), Some("work")),
+            load_profile(None, Some("work")),
             Err(ConfigError::ProfileNotFound { .. })
         ));
     }
@@ -979,22 +961,23 @@ mod tests {
 
     #[test]
     fn missing_everything_and_invalid_files_fail_clearly() {
-        let cwd = tempfile::tempdir().expect("cwd");
-        let error = load(None, cwd.path()).expect_err("no config");
-        assert!(error.to_string().contains("anvil config init"));
+        let home = tempfile::tempdir().expect("home");
+        let error = load(Some(home.path())).expect_err("no config");
+        assert!(error.to_string().contains("anvil config init --global"));
         assert!(error.to_string().contains("anvil setup"));
+        assert!(matches!(load(None), Err(ConfigError::NotFound)));
 
         write(
-            cwd.path(),
+            home.path(),
             "[roles]\ncoder = \"nope\"\nsummarizer = \"nope\"\n",
         );
-        let error = load(None, cwd.path()).expect_err("unknown provider");
+        let error = load(Some(home.path())).expect_err("unknown provider");
         assert!(matches!(error, ConfigError::Invalid { .. }), "{error}");
         assert!(error.to_string().contains("validating"), "{error}");
 
-        write(cwd.path(), "not = [toml");
+        write(home.path(), "not = [toml");
         assert!(matches!(
-            load(None, cwd.path()),
+            load(Some(home.path())),
             Err(ConfigError::Parse { .. })
         ));
     }

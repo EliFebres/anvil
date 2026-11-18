@@ -549,8 +549,11 @@ impl ChatSession<'_> {
         if self.mode == State::Review {
             return prompts::review_prompt(&sections.review);
         }
-        let mut instructions =
-            discover_instructions(self.wiring.home.as_deref(), &self.wiring.cwd, &self.touched);
+        let mut instructions = discover_instructions(
+            self.wiring.home.as_deref(),
+            self.wiring.trusted_root(),
+            &self.touched,
+        );
         instructions.extend(self.wiring.extra_instructions(&self.registry.names()));
         instructions.extend(self.session_context.iter().cloned());
         let mut coder_sections = sections.coder;

@@ -49,7 +49,7 @@ coder = "local"
 summarizer = "local"
 ```
 
-A project can add `.anvil/config.toml` to override the global file, and `anvil config init` writes a commented template for either. Keys never live in configuration files: they come from the environment, `~/.anvil/.env` or the project's `.anvil/.env`, and `anvil scan-keys` fails if a tracked file contains one.
+Everything lives in your own `~/.anvil/`: `anvil config init --global` writes a commented template there. A repository's `.anvil/config.toml` can only add permission rules that refuse calls or make them ask (`anvil config init` writes that template); anything else in it is ignored with a warning. Keys never live in configuration files: they come from the environment or `~/.anvil/.env`, never from the repository, and `anvil scan-keys` fails if a tracked file contains one.
 
 ## Basic use
 
@@ -75,9 +75,9 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 ## Security model
 
 - anvil sends prompts, and the files and command output its tools read, to the providers you configure. It has no telemetry upload, no self-update and no update check; the only other thing that reaches the network is `anvil ticket submit`, which you run yourself after configuring a queue.
-- File writes, edits and shell commands ask first. Rules in `.anvil/permissions.toml` or a `--profile` change that; a few destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `Remove-Item -Recurse`) are refused even under `--yes` unless a rule names them.
+- File writes, edits and shell commands ask first. Your own rules (in `~/.anvil/config.toml`, a `--profile`, or what `always` saved under `~/.anvil/permissions/`) change that; a repository can only add `deny` and `ask` rules; a few destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `Remove-Item -Recurse`) are refused even under `--yes` unless a rule names them.
 - Keys are read from the environment and `.env` files, never from configuration.
-- anvil trusts the repository it runs in: that repository's `.anvil/` and `.claude/` files can change providers, permissions, hooks and MCP servers. Read them before running anvil in code you did not write.
+- anvil does not trust the repository it runs in. Its hooks, MCP servers, skills, commands, agents and instruction files load only after you answer the trust prompt, which lists each of them; `anvil trust` asks again and `anvil trust --revoke` withdraws it. Without a terminal, an undecided repository is untrusted.
 
 [SECURITY.md](SECURITY.md) has the details, with file references: every network destination and what triggers it, what is stored where, where keys come from, the permission defaults, and how releases are built and verified.
 
@@ -94,7 +94,7 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 | `anvil status [--json] [--all]` | Where every session of this project stands, newest first: state, loop step, age, spend, task, id. See [Watching a session](#watching-a-session). |
 | `anvil --yes ...` | Unattended: approve the plan, allow every asked tool call, keep every proposed memory. Deny rules and the blocked commands still apply. |
 | `anvil --plain ...` | Keep the line renderer and stdin prompts. Chosen automatically when a standard stream is not a terminal. |
-| `anvil --profile <name> ...` | Layer `~/.anvil/profiles/<name>.toml` over the config; its `[permissions]` table replaces the project's. |
+| `anvil --profile <name> ...` | Layer `~/.anvil/profiles/<name>.toml` over the config; its `[permissions]` table replaces your saved rules for the repository. |
 
 #### The full-screen UI
 

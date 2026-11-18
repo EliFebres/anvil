@@ -3,6 +3,7 @@
 //! Order: `~/.anvil/ANVIL.md`, then the repo's `ANVIL.md` (or `CLAUDE.md`
 //! when there is no `ANVIL.md`), then any `CLAUDE.md` in a directory
 //! between the repo root and a file touched this session, shallowest first.
+//! The repository's files load only when the user trusts the repository.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -17,21 +18,26 @@ pub const GLOBAL_FILE: &str = ".anvil/ANVIL.md";
 /// # Arguments
 ///
 /// * `home` - The user's home directory, if known.
-/// * `cwd` - The project root.
-/// * `touched` - Files read or written this session, absolute or relative to `cwd`.
+/// * `project` - The project root, or `None` when the repository is not
+///   trusted and only `~/.anvil/ANVIL.md` may load.
+/// * `touched` - Files read or written this session, absolute or relative
+///   to the project root.
 ///
 /// # Returns
 ///
 /// The instructions in prompt order. Unreadable files are skipped.
 pub fn discover_instructions(
     home: Option<&Path>,
-    cwd: &Path,
+    project: Option<&Path>,
     touched: &BTreeSet<PathBuf>,
 ) -> Vec<Instruction> {
     let mut found = Vec::new();
     if let Some(home) = home {
         push_if_present(&mut found, &home.join(GLOBAL_FILE), "~/.anvil/ANVIL.md");
     }
+    let Some(cwd) = project else {
+        return found;
+    };
     if cwd.join("ANVIL.md").is_file() {
         push_if_present(&mut found, &cwd.join("ANVIL.md"), "ANVIL.md");
     } else {
@@ -118,7 +124,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let found = discover_instructions(Some(home.path()), repo.path(), &touched);
+        let found = discover_instructions(Some(home.path()), Some(repo.path()), &touched);
         let sources: Vec<&str> = found.iter().map(|i| i.source.as_str()).collect();
         assert_eq!(
             sources,
@@ -133,16 +139,29 @@ mod tests {
     }
 
     #[test]
+    fn an_untrusted_repository_contributes_nothing() {
+        let home = tempfile::tempdir().expect("home");
+        let repo = tempfile::tempdir().expect("repo");
+        write(home.path(), ".anvil/ANVIL.md", "global rules");
+        write(repo.path(), "CLAUDE.md", "repo rules");
+        write(repo.path(), "a/CLAUDE.md", "nested rules");
+        let touched: BTreeSet<PathBuf> = [PathBuf::from("a/x.rs")].into_iter().collect();
+        let found = discover_instructions(Some(home.path()), None, &touched);
+        let sources: Vec<&str> = found.iter().map(|i| i.source.as_str()).collect();
+        assert_eq!(sources, ["~/.anvil/ANVIL.md"]);
+    }
+
+    #[test]
     fn anvil_md_replaces_claude_md_and_empty_files_are_skipped() {
         let repo = tempfile::tempdir().expect("repo");
         write(repo.path(), "CLAUDE.md", "claude");
         write(repo.path(), "ANVIL.md", "anvil");
-        let found = discover_instructions(None, repo.path(), &BTreeSet::new());
+        let found = discover_instructions(None, Some(repo.path()), &BTreeSet::new());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].source, "ANVIL.md");
 
         write(repo.path(), "ANVIL.md", "   \n");
-        let found = discover_instructions(None, repo.path(), &BTreeSet::new());
+        let found = discover_instructions(None, Some(repo.path()), &BTreeSet::new());
         assert!(
             found.is_empty(),
             "an empty ANVIL.md adds nothing and hides CLAUDE.md"
@@ -152,6 +171,6 @@ mod tests {
     #[test]
     fn nothing_found_is_fine() {
         let repo = tempfile::tempdir().expect("repo");
-        assert!(discover_instructions(None, repo.path(), &BTreeSet::new()).is_empty());
+        assert!(discover_instructions(None, Some(repo.path()), &BTreeSet::new()).is_empty());
     }
 }

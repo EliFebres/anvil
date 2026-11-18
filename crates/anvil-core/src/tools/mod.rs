@@ -17,7 +17,7 @@ pub mod list_dir;
 /// The `outline` tool: a file's or directory's structure without the bodies.
 pub mod outline;
 mod output;
-/// The permission model: `.anvil/permissions.toml`, rule matching, and the
+/// The permission model: the user's rules, tightening rules, rule matching, and the
 /// prompt hook the CLI implements.
 pub mod permissions;
 /// What a file-writing tool call will do, computed before it runs so the
@@ -786,7 +786,7 @@ impl ToolRegistry {
             self.observe(name, DecisionScope::Blocked, false);
             return Some((
                 ToolOutput::error(format!(
-                    "{reason}; blocked unless an `allow` rule in .anvil/permissions.toml covers it"
+                    "{reason}; blocked unless an `allow` rule in your own permission rules covers it"
                 )),
                 ToolOutcome::Blocked,
             ));

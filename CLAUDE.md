@@ -41,4 +41,4 @@ The full-screen UI lives in `crates/anvil-cli/src/tui/` (ratatui + crossterm). E
 - `skills/`: Claude Code-format skills that ship with anvil (`skills/<name>/SKILL.md`).
 - `SECURITY.md`: what anvil reads, stores and sends, for a reviewer.
 - Trunk is `main` and is protected. Changes reach it through pull requests with the required `ci` check (`.github/workflows/ci.yml`).
-- Config: global `~/.anvil/config.toml`, project `.anvil/config.toml` (project overrides global). `anvil config init [--global]` writes a template.
+- Config: the user's `~/.anvil/config.toml` (plus an optional `--profile`). A repository's `.anvil/config.toml` and `.anvil/permissions.toml` may only add `deny` and `ask` rules (`anvil-types/src/project.rs`); its hooks, MCP servers, skills, commands, agents and instruction files load only once the user trusts it (`anvil-cli/src/trust.rs`, `~/.anvil/trust.toml`). `anvil config init [--global]` writes a template.

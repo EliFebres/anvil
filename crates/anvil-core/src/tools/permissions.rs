@@ -1,8 +1,14 @@
+//! Tool permission rules.
 //!
 //! A rule is `tool` or `tool:glob`. The glob matches the call's target: the
 //! `path` argument for file tools, the `command` for `shell`. When several
-//! rules match, `deny` wins, then `allow`, then `ask`, then the tool's own
-//! default.
+//! rules match, `deny` wins, then a tightening `ask` (from the repository
+//! or a policy), then `allow`, then the user's own `ask`, then the tool's
+//! own default.
+//!
+//! The user's rules come from their configuration or profile, or from
+//! their own per-repository file under `~/.anvil/permissions/`. A
+//! repository can only add rules through [`Permissions::tighten`].
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
@@ -13,9 +19,6 @@ use globset::{Glob, GlobMatcher};
 use thiserror::Error;
 
 use crate::provider::lock_or_recover;
-
-/// Where the project's rules live, relative to the project root.
-pub const PERMISSIONS_FILE: &str = ".anvil/permissions.toml";
 
 /// Why the permissions file could not be used.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -70,7 +73,7 @@ pub enum PermissionError {
     },
 }
 
-/// The on-disk shape of `.anvil/permissions.toml`, shared with the
+/// The on-disk shape of a permissions file, shared with the
 /// `[permissions]` table of a profile.
 pub type PermissionsFile = PermissionRules;
 
@@ -160,8 +163,10 @@ pub struct Permissions {
     allow: Vec<Rule>,
     /// Parsed `ask` rules.
     ask: Vec<Rule>,
-    /// Parsed `deny` rules.
+    /// Parsed `deny` rules, the user's and any added by [`Permissions::tighten`].
     deny: Vec<Rule>,
+    /// `ask` rules added by [`Permissions::tighten`]; they beat `allow`.
+    forced_ask: Vec<Rule>,
 }
 
 impl Permissions {
@@ -178,6 +183,7 @@ impl Permissions {
             allow: Vec::new(),
             ask: Vec::new(),
             deny: Vec::new(),
+            forced_ask: Vec::new(),
         }
     }
 
@@ -206,6 +212,7 @@ impl Permissions {
             allow: parse_all(&rules.allow)?,
             ask: parse_all(&rules.ask)?,
             deny: parse_all(&rules.deny)?,
+            forced_ask: Vec::new(),
             unmatched: rules.unmatched.map(Decision::from),
             file: rules.clone(),
         })
@@ -237,12 +244,11 @@ impl Permissions {
         Ok(permissions)
     }
 
-    /// Loads `<project_root>/.anvil/permissions.toml`, or empty rules when
-    /// the file does not exist.
+    /// Loads the user's own rules file, or empty rules when it does not exist.
     ///
     /// # Arguments
     ///
-    /// * `project_root` - The project directory.
+    /// * `path` - The file, normally `~/.anvil/permissions/<repository>.toml`.
     ///
     /// # Returns
     ///
@@ -251,8 +257,7 @@ impl Permissions {
     /// # Errors
     ///
     /// When the file exists but cannot be read or parsed.
-    pub fn load(project_root: &Path) -> Result<Self, PermissionError> {
-        let path = project_root.join(PERMISSIONS_FILE);
+    pub fn load_file(path: PathBuf) -> Result<Self, PermissionError> {
         match std::fs::read_to_string(&path) {
             Ok(text) => Self::from_toml(&text, Some(path)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self {
@@ -266,8 +271,34 @@ impl Permissions {
         }
     }
 
-    /// Decides one call: `deny` beats `allow` beats `ask` beats the rules'
-    /// own `default`, which beats the tool's `default`.
+    /// Adds rules that can only make a call stricter. Each `deny` refuses a
+    /// call even when an `allow` covers it; each `ask` makes a call prompt
+    /// even when an `allow` covers it. They are never written to disk.
+    ///
+    /// The repository's own rules and a policy's rules come in this way, so
+    /// neither can loosen what the user decided.
+    ///
+    /// # Arguments
+    ///
+    /// * `deny` - Rules for calls to refuse.
+    /// * `ask` - Rules for calls to ask about.
+    ///
+    /// # Errors
+    ///
+    /// [`PermissionError::InvalidRule`] for a glob that does not compile.
+    pub fn tighten(&mut self, deny: &[String], ask: &[String]) -> Result<(), PermissionError> {
+        for rule in deny {
+            self.deny.push(Rule::parse(rule)?);
+        }
+        for rule in ask {
+            self.forced_ask.push(Rule::parse(rule)?);
+        }
+        Ok(())
+    }
+
+    /// Decides one call: `deny` beats a tightening `ask`, which beats
+    /// `allow`, which beats `ask`, then the rules' own `default`, then the
+    /// tool's `default`.
     ///
     /// # Arguments
     ///
@@ -302,6 +333,8 @@ impl Permissions {
         let any = |rules: &[Rule]| rules.iter().any(|rule| rule.matches(tool, target));
         if any(&self.deny) {
             Some(Decision::Deny)
+        } else if any(&self.forced_ask) {
+            Some(Decision::Ask)
         } else if any(&self.allow) {
             Some(Decision::Allow)
         } else if any(&self.ask) {
@@ -900,14 +933,14 @@ mod tests {
     #[test]
     fn load_missing_file_is_empty_and_add_allow_creates_it() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut perms = Permissions::load(dir.path()).expect("loads");
+        let path = dir.path().join("permissions").join("repo.toml");
+        let mut perms = Permissions::load_file(path.clone()).expect("loads");
         assert!(perms.rules().allow.is_empty());
         perms.add_allow("shell:cargo *").expect("writes");
         perms.add_allow("shell:cargo *").expect("idempotent");
-        let path = dir.path().join(PERMISSIONS_FILE);
         let text = std::fs::read_to_string(&path).expect("file exists");
         assert_eq!(text.matches("cargo").count(), 1, "{text}");
-        let reloaded = Permissions::load(dir.path()).expect("reloads");
+        let reloaded = Permissions::load_file(path).expect("reloads");
         assert_eq!(
             reloaded.decide("shell", Some("cargo build"), Decision::Ask),
             Decision::Allow
@@ -917,13 +950,45 @@ mod tests {
     #[test]
     fn load_reports_parse_errors() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join(PERMISSIONS_FILE);
-        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        let path = dir.path().join("repo.toml");
         std::fs::write(&path, "allow = [1]").expect("write");
         assert!(matches!(
-            Permissions::load(dir.path()),
+            Permissions::load_file(path),
             Err(PermissionError::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn tightening_rules_beat_the_users_allow_and_never_loosen() {
+        let mut perms = parse("allow = [\"shell\", \"write_file\"]\ndefault = \"allow\"\n");
+        perms
+            .tighten(
+                &["shell:curl*".to_owned()],
+                &["write_file:src/**".to_owned()],
+            )
+            .expect("valid rules");
+        assert_eq!(
+            perms.decide("shell", Some("curl evil.example"), Decision::Ask),
+            Decision::Deny
+        );
+        assert!(!perms.explicitly_allowed("shell", Some("curl evil.example")));
+        assert_eq!(
+            perms.decide("write_file", Some("src/main.rs"), Decision::Ask),
+            Decision::Ask
+        );
+        assert_eq!(
+            perms.decide("write_file", Some("README.md"), Decision::Ask),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.decide("shell", Some("cargo test"), Decision::Ask),
+            Decision::Allow
+        );
+        assert!(
+            perms.rules().deny.is_empty(),
+            "tightening rules are not part of the user's file"
+        );
+        assert!(perms.tighten(&["shell:[".to_owned()], &[]).is_err());
     }
 
     #[test]

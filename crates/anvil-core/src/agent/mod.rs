@@ -84,6 +84,10 @@ pub struct LoopConfig {
     pub context_window: u32,
     /// The user's home directory, for `~/.anvil/ANVIL.md`.
     pub home_dir: Option<PathBuf>,
+    /// Whether the repository's own instruction files (`ANVIL.md`,
+    /// `CLAUDE.md` and nested `CLAUDE.md`) may load. False until the user
+    /// trusts the repository.
+    pub trusted_project: bool,
     /// Prompt sections supplied from outside the loop, such as a skill list,
     /// appended after the instruction files found on disk.
     pub extra_instructions: Vec<Instruction>,
@@ -190,6 +194,9 @@ pub struct AgentLoop {
     declared_check: Option<String>,
     /// `declared_check` when the permission rules allow it: what Verify runs.
     plan_check: Option<String>,
+    /// The detected or configured check command once Verify has asked the
+    /// permission rules about it; `None` until then.
+    project_check: Option<Option<String>>,
     /// Git tree of the working tree at session start.
     baseline: Option<String>,
     /// What to tell the model when Build is entered again.
@@ -297,6 +304,7 @@ impl AgentLoop {
             pending_feedback: None,
             declared_check: None,
             plan_check: None,
+            project_check: None,
             review_notes: Vec::new(),
             lane: Lane::Full,
             last_text: String::new(),
@@ -489,11 +497,12 @@ impl AgentLoop {
 
     /// Builds the system prompt for a state, with instruction files found so far.
     fn system_prompt_for(&self, state: State, tools: &[ToolSpec]) -> String {
-        let mut instructions = discover_instructions(
-            self.config.home_dir.as_deref(),
-            &self.config.cwd,
-            &self.touched,
-        );
+        let project = self
+            .config
+            .trusted_project
+            .then_some(self.config.cwd.as_path());
+        let mut instructions =
+            discover_instructions(self.config.home_dir.as_deref(), project, &self.touched);
         instructions.extend(self.config.extra_instructions.iter().cloned());
         let mut sections = self.config.sections.clone();
         if state == State::Plan {
@@ -538,27 +547,50 @@ impl AgentLoop {
         if declared == self.declared_check {
             return;
         }
-        self.plan_check = declared.clone().filter(|command| self.permitted(command));
+        self.plan_check = declared
+            .clone()
+            .filter(|command| self.permitted(command, "the plan's check command"));
         self.declared_check = declared;
     }
 
-    /// Whether the permission rules let anvil run a plan's check command;
-    /// warns when they do not.
-    fn permitted(&self, command: &str) -> bool {
+    /// Whether the permission rules let anvil run a check command as a
+    /// `shell` call; warns when they do not.
+    fn permitted(&self, command: &str, what: &str) -> bool {
         let args = serde_json::json!({ "command": command });
         match self.registry.permit(SHELL_TOOL, &args, &self.config.cwd) {
             Ok(()) => true,
             Err(reason) => {
-                self.warn(format!("the plan's check command will not run: {reason}"));
+                self.warn(format!("{what} will not run: {reason}"));
                 false
             }
         }
     }
 
+    /// The project's check command, asked about once per session.
+    ///
+    /// A command the user configured (`[tools] check`) runs as configured.
+    /// A command anvil detected from the project's files, such as
+    /// `just check` or `npm test`, runs the repository's own code, so it
+    /// goes through the permission rules like any `shell` call.
+    fn project_check(&mut self) -> Option<String> {
+        if let Some(decided) = &self.project_check {
+            return decided.clone();
+        }
+        let resolved = self.config.check.resolve(&self.config.cwd);
+        let decided = match self.config.check {
+            CheckCommand::Detect => {
+                resolved.filter(|command| self.permitted(command, "the detected check command"))
+            }
+            CheckCommand::Command(_) | CheckCommand::None => resolved,
+        };
+        self.project_check = Some(decided.clone());
+        decided
+    }
+
     /// The check commands Verify runs, in order: the detected or configured
     /// one, then the plan's own when it is a different command.
-    fn check_commands(&self) -> Vec<(CheckSource, String)> {
-        let detected = self.config.check.resolve(&self.config.cwd);
+    fn check_commands(&mut self) -> Vec<(CheckSource, String)> {
+        let detected = self.project_check();
         let declared = self
             .plan_check
             .clone()
@@ -1430,6 +1462,7 @@ mod tests {
                 check,
                 context_window: 100_000,
                 home_dir: None,
+                trusted_project: true,
                 extra_instructions: Vec::new(),
                 sections: Vec::new(),
                 review_sections: Vec::new(),
@@ -1799,6 +1832,29 @@ mod tests {
                 "Check: {check}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_detected_check_does_not_run_without_permission_for_shell() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("```json\n{\"verdict\": \"pass\"}\n```"),
+            ],
+            vec![approve()],
+        );
+        // The repository's own justfile would run `just check`: its code.
+        std::fs::write(h.dir.path().join("justfile"), "check:\n    echo pwned\n")
+            .expect("justfile");
+        let agent = h.default_agent(CheckCommand::Detect, "");
+        assert_eq!(agent.run().await.status, Status::Done);
+        let events = h.drain();
+        assert!(check_events(&events).is_empty(), "the check did not run");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            LoopEvent::Warning(text) if text.contains("the detected check command will not run")
+        )));
     }
 
     #[tokio::test]

@@ -103,7 +103,7 @@ mod tests {
         )
         .expect("write");
         let set = SkillSet::discover(&SkillRoots {
-            project: project.path().to_path_buf(),
+            project: Some(project.path().to_path_buf()),
             home: None,
             bundled: None,
         });

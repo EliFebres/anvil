@@ -23,6 +23,7 @@ mod telemetry;
 mod templates;
 mod terminal;
 mod ticket;
+mod trust;
 mod tui;
 mod wiring;
 
@@ -36,7 +37,7 @@ use crate::cli::{
     BuildCommand, Cli, Command, CompatCommand, ConfigCommand, MemoryCommand, TemplateCommand,
 };
 use crate::frontend::UiKind;
-use crate::wiring::{Wiring, home_dir};
+use crate::wiring::{ProjectAccess, Wiring, home_dir};
 
 /// Exit code for configuration and setup errors.
 const SETUP_FAILURE: i32 = 1;
@@ -47,7 +48,7 @@ struct Env {
     cwd: PathBuf,
     /// The home directory, if known.
     home: Option<PathBuf>,
-    /// Every `.env` file in loading order, present or not.
+    /// The `.env` files anvil loads, present or not: only the user's own.
     env_files: Vec<PathBuf>,
     /// The `.env` files that existed and were loaded.
     loaded_env: Vec<PathBuf>,
@@ -65,8 +66,8 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Moves old-name directories aside, loads the `.env` files, picks the
-/// front end, then starts the runtime and runs the command.
+/// Moves old-name directories aside, loads the user's `.env` file, picks
+/// the front end, then starts the runtime and runs the command.
 ///
 /// The migration runs before anything creates `.anvil/`, so an old
 /// directory is moved rather than reported as a duplicate. The files are loaded before any thread exists: filling the environment
@@ -84,7 +85,7 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
             eprintln!("{line}");
         }
     }
-    let env_files = dotenv::env_files(home.as_deref(), &cwd);
+    let env_files = dotenv::env_files(home.as_deref());
     let loaded_env = dotenv::load(&env_files)?;
     let interactive = matches!(
         cli.command,
@@ -102,12 +103,43 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
     runtime.block_on(dispatch(cli, env, ui))
 }
 
+/// The wiring for a command that works in the repository: the user's
+/// configuration, the repository's tightening rules, and what the
+/// repository ships when the user trusts it.
+///
+/// # Arguments
+///
+/// * `env` - Where the process runs.
+/// * `profile` - The `--profile` name, if any.
+/// * `ask_trust` - Whether a person is at the terminal to answer the trust
+///   prompt; without one an undecided repository stays untrusted.
+///
+/// # Returns
+///
+/// The wiring.
+///
+/// # Errors
+///
+/// When the configuration, the repository's rules or the trust file are
+/// malformed.
+fn project_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow::Result<Wiring> {
+    let home = env.home.as_deref();
+    let loaded = load_profile(home, profile)?;
+    let rules = anvil_types::project::load(&env.cwd)?;
+    for line in &rules.ignored {
+        eprintln!("warning: {line}");
+    }
+    let trusted = trust::decide(&env.cwd, home, ask_trust)?;
+    Wiring::new(loaded.config, ProjectAccess { trusted, rules })
+}
+
 /// Runs the chosen command and returns its exit code.
 async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
     let cwd = &env.cwd;
     let home = env.home.as_deref();
     let profile = cli.profile.as_deref();
-    let load_config = |home: Option<&Path>, cwd: &Path| load_profile(home, cwd, profile);
+    let load_config = |home: Option<&Path>| load_profile(home, profile);
+    let ask_trust = ui == UiKind::Tui;
     match cli.command {
         Some(Command::Config {
             command: ConfigCommand::Init { global },
@@ -119,12 +151,17 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         Some(Command::Config {
             command: ConfigCommand::Show,
         }) => {
-            let loaded = load_config(home, cwd)?;
+            let loaded = load_config(home)?;
             commands::config_show(&loaded);
             Ok(0)
         }
         Some(Command::Setup) => setup::run(home),
-        Some(Command::ScanKeys) => secrets::run(cwd, &env.env_files),
+        Some(Command::ScanKeys) => {
+            let mut files = env.env_files.clone();
+            files.push(dotenv::project_env_file(cwd));
+            secrets::run(cwd, &files)
+        }
+        Some(Command::Trust { revoke }) => trust::run(cwd, home, revoke),
         Some(Command::Sessions) => {
             commands::sessions(cwd)?;
             Ok(0)
@@ -151,11 +188,11 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         Some(Command::Memory {
             command: MemoryCommand::Learn,
         }) => {
-            let wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            let wiring = project_wiring(&env, profile, false)?;
             learn::run(&wiring).await
         }
         Some(Command::Stats { since }) => {
-            let config = load_config(home, cwd).ok().map(|loaded| loaded.config);
+            let config = load_config(home).ok().map(|loaded| loaded.config);
             stats::run(config.as_ref(), cwd, &since)
         }
         Some(Command::Status { json, all }) => {
@@ -173,11 +210,11 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         Some(Command::Compat {
             command: CompatCommand::Check { path },
         }) => {
-            let config = load_config(home, cwd).ok().map(|loaded| loaded.config);
+            let config = load_config(home).ok().map(|loaded| loaded.config);
             commands::compat_check(&path, config.as_ref())
         }
         Some(Command::Doctor) => {
-            let wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            let wiring = project_wiring(&env, profile, false)?;
             let options = doctor::Options {
                 env_files: &env.env_files,
                 loaded_env: &env.loaded_env,
@@ -189,28 +226,28 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
                 build::status(cwd, id.as_deref())?;
                 return Ok(0);
             }
-            let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            let mut wiring = project_wiring(&env, profile, ask_trust)?;
             wiring.allow_tools(&cli.allow_tools)?;
             wiring.load_mcp().await;
             build::execute(args, wiring, cli.yes).await
         }
         Some(Command::Chat) => {
-            let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            let mut wiring = project_wiring(&env, profile, ask_trust)?;
             wiring.allow_tools(&cli.allow_tools)?;
             wiring.load_mcp().await;
             chat::chat(&wiring, cli.yes, ui).await
         }
         Some(Command::Resume { id }) => {
-            let mut wiring = Wiring::new(load_config(home, cwd)?.config)?;
+            let mut wiring = project_wiring(&env, profile, ask_trust)?;
             wiring.allow_tools(&cli.allow_tools)?;
             wiring.load_mcp().await;
             commands::resume(&wiring, &id, cli.yes, ui).await
         }
         Some(Command::Run { task }) => {
-            run(home, cwd, profile, task, &cli.allow_tools, cli.yes, ui).await
+            run(&env, profile, task, &cli.allow_tools, cli.yes, ui).await
         }
         None if !cli.task.is_empty() => {
-            run(home, cwd, profile, cli.task, &cli.allow_tools, cli.yes, ui).await
+            run(&env, profile, cli.task, &cli.allow_tools, cli.yes, ui).await
         }
         None => anyhow::bail!("nothing to do; pass a task or a subcommand (see --help)"),
     }
@@ -218,8 +255,7 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
 
 /// Runs a task given as words on the command line.
 async fn run(
-    home: Option<&Path>,
-    cwd: &Path,
+    env: &Env,
     profile: Option<&str>,
     words: Vec<String>,
     allow_tools: &[String],
@@ -227,7 +263,7 @@ async fn run(
     ui: UiKind,
 ) -> anyhow::Result<i32> {
     let task = words.join(" ");
-    let mut wiring = Wiring::new(load_profile(home, cwd, profile)?.config)?;
+    let mut wiring = project_wiring(env, profile, ui == UiKind::Tui)?;
     wiring.allow_tools(allow_tools)?;
     wiring.load_mcp().await;
     commands::run_task(&wiring, task, yes, ui).await

@@ -784,7 +784,7 @@ mod tests {
         );
         let config: anvil_types::AnvilConfig =
             toml::from_str(anvil_types::config::CONFIG_TEMPLATE).expect("config parses");
-        let wiring = Wiring::new(config).expect("wiring");
+        let wiring = Wiring::new(config, crate::wiring::ProjectAccess::default()).expect("wiring");
         telemetry.observe_permissions(&wiring);
         let main = wiring
             .registry(Box::new(StaticPrompt(PromptAnswer::No)))
@@ -854,6 +854,7 @@ mod tests {
             check: CheckCommand::Command("exit 0".to_owned()),
             context_window: 100_000,
             home_dir: None,
+            trusted_project: true,
             extra_instructions: Vec::new(),
             sections: Vec::new(),
             review_sections: Vec::new(),
@@ -954,6 +955,7 @@ mod tests {
             check: CheckCommand::Command("exit 0".to_owned()),
             context_window: 100_000,
             home_dir: None,
+            trusted_project: true,
             extra_instructions: Vec::new(),
             sections: Vec::new(),
             review_sections: Vec::new(),

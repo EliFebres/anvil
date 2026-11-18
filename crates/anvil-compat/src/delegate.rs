@@ -482,7 +482,7 @@ mod tests {
             provider: Arc::new(FakeProvider::new(Vec::new())),
             dir: dir.path().to_path_buf(),
         });
-        let tool = DelegateTool::new(Arc::new(AgentSet::discover(dir.path(), None)), env);
+        let tool = DelegateTool::new(Arc::new(AgentSet::discover(Some(dir.path()), None)), env);
         let parallel = |agent: &str| tool.parallel_safe(&json!({"agent": agent, "task": "x"}));
         assert!(parallel("explore"), "the built-in explorer only reads");
         assert!(!parallel("implement"), "the built-in implementer writes");

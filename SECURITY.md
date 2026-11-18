@@ -4,16 +4,16 @@ This page is for someone deciding whether anvil may run on their machines. It de
 
 ## In one paragraph
 
-anvil is a single binary that sends your prompts, and the files and command output its tools read, to the model providers you configure, and to nothing else unless you turn something on. It has no telemetry upload, no self-update, no update check and no background process. It keeps transcripts, logs and content-free usage records as plain files in the project's `.anvil/` folder and in `~/.anvil/`. API keys are read from environment variables and `.env` files, never from configuration files. File writes and shell commands ask first unless a permission rule says otherwise. **anvil trusts the project it runs in**: a repository's own `.anvil/` and `.claude/` files can change providers, permissions, environment variables, hooks and MCP servers (see "Running in a repository you do not trust").
+anvil is a single binary that sends your prompts, and the files and command output its tools read, to the model providers you configure, and to nothing else unless you turn something on. It has no telemetry upload, no self-update, no update check and no background process. It keeps transcripts, logs and content-free usage records as plain files in the project's `.anvil/` folder and in `~/.anvil/`. API keys are read from the environment and your own `~/.anvil/.env`, never from configuration files or from the repository. File writes and shell commands ask first unless one of your own permission rules says otherwise. **anvil does not trust the repository it runs in**: a repository can only add rules that make anvil stricter, and the hooks, MCP servers, skills and instruction files it ships load only after you trust it (see "Running in a repository you do not trust").
 
 ## Network destinations
 
 | destination | what triggers it | on by default |
 |---|---|---|
 | **Model providers**: each `[providers.<name>] base_url`. `anvil setup` writes `https://api.anthropic.com/v1`, `https://api.openai.com/v1` and `https://generativelanguage.googleapis.com/v1beta/openai`; there is no built-in default (`crates/anvil-types/src/config.rs`). Requests go to `{base_url}/messages` or `{base_url}/chat/completions` (`crates/anvil-core/src/provider/`). | Every model turn of `anvil run`, `chat`, `resume` and `build`. Also, inside a session and without a separate prompt: context compaction, the end-of-session memory summarizer, and at session start the summarizer call that proposes rules from files you edited after anvil wrote them (it sends a diff of those edits, at most 16 KiB). `anvil memory learn` and `anvil ticket draft` call the summarizer too. `anvil doctor` sends a one-token request to every configured provider. | Yes, whenever those commands run. They are the product. |
-| **MCP servers** from `.mcp.json`, `.claude/settings.json`, `.claude/settings.local.json` (project) and `~/.anvil/mcp.toml` (`crates/anvil-compat/src/mcp/mod.rs`). Only stdio servers are supported: a local program anvil starts. A definition with a `url` is refused, so no MCP server makes anvil contact a host. | Every server is started when a session starts (`run`, `chat`, `resume`, `build`), unless `.anvil/mcp-cache/` holds a fresh listing for it. There is no per-server confirmation. Calling a server's tool asks first unless the server marks the tool read-only. | Only when such a file defines servers. |
+| **MCP servers** from `~/.anvil/mcp.toml` and, for a repository you trust, its `.mcp.json`, `.claude/settings.json` and `.claude/settings.local.json` (`crates/anvil-compat/src/mcp/mod.rs`). Only stdio servers are supported: a local program anvil starts. A definition with a `url` is refused, so no MCP server makes anvil contact a host. | Every server is started when a session starts (`run`, `chat`, `resume`, `build`), unless `.anvil/mcp-cache/` holds a fresh listing for it. Calling a server's tool asks first unless the server marks the tool read-only. | Only when such a file defines servers; a repository's servers only once you trust it. |
 | **The ticket queue**: the git URL in `[tickets] queue`. A `git fetch` into the cache `~/.anvil/queue.git`, then `git push queue refs/heads/tickets/<id>`, with your own git credentials (`crates/anvil-telemetry/src/git.rs`). | `anvil ticket submit` and the submit key of `anvil ticket review` only. | No. The key is unset by default, and while it is unset `submit` says what to set and sends nothing. See "Tickets". |
-| **Hooks**: shell commands from the `hooks` section of `.claude/settings.json`, `.claude/settings.local.json`, `.anvil/settings.json` (project) and `~/.claude/settings.json`, `~/.anvil/settings.json` (`crates/anvil-compat/src/hooks.rs`). They can do anything, including network calls. | Automatic around tool calls once defined. | Only when such a file defines hooks. |
+| **Hooks**: shell commands from the `hooks` section of `~/.claude/settings.json` and `~/.anvil/settings.json` and, for a repository you trust, its `.claude/settings.json`, `.claude/settings.local.json` and `.anvil/settings.json` (`crates/anvil-compat/src/hooks.rs`). They can do anything, including network calls. | Automatic at session start and around tool calls once defined. | Only when such a file defines hooks; a repository's hooks only once you trust it. |
 | **The `shell` tool**: whatever command the model runs. | A model turn; asks first by default. | Asks. |
 
 herdr reporting (`[integrations] herdr = true`) runs a local program and makes no network call. There is no web search or web fetch tool.
@@ -33,35 +33,37 @@ Nothing anvil records leaves the machine on its own. There is no upload code; th
 | Tickets | `~/.anvil/tickets/draft/` and `~/.anvil/tickets/open/` | Drafts, and the tickets you submitted. Drafts an older anvil left in `<project>/tickets/draft/` are moved here by the next `anvil ticket` command. |
 | Ticket queue cache | `~/.anvil/queue.git` | A bare clone of the queue, made on the first submit. |
 | MCP listings | `<project>/.anvil/mcp-cache/` | Tool lists the servers returned. |
+| Trust decisions | `~/.anvil/trust.toml` | Each repository path you answered the trust prompt for, and the answer. |
+| Your permission rules per repository | `~/.anvil/permissions/<repository>.toml` | The rules an `always` answer saved. |
 
 The `.gitignore` of this repository keeps `.anvil/telemetry/`, `.anvil/sessions/`, `.anvil/logs/` and `.anvil/mcp-cache/` out of commits; other projects need the same lines.
 
 ## API keys
 
 - Each provider names the environment variable that holds its key (`api_key_env`); the key is read from the process environment when a request is built (`crates/anvil-core/src/provider/mod.rs`). Keys never appear in configuration files.
-- At startup anvil fills the environment from `.env` files without overriding anything already set, first definition wins: the real environment, then `~/.anvil/.env`, then the project's `.anvil/.env` (`crates/anvil-types/src/dotenv.rs`). `ANVIL_HOME` replaces the home directory.
+- At startup anvil fills the environment from `~/.anvil/.env` without overriding anything already set (`crates/anvil-types/src/dotenv.rs`). A repository's `.anvil/.env` is never loaded, so a repository cannot set a key, `ANVIL_HOME`, a proxy or any other variable. `ANVIL_HOME` in your own environment replaces the home directory.
 - `anvil setup` writes `~/.anvil/.env` from a template of placeholders and makes it private: mode 600 on Unix; on Windows it inspects the ACL with `icacls` and prints the command that removes a grant to other users (`crates/anvil-cli/src/setup.rs`).
 - `anvil scan-keys` (part of `just check` and CI) fails when a tracked file holds something shaped like a key (`sk-`, `AIza`, `ghp_`, `github_pat_`, `hf_`) or any value of 12 or more characters from your `.env` files; it reports the file and line, never the value (`crates/anvil-cli/src/secrets.rs`).
 
 ## Permissions
 
-- Every tool call is decided by rules in `<project>/.anvil/permissions.toml`, or by a profile's `[permissions]` table when `--profile <name>` is given (`crates/anvil-core/src/tools/permissions.rs`). A rule is `tool` or `tool:glob`; the glob matches the path for file tools and the command line for `shell`. A deny rule wins, then allow, then ask, then the file's `default`, then the tool's own default.
+- Every tool call is decided by your own rules: the `[permissions]` table of `~/.anvil/config.toml` or of a profile given with `--profile <name>`, or else your file for the repository, `~/.anvil/permissions/<repository>.toml` (`crates/anvil-core/src/tools/permissions.rs`, `crates/anvil-cli/src/wiring.rs`). The repository adds its `deny` and `ask` rules from `.anvil/config.toml` and `.anvil/permissions.toml` on top; it cannot add `allow` rules or a `default` (`crates/anvil-types/src/project.rs`). A rule is `tool` or `tool:glob`; the glob matches the path for file tools and the command line for `shell`. A deny rule from anywhere wins, then a repository `ask`, then your `allow`, then your `ask`, then your `default`, then the tool's own default.
 - Without rules: reading tools (`read_file`, `glob`, `grep`, `list_dir`, `outline`, `delegate`, `skill`, read-only MCP tools) are allowed; `write_file`, `edit_file`, `shell` and every other MCP tool ask.
 - These commands are refused whatever the answer, `--yes` and `default = "allow"` included, unless an allow rule names them explicitly: anything containing `rm -rf`, `Remove-Item -Recurse`, `git push --force` or `git reset --hard` (`crates/anvil-core/src/tools/shell.rs`).
-- A prompt offers: yes (this call), no, session (this tool for the rest of the session, and for path tools only inside the project's root, symlinks resolved), and for `shell` only, always (saves `shell:<first word> *` to the project's permissions file).
+- A prompt offers: yes (this call), no, session (this tool for the rest of the session, and for path tools only inside the project's root, symlinks resolved), and for `shell` only, always (saves `shell:<first word> *` to your own file for the repository under `~/.anvil/permissions/`, never into the repository).
 - `--yes` answers every prompt with yes and approves plans; deny rules and the refused commands still apply. `--allow-tool <name>` or `permissions.allow_tools` pre-approves a tool for one session. In the Plan state a tool that may write is refused.
+- The Verify state runs the project's check command. A command you set in `[tools] check` runs as you set it. A command anvil detects from the repository's files (`just check`, `cargo test`, `npm test`, `python -m pytest`) runs the repository's own code, so it is asked about like any `shell` call (`crates/anvil-core/src/agent/mod.rs`).
 
 ## Running in a repository you do not trust
 
-anvil reads configuration from the project it runs in and does not ask whether you trust it. A repository you clone can ship:
+A repository you clone cannot change how anvil treats you:
 
-- `.anvil/permissions.toml` that allows `shell` or every tool, so commands run without asking;
-- `.anvil/config.toml`, which overrides your global configuration key by key, including a provider's `base_url`, so requests that carry your API key go to another server;
-- `.anvil/.env`, which sets any variable you have not set yourself, such as `ANVIL_HOME`;
-- hooks in `.claude/settings.json`, which run shell commands around tool calls;
-- MCP servers in `.mcp.json`, which anvil starts or contacts when the session starts.
+- Its `.anvil/config.toml` and `.anvil/permissions.toml` may only add `deny` and `ask` rules. Every other key (providers, `base_url`, roles, limits, `[tools] shell` and `check`, `allow`, `default`, `allow_tools`) is ignored with a warning that names it (`crates/anvil-types/src/project.rs`). Providers, keys and every setting come from your own `~/.anvil/`.
+- Its `.anvil/.env` is never loaded.
+- Its hooks, MCP servers, skills, slash commands, agents and instruction files (`ANVIL.md`, `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md` and nested `CLAUDE.md` files) do not load until you trust the repository (`crates/anvil-cli/src/trust.rs`). The first interactive session shows every item, with the command line of each hook and MCP server, and asks once. The answer is kept in `~/.anvil/trust.toml`, keyed by the repository's full path. With `--plain`, `--yes`, no terminal, or a command that never prompts (`doctor`, `build`), an undecided repository is untrusted: nothing it ships loads and nothing is recorded. `anvil trust` shows the list and asks again; `anvil trust --revoke` withdraws trust.
+- Even in a trusted repository, an `@path` import in one of its instruction files may only name a file inside the repository, so a `CLAUDE.md` cannot pull `~/.ssh/...` into the prompt (`crates/anvil-compat/src/instructions.rs`).
 
-Read those files before running anvil in a repository you did not write, or run it there with a profile whose `[permissions]` table you control.
+Trust is all or nothing and is not tied to the files' content: a repository you trusted can change its hooks later and they run. Pinning instruction files with re-approval on change is on the roadmap.
 
 ## Tickets
 

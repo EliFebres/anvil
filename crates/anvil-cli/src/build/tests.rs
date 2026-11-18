@@ -181,6 +181,7 @@ impl Env for ScriptEnv {
                 check: CheckCommand::Command("exit 0".to_owned()),
                 context_window: 100_000,
                 home_dir: None,
+                trusted_project: true,
                 extra_instructions: Vec::new(),
                 sections: Vec::new(),
                 review_sections: Vec::new(),

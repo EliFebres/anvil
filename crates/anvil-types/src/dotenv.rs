@@ -1,9 +1,10 @@
 //! `.env` loading.
 //!
 //! Keys never live in configuration files. Each provider names an
-//! environment variable, and anvil fills the environment from `.env` files
-//! at startup, in a fixed order where the first definition wins: the real
-//! environment, then `~/.anvil/.env`, then the project's `.anvil/.env`.
+//! environment variable, and anvil fills the environment from the user's
+//! `~/.anvil/.env` at startup without overriding the real environment. A
+//! repository's `.anvil/.env` is never loaded: it could set variables that
+//! change anvil's behavior, such as `ANVIL_HOME` or `HTTPS_PROXY`.
 
 use std::path::{Path, PathBuf};
 
@@ -12,23 +13,33 @@ use crate::error::DotenvError;
 /// File name of the anvil env file inside `.anvil`.
 pub const ANVIL_ENV_FILE: &str = ".env";
 
-/// The `.env` files anvil loads, in loading order.
+/// The `.env` files anvil loads into its environment: only the user's own.
 ///
 /// # Arguments
 ///
 /// * `home` - The home directory, if known.
-/// * `cwd` - The project root.
 ///
 /// # Returns
 ///
 /// The candidate paths; a missing file is skipped by [`load`].
-pub fn env_files(home: Option<&Path>, cwd: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if let Some(home) = home {
-        files.push(home.join(crate::config::CONFIG_DIR).join(ANVIL_ENV_FILE));
-    }
-    files.push(cwd.join(crate::config::CONFIG_DIR).join(ANVIL_ENV_FILE));
-    files
+pub fn env_files(home: Option<&Path>) -> Vec<PathBuf> {
+    home.map(|home| home.join(crate::config::CONFIG_DIR).join(ANVIL_ENV_FILE))
+        .into_iter()
+        .collect()
+}
+
+/// The repository's `.anvil/.env`, which anvil never loads but
+/// `anvil scan-keys` still reads, so its values are caught if committed.
+///
+/// # Arguments
+///
+/// * `cwd` - The project root.
+///
+/// # Returns
+///
+/// The path; it may not exist.
+pub fn project_env_file(cwd: &Path) -> PathBuf {
+    cwd.join(crate::config::CONFIG_DIR).join(ANVIL_ENV_FILE)
 }
 
 /// Loads each file into the process environment without overriding anything.
@@ -196,17 +207,15 @@ mod tests {
     }
 
     #[test]
-    fn env_files_order() {
+    fn only_the_home_env_file_is_loaded() {
         let home = Path::new("/home/u");
         let cwd = Path::new("/proj");
         assert_eq!(
-            env_files(Some(home), cwd),
-            vec![
-                home.join(".anvil").join(".env"),
-                cwd.join(".anvil").join(".env")
-            ]
+            env_files(Some(home)),
+            vec![home.join(".anvil").join(".env")]
         );
-        assert_eq!(env_files(None, cwd), vec![cwd.join(".anvil").join(".env")]);
+        assert!(env_files(None).is_empty());
+        assert_eq!(project_env_file(cwd), cwd.join(".anvil").join(".env"));
     }
 
     #[test]

@@ -140,11 +140,30 @@ pub enum ValidationError {
 /// Why the anvil configuration could not be loaded.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// Neither the global nor the project file exists.
+    /// The user has no `~/.anvil/config.toml`.
     #[error(
-        "no configuration found; run `anvil setup` (global, with the standard providers) or `anvil config init` (project template)"
+        "no configuration found in ~/.anvil/config.toml; run `anvil setup` (with the standard providers) or `anvil config init --global` (a template)"
     )]
     NotFound,
+
+    /// A file exists but cannot be read.
+    #[error("reading {path}: {source}")]
+    Read {
+        /// The file.
+        path: PathBuf,
+        /// The I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A repository's own rules are malformed.
+    #[error("{path}: {detail}")]
+    Project {
+        /// The repository file.
+        path: PathBuf,
+        /// What is wrong.
+        detail: String,
+    },
 
     /// A configuration file is not valid TOML.
     #[error("parsing {path}: {source}")]

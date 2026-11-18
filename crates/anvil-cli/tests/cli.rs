@@ -18,9 +18,10 @@ fn anvil(dir: &Path) -> Command {
     command
 }
 
+/// Writes the user configuration template into the empty home under `dir`.
 fn init(dir: &Path) {
     let out = anvil(dir)
-        .args(["config", "init"])
+        .args(["config", "init", "--global"])
         .output()
         .expect("anvil runs");
     assert!(
@@ -55,13 +56,29 @@ fn no_arguments_prints_help_and_fails() {
 fn config_init_writes_a_valid_template_and_refuses_to_overwrite() {
     let dir = tempfile::tempdir().expect("tempdir");
     init(dir.path());
-    let path = dir.path().join(".anvil").join("config.toml");
+    let path = dir
+        .path()
+        .join("empty-home")
+        .join(".anvil")
+        .join("config.toml");
     let text = std::fs::read_to_string(&path).expect("config written");
     let config: anvil_types::AnvilConfig = toml::from_str(&text).expect("template parses");
     config.validate().expect("template validates");
 
-    let second = anvil(dir.path())
+    let project = anvil(dir.path())
         .args(["config", "init"])
+        .output()
+        .expect("anvil runs");
+    assert!(project.status.success());
+    let rules = anvil_types::project::load(dir.path()).expect("repository template loads");
+    assert!(
+        rules.ignored.is_empty(),
+        "the repository template sets only tightening rules: {:?}",
+        rules.ignored
+    );
+
+    let second = anvil(dir.path())
+        .args(["config", "init", "--global"])
         .output()
         .expect("anvil runs");
     assert!(!second.status.success(), "second init must fail");
@@ -187,7 +204,7 @@ fn key_row(dir: &Path, home: &Path, real_env: Option<&str>) -> String {
 }
 
 #[test]
-fn env_order_real_env_beats_home_env_beats_project_env() {
+fn the_real_env_beats_the_home_env_and_the_project_env_is_never_read() {
     let dir = tempfile::tempdir().expect("tempdir");
     let home = dir.path().join("home");
     let project = dir.path().join("project");
@@ -215,6 +232,13 @@ fn env_order_real_env_beats_home_env_beats_project_env() {
     assert!(
         key_row(&project, &home, Some("from-the-real-env")).starts_with("PASS"),
         "real environment beats both files"
+    );
+
+    std::fs::remove_file(&home_env).expect("remove the home file");
+    let row = key_row(&project, &home, None);
+    assert!(
+        row.starts_with("FAIL") && row.contains("not set"),
+        "a key only in the repository's .anvil/.env is never loaded: {row}"
     );
 }
 

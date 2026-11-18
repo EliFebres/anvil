@@ -376,7 +376,7 @@ mod tests {
             ])
         );
         let text = std::fs::read_to_string(&path).expect("read");
-        assert!(text.contains("# anvil configuration.\n"), "comments kept");
+        assert!(text.contains("# anvil configuration: "), "comments kept");
         assert!(text.contains("coder = \"runpod\""), "existing value kept");
         assert!(text.contains("[providers.runpod]"));
         assert!(text.contains("[providers.anthropic]"));

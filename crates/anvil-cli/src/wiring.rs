@@ -17,7 +17,8 @@ use anvil_core::tools::{
     PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
     SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry,
 };
-use anvil_types::{AnvilConfig, PromptConfig};
+use anvil_types::trust::user_permissions_path;
+use anvil_types::{AnvilConfig, ProjectRules, PromptConfig};
 use anyhow::Context;
 
 use crate::memory::{self, RuleChecks};
@@ -38,6 +39,17 @@ pub fn home_dir() -> Option<PathBuf> {
         .or_else(std::env::home_dir)
 }
 
+/// What the repository anvil runs in may contribute.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectAccess {
+    /// Whether the user trusts the repository, so its hooks, MCP servers,
+    /// skills, commands, agents and instruction files load.
+    pub trusted: bool,
+    /// The `deny` and `ask` rules the repository adds. They apply whether or
+    /// not it is trusted, because they can only make anvil stricter.
+    pub rules: ProjectRules,
+}
+
 /// Everything a run or a chat needs, built once from config.
 ///
 /// Cloning is cheap (shared sets, one config copy) and lets the `delegate`
@@ -48,8 +60,10 @@ pub struct Wiring {
     pub cwd: PathBuf,
     /// The home directory, if known.
     pub home: Option<PathBuf>,
-    /// The merged configuration.
+    /// The user's configuration.
     pub config: AnvilConfig,
+    /// What the repository may contribute.
+    pub project: ProjectAccess,
     /// The session's token budget, shared by every provider.
     pub budget: SharedBudget,
     /// Skills discovered from the project, the home directory and the bundle.
@@ -103,16 +117,16 @@ struct SessionInfo {
 ///
 /// # Arguments
 ///
-/// * `cwd` - The project root.
+/// * `project` - The project root, or `None` when the repository is not trusted.
 /// * `home` - The home directory, if known.
 ///
 /// # Returns
 ///
 /// The roots.
-pub fn skill_roots(cwd: &Path, home: Option<&Path>) -> SkillRoots {
+pub fn skill_roots(project: Option<&Path>, home: Option<&Path>) -> SkillRoots {
     let bundled = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../skills"));
     SkillRoots {
-        project: cwd.to_path_buf(),
+        project: project.map(Path::to_path_buf),
         home: home.map(Path::to_path_buf),
         bundled: bundled.is_dir().then_some(bundled),
     }
@@ -121,9 +135,13 @@ pub fn skill_roots(cwd: &Path, home: Option<&Path>) -> SkillRoots {
 impl Wiring {
     /// Captures the environment.
     ///
+    /// Skills, commands, agents, hooks and MCP servers are discovered from
+    /// the home directory, and from the repository only when it is trusted.
+    ///
     /// # Arguments
     ///
-    /// * `config` - The merged configuration.
+    /// * `config` - The user's configuration.
+    /// * `project` - What the repository may contribute.
     ///
     /// # Returns
     ///
@@ -133,15 +151,41 @@ impl Wiring {
     ///
     /// When the current directory cannot be determined, or when
     /// `permissions.allow_tools` names an invalid tool.
-    pub fn new(config: AnvilConfig) -> anyhow::Result<Self> {
+    pub fn new(config: AnvilConfig, project: ProjectAccess) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir().context("cannot determine the current directory")?;
-        let home = home_dir();
+        Self::new_in(cwd, home_dir(), config, project)
+    }
+
+    /// [`Wiring::new`] for a given project root and home directory, so a
+    /// test can build the wiring for a fixture repository.
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The project root.
+    /// * `home` - The home directory, if known.
+    /// * `config` - The user's configuration.
+    /// * `project` - What the repository may contribute.
+    ///
+    /// # Returns
+    ///
+    /// The wiring.
+    ///
+    /// # Errors
+    ///
+    /// When `permissions.allow_tools` names an invalid tool.
+    pub fn new_in(
+        cwd: PathBuf,
+        home: Option<PathBuf>,
+        config: AnvilConfig,
+        project: ProjectAccess,
+    ) -> anyhow::Result<Self> {
         let budget = TokenBudget::shared(config.limits.session_tokens);
-        let skills = Arc::new(SkillSet::discover(&skill_roots(&cwd, home.as_deref())));
-        let commands = CommandSet::discover(&cwd, home.as_deref());
-        let agents = Arc::new(AgentSet::discover(&cwd, home.as_deref()));
-        let hooks = Arc::new(HookConfig::load(&cwd, home.as_deref()));
-        let mcp_servers = ServerSet::load(&cwd, home.as_deref());
+        let shipped = project.trusted.then_some(cwd.as_path());
+        let skills = Arc::new(SkillSet::discover(&skill_roots(shipped, home.as_deref())));
+        let commands = CommandSet::discover(shipped, home.as_deref());
+        let agents = Arc::new(AgentSet::discover(shipped, home.as_deref()));
+        let hooks = Arc::new(HookConfig::load(shipped, home.as_deref()));
+        let mcp_servers = ServerSet::load(shipped, home.as_deref());
         let approvals = Arc::new(Mutex::new(
             SessionApprovals::preapproved(config_allow_tools(&config))
                 .context("permissions.allow_tools in the configuration")?,
@@ -150,6 +194,7 @@ impl Wiring {
             cwd,
             home,
             config,
+            project,
             budget,
             skills,
             commands,
@@ -400,8 +445,9 @@ impl Wiring {
             .unwrap_or(32_000)
     }
 
-    /// The tool registry with the project's permissions: the built-ins, the
-    /// `skill` tool and, when any subagent is defined, the `delegate` tool.
+    /// The tool registry with the user's permission rules, tightened by the
+    /// repository's: the built-ins, the `skill` tool and, when any subagent
+    /// is defined, the `delegate` tool.
     ///
     /// # Arguments
     ///
@@ -413,7 +459,8 @@ impl Wiring {
     ///
     /// # Errors
     ///
-    /// When `.anvil/permissions.toml` exists but cannot be read.
+    /// When a permission rules file exists but cannot be read, or a rule
+    /// does not compile.
     pub fn registry(&self, prompt: Box<dyn PermissionPrompt>) -> anyhow::Result<ToolRegistry> {
         let prompt: Arc<dyn PermissionPrompt> = Arc::from(prompt);
         if let Ok(mut slot) = self.prompt.lock() {
@@ -435,12 +482,10 @@ impl Wiring {
         &self,
         prompt: Box<dyn PermissionPrompt>,
     ) -> anyhow::Result<ToolRegistry> {
-        let permissions = match &self.config.permissions {
-            Some(rules) if rules.has_rules() => {
-                Permissions::from_rules(rules).context("permissions in the configuration")?
-            }
-            _ => Permissions::load(&self.cwd).context("loading permissions")?,
-        };
+        let mut permissions = self.user_permissions()?;
+        permissions
+            .tighten(&self.project.rules.deny, &self.project.rules.ask)
+            .context("the repository's permission rules")?;
         let mut registry = ToolRegistry::with_builtins(permissions, prompt)
             .with_session_approvals(Arc::clone(&self.approvals));
         let observer = self.observer.lock().ok().and_then(|slot| slot.clone());
@@ -453,6 +498,21 @@ impl Wiring {
             registry.set_hook(runner);
         }
         Ok(registry)
+    }
+
+    /// The user's own permission rules: the configuration's or profile's
+    /// `[permissions]` when it sets any, otherwise the user's file for this
+    /// repository under `~/.anvil/permissions/`, which `always` answers
+    /// are saved to.
+    fn user_permissions(&self) -> anyhow::Result<Permissions> {
+        if let Some(rules) = self.config.permissions.as_ref().filter(|r| r.has_rules()) {
+            return Permissions::from_rules(rules).context("permissions in the configuration");
+        }
+        match &self.home {
+            Some(home) => Permissions::load_file(user_permissions_path(home, &self.cwd))
+                .context("loading your permission rules for this repository"),
+            None => Ok(Permissions::empty()),
+        }
     }
 
     /// Prompt sections that come from outside anvil-core: the Claude Code
@@ -468,13 +528,22 @@ impl Wiring {
     ///
     /// The sections, possibly empty.
     pub fn extra_instructions(&self, tool_names: &[&str]) -> Vec<Instruction> {
-        let base =
-            context::discover_instructions(self.home.as_deref(), &self.cwd, &BTreeSet::new());
+        let project = self.trusted_root();
+        let base = context::discover_instructions(self.home.as_deref(), project, &BTreeSet::new());
         let mut extra =
-            anvil_compat::instructions::discover_extra(self.home.as_deref(), &self.cwd, &base);
+            anvil_compat::instructions::discover_extra(self.home.as_deref(), project, &base);
         extra.extend(self.skills.prompt_section(tool_names));
         extra.extend(self.agents.prompt_section());
         extra
+    }
+
+    /// The repository root when the user trusts it, for loading its files.
+    ///
+    /// # Returns
+    ///
+    /// The root, or `None` when nothing the repository ships may load.
+    pub fn trusted_root(&self) -> Option<&Path> {
+        self.project.trusted.then_some(self.cwd.as_path())
     }
 
     /// Where tools run.
@@ -530,6 +599,7 @@ impl Wiring {
                 .map_or(CheckCommand::Detect, CheckCommand::Command),
             context_window: self.context_window(),
             home_dir: self.home.clone(),
+            trusted_project: self.project.trusted,
             extra_instructions: self.extra_instructions(&registry.names()),
             sections: sections.coder,
             review_sections: sections.review,
@@ -630,6 +700,9 @@ fn profile_section(prompt: &PromptConfig) -> Option<PromptSection> {
 }
 
 #[cfg(test)]
+mod hostile_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -689,19 +762,22 @@ mod tests {
     #[tokio::test]
     async fn allow_tool_flag_and_config_key_pre_approve_edit_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut flagged = Wiring::new(config("")).expect("wiring");
+        let mut flagged = Wiring::new(config(""), ProjectAccess::default()).expect("wiring");
         flagged
             .allow_tools(&["edit_file".to_owned()])
             .expect("valid names");
         let registry = flagged.registry(refusing()).expect("registry");
         assert_eq!(completed_edits(&registry, dir.path()).await, 5);
 
-        let configured =
-            Wiring::new(config("[permissions]\nallow_tools = [\"edit_file\"]\n")).expect("wiring");
+        let configured = Wiring::new(
+            config("[permissions]\nallow_tools = [\"edit_file\"]\n"),
+            ProjectAccess::default(),
+        )
+        .expect("wiring");
         let registry = configured.registry(refusing()).expect("registry");
         assert_eq!(completed_edits(&registry, dir.path()).await, 5);
 
-        let neither = Wiring::new(config("")).expect("wiring");
+        let neither = Wiring::new(config(""), ProjectAccess::default()).expect("wiring");
         let registry = neither.registry(refusing()).expect("registry");
         assert_eq!(completed_edits(&registry, dir.path()).await, 0);
     }
@@ -710,13 +786,13 @@ mod tests {
     fn the_planner_is_a_role_name_for_model_keys() {
         let mut config = config("");
         let coder = config.roles.coder.clone();
-        let wiring = Wiring::new(config.clone()).expect("wiring");
+        let wiring = Wiring::new(config.clone(), ProjectAccess::default()).expect("wiring");
         assert_eq!(wiring.resolve_model(Some("planner")), (coder.clone(), None));
 
         let big = config.providers[&coder].clone();
         config.providers.insert("big".to_owned(), big);
         config.roles.planner = Some("big".to_owned());
-        let wiring = Wiring::new(config).expect("wiring");
+        let wiring = Wiring::new(config, ProjectAccess::default()).expect("wiring");
         assert_eq!(
             wiring.resolve_model(Some("planner")),
             ("big".to_owned(), None)
@@ -728,13 +804,13 @@ mod tests {
     fn the_worker_is_a_role_name_for_model_keys_and_falls_back_to_the_coder() {
         let mut config = config("");
         let coder = config.roles.coder.clone();
-        let wiring = Wiring::new(config.clone()).expect("wiring");
+        let wiring = Wiring::new(config.clone(), ProjectAccess::default()).expect("wiring");
         assert_eq!(wiring.resolve_model(Some("worker")), (coder.clone(), None));
 
         let cheap = config.providers[&coder].clone();
         config.providers.insert("cheap".to_owned(), cheap);
         config.roles.worker = Some("cheap".to_owned());
-        let wiring = Wiring::new(config).expect("wiring");
+        let wiring = Wiring::new(config, ProjectAccess::default()).expect("wiring");
         assert_eq!(
             wiring.resolve_model(Some("worker")),
             ("cheap".to_owned(), None)
@@ -779,7 +855,8 @@ mod tests {
     async fn a_delegated_run_draws_on_the_session_budget_and_stops_when_it_is_spent() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Every fake completion costs 15 weighted tokens.
-        let wiring = Wiring::new(scripted_config(dir.path(), 20, 3)).expect("wiring");
+        let wiring = Wiring::new(scripted_config(dir.path(), 20, 3), ProjectAccess::default())
+            .expect("wiring");
         let coder = wiring.provider("coder").expect("coder provider");
         let request = anvil_core::provider::CompletionRequest {
             system: String::new(),
@@ -807,7 +884,11 @@ mod tests {
     #[tokio::test]
     async fn a_delegated_run_within_budget_reports_its_turns() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wiring = Wiring::new(scripted_config(dir.path(), 10_000, 1)).expect("wiring");
+        let wiring = Wiring::new(
+            scripted_config(dir.path(), 10_000, 1),
+            ProjectAccess::default(),
+        )
+        .expect("wiring");
         let explore = wiring.agents.get("explore").expect("built-in explore");
         let run = anvil_compat::delegate::run_subagent(explore, "look around", &wiring).await;
         assert_eq!(run.result.as_deref(), Ok("all done"));
@@ -817,19 +898,22 @@ mod tests {
 
     #[test]
     fn invalid_allow_tool_names_are_errors() {
-        let mut wiring = Wiring::new(config("")).expect("wiring");
+        let mut wiring = Wiring::new(config(""), ProjectAccess::default()).expect("wiring");
         let error = wiring
             .allow_tools(&["edit file".to_owned()])
             .expect_err("whitespace");
         assert!(format!("{error:#}").contains("--allow-tool"), "{error:#}");
-        let configured = Wiring::new(config("[permissions]\nallow_tools = [\"\"]\n"));
+        let configured = Wiring::new(
+            config("[permissions]\nallow_tools = [\"\"]\n"),
+            ProjectAccess::default(),
+        );
         assert!(configured.is_err());
     }
 
     #[tokio::test]
     async fn subagent_registry_shares_the_session_approvals() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wiring = Wiring::new(config("")).expect("wiring");
+        let wiring = Wiring::new(config(""), ProjectAccess::default()).expect("wiring");
         let main = wiring.registry(refusing()).expect("registry");
         main.session_approvals()
             .lock()
