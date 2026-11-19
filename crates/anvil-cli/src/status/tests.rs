@@ -1,11 +1,10 @@
-//! Tests of the reporter: files and herdr, driven without a terminal.
+//! Tests of the reporter's files, driven without a terminal.
 
 use anvil_core::agent::{IncompleteReason, ScriptedGate, State};
 use anvil_core::tools::{ScriptedPrompt, StaticPrompt};
 use anvil_types::{LoopState, SessionState};
 
 use super::file::read_status;
-use super::herdr::HerdrEnv;
 use super::*;
 
 fn setup(dir: &Path) -> Setup {
@@ -16,7 +15,6 @@ fn setup(dir: &Path) -> Setup {
         session_dir: dir.join("session"),
         task: "fix the bug\nwith details".to_owned(),
         prices: Prices::default(),
-        herdr: None,
     }
 }
 
@@ -185,22 +183,6 @@ async fn the_session_holds_its_lock_until_it_is_dropped() {
     assert!(!file::lock_is_free(&session));
     drop(status);
     assert!(file::lock_is_free(&session));
-}
-
-#[tokio::test]
-async fn a_missing_herdr_binary_does_not_affect_the_session() {
-    let dir = tempfile::tempdir().expect("dir");
-    let mut setup = setup(dir.path());
-    setup.herdr = Some(HerdrEnv {
-        bin: PathBuf::from("/definitely/not/herdr"),
-        pane: "p1".to_owned(),
-    });
-    let status = StatusReporter::start(setup);
-    let prompt = status.prompt(false, Box::new(StaticPrompt(PromptAnswer::Yes)));
-    prompt.ask(&request());
-    status.finish_run(&Status::Done);
-    status.shutdown().await;
-    assert_eq!(on_disk(dir.path()).state, SessionState::Done);
 }
 
 #[tokio::test]

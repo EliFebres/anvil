@@ -84,11 +84,6 @@ summarizer = "runpod"
 # [memory]
 # always_summarize = false
 
-# Report the session to herdr (a terminal multiplexer for coding agents) when it
-# runs in a herdr pane.
-# [integrations]
-# herdr = false
-
 # Hosts a provider may be reached on over plain http, such as a GPU server on
 # your own network. Everything else must use https, except localhost.
 # [network]
@@ -105,7 +100,7 @@ summarizer = "runpod"
 ///
 /// A file that still sets one fails to load with that reason, so nobody
 /// believes a feature is on when it no longer exists.
-const REMOVED_SECTIONS: [(&str, &str); 4] = [
+const REMOVED_SECTIONS: [(&str, &str); 5] = [
     (
         "update",
         "self-update was removed; updates come from whoever distributes the anvil binary",
@@ -121,6 +116,10 @@ const REMOVED_SECTIONS: [(&str, &str); 4] = [
     (
         "telemetry",
         "the ticket signal thresholds were removed with ticket drafting",
+    ),
+    (
+        "integrations",
+        "herdr reporting was removed; anvil reports a session only in its status.json",
     ),
 ];
 
@@ -503,14 +502,6 @@ pub struct NetworkConfig {
     pub allow_http_hosts: Vec<String>,
 }
 
-/// Optional reports to other tools.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct IntegrationsConfig {
-    /// Report the session's state to herdr when running in a herdr pane.
-    pub herdr: bool,
-}
-
 /// Lines a profile adds to the coder's system prompt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -614,9 +605,6 @@ pub struct AnvilConfig {
     /// Normally set by a profile, not by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionRules>,
-    /// Optional reports to other tools.
-    #[serde(default)]
-    pub integrations: IntegrationsConfig,
     /// Rules for outbound requests.
     #[serde(default)]
     pub network: NetworkConfig,
@@ -867,6 +855,7 @@ mod tests {
             ("notify", "webhook"),
             ("tickets", "tickets were removed"),
             ("telemetry", "ticket signal thresholds"),
+            ("integrations", "herdr reporting was removed"),
         ] {
             let text = format!("{SETUP_PROVIDERS}\n[{section}]\n");
             write(home.path(), &text);

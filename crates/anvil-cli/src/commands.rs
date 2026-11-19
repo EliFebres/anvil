@@ -53,17 +53,15 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
     let result = run_session(&wiring, &id, session_dir, task, yes, ui, &status)
         .await
         .map(|result| result.status.exit_code());
-    end_status(&status, &result).await;
+    end_status(&status, &result);
     result
 }
 
-/// Records an error that aborted the command as `failed`, then lets the
-/// last notifications go out.
-pub(crate) async fn end_status(status: &StatusReporter, result: &anyhow::Result<i32>) {
+/// Records an error that aborted the command as `failed`.
+pub(crate) fn end_status(status: &StatusReporter, result: &anyhow::Result<i32>) {
     if let Err(error) = result {
         status.fail(&format!("{error:#}"));
     }
-    status.shutdown().await;
 }
 
 /// The body of [`run_task`], with the status reporter already running.
@@ -317,7 +315,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
         &snapshot.meta.task,
     ));
     let result = resume_session(&wiring, id, snapshot, yes, ui, &status).await;
-    end_status(&status, &result).await;
+    end_status(&status, &result);
     result
 }
 

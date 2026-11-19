@@ -1,7 +1,6 @@
 //! Session status: a `status.json` in every session folder that says
 //! whether the session is working, waiting for the owner, blocked, done or
-//! failed, plus the report to herdr that follows a change of state, and
-//! `anvil status`, which reads the files.
+//! failed, and `anvil status`, which reads the files.
 //!
 //! The mapping from what a session observes to a state is pure and lives
 //! in [`tracker`]; this file wires it to the files and processes.
@@ -12,7 +11,6 @@
 //! renderer's stdin prompts or the full-screen UI's modals) provides.
 
 mod file;
-mod herdr;
 pub mod list;
 mod tracker;
 
@@ -28,7 +26,6 @@ use chrono::{DateTime, Utc};
 
 use self::file::StatusFile;
 pub(crate) use self::file::write_atomic;
-use self::herdr::{HerdrEnv, HerdrReporter, Report, report_for};
 use self::tracker::{Prices, Snapshot, Tracker};
 use crate::wiring::Wiring;
 
@@ -47,8 +44,6 @@ pub struct Setup {
     pub task: String,
     /// Prices for the cost estimate.
     pub prices: Prices,
-    /// The herdr pane, when reporting is on.
-    pub herdr: Option<HerdrEnv>,
 }
 
 impl Setup {
@@ -63,10 +58,8 @@ impl Setup {
     ///
     /// # Returns
     ///
-    /// The setup; the herdr part is `None` unless configured and running
-    /// in a herdr pane.
+    /// The setup.
     pub fn from_wiring(wiring: &Wiring, session_id: &str, session_dir: &Path, task: &str) -> Self {
-        let env = |name: &str| std::env::var(name).ok();
         let config = &wiring.config;
         Self {
             project: wiring.cwd.clone(),
@@ -75,15 +68,14 @@ impl Setup {
             session_dir: session_dir.to_path_buf(),
             task: task.to_owned(),
             prices: crate::frontend::role_price_map(config),
-            herdr: HerdrEnv::detect(config.integrations.herdr, env),
         }
     }
 }
 
 /// Keeps one session's `status.json` current. Cloning shares the session.
 ///
-/// Nothing here fails the session: a file that cannot be written and a
-/// `herdr` that is missing are logged and skipped.
+/// Nothing here fails the session: a file that cannot be written is logged
+/// and skipped.
 #[derive(Clone)]
 pub struct StatusReporter {
     inner: Arc<Mutex<Inner>>,
@@ -98,8 +90,6 @@ struct Inner {
     file: Option<StatusFile>,
     /// What the file says now, so an event that changes nothing writes nothing.
     written: Option<Snapshot>,
-    herdr: Option<HerdrReporter>,
-    last_herdr: Option<Report>,
 }
 
 impl StatusReporter {
@@ -123,11 +113,6 @@ impl StatusReporter {
         {
             tracing::warn!(%error, "the project is not registered for `anvil status --all`");
         }
-        let runtime = tokio::runtime::Handle::try_current().ok();
-        let herdr = match (&runtime, setup.herdr) {
-            (Some(runtime), Some(env)) => Some(HerdrReporter::spawn(env, runtime)),
-            _ => None,
-        };
         let tracker = Tracker::new(setup.prices);
         let mut inner = Inner {
             session_id: setup.session_id,
@@ -137,8 +122,6 @@ impl StatusReporter {
             tracker,
             file,
             written: None,
-            herdr,
-            last_herdr: None,
         };
         inner.publish();
         Self {
@@ -225,14 +208,6 @@ impl StatusReporter {
         self.update(|tracker| tracker.finish(SessionState::Failed, detail));
     }
 
-    /// Tells herdr the session is gone. Call it once, when the command ends.
-    pub async fn shutdown(&self) {
-        let herdr = self.lock().herdr.take();
-        if let Some(herdr) = herdr {
-            herdr.release().await;
-        }
-    }
-
     /// Wraps a permission prompt so a question waiting for the owner shows
     /// as `needs_input`.
     ///
@@ -314,8 +289,7 @@ impl StatusReporter {
 }
 
 impl Inner {
-    /// Writes the file and tells herdr, for whatever changed since the
-    /// last call.
+    /// Writes the file, for whatever changed since the last call.
     fn publish(&mut self) {
         let snapshot = self.tracker.snapshot();
         if self.written.as_ref() == Some(&snapshot) {
@@ -339,20 +313,7 @@ impl Inner {
                 tracing::warn!(%error, "cannot write status.json");
             }
         }
-        self.tell_herdr(&snapshot);
         self.written = Some(snapshot);
-    }
-
-    /// Reports a changed herdr state; a detail change while working is not one.
-    fn tell_herdr(&mut self, snapshot: &Snapshot) {
-        let Some(herdr) = &self.herdr else {
-            return;
-        };
-        let report = report_for(snapshot.state, &snapshot.detail);
-        if self.last_herdr.as_ref() != Some(&report) {
-            herdr.send(report.clone());
-            self.last_herdr = Some(report);
-        }
     }
 }
 

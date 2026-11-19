@@ -139,8 +139,6 @@ pub struct ExtensionsPolicy {
     pub mcp_commands: Vec<String>,
     /// The only folders skills load from. Default none.
     pub skill_dirs: Vec<PathBuf>,
-    /// Whether herdr reporting may run. Default `false`.
-    pub herdr: bool,
 }
 
 /// Where sessions are kept and what runs around them.
@@ -261,9 +259,6 @@ impl LoadedPolicy {
                     .join(", ")
             )
         });
-        if !p.extensions.herdr {
-            lines.push("herdr reporting".to_owned());
-        }
         if !p.sessions.summarizer_calls {
             lines.push("the automatic summarizer calls at session start and end".to_owned());
         }
@@ -381,7 +376,6 @@ mod tests {
         assert!(!p.extensions.hooks);
         assert!(p.extensions.mcp_commands.is_empty());
         assert!(p.extensions.skill_dirs.is_empty());
-        assert!(!p.extensions.herdr);
         assert!(!p.sessions.summarizer_calls);
         assert_eq!(loaded.sessions_root(dir.path()), None);
         let disabled = loaded.disables().join("\n");

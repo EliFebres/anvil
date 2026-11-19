@@ -562,8 +562,11 @@ fn removed_commands_are_not_part_of_the_binary() {
         .collect();
     assert!(commands.contains(&"doctor"), "{stdout}");
     for removed in ["ticket", "update", "learn"] {
-        assert!(!commands.contains(&removed), "`{removed}` in:
-{stdout}");
+        assert!(
+            !commands.contains(&removed),
+            "`{removed}` in:
+{stdout}"
+        );
     }
 }
 

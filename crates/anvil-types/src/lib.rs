@@ -18,8 +18,8 @@ pub mod status;
 pub mod trust;
 
 pub use config::{
-    AnvilConfig, IntegrationsConfig, LimitsConfig, LoadedConfig, NetworkConfig, PermissionRules,
-    Price, PromptConfig, Protocol, ProviderConfig, Roles, StateBudget, ToolsConfig, Unmatched,
+    AnvilConfig, LimitsConfig, LoadedConfig, NetworkConfig, PermissionRules, Price, PromptConfig,
+    Protocol, ProviderConfig, Roles, StateBudget, ToolsConfig, Unmatched,
 };
 pub use error::{ConfigError, DotenvError, ValidationError};
 pub use project::ProjectRules;

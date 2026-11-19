@@ -68,7 +68,7 @@ pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32>
     let wiring = &wiring.with_session(&id, &session_dir);
     let status = StatusReporter::start(Setup::from_wiring(wiring, &id, &session_dir, "chat"));
     let result = chat_session(wiring, id, session_dir, yes, ui, &status).await;
-    end_status(&status, &result).await;
+    end_status(&status, &result);
     result
 }
 

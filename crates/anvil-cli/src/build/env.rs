@@ -80,7 +80,7 @@ impl Env for WiringEnv {
                 cost_usd,
             },
         };
-        end_status(&status, &result.map(|result| result.status.exit_code())).await;
+        end_status(&status, &result.map(|result| result.status.exit_code()));
         report
     }
 

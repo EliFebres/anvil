@@ -45,8 +45,6 @@ hooks = false
 mcp_commands = []
 # The only folders skills load from (default: none).
 skill_dirs = ['C:\ProgramData\Anvil\skills']
-# Whether herdr reporting may run (default: false).
-herdr = false
 
 [sessions]
 # Where session folders go, one subfolder per repository (default: the

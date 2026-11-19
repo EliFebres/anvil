@@ -374,7 +374,6 @@ async fn run_build<E: Env>(
             Err(error) => status.fail(&format!("{error:#}")),
             Ok(_) => status.finish_as(session_state(state.status), &state.detail),
         }
-        status.shutdown().await;
     }
     outcome?;
     eprintln!("\n{}", state.report());

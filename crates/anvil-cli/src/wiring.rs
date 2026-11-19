@@ -228,7 +228,6 @@ impl Wiring {
     /// - hooks are dropped unless `hooks = true`;
     /// - MCP servers are dropped unless their command is in `mcp_commands`;
     /// - skills load only from `skill_dirs`;
-    /// - herdr reporting is off unless `herdr = true`;
     /// - `permissions.allow_tools` from the configuration is ignored unless
     ///   `allow_skip_prompts = true`;
     /// - a forced profile replaces the user's rules (see
@@ -264,9 +263,6 @@ impl Wiring {
             bundled: None,
             managed: p.extensions.skill_dirs.clone(),
         }));
-        if !p.extensions.herdr {
-            self.config.integrations.herdr = false;
-        }
         if !p.permissions.allow_skip_prompts {
             self.approvals = Arc::new(Mutex::new(SessionApprovals::default()));
         }

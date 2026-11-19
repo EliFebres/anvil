@@ -3,7 +3,7 @@
 //! and the policy block `anvil doctor` prints.
 //!
 //! What the policy changes inside a session (endpoints, hooks, MCP servers,
-//! skills, herdr, the forced profile) is applied in one place,
+//! skills, the forced profile) is applied in one place,
 //! [`crate::wiring::Wiring::with_policy`].
 
 use std::path::{Path, PathBuf};

@@ -208,15 +208,6 @@ fn skills_load_only_from_the_policy_folders() {
     assert!(managed.skills.get("approved").is_some());
 }
 
-#[test]
-fn herdr_is_off_even_when_the_user_turns_it_on() {
-    let s = setup();
-    let config = "[integrations]\nherdr = true\n";
-    assert!(wiring(&s, config, None).config.integrations.herdr);
-    let managed = wiring(&s, config, Some(load_policy(&s.policy_dir, "")));
-    assert!(!managed.config.integrations.herdr);
-}
-
 #[tokio::test]
 async fn the_users_allow_tools_is_ignored_when_skipping_prompts_is_off() {
     let s = setup();
