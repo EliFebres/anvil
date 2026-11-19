@@ -78,7 +78,7 @@ Two policies ship as starting points: `policies/restricted.toml` (one model serv
 | `[features] memory` | `false` | Whether remembered facts are read and the end-of-session summarizer proposes new ones. When off, nothing under `~/.anvil/memory` is read or written. |
 | `[features] build` | `false` | Whether `anvil build` may run. |
 | `[features] delegation` | `false` | Whether the `delegate` tool (subagents) is available. |
-| `[projects] allow_trust` | `false` | Whether a repository can be trusted, so its hooks, MCP servers, skills, commands, agents and instruction files load. Its `deny` and `ask` rules apply either way. |
+| `[projects] allow_trust` | `false` | Whether a repository can be trusted, so its hooks, MCP servers, skills, commands, agents, instruction files and `.anvil/permissions.toml` `allow` rules take effect. Its `deny` and `ask` rules apply either way. |
 | `[data] transcript_dir` | the repository's `.anvil/sessions` | Where session folders go, one subfolder per repository. |
 | `[data] retention_days` | kept | Session folders older than this are deleted when a session starts. |
 | `[limits] session_tokens` | none | The most tokens one session may use; a larger user value is an error, and the default is capped. |
