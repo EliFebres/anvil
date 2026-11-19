@@ -34,11 +34,11 @@ The pilot ends on the end date unless a new version of this document extends it.
 ## 6. Technical controls
 
 - Managed policy installed by IT on every participant machine, at the system path in SECURITY.md, with at least:
-  - `allowed_base_urls` set to the one endpoint above;
-  - `allow_skip_prompts = false` and `require_plan_approval = true`;
-  - `profile = "strict.toml"` with `shell_programs` limited to [programs];
-  - `hooks = false`, `mcp_commands = []`, `summarizer_calls = false`;
-  - `transcript_dir` set to [folder] and `retention_days` to [days].
+  - `[network] allowed_hosts` set to the one endpoint above, as `host:port`;
+  - `allow_yes = false`, `allow_allow_tool = false`, `allow_always = false` and `require_plan_approval = true`;
+  - `[permissions] ask = ["shell", "write_file", "edit_file"]`, so every command and write asks a person;
+  - `[features] hooks = false`, `mcp = "off"`, `memory = false`;
+  - `[data] transcript_dir` set to [folder] and `retention_days` to [days].
 - `anvil doctor` run on each machine at the start, and its policy block attached to this document.
 - Version of anvil: [commit or release], built by [who] from [where].
 

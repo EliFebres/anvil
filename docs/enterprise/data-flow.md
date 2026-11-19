@@ -1,6 +1,6 @@
 # Data flow
 
-What leaves the developer's machine when anvil runs, and where it goes. Under a managed policy (`docs/enterprise/policy.example.toml`) the picture below is the whole of it.
+What leaves the developer's machine when anvil runs, and where it goes. Under a managed policy (`policies/restricted.toml`) the picture below is the whole of it.
 
 ```mermaid
 flowchart LR
@@ -12,7 +12,7 @@ flowchart LR
         home[("~/.anvil<br/>config, .env key, trust,<br/>memory, usage records")]
         children["Programs anvil starts:<br/>approved shell commands, checks<br/>(scrubbed environment)"]
     end
-    endpoint["The one allowed model endpoint<br/>(allowed_base_urls)<br/>operated by the model host"]
+    endpoint["The one allowed model endpoint<br/>([network] allowed_hosts)<br/>operated by the model host"]
 
     dev -- "task, approvals" --> anvil
     anvil -- "file tools, jailed to the workspace" --> repo

@@ -26,7 +26,7 @@ A cloned repository tries to make anvil act against the developer: send the API 
 Source code, secrets or customer data reach a server the firm did not approve.
 
 **Stopped today**
-- Requests go only to configured endpoints, over https unless a host is named, without following redirects; under a policy only to `allowed_base_urls`. Only one module can build an HTTP client, enforced by a lint and a test.
+- Requests go only to configured endpoints, over https unless a host is named, without following redirects; under a policy only to the `host:port` pairs in `[network] allowed_hosts`. Only one module can build an HTTP client, enforced by a lint and a test.
 - No telemetry upload, update check or analytics exists. Webhooks, remote MCP servers and skill downloads were removed.
 - File tools cannot read outside the workspace or open `.env` files, SSH, cloud and GPG credentials, browser profiles or keychains.
 - Programs anvil starts do not inherit API keys or tokens.

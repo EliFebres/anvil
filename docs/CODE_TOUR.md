@@ -10,24 +10,24 @@ This walks through what happens when someone types `anvil "add a --dry-run flag"
 
 `start` does four things, in this order:
 
-1. **Loads the managed policy**, `policy::load_system` in `crates/anvil-cli/src/policy.rs`, from the one fixed path `anvil_types::policy::system_path()`: `C:\ProgramData\Anvil\policy.toml` on Windows, `/etc/anvil/policy.toml` on Linux. No environment variable or flag can change that path. If the file exists but is broken, `start` returns the error and anvil stops here, before it touches anything. *Safe because a policy that cannot be read is never silently skipped.*
+1. **Loads the managed policy**, `policy::load_system` in `crates/anvil-cli/src/policy.rs`, from the one fixed path `anvil_types::policy::system_path()`: `C:\ProgramData\anvil\policy.toml` on Windows, `/etc/anvil/policy.toml` on Linux and macOS. No environment variable or flag can change that path. `anvil_types::policy::load_checked` first runs `ownership::check` (root-owned and not group or other writable on Unix; only Administrators, SYSTEM or TrustedInstaller may own or change it on Windows), then parses the file. If the file exists but is unsafe or broken, `start` returns the error and anvil stops here, before it touches anything. *Safe because a policy that cannot be trusted or read is never silently skipped.*
 2. **Loads the user's `.env` file**, `anvil_types::dotenv::env_files` and `load`. Only `~/.anvil/.env` is loaded, never the repository's. *Safe because a cloned repository cannot set a key, `ANVIL_HOME` or a proxy.*
 3. Picks the full-screen UI or the plain line renderer (`UiKind::choose` in `frontend.rs`).
 4. Starts logging into `.anvil/logs/` and the async runtime, then calls `dispatch`.
 
-**`dispatch`** first calls **`policy::check_flags`**. Under a policy that does not allow skipping prompts, `--yes`, `--allow-tool` and `--profile` stop anvil here with an error naming the policy file. Then it matches the subcommand; a bare task goes to `run`, which calls `project_wiring`.
+**`dispatch`** first calls **`policy::check_flags`**. Under a policy with `allow_yes` or `allow_allow_tool` off, `--yes` or `--allow-tool` stops anvil here with an error naming the policy key. Then it matches the subcommand; a bare task goes to `run`, which calls `project_wiring`.
 
 ## 2. Configuration, the repository, and trust
 
 **`crates/anvil-cli/src/main.rs`: `project_wiring`.**
 
 1. **The user's configuration**, `anvil_types::config::load_profile` in `crates/anvil-types/src/config.rs`. It reads `~/.anvil/config.toml` and, with `--profile`, `~/.anvil/profiles/<name>.toml`. It never reads the repository's config. A section that was removed (`[update]`, `[notify]`, `[tickets]`, `[telemetry]`, `[integrations]`) fails with a sentence saying why. *Safe because providers, URLs, keys and settings only ever come from the user's own files.*
-2. **The repository's rules**, `anvil_types::project::load` in `crates/anvil-types/src/project.rs`. From the repository's `.anvil/config.toml` and `.anvil/permissions.toml` it keeps only `deny`, `ask` and `shell_programs`; everything else becomes a warning line naming the key. Under a policy with `[project] config = false` this step is skipped entirely.
+2. **The repository's rules**, `anvil_types::project::load` in `crates/anvil-types/src/project.rs`. From the repository's `.anvil/config.toml` and `.anvil/permissions.toml` it keeps only `deny`, `ask` and `shell_programs`; everything else becomes a warning line naming the key. These rules always apply; under a policy, whether the repository can be trusted at all is `[projects] allow_trust`.
 3. **Trust**, `trust::decide` in `crates/anvil-cli/src/trust.rs`. It looks the repository up in `~/.anvil/trust.toml`. If the user never decided and a person is at the terminal, `shipped` lists everything the repository would load (each hook and MCP server with its command line) and asks once; the answer is saved. With `--plain`, `--yes` or no terminal, an undecided repository stays untrusted and nothing is recorded. *Safe because nothing the repository ships can run or steer the model before a person has seen the list and said yes.*
-4. **The wiring**, `Wiring::new_in` in `crates/anvil-cli/src/wiring.rs`. This is the one place skills, commands, agents, hooks and MCP servers are discovered. It passes the repository root to each discovery only when the repository is trusted, otherwise `None`, so only the user's own files under `~` are found. It also records the user's `[tools] pass_env` for child processes and builds the personal-mode `Egress` (https only, plus the user's `allow_http_hosts`).
-5. **The policy**, `Wiring::with_policy`, when one is installed. This one function is every effect the policy has on a session, and it reads top to bottom: the egress becomes the policy's allowed endpoints, hooks are dropped unless allowed, MCP servers are filtered to the allowed commands, skills come only from the policy's folders, and the configuration's `allow_tools` stops counting. Later, `Wiring::user_permissions` swaps in the policy's forced profile.
+4. **The wiring**, `Wiring::new_in` in `crates/anvil-cli/src/wiring.rs`. This is the one place skills, commands, agents, hooks and MCP servers are discovered. It passes the repository root to each discovery only when the repository is trusted, otherwise `None`, so only the user's own files under `~` are found. It also records the user's `[tools] pass_env` for child processes and builds the unmanaged-mode `Egress` (https only, plus the user's `allow_http_hosts`).
+5. **The policy**, `Wiring::with_policy`, when one is installed. Before the wiring is built, `policy::check_config` refuses a user configuration or profile that conflicts with the policy (a provider host, provider or model the policy does not allow, plain-http hosts, `extra_dirs`, `allow_tools`, an allow rule the policy's `deny` or `ask` covers, a token limit above the ceiling), naming the key. `with_policy` then reads top to bottom: the egress becomes the policy's `host:port` list; hooks, MCP servers and skills the policy forbids are an error when anvil's own files define them and are left out with a note otherwise; saved `always` rules are checked; the token budget is capped; the `[files] deny` globs are compiled. Later, `Wiring::registry_without_delegate` adds the policy's `deny` and `ask` rules and its `allow_always` switch, and `Wiring::tool_context` its `[files]` settings; subagents use the same two functions.
 
-Back in `run`, `prune_old_sessions` deletes this repository's session folders older than the policy's `retention_days`, and `Wiring::load_mcp` starts the remaining MCP servers.
+Back in `run`, `before_session` prints `policy: unmanaged` or the policy's path and hash (line renderer only; the full-screen UI shows it on its startup screen), deletes this repository's session folders older than the policy's `retention_days`, and `Wiring::load_mcp` starts the remaining MCP servers.
 
 ## 3. The session
 
@@ -62,7 +62,7 @@ Every message is appended to the transcript by `push_message`, through `SessionL
 **`crates/anvil-core/src/tools/mod.rs`: `ToolRegistry::execute`, then `check_permission`.**
 **`crates/anvil-core/src/tools/permissions.rs`: `Permissions`.**
 
-The rules were assembled in `Wiring::registry_without_delegate`: the user's own rules (`Wiring::user_permissions`, or the policy's forced profile with the user's denies on top), then `Permissions::tighten` with the repository's `deny`, `ask` and `shell_programs`. Tightening rules are kept apart from the user's, so they can only make a call stricter.
+The rules were assembled in `Wiring::registry_without_delegate`: the user's own rules (`Wiring::user_permissions`), then `Permissions::tighten` with the repository's `deny`, `ask` and `shell_programs`, then with the policy's `deny` and `ask`. Tightening rules are kept apart from the user's, so they can only make a call stricter.
 
 For each call, `check_permission` asks in this order:
 
@@ -89,7 +89,7 @@ The command runs through the configured shell with `env_clear()` followed by `an
 **`crates/anvil-core/src/net.rs`: `Egress::check`, `http_client`.**
 **`crates/anvil-core/src/provider/openai.rs`, `anthropic.rs`, `http.rs`.**
 
-When the wiring builds a provider (`Wiring::provider`), `from_config` first calls **`Egress::check`** on the provider's `base_url`. It must use https unless the host is loopback or named, and under a policy it must lie under an allowed base URL. A refused endpoint never sees a request. Then `read_api_key` reads the key from the environment, and `build` creates the client with **`net::http_client`**, the only function allowed to build one (`clippy.toml` and `crates/anvil-core/tests/one_http_client.rs` enforce that). That client does not follow redirects.
+When the wiring builds a provider (`Wiring::provider`), `from_config` first calls **`Egress::check`** on the provider's `base_url`. It must use https unless the host is loopback or named, and under a policy its `host:port` must be in `[network] allowed_hosts`. A refused endpoint never sees a request. Then `read_api_key` reads the key from the environment, and `build` creates the client with **`net::http_client`**, the only function allowed to build one (`clippy.toml` and `crates/anvil-core/tests/one_http_client.rs` enforce that). That client does not follow redirects.
 
 `OpenAiProvider::complete` (or the Anthropic one) posts the request and hands the response to `http::start`, which retries connection failures and 5xx responses, applies the deadline, and decodes the server-sent events into text and tool calls. When the server answers with an error, `http::send_attempt` replaces any copy of the key in the error body with `[redacted]` before the error goes anywhere. The provider is wrapped in `Budgeted`, which stops the session at its token budget.
 
@@ -101,7 +101,7 @@ When the wiring builds a provider (`Wiring::provider`), `from_config` first call
 
 `SessionLog::open` creates `session.jsonl` in the session folder chosen in step 3, and `append` writes one JSON line per record: the task, each message, state changes, the final status. Full tool output goes to `tool-output/` next to it, and `status.json` keeps the session's state for `anvil status`. `anvil resume`, `anvil sessions` and `anvil status` read from the same `sessions_root`, so they find the sessions wherever the policy put them.
 
-At the end, `memory::finish_session` runs the end-of-session summarizer only if `Wiring::summarizer_calls_allowed`, and the Stop hooks run if any are loaded.
+At the end, `memory::finish_session` runs the end-of-session summarizer only if `Wiring::memory_allowed`, and the Stop hooks run if any are loaded.
 
 ## Where to look when demoing
 

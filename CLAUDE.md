@@ -40,7 +40,7 @@ The full-screen UI lives in `crates/anvil-cli/src/tui/` (ratatui + crossterm). E
 
 - `skills/`: Claude Code-format skills that ship with anvil (`skills/<name>/SKILL.md`).
 - `SECURITY.md`: what anvil reads, stores and sends, for a reviewer.
-- `docs/enterprise/`: data flow, threat model, pilot scope template and an example managed policy; `docs/ROADMAP.md`: deferred work; `docs/CODE_TOUR.md`: the request path, file by file.
+- `docs/enterprise/`: data flow, threat model and pilot scope template; `policies/`: the example managed policies (`restricted.toml`, `standard.toml`), each parsed by a test; `docs/ADMIN_GUIDE.md`: installing and writing a policy; `docs/ROADMAP.md`: deferred work; `docs/CODE_TOUR.md`: the request path, file by file.
 - `profiles/`: profiles that ship with anvil, such as `strict.toml`.
 - Trunk is `main` and is protected. Changes reach it through pull requests with the required `ci` check (`.github/workflows/ci.yml`).
 - Config: the user's `~/.anvil/config.toml` (plus an optional `--profile`). A repository's `.anvil/config.toml` and `.anvil/permissions.toml` may only add `deny` and `ask` rules (`anvil-types/src/project.rs`); its hooks, MCP servers, skills, commands, agents and instruction files load only once the user trusts it (`anvil-cli/src/trust.rs`, `~/.anvil/trust.toml`). `anvil config init [--global]` writes a template.

@@ -7,6 +7,14 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 - **Provider tolerance for self-hosted servers.** Fall back to a client-side token estimate when a server reports no usage, support both `max_tokens` and `max_completion_tokens`, accept a stream that ends without `finish_reason`, use a long request timeout, retry on connection refused while a model loads, and make `api_key_env` optional; without this, budgets and statistics read zero and some vLLM and llama.cpp servers fail on the first turn.
 - **`anvil doctor` as the acceptance test for an endpoint.** A streaming round trip, one real tool call, a usage check, a warning when the server's context is smaller than the configured `context_window`, and latency; a reviewer then has one command that proves an endpoint works before a pilot starts.
 
+## Managed policy keys still to come
+
+- **`[network]` TLS client settings and proxy mode**: a CA bundle, a client certificate and key for mutual TLS, and `proxy = "none" | "system" | <url>`. Today anvil uses the system's trust store and reqwest's environment proxy handling.
+- **HTTP MCP servers behind `[network] allowed_hosts`.** Only stdio MCP servers exist today.
+- **`[shell]`**: mode (`off`, `allowlist`, `ask`), the allowlist and the executor (`host` or `container`).
+- **`[data]` redaction and transcript modes** (`full`, `metadata`, `off`).
+- **`[audit]`**: a required audit sink, a mirror directory, and full or digested arguments.
+
 ## Isolation
 
 - **Operating-system sandboxing of shell commands.** An approved command runs with the developer's rights today; a sandbox (a restricted token or AppContainer on Windows, Seatbelt on macOS, namespaces or Landlock on Linux) would confine its files and network the way the file tools are already confined.

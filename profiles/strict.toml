@@ -1,8 +1,8 @@
 # anvil strict profile.
 #
 # Copy this file to ~/.anvil/profiles/strict.toml and run anvil with
-# `--profile strict`, or have an administrator force it through the
-# managed policy. It replaces your own [permissions] table for the run.
+# `--profile strict`. It replaces your own [permissions] table for the
+# run. A managed policy's deny and ask rules still apply on top.
 #
 # - Reading tools run without asking; they stay inside the workspace jail.
 # - Everything else asks first, including every MCP tool.
