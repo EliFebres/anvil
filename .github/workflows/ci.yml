@@ -13,6 +13,8 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# Every action is pinned to a full commit SHA; the comment names the release.
+# Dependabot (.github/dependabot.yml) proposes updates as pull requests.
 jobs:
   check:
     name: check (${{ matrix.os }})
@@ -22,21 +24,23 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The version must equal rust-toolchain.toml; anvil-types' tests check it.
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
         with:
           toolchain: 1.99.1
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: test
-        run: cargo test --all
+        run: cargo test --locked --all
       - name: scan-keys
-        run: cargo run -q -p anvil-cli -- scan-keys
+        run: cargo run --locked -q -p anvil-cli -- scan-keys
       - name: no-old-name
         shell: bash
         # The old program name may not appear anywhere in the tree.
@@ -45,12 +49,31 @@ jobs:
         run: |
           ! git grep -i -I -E --untracked 'f[o]rge' -- .
 
+  # Advisories, licenses, banned crates (OpenSSL, native-tls) and sources, from deny.toml.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The version must equal rust-toolchain.toml; anvil-types' tests check it.
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: 1.99.1
+      # Built from crates.io with its own lockfile, so no third-party action or
+      # container image runs here.
+      - name: install cargo-deny
+        run: cargo install cargo-deny --version 0.22.0 --locked
+      - name: cargo deny check
+        run: cargo deny --all-features --locked check
+
   # One status check named `ci` for branch protection to require.
   ci:
-    needs: [check]
+    needs: [check, deny]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: every leg passed
         run: |
           test "${{ needs.check.result }}" = "success"
+          test "${{ needs.deny.result }}" = "success"

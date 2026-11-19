@@ -1,0 +1,10 @@
+# Every change needs a review from the repository owner. The paths that decide
+# what anvil may do, and how it is built and released, are listed on their own
+# so a later split of ownership keeps them covered.
+*                     @EliFebres
+/.github/             @EliFebres
+/deny.toml            @EliFebres
+/Cargo.lock           @EliFebres
+/SECURITY.md          @EliFebres
+/policies/            @EliFebres
+/profiles/            @EliFebres

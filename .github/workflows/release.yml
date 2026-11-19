@@ -1,24 +1,39 @@
 name: release
 
-# Every merge to main becomes a release: anvil for Linux (glibc, and a
-# static musl build that runs on any distribution) and Windows, tagged
-# with the date and the short sha, marked latest. The notes carry a
-# `## SHA256` section so whoever installs a binary can check it.
+# A release is cut only by pushing a version tag (`v0.2.0`); nothing else
+# publishes. It builds anvil for Linux (glibc, and a static musl build that
+# runs on any distribution), Windows and macOS on Apple silicon, with the
+# lockfile enforced, and publishes alongside the binaries:
+#   - SHA256SUMS, the SHA-256 of every asset;
+#   - anvil.cdx.json, a CycloneDX SBOM of the anvil binary's dependencies;
+#   - anvil-<version>-vendored-src.tar.gz, the source with every dependency
+#     vendored, for an offline build (README.md, "Building offline");
+#   - a GitHub artifact attestation (SLSA build provenance) for every asset,
+#     checked with `gh attestation verify <file> --repo EliFebres/anvil`.
 on:
   push:
-    branches: [main]
+    tags: ['v*']
 
-# The only workflow that writes: it pushes a tag and uploads release assets.
+# The only workflow that writes. `contents: write` creates the release and
+# uploads its assets; `id-token: write` lets the attestation step get a
+# short-lived signing certificate; `attestations: write` stores the
+# attestation. Jobs that need less narrow it with their own `permissions:`
+# (a job can only narrow, and anvil-types' tests refuse a job that widens).
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
 
+# Every action is pinned to a full commit SHA; the comment names the release.
 jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: true
       matrix:
@@ -27,76 +42,124 @@ jobs:
             target: x86_64-unknown-linux-gnu
             asset: anvil-x86_64-unknown-linux-gnu
             binary: anvil
-            out: target/release
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset: anvil-x86_64-unknown-linux-musl
             binary: anvil
-            out: target/x86_64-unknown-linux-musl/release
-            cargo_target: --target x86_64-unknown-linux-musl
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: anvil-x86_64-pc-windows-msvc.exe
             binary: anvil.exe
-            out: target/release
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: anvil-aarch64-apple-darwin
+            binary: anvil
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # The version must equal rust-toolchain.toml; anvil-types' tests check it.
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
         with:
           toolchain: 1.99.1
           targets: ${{ matrix.target }}
       - name: musl-gcc
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get install -y -qq musl-tools
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+      # No build cache: a release is built from a clean state.
       - name: build
         shell: bash
+        env:
+          # `anvil --version` prints this commit (crates/anvil-cli/src/cli.rs).
+          ANVIL_BUILD_SHA: ${{ github.sha }}
         run: |
-          cargo build --release -p anvil-cli ${{ matrix.cargo_target }}
+          cargo build --release --locked -p anvil-cli --target "${{ matrix.target }}"
           mkdir -p dist
-          cp "${{ matrix.out }}/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
-      - uses: actions/upload-artifact@v4
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
           if-no-files-found: error
 
+  # The CycloneDX SBOM and the vendored source archive.
+  source:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The version must equal rust-toolchain.toml; anvil-types' tests check it.
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: 1.99.1
+      - name: sbom
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-cyclonedx --version 0.5.10 --locked
+          # One SBOM for the anvil binary, covering the dependencies of every platform.
+          cargo cyclonedx --manifest-path crates/anvil-cli/Cargo.toml --format json \
+            --spec-version 1.5 --target all --override-filename anvil.cdx
+          mkdir -p dist
+          cp crates/anvil-cli/anvil.cdx.json dist/anvil.cdx.json
+      - name: vendored source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="anvil-${GITHUB_REF_NAME#v}"
+          git archive --format=tar --prefix="$name/" -o source.tar HEAD
+          mkdir -p staging
+          tar -xf source.tar -C staging
+          cd "staging/$name"
+          mkdir -p .cargo
+          # cargo vendor prints the source replacement that points cargo at vendor/.
+          cargo vendor --locked vendor > .cargo/config.toml
+          cd ..
+          tar -czf "../dist/$name-vendored-src.tar.gz" "$name"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source
+          path: dist/*
+          if-no-files-found: error
+
   release:
-    needs: build
+    needs: [build, source]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The changelog spans the commits since the previous release tag.
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
-      - name: tag, notes and release
+      - name: checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      # SLSA build provenance for every file listed in SHA256SUMS. No
+      # `artifact-metadata` permission: storage records only apply to registry pushes.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="$(date -u +%Y-%m-%d)-${GITHUB_SHA::7}"
-          previous="$(git describe --tags --abbrev=0 --match '20??-??-??-*' "HEAD^" 2>/dev/null || true)"
-          {
-            echo "## Changes"
-            echo
-            # Squash-merged pull requests carry their ticket titles as subjects.
-            if [ -n "$previous" ]; then
-              git log --first-parent --format='- %s' "$previous..HEAD"
-            else
-              git log --first-parent --format='- %s' -n 20 HEAD
-            fi
-            echo
-            echo "## SHA256"
-            echo
-            (cd dist && sha256sum ./*)
-          } > notes.md
-          cat notes.md
-          gh release create "$tag" dist/* --title "$tag" --notes-file notes.md --latest
+          version="${GITHUB_REF_NAME#v}"
+          # The notes are the CHANGELOG.md section for this version.
+          awk -v head="## [$version]" '
+            index($0, head) == 1 { on = 1; next }
+            on && index($0, "## [") == 1 { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for $version" >&2; exit 1; }
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "anvil $version" --notes-file notes.md

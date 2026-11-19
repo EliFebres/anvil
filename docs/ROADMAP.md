@@ -18,6 +18,8 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 - **Distribution through the firm's own channel.** IT can then pin a reviewed version and roll it out with the policy file, instead of each developer downloading a release.
 - **SBOM, `cargo audit`, `cargo deny` and vendored offline builds.** Reviewers need the dependency list and known advisories, and some firms build without network access.
 
+- **Replace `chrono` with `jiff` or `time`.** RUSTSEC-2026-0543 marks chrono unmaintained; `deny.toml` ignores that advisory with a reason until the switch is made.
+
 ## Records and secrets
 
 - **Append-only, hash-chained audit log with export.** Transcripts are plain files today; a chained log lets a reviewer prove nothing was removed or changed after the fact.

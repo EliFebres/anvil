@@ -10,7 +10,7 @@ A coding agent for your own projects. Point it at a repository, give it a task, 
 
 ## Install
 
-A release build: download `anvil-x86_64-unknown-linux-gnu`, `anvil-x86_64-unknown-linux-musl` (static, any distribution) or `anvil-x86_64-pc-windows-msvc.exe` from the [releases page](https://github.com/EliFebres/anvil/releases), check it against the `## SHA256` section of the release notes, rename it to `anvil` (`anvil.exe`) and put it on your `PATH`. anvil does not update itself: a newer version comes from wherever you got this one.
+A release build: download the binary for your platform (`anvil-x86_64-unknown-linux-gnu`, `anvil-x86_64-unknown-linux-musl` for a static build that runs on any distribution, `anvil-x86_64-pc-windows-msvc.exe` or `anvil-aarch64-apple-darwin`) and `SHA256SUMS` from the [releases page](https://github.com/EliFebres/anvil/releases). Check the hash (`sha256sum --check --ignore-missing SHA256SUMS`) and, with the GitHub CLI, where it was built (`gh attestation verify <file> --repo EliFebres/anvil`), then rename it to `anvil` (`anvil.exe`) and put it on your `PATH`. Each release also carries a CycloneDX SBOM (`anvil.cdx.json`). anvil does not update itself: a newer version comes from wherever you got this one.
 
 From source, with a Rust toolchain (edition 2024, rust-version 1.89 or newer) and git; Windows, macOS and Linux all work, and HTTP uses rustls, so there is no OpenSSL to install:
 
@@ -19,6 +19,28 @@ git clone https://github.com/EliFebres/anvil
 cd anvil
 cargo build --release      # target/release/anvil
 ```
+
+### Building offline
+
+Each release carries `anvil-<version>-vendored-src.tar.gz`: the tagged source with every dependency in `vendor/` and a `.cargo/config.toml` that points cargo there:
+
+```toml
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+```
+
+On a machine without network access, with the Rust toolchain named in `rust-toolchain.toml` already installed:
+
+```sh
+tar -xzf anvil-<version>-vendored-src.tar.gz
+cd anvil-<version>
+cargo build --release --locked --offline    # target/release/anvil
+```
+
+`--locked` refuses to build if `Cargo.lock` would change, and `--offline` refuses any download, so the build uses exactly the reviewed dependencies.
 
 ## Configure a provider
 
@@ -245,4 +267,4 @@ just check
 
 That runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all`, the key scan, and a grep that keeps the program's old name out of the tree. CI runs the same on Ubuntu and Windows, and `main` is protected: code reaches it only through pull requests. Prompts and tool schemas are pinned with `insta` snapshots; `cargo insta review` after a deliberate change.
 
-Releases are built by `.github/workflows/release.yml`; each release lists the SHA256 of every binary in its notes.
+Releases are built by `.github/workflows/release.yml` when a version tag is pushed; SECURITY.md ("Release builds") lists what each release publishes and how to verify it. `just deny` runs the dependency gate (`deny.toml`) that CI runs. Changes are recorded in `CHANGELOG.md`.

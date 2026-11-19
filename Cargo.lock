@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil-compat",
  "anvil-core",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-compat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil-core",
  "anvil-types",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil-types",
  "chrono",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil-types",
  "ignore",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-telemetry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil-types",
  "chrono",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "anvil-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dotenvy",

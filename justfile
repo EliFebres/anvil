@@ -14,6 +14,11 @@ check: no-old-name
     cargo test --all
     cargo run -q -p anvil-cli -- scan-keys
 
+# Advisories, licenses, banned crates and sources (deny.toml). CI runs it on
+# every pull request; locally it needs `cargo install cargo-deny --locked`.
+deny:
+    cargo deny --all-features --locked check
+
 # The program used to have another name, which may not appear anywhere in the
 # tree; `f[o]rge` keeps this recipe from matching itself.
 # git grep ships with git, so no extra tool is needed on any machine or runner; it
