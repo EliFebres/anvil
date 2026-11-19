@@ -736,6 +736,11 @@ impl Wiring {
                 &self.project.rules.shell_programs,
             )
             .context("the repository's permission rules")?;
+        if self.project.trusted {
+            permissions
+                .allow_from_project(&self.project.rules.allow)
+                .context("the repository's allow rules")?;
+        }
         let mut always = true;
         if let Some(loaded) = &self.policy {
             let p = &loaded.policy.permissions;

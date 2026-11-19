@@ -130,11 +130,8 @@ fn project_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow::
     for line in &rules.ignored {
         eprintln!("warning: {line}");
     }
-    let trusted = if anvil_types::policy::allows_project_trust(env.policy.as_deref()) {
-        trust::decide(&env.cwd, home, ask_trust)?
-    } else {
-        false
-    };
+    let allow_trust = anvil_types::policy::allows_project_trust(env.policy.as_deref());
+    let trusted = trust::decide(&env.cwd, home, ask_trust, allow_trust)?;
     let project = ProjectAccess { trusted, rules };
     let wiring = Wiring::new_in(env.cwd.clone(), env.home.clone(), loaded.config, project)?;
     match &env.policy {
@@ -235,7 +232,12 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             files.push(dotenv::project_env_file(cwd));
             secrets::run(cwd, &files)
         }
-        Some(Command::Trust { revoke }) => trust::run(cwd, home, revoke),
+        Some(Command::Trust { revoke }) => trust::run(
+            cwd,
+            home,
+            revoke,
+            anvil_types::policy::allows_project_trust(env.policy.as_deref()),
+        ),
         Some(Command::Policy {
             command: PolicyCommand::Show,
         }) => {
@@ -392,7 +394,11 @@ mod tests {
             anvil_types::config::CONFIG_TEMPLATE,
         );
         let mut store = anvil_types::trust::TrustStore::default();
-        store.set(&project, anvil_types::trust::TrustDecision::Trusted);
+        store.set(
+            &project,
+            anvil_types::trust::TrustDecision::Trusted,
+            &trust::fingerprint(&project),
+        );
         store.save(&home).expect("trust saved");
         let policy_path = dir.join("policy.toml");
         write(

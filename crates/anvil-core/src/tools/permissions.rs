@@ -167,6 +167,10 @@ pub struct Permissions {
     deny: Vec<Rule>,
     /// `ask` rules added by [`Permissions::tighten`]; they beat `allow`.
     forced_ask: Vec<Rule>,
+    /// `allow` rules of a trusted repository, added by
+    /// [`Permissions::allow_from_project`]; they only decide a call no
+    /// other rule decides.
+    project_allow: Vec<Rule>,
     /// The programs `shell` is limited to, or `None` for no limit.
     shell_programs: Option<Vec<String>>,
 }
@@ -186,6 +190,7 @@ impl Permissions {
             ask: Vec::new(),
             deny: Vec::new(),
             forced_ask: Vec::new(),
+            project_allow: Vec::new(),
             shell_programs: None,
         }
     }
@@ -216,6 +221,7 @@ impl Permissions {
             ask: parse_all(&rules.ask)?,
             deny: parse_all(&rules.deny)?,
             forced_ask: Vec::new(),
+            project_allow: Vec::new(),
             shell_programs: (!rules.shell_programs.is_empty())
                 .then(|| rules.shell_programs.clone()),
             unmatched: rules.unmatched.map(Decision::from),
@@ -322,6 +328,27 @@ impl Permissions {
         Ok(())
     }
 
+    /// Adds the `allow` rules of a repository the user trusts. They are
+    /// weaker than every other rule: a call any `deny`, `ask` or `allow`
+    /// rule of the user's or the repository's matches is decided by that
+    /// rule, and so is a call the user's own `default` covers; a
+    /// repository's allow only replaces the tool's own default. They never lift the blocked-command list or a
+    /// `shell_programs` limit, and they are never written to disk.
+    ///
+    /// # Arguments
+    ///
+    /// * `allow` - The repository's `allow` rules.
+    ///
+    /// # Errors
+    ///
+    /// [`PermissionError::InvalidRule`] for a glob that does not compile.
+    pub fn allow_from_project(&mut self, allow: &[String]) -> Result<(), PermissionError> {
+        for rule in allow {
+            self.project_allow.push(Rule::parse(rule)?);
+        }
+        Ok(())
+    }
+
     /// Why a `shell` command is refused under a `shell_programs` limit.
     ///
     /// The command must be one program from the list, named as found on
@@ -394,7 +421,12 @@ impl Permissions {
     ///
     /// The rules' decision, if they make one.
     pub fn rule_decision(&self, tool: &str, target: Option<&str>) -> Option<Decision> {
-        self.matched(tool, target).or(self.unmatched)
+        self.matched(tool, target).or(self.unmatched).or_else(|| {
+            self.project_allow
+                .iter()
+                .any(|rule| rule.matches(tool, target))
+                .then_some(Decision::Allow)
+        })
     }
 
     /// The decision of the matching rules alone, if any rule matches.
@@ -1092,6 +1124,42 @@ mod tests {
             "tightening rules are not part of the user's file"
         );
         assert!(perms.tighten(&["shell:[".to_owned()], &[], &[]).is_err());
+    }
+
+    #[test]
+    fn a_projects_allow_only_decides_what_no_other_rule_decides() {
+        let mut perms = parse("ask = [\"edit_file:src/**\"]\ndeny = [\"shell:curl*\"]\n");
+        perms
+            .allow_from_project(&["edit_file".to_owned(), "shell".to_owned()])
+            .expect("valid rules");
+        assert_eq!(
+            perms.decide("edit_file", Some("README.md"), Decision::Ask),
+            Decision::Allow
+        );
+        assert_eq!(
+            perms.decide("edit_file", Some("src/main.rs"), Decision::Ask),
+            Decision::Ask,
+            "the user's ask wins"
+        );
+        assert_eq!(
+            perms.decide("shell", Some("curl x"), Decision::Ask),
+            Decision::Deny
+        );
+        assert!(
+            !perms.explicitly_allowed("shell", Some("rm -rf x")),
+            "a repository's allow never lifts the blocked-command list"
+        );
+        assert!(perms.rules().allow.is_empty(), "never written to disk");
+
+        let mut strict = parse("default = \"ask\"\n");
+        strict
+            .allow_from_project(&["edit_file".to_owned()])
+            .expect("valid rules");
+        assert_eq!(
+            strict.decide("edit_file", Some("README.md"), Decision::Allow),
+            Decision::Ask,
+            "the user's own default wins"
+        );
     }
 
     #[test]

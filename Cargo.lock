@@ -102,6 +102,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "ignore",
  "insta",
  "pulldown-cmark",
  "ratatui",

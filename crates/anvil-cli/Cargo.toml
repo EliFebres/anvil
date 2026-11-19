@@ -24,6 +24,7 @@ anvil-telemetry.workspace = true
 anvil-tui.workspace = true
 anvil-types.workspace = true
 futures-util.workspace = true
+ignore.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true
 regex.workspace = true
