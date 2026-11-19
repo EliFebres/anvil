@@ -28,10 +28,15 @@ pub const CONFIG_TEMPLATE: &str = r#"# anvil configuration: ~/.anvil/config.toml
 # only add permission rules that refuse calls or make them ask first.
 # Swap models by editing this file; no code changes are needed.
 
-[providers.runpod]
+# One example provider: a self-hosted, OpenAI-compatible model server on your
+# own network (vLLM, llama.cpp, an internal gateway). Replace base_url and
+# model, or run `anvil setup --endpoint <url>` to fill them in from the server.
+# Hosted APIs (protocol "anthropic" or "openai") work the same way; README.md
+# shows an example.
+[providers.endpoint]
 protocol = "openai"          # "openai" or "anthropic"
-base_url = "https://<pod-id>-8000.proxy.runpod.net/v1"
-api_key_env = "ANVIL_RUNPOD_KEY"   # environment variable that holds the API key
+base_url = "https://models.internal.example/v1"
+api_key_env = "ANVIL_ENDPOINT_KEY"   # environment variable that holds the API key
 model = "<model name as served>"
 context_window = 131072
 supports_tools = true
@@ -44,15 +49,15 @@ supports_reasoning = true
 # Each role names a provider above, so the coder, the summarizer and the
 # reviewer can each be a different model.
 [roles]
-coder = "runpod"
-summarizer = "runpod"
-# reviewer = "runpod"
+coder = "endpoint"
+summarizer = "endpoint"
+# reviewer = "endpoint"
 # Optional: a model that plans, and takes a build round when the coder is
 # stuck. The coder plans when this is absent.
-# planner = "runpod"
+# planner = "endpoint"
 # Optional: a model for delegated work, the `explore` and `implement`
 # subagents and any agent file with `model: worker`. The coder when absent.
-# worker = "runpod"
+# worker = "endpoint"
 
 # Optional. The shell program behind the `shell` tool: "powershell", "pwsh",
 # "sh", "bash", "zsh" or "cmd". Default: PowerShell on Windows, sh elsewhere.
@@ -123,60 +128,38 @@ const REMOVED_SECTIONS: [(&str, &str); 5] = [
     ),
 ];
 
-/// The provider entries and roles `anvil setup` adds to `~/.anvil/config.toml`.
+/// The provider and roles `anvil setup` adds to `~/.anvil/config.toml`: one
+/// example of a self-hosted, OpenAI-compatible model server.
 ///
-/// Model ids and prices were taken from each vendor's own pages on
-/// 2026-10-30; `anvil setup` prints them so they can be changed.
-pub const SETUP_PROVIDERS: &str = r#"# anvil configuration, written by `anvil setup`.
-# Global: ~/.anvil/config.toml   Project: .anvil/config.toml (project overrides global).
+/// Hosted APIs are a documented option, never something setup writes.
+pub const SETUP_PROVIDERS: &str = r#"# anvil configuration, written by `anvil setup`: ~/.anvil/config.toml.
+# A repository's own .anvil/config.toml cannot change providers or roles.
 # Keys never live here: each provider names the environment variable that
-# holds its key, and `anvil` loads ~/.anvil/.env (then .anvil/.env) at start.
+# holds its key, read from the environment or ~/.anvil/.env.
 
-# Claude Opus 5.5: platform.claude.com -> pricing (cache reads 0.20).
-[providers.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com/v1"
-api_key_env = "ANTHROPIC_API_KEY"
-model = "claude-opus-5-5"
-context_window = 1000000
-supports_tools = true
-supports_reasoning = true
-price_per_mtoken = { input = 4.0, output = 20.0, cached = 0.2 }
-
-# GPT-6 Astra: developers.openai.com -> pricing (standard tier, <= 272K input).
-[providers.openai]
+# One example provider: a self-hosted, OpenAI-compatible model server on your
+# own network (vLLM, llama.cpp, an internal gateway). Replace base_url and
+# model, or run `anvil setup --endpoint <url>` to fill them in from the server.
+[providers.endpoint]
 protocol = "openai"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
-model = "gpt-6-astra"
-context_window = 1048576
+base_url = "https://models.internal.example/v1"
+api_key_env = "ANVIL_ENDPOINT_KEY"
+model = "<model name as served>"
+context_window = 32768
 supports_tools = true
-supports_reasoning = true
-price_per_mtoken = { input = 10.0, output = 50.0 }
-
-# Gemini 4 Argon through Gemini's OpenAI-compatible endpoint: ai.google.dev -> pricing.
-# Launch price until 2026-11-30; from 2026-12-01 it is input = 4.0, output = 20.0.
-[providers.google]
-protocol = "openai"
-base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-api_key_env = "GEMINI_API_KEY"
-model = "gemini-4-argon"
-context_window = 1000000
-supports_tools = true
-supports_reasoning = true
-price_per_mtoken = { input = 2.0, output = 10.0 }
+supports_reasoning = false
 
 # Each role names a provider above.
 [roles]
-coder = "anthropic"
-reviewer = "openai"
-summarizer = "anthropic"
+coder = "endpoint"
+summarizer = "endpoint"
+# reviewer = "endpoint"
 # Optional: a model that plans, and takes a build round when the coder is
 # stuck. The coder plans when this is absent.
-# planner = "anthropic"
+# planner = "endpoint"
 # Optional: a model for delegated work (the `explore` and `implement`
 # subagents). The coder when absent.
-# worker = "anthropic"
+# worker = "endpoint"
 "#;
 
 /// The optional, commented sections `anvil setup` appends to a new config file.
@@ -872,10 +855,29 @@ mod tests {
     fn setup_providers_parse_and_validate() {
         let config: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
         config.validate().expect("validates");
-        assert_eq!(config.roles.coder, "anthropic");
-        assert_eq!(config.roles.reviewer.as_deref(), Some("openai"));
-        assert_eq!(config.providers["google"].protocol, Protocol::Openai);
-        assert_eq!(config.providers["anthropic"].protocol, Protocol::Anthropic);
+        assert_eq!(
+            config.providers.keys().collect::<Vec<_>>(),
+            ["endpoint"],
+            "setup writes one example provider"
+        );
+        let endpoint = &config.providers["endpoint"];
+        assert_eq!(endpoint.protocol, Protocol::Openai);
+        assert!(
+            endpoint.base_url.starts_with("https://")
+                && !endpoint.base_url.contains("anthropic.com")
+                && !endpoint.base_url.contains("openai.com"),
+            "a self-hosted example, not a hosted API: {}",
+            endpoint.base_url
+        );
+        assert_eq!(config.roles.coder, "endpoint");
+        assert_eq!(config.roles.summarizer, "endpoint");
+        assert_eq!(config.roles.reviewer, None);
+        let template: AnvilConfig = toml::from_str(CONFIG_TEMPLATE).expect("parses");
+        assert_eq!(
+            template.providers.keys().collect::<Vec<_>>(),
+            ["endpoint"],
+            "`anvil config init --global` writes the same single example"
+        );
         let with_optional = format!("{SETUP_PROVIDERS}{OPTIONAL_SECTIONS}");
         let same: AnvilConfig = toml::from_str(&with_optional).expect("parses with comments");
         assert_eq!(same, config);
@@ -889,13 +891,13 @@ mod tests {
         std::fs::create_dir_all(profile.parent().expect("parent")).expect("mkdir");
         std::fs::write(
             &profile,
-            "[providers.runpod]\nmodel = \"local-model\"\n[limits]\nsession_tokens = 7\n[permissions]\nallow = [\"shell:cargo *\"]\ndefault = \"deny\"\n",
+            "[providers.endpoint]\nmodel = \"local-model\"\n[limits]\nsession_tokens = 7\n[permissions]\nallow = [\"shell:cargo *\"]\ndefault = \"deny\"\n",
         )
         .expect("write");
         let loaded = load_profile(Some(home.path()), Some("ci")).expect("loads");
-        let runpod = &loaded.config.providers["runpod"];
-        assert_eq!(runpod.model, "local-model");
-        assert_eq!(runpod.context_window, 131_072, "config field kept");
+        let endpoint = &loaded.config.providers["endpoint"];
+        assert_eq!(endpoint.model, "local-model");
+        assert_eq!(endpoint.context_window, 131_072, "config field kept");
         assert_eq!(loaded.sources.len(), 2);
         assert_eq!(loaded.sources[1], profile);
         assert_eq!(loaded.config.limits.session_tokens, 7);
@@ -1020,18 +1022,18 @@ mod tests {
     fn template_parses_and_validates() {
         let config = template();
         config.validate().expect("template validates");
-        assert_eq!(config.roles.coder, "runpod");
+        assert_eq!(config.roles.coder, "endpoint");
         assert_eq!(config.roles.reviewer, None);
-        let runpod = &config.providers["runpod"];
-        assert_eq!(runpod.protocol, Protocol::Openai);
-        assert_eq!(runpod.context_window, 131_072);
-        assert!(runpod.supports_tools && runpod.supports_reasoning);
+        let endpoint = &config.providers["endpoint"];
+        assert_eq!(endpoint.protocol, Protocol::Openai);
+        assert_eq!(endpoint.context_window, 131_072);
+        assert!(endpoint.supports_tools && endpoint.supports_reasoning);
     }
 
     #[test]
     fn toml_round_trip() {
         let mut config = template();
-        config.roles.reviewer = Some("runpod".to_owned());
+        config.roles.reviewer = Some("endpoint".to_owned());
         let text = toml::to_string_pretty(&config).expect("serializes");
         let back: AnvilConfig = toml::from_str(&text).expect("parses back");
         assert_eq!(back, config);
@@ -1090,7 +1092,11 @@ mod tests {
     #[test]
     fn provider_fields_are_checked() {
         let mut config = template();
-        config.providers.get_mut("runpod").expect("exists").base_url = "ftp://x".to_owned();
+        config
+            .providers
+            .get_mut("endpoint")
+            .expect("exists")
+            .base_url = "ftp://x".to_owned();
         assert!(matches!(
             config.validate(),
             Err(ValidationError::InvalidBaseUrl { .. })
@@ -1099,7 +1105,7 @@ mod tests {
         let mut config = template();
         config
             .providers
-            .get_mut("runpod")
+            .get_mut("endpoint")
             .expect("exists")
             .context_window = 0;
         assert!(matches!(
@@ -1108,11 +1114,11 @@ mod tests {
         ));
 
         let mut config = template();
-        config.providers.get_mut("runpod").expect("exists").model = String::new();
+        config.providers.get_mut("endpoint").expect("exists").model = String::new();
         assert_eq!(
             config.validate(),
             Err(ValidationError::EmptyProviderField {
-                name: "runpod".to_owned(),
+                name: "endpoint".to_owned(),
                 field: "model"
             })
         );
@@ -1123,9 +1129,9 @@ mod tests {
         let mut config = template();
         assert_eq!(config.roles.worker, None);
         assert_eq!(config.roles.worker_or_coder(), config.roles.coder);
-        config.roles.worker = Some("runpod".to_owned());
+        config.roles.worker = Some("endpoint".to_owned());
         config.validate().expect("a declared worker is valid");
-        assert_eq!(config.roles.worker_or_coder(), "runpod");
+        assert_eq!(config.roles.worker_or_coder(), "endpoint");
         config.roles.worker = Some("nope".to_owned());
         assert_eq!(
             config.validate(),
@@ -1151,7 +1157,7 @@ delegate_guidance = false
 
     #[test]
     fn unknown_keys_are_rejected() {
-        let text = format!("{CONFIG_TEMPLATE}\n[roles]\nplanner = \"runpod\"\n");
+        let text = format!("{CONFIG_TEMPLATE}\n[roles]\nplanner = \"endpoint\"\n");
         assert!(toml::from_str::<AnvilConfig>(&text).is_err());
     }
 
@@ -1162,7 +1168,7 @@ delegate_guidance = false
         assert_eq!(config.limits.request_timeout_s, 600);
         assert_eq!(config.limits.max_retries, 4);
         assert_eq!(config.limits.session_tokens, 2_000_000);
-        assert_eq!(config.providers["runpod"].max_output_tokens, None);
+        assert_eq!(config.providers["endpoint"].max_output_tokens, None);
     }
 
     #[test]
@@ -1190,12 +1196,12 @@ delegate_guidance = false
 
     #[test]
     fn price_is_optional_and_costs_tokens() {
-        assert_eq!(template().providers["runpod"].price_per_mtoken, None);
+        assert_eq!(template().providers["endpoint"].price_per_mtoken, None);
         let text = format!(
-            "{CONFIG_TEMPLATE}\n[providers.runpod.price_per_mtoken]\ninput = 3.0\noutput = 15.0\n"
+            "{CONFIG_TEMPLATE}\n[providers.endpoint.price_per_mtoken]\ninput = 3.0\noutput = 15.0\n"
         );
         let config: AnvilConfig = toml::from_str(&text).expect("parses");
-        let price = config.providers["runpod"]
+        let price = config.providers["endpoint"]
             .price_per_mtoken
             .expect("price set");
         assert!((price.cost(1_000_000, 1_000_000, 1_000_000) - 21.0).abs() < 1e-9);
@@ -1211,7 +1217,7 @@ delegate_guidance = false
         let mut config = template();
         config
             .providers
-            .get_mut("runpod")
+            .get_mut("endpoint")
             .expect("exists")
             .price_per_mtoken = Some(Price {
             input: -1.0,
@@ -1221,7 +1227,7 @@ delegate_guidance = false
         assert_eq!(
             config.validate(),
             Err(ValidationError::NegativePrice {
-                name: "runpod".to_owned()
+                name: "endpoint".to_owned()
             })
         );
     }

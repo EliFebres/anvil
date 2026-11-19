@@ -22,14 +22,9 @@ const UNFILLED: i32 = 2;
 
 /// The `~/.anvil/.env` template. Placeholders are quoted because a bare
 /// value with spaces is not valid `.env` syntax.
-pub const ENV_TEMPLATE: &str = r#"# anvil providers
-ANTHROPIC_API_KEY="<console.anthropic.com -> API keys>"
-OPENAI_API_KEY="<platform.openai.com -> API keys>"
-GEMINI_API_KEY="<aistudio.google.com -> Get API key>"
-
-# Prompt 7, leave blank for now
-# RUNPOD_API_KEY=
-# HF_TOKEN=
+pub const ENV_TEMPLATE: &str = r#"# The key of the model server in ~/.anvil/config.toml. Set it to any value
+# if the server needs none.
+ANVIL_ENDPOINT_KEY="<your model server's API key>"
 "#;
 
 /// What happened to one file.
@@ -325,10 +320,7 @@ mod tests {
         );
         let values = read_values(&path).expect("parses");
         let names: Vec<&str> = values.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(
-            names,
-            ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
-        );
+        assert_eq!(names, ["ANVIL_ENDPOINT_KEY"]);
         assert!(values.iter().all(|(_, v)| is_placeholder(v)));
         assert_eq!(
             write_env(&path, ENV_TEMPLATE).expect("again"),
@@ -340,22 +332,16 @@ mod tests {
     fn env_merge_appends_missing_blocks_and_keeps_filled_lines() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(".env");
-        std::fs::write(&path, "OPENAI_API_KEY=filled-value-1234\nWEBHOOK_URL=\n").expect("write");
+        std::fs::write(&path, "OTHER_API_KEY=filled-value-1234\nWEBHOOK_URL=\n").expect("write");
         let outcome = write_env(&path, ENV_TEMPLATE).expect("merges");
         assert_eq!(
             outcome,
-            Outcome::Extended(vec![
-                "ANTHROPIC_API_KEY".to_owned(),
-                "GEMINI_API_KEY".to_owned(),
-                "RUNPOD_API_KEY".to_owned(),
-                "HF_TOKEN".to_owned(),
-            ])
+            Outcome::Extended(vec!["ANVIL_ENDPOINT_KEY".to_owned()])
         );
         let text = std::fs::read_to_string(&path).expect("read");
-        assert!(text.starts_with("OPENAI_API_KEY=filled-value-1234\nWEBHOOK_URL=\n"));
-        assert!(text.contains("# anvil providers\nANTHROPIC_API_KEY="));
-        assert!(text.contains("# Prompt 7, leave blank for now\n# RUNPOD_API_KEY=\n# HF_TOKEN="));
-        assert_eq!(text.matches("OPENAI_API_KEY").count(), 1);
+        assert!(text.starts_with("OTHER_API_KEY=filled-value-1234\nWEBHOOK_URL=\n"));
+        assert!(text.contains("needs none.\nANVIL_ENDPOINT_KEY="));
+        assert_eq!(text.matches("OTHER_API_KEY").count(), 1);
         assert_eq!(text.matches("WEBHOOK_URL").count(), 1);
         assert_eq!(
             write_env(&path, ENV_TEMPLATE).expect("again"),
@@ -367,25 +353,23 @@ mod tests {
     fn config_merge_keeps_comments_and_existing_entries() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, CONFIG_TEMPLATE).expect("write");
+        let mine = CONFIG_TEMPLATE
+            .replace("[providers.endpoint]", "[providers.mine]")
+            .replace("\"endpoint\"", "\"mine\"");
+        std::fs::write(&path, &mine).expect("write");
         let outcome = write_config(&path).expect("merges");
         assert_eq!(
             outcome,
-            Outcome::Extended(vec![
-                "providers.anthropic".to_owned(),
-                "providers.openai".to_owned(),
-                "providers.google".to_owned(),
-                "roles.reviewer".to_owned(),
-            ])
+            Outcome::Extended(vec!["providers.endpoint".to_owned()])
         );
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("# anvil configuration: "), "comments kept");
-        assert!(text.contains("coder = \"runpod\""), "existing value kept");
-        assert!(text.contains("[providers.runpod]"));
-        assert!(text.contains("[providers.anthropic]"));
+        assert!(text.contains("coder = \"mine\""), "existing value kept");
+        assert!(text.contains("[providers.mine]"));
+        assert!(text.contains("[providers.endpoint]"));
         let config: AnvilConfig = toml::from_str(&text).expect("parses");
         config.validate().expect("validates");
-        assert_eq!(config.roles.reviewer.as_deref(), Some("openai"));
+        assert_eq!(config.roles.coder, "mine");
         assert_eq!(write_config(&path).expect("again"), Outcome::Kept);
         assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
     }
@@ -397,7 +381,7 @@ mod tests {
         assert_eq!(write_config(&path).expect("writes"), Outcome::Written);
         let config: AnvilConfig =
             toml::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parses");
-        assert_eq!(config.providers.len(), 3);
+        assert_eq!(config.providers.len(), 1);
     }
 
     #[test]

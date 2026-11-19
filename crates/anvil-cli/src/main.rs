@@ -226,7 +226,7 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
                 setup::endpoint::run(home, args, &egress).await
             }
             None if env.policy.is_some() => anyhow::bail!(
-                "a managed policy is installed; run `anvil setup --endpoint <url>` with an allowed endpoint instead of writing the hosted providers"
+                "a managed policy is installed; run `anvil setup --endpoint <url>` with an allowed endpoint instead of writing the example provider"
             ),
             None => setup::run(home),
         },

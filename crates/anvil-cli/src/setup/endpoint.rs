@@ -254,11 +254,12 @@ mod tests {
     fn every_role_points_at_the_endpoint_and_other_providers_are_kept() {
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            format!("# my notes\n{}", anvil_types::config::SETUP_PROVIDERS),
-        )
-        .expect("write");
+        let other = "# my notes\n[providers.other]\nprotocol = \"anthropic\"\n\
+            base_url = \"https://api.anthropic.com/v1\"\napi_key_env = \"ANTHROPIC_API_KEY\"\n\
+            model = \"m\"\ncontext_window = 1000\nsupports_tools = true\n\
+            supports_reasoning = false\n\n[roles]\ncoder = \"other\"\n\
+            summarizer = \"other\"\nreviewer = \"other\"\n";
+        std::fs::write(&path, other).expect("write");
         write_config(
             &path,
             "https://gpu.example/v1",
@@ -275,7 +276,7 @@ mod tests {
         assert_eq!(config.roles.coder, PROVIDER_NAME);
         assert_eq!(config.roles.summarizer, PROVIDER_NAME);
         assert_eq!(config.roles.reviewer.as_deref(), Some(PROVIDER_NAME));
-        assert!(config.providers.contains_key("anthropic"), "kept, unused");
+        assert!(config.providers.contains_key("other"), "kept, unused");
     }
 
     #[test]

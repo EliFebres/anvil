@@ -105,8 +105,8 @@ fn config_show_prints_the_merged_toml_with_sources() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("# from "), "{stdout}");
-    assert!(stdout.contains("[providers.runpod]"), "{stdout}");
-    assert!(stdout.contains("coder = \"runpod\""), "{stdout}");
+    assert!(stdout.contains("[providers.endpoint]"), "{stdout}");
+    assert!(stdout.contains("coder = \"endpoint\""), "{stdout}");
 }
 
 #[test]
@@ -153,14 +153,14 @@ fn doctor_reports_a_missing_api_key_without_a_network() {
     init(dir.path());
     let out = anvil(dir.path())
         .arg("doctor")
-        .env_remove("ANVIL_RUNPOD_KEY")
+        .env_remove("ANVIL_ENDPOINT_KEY")
         .output()
         .expect("anvil runs");
     assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("key:ANVIL_RUNPOD_KEY"), "{stdout}");
+    assert!(stdout.contains("key:ANVIL_ENDPOINT_KEY"), "{stdout}");
     assert!(stdout.contains("FAIL"), "{stdout}");
-    assert!(stdout.contains("SKIP  provider:runpod"), "{stdout}");
+    assert!(stdout.contains("SKIP  provider:endpoint"), "{stdout}");
 }
 
 /// A config with one provider on a closed local port, so no ping leaves the machine.
@@ -235,10 +235,15 @@ fn the_real_env_beats_the_home_env_and_the_project_env_is_never_read() {
     );
 
     std::fs::remove_file(&home_env).expect("remove the home file");
+    write(
+        &project.join(".env"),
+        "ANVIL_TEST_ORDER_KEY=real-looking-key
+",
+    );
     let row = key_row(&project, &home, None);
     assert!(
         row.starts_with("FAIL") && row.contains("not set"),
-        "a key only in the repository's .anvil/.env is never loaded: {row}"
+        "a key only in the repository's .env or .anvil/.env is never loaded: {row}"
     );
 }
 
@@ -292,27 +297,28 @@ fn setup_is_idempotent_and_keeps_filled_keys() {
         String::from_utf8_lossy(&first.stderr)
     );
     let stdout = String::from_utf8_lossy(&first.stdout);
-    assert!(stdout.contains("ANTHROPIC_API_KEY in"), "{stdout}");
-    assert!(stdout.contains("claude-opus-5-5"), "{stdout}");
+    assert!(stdout.contains("ANVIL_ENDPOINT_KEY in"), "{stdout}");
+    assert!(stdout.contains("models.internal.example"), "{stdout}");
+    assert!(!stdout.contains("anthropic.com"), "{stdout}");
+    assert!(!stdout.contains("openai.com"), "{stdout}");
     let written = snapshot();
     let config: anvil_types::AnvilConfig = toml::from_str(&written[1]).expect("config parses");
     config.validate().expect("config validates");
 
     let filled = written[0].replace(
-        "ANTHROPIC_API_KEY=\"<console.anthropic.com -> API keys>\"",
-        "ANTHROPIC_API_KEY=my-real-anthropic-key",
+        "ANVIL_ENDPOINT_KEY=\"<your model server's API key>\"",
+        "ANVIL_ENDPOINT_KEY=my-real-endpoint-key",
     );
     assert_ne!(filled, written[0]);
     std::fs::write(&files[0], &filled).expect("fill in");
     let before = snapshot();
 
     let second = setup();
-    assert_eq!(second.status.code(), Some(2));
+    assert_eq!(second.status.code(), Some(0), "every placeholder is filled");
     let stdout = String::from_utf8_lossy(&second.stdout);
-    assert!(!stdout.contains("ANTHROPIC_API_KEY in"), "{stdout}");
-    assert!(stdout.contains("OPENAI_API_KEY in"), "{stdout}");
+    assert!(!stdout.contains("ANVIL_ENDPOINT_KEY in"), "{stdout}");
     assert_eq!(snapshot(), before, "second setup changes nothing");
-    assert!(before[0].contains("ANTHROPIC_API_KEY=my-real-anthropic-key"));
+    assert!(before[0].contains("ANVIL_ENDPOINT_KEY=my-real-endpoint-key"));
 }
 
 #[test]

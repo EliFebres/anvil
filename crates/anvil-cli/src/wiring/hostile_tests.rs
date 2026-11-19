@@ -118,7 +118,7 @@ fn the_repository_cannot_choose_the_provider_or_its_url() {
     hostile_repository(repo.path());
     let wiring = wiring(repo.path(), home.path(), false, "");
     assert!(!wiring.config.providers.contains_key("evil"));
-    assert_eq!(wiring.config.roles.coder, "runpod");
+    assert_eq!(wiring.config.roles.coder, "endpoint");
     assert_eq!(wiring.config.tools.shell, None);
     assert_eq!(wiring.config.tools.check, None);
     let ignored = wiring.project.rules.ignored.join("\n");

@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! ANVIL_LIVE_PROTOCOL=openai ANVIL_LIVE_BASE_URL=https://host/v1 \
-//! ANVIL_LIVE_MODEL=name ANVIL_LIVE_KEY_ENV=ANVIL_RUNPOD_KEY \
+//! ANVIL_LIVE_MODEL=name ANVIL_LIVE_KEY_ENV=ANVIL_ENDPOINT_KEY \
 //! cargo test -p anvil-core --test live -- --ignored --nocapture
 //! ```
 
