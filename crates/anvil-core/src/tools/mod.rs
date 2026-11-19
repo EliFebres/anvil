@@ -300,6 +300,11 @@ impl ToolContext {
                 "`{path}` holds secrets or credentials; anvil's file tools never open it"
             ));
         }
+        if self.workspace.refuses(&resolved) {
+            return Err(format!(
+                "`{path}` matches the managed policy's [files] deny; anvil's file tools never open it"
+            ));
+        }
         if write && workspace::inside_git_dir(&resolved) {
             return Err(format!(
                 "`{path}` is inside a git directory (hooks, config and the rest of .git); anvil's file tools never write there"
@@ -520,6 +525,9 @@ pub struct ToolRegistry {
     observer: Option<Arc<dyn PermissionObserver>>,
     /// Runs around every allowed call.
     hook: Option<Arc<dyn ToolHook>>,
+    /// Whether an `always` answer may save a rule; a managed policy can
+    /// turn it off, and the answer then counts for the session only.
+    always_allowed: bool,
 }
 
 impl ToolRegistry {
@@ -539,6 +547,7 @@ impl ToolRegistry {
             permissions: Mutex::new(permissions),
             prompt,
             approvals: Arc::new(Mutex::new(SessionApprovals::default())),
+            always_allowed: true,
             observer: None,
             hook: None,
         }
@@ -558,6 +567,22 @@ impl ToolRegistry {
     /// The registry.
     pub fn with_session_approvals(mut self, approvals: Arc<Mutex<SessionApprovals>>) -> Self {
         self.approvals = approvals;
+        self
+    }
+
+    /// Turns the `always` answer, which saves a rule to disk, on or off.
+    /// When off, prompts do not offer it and an `always` answer counts as
+    /// `session`.
+    ///
+    /// # Arguments
+    ///
+    /// * `allowed` - Whether `always` may save a rule.
+    ///
+    /// # Returns
+    ///
+    /// The registry.
+    pub fn with_always(mut self, allowed: bool) -> Self {
+        self.always_allowed = allowed;
         self
     }
 
@@ -898,6 +923,7 @@ impl ToolRegistry {
                     target: target.map(str::to_owned),
                     arguments: args.clone(),
                     needs_person,
+                    may_save: self.always_allowed,
                 };
                 match self.prompt.ask(&request) {
                     PromptAnswer::Yes => {
@@ -920,6 +946,13 @@ impl ToolRegistry {
                             ToolOutput::error(message.to_owned()),
                             ToolOutcome::DeclinedByUser,
                         ))
+                    }
+                    PromptAnswer::Session | PromptAnswer::Always if !self.always_allowed => {
+                        if let Err(error) = approvals.approve(name, root) {
+                            tracing::warn!(%error, tool = name, "could not keep the session approval");
+                        }
+                        self.observe(name, DecisionScope::Session, false);
+                        None
                     }
                     PromptAnswer::Session => {
                         if let Err(error) = approvals.approve(name, root) {
@@ -1109,6 +1142,32 @@ mod tests {
         // The scripted prompt has no answers left; a second prompt would say No.
         let second = registry.execute(&call(r#"{"text": "again"}"#), &ctx).await;
         assert_eq!(second.outcome, ToolOutcome::Completed);
+    }
+
+    #[tokio::test]
+    async fn without_saving_always_counts_for_the_session_and_is_not_offered() {
+        let registry = make_registry("", vec![PromptAnswer::Always]).with_always(false);
+        let ctx = ToolContext::new(".");
+        let first = registry.execute(&call(r#"{"text": "hi"}"#), &ctx).await;
+        assert_eq!(first.outcome, ToolOutcome::Completed);
+        assert!(
+            registry.permissions().rules().allow.is_empty(),
+            "no rule is recorded"
+        );
+        let second = registry.execute(&call(r#"{"text": "again"}"#), &ctx).await;
+        assert_eq!(
+            second.outcome,
+            ToolOutcome::Completed,
+            "the session approval holds"
+        );
+        let request = PermissionRequest {
+            tool: "shell".to_owned(),
+            target: None,
+            arguments: Value::Null,
+            needs_person: false,
+            may_save: false,
+        };
+        assert!(!request.offers_always());
     }
 
     #[tokio::test]

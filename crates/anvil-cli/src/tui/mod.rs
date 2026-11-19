@@ -132,6 +132,8 @@ pub struct SessionInfo {
     pub skills: usize,
     /// How many MCP servers are configured.
     pub mcp_servers: usize,
+    /// The policy in force: `unmanaged`, or `managed` with its hash.
+    pub policy: String,
     /// The newest saved sessions, newest first.
     pub recent_sessions: Vec<RecentSession>,
     /// Whether the logo draws in over time; off when stdout is not a

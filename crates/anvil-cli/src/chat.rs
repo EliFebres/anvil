@@ -82,7 +82,7 @@ async fn chat_session(
 ) -> anyhow::Result<i32> {
     let telemetry =
         SessionTelemetry::start(wiring, &id, SessionMode::Chat).with_status(status.clone());
-    memory::prompt_sections(wiring.home.as_deref(), &wiring.cwd)?;
+    memory::prompt_sections(wiring.home.as_deref(), &wiring.cwd, wiring.memory_allowed())?;
     let hooks = wiring.hook_runner();
     let mut session_context = Vec::new();
     if let Some(hooks) = &hooks {
@@ -515,8 +515,11 @@ impl ChatSession<'_> {
     /// The system prompt for the current mode. The rules and facts are
     /// reloaded each turn so a `rule:` line applies to the next message.
     fn system_prompt(&self, tools: &[ToolSpec]) -> String {
-        let sections = match memory::prompt_sections(self.wiring.home.as_deref(), &self.wiring.cwd)
-        {
+        let sections = match memory::prompt_sections(
+            self.wiring.home.as_deref(),
+            &self.wiring.cwd,
+            self.wiring.memory_allowed(),
+        ) {
             Ok(sections) => sections,
             Err(error) => {
                 self.console.warn(format!("warning: {error:#}"));

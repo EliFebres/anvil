@@ -385,10 +385,23 @@ pub fn session_info(
         rules,
         skills: wiring.skills.skills().len(),
         mcp_servers: wiring.mcp_servers.servers().len(),
+        policy: policy_label(wiring),
         recent_sessions,
         animate: animate_logo(
             io::stdout().is_terminal(),
             std::env::var_os("ANVIL_NO_ANIMATION").is_some(),
+        ),
+    }
+}
+
+/// The policy as the startup screen shows it: `unmanaged`, or `managed`
+/// with the first twelve hex digits of its hash.
+fn policy_label(wiring: &Wiring) -> String {
+    match &wiring.policy {
+        None => anvil_types::policy::UNMANAGED.to_owned(),
+        Some(loaded) => format!(
+            "managed (sha256:{})",
+            loaded.sha256.get(..12).unwrap_or(&loaded.sha256)
         ),
     }
 }

@@ -13,18 +13,29 @@ use anvil_core::agent::{
 };
 use anvil_core::context;
 use anvil_core::provider::{self, Egress, Provider, SharedBudget, TokenBudget};
+use anvil_core::tools::workspace::{DeniedPaths, deny_globs};
 use anvil_core::tools::{
     PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
     SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry, Workspace,
 };
-use anvil_types::policy::LoadedPolicy;
+use anvil_types::policy::{LoadedPolicy, McpMode, SkillsMode};
 use anvil_types::trust::user_permissions_path;
 use anvil_types::{AnvilConfig, ProjectRules, PromptConfig};
 use anyhow::Context;
 
 use crate::memory::{self, RuleChecks};
+use crate::policy::{check_allow_rules, conflict};
 use crate::templates;
 use crate::terminal::TerminalPrompt;
+
+/// The name of a skills mode as the policy file spells it.
+fn skills_mode(mode: SkillsMode) -> &'static str {
+    match mode {
+        SkillsMode::Off => "off",
+        SkillsMode::Bundled => "bundled",
+        SkillsMode::Local => "local",
+    }
+}
 
 /// The home directory: `ANVIL_HOME` when set, otherwise the OS home.
 ///
@@ -35,9 +46,21 @@ use crate::terminal::TerminalPrompt;
 ///
 /// The directory, if any.
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("ANVIL_HOME")
-        .map(PathBuf::from)
-        .or_else(std::env::home_dir)
+    home_dir_from(std::env::var_os("ANVIL_HOME"))
+}
+
+/// [`home_dir`] for a given value of `ANVIL_HOME`, so a test can show
+/// that a home chosen through the environment is still under the policy.
+///
+/// # Arguments
+///
+/// * `anvil_home` - The value of `ANVIL_HOME`, if set.
+///
+/// # Returns
+///
+/// That folder, otherwise the OS home.
+pub fn home_dir_from(anvil_home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    anvil_home.map(PathBuf::from).or_else(std::env::home_dir)
 }
 
 /// What the repository anvil runs in may contribute.
@@ -83,6 +106,8 @@ pub struct Wiring {
     pub mcp_servers: ServerSet,
     /// MCP tools, resolved by [`Wiring::load_mcp`]; empty until then.
     pub mcp: Arc<McpTools>,
+    /// Path globs the file tools refuse, from the policy's `[files] deny`.
+    denied_paths: Option<DeniedPaths>,
     /// The session this wiring serves, once one exists.
     session: Option<SessionInfo>,
     /// Session-scoped tool approvals, shared by every registry and clone so
@@ -212,6 +237,7 @@ impl Wiring {
             hooks,
             mcp_servers,
             mcp: Arc::new(McpTools::default()),
+            denied_paths: None,
             session: None,
             approvals,
             observer: Arc::new(Mutex::new(None)),
@@ -224,14 +250,19 @@ impl Wiring {
     ///
     /// This is the one place the policy changes a session:
     ///
-    /// - requests may go only to `allowed_base_urls`;
-    /// - hooks are dropped unless `hooks = true`;
-    /// - MCP servers are dropped unless their command is in `mcp_commands`;
-    /// - skills load only from `skill_dirs`;
-    /// - `permissions.allow_tools` from the configuration is ignored unless
-    ///   `allow_skip_prompts = true`;
-    /// - a forced profile replaces the user's rules (see
-    ///   [`Wiring::registry`]).
+    /// - requests may go only to `[network] allowed_hosts`;
+    /// - hooks, MCP servers and skills load only as `[features]` allows;
+    ///   one defined in anvil's own files under `~/.anvil` that the policy
+    ///   forbids is an error, one from a file shared with Claude Code or
+    ///   shipped by a repository is left out with a note naming the key;
+    /// - saved `always` rules are an error unless `allow_always` is on, and
+    ///   their allow rules may not cover a policy `deny` or `ask` rule;
+    /// - `[limits] session_tokens` caps the session budget;
+    /// - `[files] deny` is compiled for the file tools.
+    ///
+    /// The policy's `deny` and `ask` rules, `allow_always` and `[files]
+    /// extra_roots` take effect in [`Wiring::registry`] and
+    /// [`Wiring::tool_context`], which subagents share.
     ///
     /// # Arguments
     ///
@@ -243,29 +274,130 @@ impl Wiring {
     ///
     /// # Errors
     ///
-    /// When an allowed endpoint does not parse as a URL.
+    /// When anvil's own files define something the policy forbids, when
+    /// saved rules conflict with it, or when a `[files] deny` glob does not
+    /// compile; each error names the policy key.
     pub fn with_policy(mut self, policy: Arc<LoadedPolicy>) -> anyhow::Result<Self> {
         let p = &policy.policy;
-        self.egress = Egress::managed(
-            &p.endpoints.allowed_base_urls,
-            p.endpoints.allow_http_hosts.clone(),
-        )
-        .context("[endpoints] in the managed policy")?;
-        if !p.extensions.hooks {
+        let own = self.home.as_ref().map(|home| home.join(".anvil"));
+        let is_own = |path: &Path| own.as_ref().is_some_and(|dir| path.starts_with(dir));
+        self.egress = Egress::managed(&p.network.allowed_hosts, p.network.require_tls);
+
+        if !p.features.hooks {
+            let sources: BTreeSet<PathBuf> = self
+                .hooks
+                .events()
+                .into_iter()
+                .flat_map(|event| self.hooks.groups(event).iter().map(|g| g.source.clone()))
+                .collect();
+            for source in sources {
+                if is_own(&source) {
+                    return Err(conflict(
+                        "[features] hooks = false",
+                        &format!("the hooks defined in {}", source.display()),
+                    ));
+                }
+                eprintln!(
+                    "note: the hooks in {} do not run: the managed policy's [features] hooks = false",
+                    source.display()
+                );
+            }
             self.hooks = Arc::new(HookConfig::default());
         }
-        for name in self.mcp_servers.retain_commands(&p.extensions.mcp_commands) {
-            eprintln!("note: MCP server `{name}` is not allowed by the managed policy");
+
+        let mcp_key = match p.features.mcp {
+            McpMode::Off => "[features] mcp = \"off\"",
+            McpMode::Allowlist => "[features] mcp_servers",
+            McpMode::On => "[features] mcp",
+        };
+        let dropped = self.mcp_servers.retain(|server| {
+            let anvil_compat::mcp::Transport::Stdio { command, .. } = &server.transport;
+            policy.allows_mcp_server(&server.name, command)
+        });
+        for server in dropped {
+            if is_own(&server.source) {
+                return Err(conflict(
+                    mcp_key,
+                    &format!(
+                        "the MCP server `{}` defined in {}",
+                        server.name,
+                        server.source.display()
+                    ),
+                ));
+            }
+            eprintln!(
+                "note: the MCP server `{}` in {} does not start: the managed policy's {mcp_key}",
+                server.name,
+                server.source.display()
+            );
         }
-        self.skills = Arc::new(SkillSet::discover(&SkillRoots {
-            project: None,
-            home: None,
-            bundled: None,
-            managed: p.extensions.skill_dirs.clone(),
-        }));
-        if !p.permissions.allow_skip_prompts {
-            self.approvals = Arc::new(Mutex::new(SessionApprovals::default()));
+
+        let all = skill_roots(self.trusted_root(), self.home.as_deref());
+        let roots = match p.features.skills {
+            SkillsMode::Off => SkillRoots {
+                project: None,
+                home: None,
+                bundled: None,
+                managed: Vec::new(),
+            },
+            SkillsMode::Bundled => SkillRoots {
+                project: None,
+                home: None,
+                ..all.clone()
+            },
+            SkillsMode::Local => all,
+        };
+        let allowed = SkillSet::discover(&roots);
+        for skill in self.skills.skills() {
+            if allowed.get(skill.name()).is_some() {
+                continue;
+            }
+            if is_own(&skill.dir) {
+                return Err(conflict(
+                    &format!("[features] skills = \"{}\"", skills_mode(p.features.skills)),
+                    &format!("the skill `{}` in {}", skill.name(), skill.dir.display()),
+                ));
+            }
+            eprintln!(
+                "note: the skill `{}` in {} does not load: the managed policy's [features] skills",
+                skill.name(),
+                skill.dir.display()
+            );
         }
+        self.skills = Arc::new(allowed);
+
+        if self
+            .config
+            .permissions
+            .as_ref()
+            .is_none_or(|r| !r.has_rules())
+            && let Some(home) = &self.home
+        {
+            let saved = user_permissions_path(home, &self.cwd);
+            let rules = Permissions::load_file(saved.clone())
+                .context("loading your permission rules for this repository")?;
+            if rules.rules().has_rules() {
+                if !p.permissions.allow_always {
+                    return Err(conflict(
+                        "[permissions] allow_always = false",
+                        &format!(
+                            "the saved rules in {}; delete the file to continue",
+                            saved.display()
+                        ),
+                    ));
+                }
+                check_allow_rules(p, &rules.rules().allow, &saved.display().to_string())?;
+            }
+        }
+
+        if let Some(ceiling) = p.limits.session_tokens
+            && self.config.limits.session_tokens > ceiling
+        {
+            self.config.limits.session_tokens = ceiling;
+            self.budget = TokenBudget::shared(ceiling);
+        }
+        self.denied_paths = deny_globs(&p.files.deny)
+            .map_err(|error| anyhow::anyhow!("the managed policy's [files] deny: {error}"))?;
         self.policy = Some(policy);
         Ok(self)
     }
@@ -280,16 +412,29 @@ impl Wiring {
         crate::policy::sessions_root(&self.cwd, self.policy.as_deref())
     }
 
-    /// Whether the automatic summarizer calls at session start and end may
-    /// run: always in personal mode, only when the policy allows it.
+    /// Whether remembered facts are read and the end-of-session summarizer
+    /// proposes new ones: always when unmanaged, only when the policy's
+    /// `[features] memory` is on.
     ///
     /// # Returns
     ///
-    /// `true` when they may run.
-    pub fn summarizer_calls_allowed(&self) -> bool {
+    /// `true` when memory may be used.
+    pub fn memory_allowed(&self) -> bool {
         self.policy
             .as_ref()
-            .is_none_or(|loaded| loaded.policy.sessions.summarizer_calls)
+            .is_none_or(|loaded| loaded.policy.features.memory)
+    }
+
+    /// Whether the `delegate` tool may be registered: always when
+    /// unmanaged, only when the policy's `[features] delegation` is on.
+    ///
+    /// # Returns
+    ///
+    /// `true` when subagents may run.
+    pub fn delegation_allowed(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_none_or(|loaded| loaded.policy.features.delegation)
     }
 
     /// Whether a plan must be approved by a person even under `--yes`.
@@ -305,8 +450,8 @@ impl Wiring {
 
     /// Pre-approves tools for this session on top of `permissions.allow_tools`,
     /// as `--allow-tool` does. Call it before building any registry.
-    /// Under a policy that disables skipping prompts, the configuration's
-    /// list is ignored (the flag itself is refused at startup).
+    /// Under a policy that disables pre-approval, both are refused before
+    /// this runs (`crate::policy::check_flags`, `crate::policy::check_config`).
     ///
     /// # Arguments
     ///
@@ -316,12 +461,7 @@ impl Wiring {
     ///
     /// When a name is empty or contains whitespace or a `:`.
     pub fn allow_tools(&mut self, tools: &[String]) -> anyhow::Result<()> {
-        let skipping_allowed = self
-            .policy
-            .as_ref()
-            .is_none_or(|loaded| loaded.policy.permissions.allow_skip_prompts);
-        let from_config = config_allow_tools(&self.config).filter(|_| skipping_allowed);
-        let all = from_config.chain(tools.iter().map(String::as_str));
+        let all = config_allow_tools(&self.config).chain(tools.iter().map(String::as_str));
         let approvals = SessionApprovals::preapproved(all).context("--allow-tool")?;
         self.approvals = Arc::new(Mutex::new(approvals));
         Ok(())
@@ -573,7 +713,7 @@ impl Wiring {
             *slot = Some(Arc::clone(&prompt));
         }
         let mut registry = self.registry_without_delegate(Box::new(ParentPrompt(prompt)))?;
-        if !self.agents.is_empty() {
+        if !self.agents.is_empty() && self.delegation_allowed() {
             registry.register(Box::new(DelegateTool::new(
                 Arc::clone(&self.agents),
                 Arc::new(self.clone()),
@@ -596,8 +736,17 @@ impl Wiring {
                 &self.project.rules.shell_programs,
             )
             .context("the repository's permission rules")?;
+        let mut always = true;
+        if let Some(loaded) = &self.policy {
+            let p = &loaded.policy.permissions;
+            permissions
+                .tighten(&p.deny, &p.ask, &[])
+                .context("the managed policy's [permissions]")?;
+            always = p.allow_always;
+        }
         let mut registry = ToolRegistry::with_builtins(permissions, prompt)
-            .with_session_approvals(Arc::clone(&self.approvals));
+            .with_session_approvals(Arc::clone(&self.approvals))
+            .with_always(always);
         let observer = self.observer.lock().ok().and_then(|slot| slot.clone());
         if let Some(observer) = observer {
             registry.set_observer(observer);
@@ -613,34 +762,23 @@ impl Wiring {
     /// The user's own permission rules: the configuration's or profile's
     /// `[permissions]` when it sets any, otherwise the user's file for this
     /// repository under `~/.anvil/permissions/`, which `always` answers
-    /// are saved to.
-    ///
-    /// Under a policy with a forced profile, the profile's rules replace
-    /// them, and the user's own `deny`, `ask` and `shell_programs` are added
-    /// on top so they can still tighten.
+    /// are saved to. Under a policy with `allow_always = false` that file
+    /// is not used; [`Wiring::with_policy`] already refused it if it held
+    /// rules.
     fn user_permissions(&self) -> anyhow::Result<Permissions> {
-        let own = self.config.permissions.as_ref().filter(|r| r.has_rules());
-        if let Some(forced) = self
-            .policy
-            .as_ref()
-            .and_then(|loaded| loaded.profile_rules.as_ref())
-        {
-            let mut permissions =
-                Permissions::from_rules(forced).context("the managed policy's profile")?;
-            if let Some(own) = own {
-                permissions
-                    .tighten(&own.deny, &own.ask, &own.shell_programs)
-                    .context("permissions in the configuration")?;
-            }
-            return Ok(permissions);
-        }
-        if let Some(rules) = own {
+        if let Some(rules) = self.config.permissions.as_ref().filter(|r| r.has_rules()) {
             return Permissions::from_rules(rules).context("permissions in the configuration");
         }
+        let saving_allowed = self
+            .policy
+            .as_ref()
+            .is_none_or(|loaded| loaded.policy.permissions.allow_always);
         match &self.home {
-            Some(home) => Permissions::load_file(user_permissions_path(home, &self.cwd))
-                .context("loading your permission rules for this repository"),
-            None => Ok(Permissions::empty()),
+            Some(home) if saving_allowed => {
+                Permissions::load_file(user_permissions_path(home, &self.cwd))
+                    .context("loading your permission rules for this repository")
+            }
+            _ => Ok(Permissions::empty()),
         }
     }
 
@@ -687,7 +825,18 @@ impl Wiring {
             shell: Shell::from_config(self.config.tools.shell.as_deref()),
             workspace: Workspace {
                 extra_dirs: self.config.tools.extra_dirs.clone(),
-                read_only_dirs: self.skills.skills().iter().map(|s| s.dir.clone()).collect(),
+                read_only_dirs: self
+                    .skills
+                    .skills()
+                    .iter()
+                    .map(|s| s.dir.clone())
+                    .chain(
+                        self.policy
+                            .iter()
+                            .flat_map(|loaded| loaded.policy.files.extra_roots.clone()),
+                    )
+                    .collect(),
+                denied: self.denied_paths.clone(),
             },
             ..ToolContext::new(self.cwd.clone())
         }
@@ -715,7 +864,8 @@ impl Wiring {
         session_dir: PathBuf,
         registry: &ToolRegistry,
     ) -> anyhow::Result<LoopConfig> {
-        let mut sections = memory::prompt_sections(self.home.as_deref(), &self.cwd)?;
+        let mut sections =
+            memory::prompt_sections(self.home.as_deref(), &self.cwd, self.memory_allowed())?;
         sections.coder.extend(profile_section(&self.config.prompt));
         sections
             .coder

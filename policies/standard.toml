@@ -1,0 +1,57 @@
+# anvil managed policy: standard.
+#
+# For a developer workstation on the internal network. The model server is
+# fixed, prompts work as usual, and the features developers rely on
+# (skills, memory, subagents, anvil build, trusted repositories) are on.
+# Hooks and MCP servers, which run programs, stay off.
+#
+# Install as an administrator at /etc/anvil/policy.toml (Linux and macOS,
+# owned by root, not writable by group or others) or
+# C:\ProgramData\anvil\policy.toml (Windows, owned by and writable only by
+# Administrators and SYSTEM). docs/ADMIN_GUIDE.md describes every key.
+# Check it before rollout with: anvil policy check standard.toml
+
+version = 1
+
+[network]
+# The model servers anvil may call, as host:port. Edit these.
+allowed_hosts = ["models.internal.example:443"]
+require_tls = true
+
+[models]
+# Empty means any provider name and any model the servers offer.
+providers = []
+models = []
+
+[permissions]
+# --yes stays off on workstations; unattended runs belong in CI with
+# their own policy.
+allow_yes = false
+allow_allow_tool = true
+allow_always = true
+require_plan_approval = false
+# Commands that reach the network or change remotes always ask.
+ask = ["shell:git push*", "shell:curl *", "shell:wget *"]
+deny = []
+
+[files]
+extra_roots = []
+deny = []
+
+[features]
+mcp = "off"
+hooks = false
+skills = "local"
+memory = true
+build = true
+delegation = true
+
+[projects]
+allow_trust = true
+
+[data]
+retention_days = 90
+
+[limits]
+session_tokens = 4000000
+build_tokens = 20000000

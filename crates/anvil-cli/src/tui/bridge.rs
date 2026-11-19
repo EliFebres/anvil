@@ -316,6 +316,7 @@ mod tests {
             target: Some("ls".to_owned()),
             arguments: Value::Null,
             needs_person: false,
+            may_save: true,
         };
         assert_eq!(
             TuiPrompt::new(ui.clone()).ask(&request),
@@ -342,6 +343,7 @@ mod tests {
             target: None,
             arguments: Value::Null,
             needs_person: false,
+            may_save: true,
         };
         assert_eq!(TuiPrompt::new(ui.clone()).ask(&request), PromptAnswer::No);
         assert_eq!(TuiGate::new(ui).review("# Plan"), PlanDecision::Abort);

@@ -170,6 +170,7 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
             "not trusted; nothing it ships is loaded"
         }
     );
+    report_policy(&mut report, wiring.policy.as_deref());
     report_env(&mut report, options.env_files, options.loaded_env);
     let bad_keys = report_keys(&mut report, config);
     report_providers(&mut report, wiring, &bad_keys).await;
@@ -205,6 +206,34 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
     }
     println!("doctor: all checks passed");
     Ok(0)
+}
+
+/// The policy rows: whether one is installed, whether only an
+/// administrator can change it, and its hash.
+fn report_policy(report: &mut Report, policy: Option<&anvil_types::policy::LoadedPolicy>) {
+    let Some(loaded) = policy else {
+        report.skip(
+            "policy",
+            format!(
+                "unmanaged: no file at {}",
+                anvil_types::policy::system_path().display()
+            ),
+        );
+        return;
+    };
+    report.pass("policy", format!("managed: {}", loaded.path.display()));
+    match anvil_types::policy::ownership::check(&loaded.path) {
+        Ok(()) => report.pass(
+            "policy:ownership",
+            "only an administrator can change the file and its folder",
+        ),
+        Err(detail) => report.fail(
+            "policy:ownership",
+            detail,
+            "give the file and its folder to an administrator (docs/ADMIN_GUIDE.md)",
+        ),
+    }
+    report.pass("policy:sha256", loaded.sha256.clone());
 }
 
 /// The `env` row: which `.env` files were loaded.
@@ -450,5 +479,35 @@ mod tests {
     fn head_truncates_on_one_line() {
         assert_eq!(head("a\n  b", 10), "a b");
         assert_eq!(head("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn policy_rows_show_presence_ownership_and_hash() {
+        let mut report = Report::default();
+        report_policy(&mut report, None);
+        assert_eq!(report.checks[0].status, Status::Skip);
+        assert!(report.checks[0].detail.starts_with("unmanaged"));
+
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("policy.toml");
+        std::fs::write(
+            &path,
+            "version = 1\n[network]\nallowed_hosts = [\"m.example:443\"]\n",
+        )
+        .expect("write");
+        let loaded = anvil_types::policy::load(&path)
+            .expect("valid")
+            .expect("present");
+        let mut report = Report::default();
+        report_policy(&mut report, Some(&loaded));
+        let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["policy", "policy:ownership", "policy:sha256"]);
+        assert_eq!(report.checks[2].detail, loaded.sha256);
+        #[cfg(windows)]
+        assert_eq!(
+            report.checks[1].status,
+            Status::Fail,
+            "a file the user created is not administrator-owned"
+        );
     }
 }

@@ -1,0 +1,63 @@
+# anvil managed policy: restricted.
+#
+# For a workstation with no internet access that talks to one model server
+# on the internal network. Nothing runs besides the built-in tools, every
+# write and command asks a person, and repositories cannot be trusted.
+#
+# Install as an administrator at /etc/anvil/policy.toml (Linux and macOS,
+# owned by root, not writable by group or others) or
+# C:\ProgramData\anvil\policy.toml (Windows, owned by and writable only by
+# Administrators and SYSTEM). docs/ADMIN_GUIDE.md describes every key.
+# Check it before rollout with: anvil policy check restricted.toml
+
+version = 1
+
+[network]
+# The only model server anvil may call, as host:port. Edit this.
+allowed_hosts = ["models.internal.example:443"]
+# Every request uses https (the default).
+require_tls = true
+
+[models]
+# The provider names and model names the user's configuration may use.
+# Empty means any. Edit these to match the model server.
+providers = ["endpoint"]
+models = []
+
+[permissions]
+# Nothing skips a prompt: no --yes, no --allow-tool, no saved "always" rules.
+allow_yes = false
+allow_allow_tool = false
+allow_always = false
+# A person approves every plan.
+require_plan_approval = true
+# Every write and command asks, whatever the user's own rules say.
+ask = ["write_file", "edit_file", "shell"]
+deny = []
+
+[files]
+# No folders outside the workspace.
+extra_roots = []
+# Extra paths the file tools refuse, on top of the built-in secret list.
+deny = ["**/*.kdbx", "**/*.jks", "**/*.keystore"]
+
+[features]
+mcp = "off"
+hooks = false
+skills = "off"
+memory = false
+build = false
+delegation = false
+
+[projects]
+# A repository's hooks, MCP servers, skills, commands, agents and
+# instruction files never load. Its deny and ask rules still apply.
+allow_trust = false
+
+[data]
+# Delete session transcripts older than 30 days when a session starts.
+retention_days = 30
+
+[limits]
+# The most tokens one session may use.
+session_tokens = 2000000

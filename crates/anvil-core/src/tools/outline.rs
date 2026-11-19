@@ -58,7 +58,7 @@ impl Tool for Outline {
             };
             let shown = ctx.display_path(&path);
             if path.is_dir() {
-                let files: Vec<String> = walk(&path)
+                let files: Vec<String> = walk(&path, &ctx.workspace)
                     .filter(|entry| entry.file_type().is_some_and(|t| t.is_file()))
                     .filter(|entry| outline::is_source(entry.path()))
                     .filter_map(|entry| {

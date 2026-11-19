@@ -547,19 +547,23 @@ pub struct PermissionRequest {
     /// that can define hooks. An unattended prompt refuses it, and a
     /// `session` or `always` answer covers this one call only.
     pub needs_person: bool,
+    /// Whether an `always` answer may save a rule; `false` when a managed
+    /// policy sets `[permissions] allow_always = false`.
+    pub may_save: bool,
 }
 
 impl PermissionRequest {
     /// Whether the prompt should offer `always`, which saves a rule to disk.
     ///
     /// Only `shell` offers it: its saved rule is a command prefix, which is
-    /// narrower than the session approval every prompt offers.
+    /// narrower than the session approval every prompt offers. A managed
+    /// policy can turn it off.
     ///
     /// # Returns
     ///
-    /// `true` for `shell`.
+    /// `true` for `shell` when saving is allowed.
     pub fn offers_always(&self) -> bool {
-        self.tool == "shell"
+        self.tool == "shell" && self.may_save
     }
 }
 
@@ -1162,6 +1166,7 @@ mod tests {
             target: Some("ls".to_owned()),
             arguments: serde_json::json!({"command": "ls"}),
             needs_person: false,
+            may_save: true,
         };
         assert_eq!(prompt.ask(&request), PromptAnswer::Always);
         assert_eq!(prompt.ask(&request), PromptAnswer::No);
@@ -1360,6 +1365,7 @@ mod tests {
             target: None,
             arguments: serde_json::json!({}),
             needs_person: false,
+            may_save: true,
         };
         assert!(request("shell").offers_always());
         assert!(!request("edit_file").offers_always());

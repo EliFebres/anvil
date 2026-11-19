@@ -54,7 +54,7 @@ pub struct EndpointArgs<'a> {
 /// * `home` - The home directory.
 /// * `args` - The endpoint, model and key variable.
 /// * `egress` - Where requests may go: the managed policy's endpoints, or
-///   personal mode.
+///   unmanaged mode.
 ///
 /// # Returns
 ///

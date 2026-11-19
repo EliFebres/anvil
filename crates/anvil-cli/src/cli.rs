@@ -1,5 +1,6 @@
 //! Command-line definition for `anvil`.
 
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -78,6 +79,12 @@ pub enum Command {
         /// Record the repository as not trusted, without asking.
         #[arg(long)]
         revoke: bool,
+    },
+    /// Show the managed policy in force, or check a policy file before rollout.
+    Policy {
+        /// Which policy action to take.
+        #[command(subcommand)]
+        command: PolicyCommand,
     },
     /// Manage anvil configuration.
     Config {
@@ -298,6 +305,24 @@ pub enum ConfigCommand {
     },
     /// Print your configuration (and profile, if given) as TOML.
     Show,
+}
+
+/// Subcommands under `anvil policy`.
+#[derive(Debug, Subcommand)]
+pub enum PolicyCommand {
+    /// Print every effective policy setting and the layer that set it
+    /// (policy or default), then the user settings the policy bounds.
+    Show,
+    /// Validate a policy file for an administrator: syntax, schema and
+    /// values. Exits 1 with the reasons when it is invalid.
+    Check {
+        /// The policy file to check.
+        file: PathBuf,
+        /// Also check that only an administrator can change the file and
+        /// its folder, as anvil does at startup.
+        #[arg(long)]
+        ownership: bool,
+    },
 }
 
 #[cfg(test)]

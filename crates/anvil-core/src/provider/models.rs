@@ -159,8 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_an_endpoint_the_rules_do_not_allow_before_sending() {
-        let managed = Egress::managed(&["https://models.corp.example/v1".to_owned()], Vec::new())
-            .expect("valid");
+        let managed = Egress::managed(&["models.corp.example:443".to_owned()], true);
         let error = list_models(
             "http://127.0.0.1:9/v1",
             None,

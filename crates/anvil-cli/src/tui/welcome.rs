@@ -37,6 +37,7 @@ pub struct Welcome {
     rules: Vec<(String, String)>,
     skills: usize,
     mcp_servers: usize,
+    policy: String,
     sessions: Vec<RecentSession>,
     started: Instant,
     animate: bool,
@@ -63,6 +64,7 @@ impl Welcome {
             rules: info.rules.clone(),
             skills: info.skills,
             mcp_servers: info.mcp_servers,
+            policy: info.policy.clone(),
             sessions: info.recent_sessions.clone(),
             started: now,
             animate: info.animate,
@@ -215,6 +217,7 @@ impl Welcome {
                 count_label(self.mcp_servers, "mcp server")
             ),
         ));
+        lines.push(pair("policy", self.policy.clone()));
         lines
     }
 
@@ -271,6 +274,7 @@ mod tests {
             )],
             skills: 2,
             mcp_servers: 0,
+            policy: "unmanaged".to_owned(),
             recent_sessions: vec![RecentSession {
                 id: "01J".to_owned(),
                 status: "done".to_owned(),

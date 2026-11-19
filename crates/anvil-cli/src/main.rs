@@ -31,10 +31,11 @@ use std::sync::Arc;
 use anvil_types::config::load_profile;
 use anvil_types::dotenv;
 use anvil_types::policy::LoadedPolicy;
-use anyhow::Context;
 use clap::Parser;
 
-use crate::cli::{BuildCommand, Cli, Command, CompatCommand, ConfigCommand, TemplateCommand};
+use crate::cli::{
+    BuildCommand, Cli, Command, CompatCommand, ConfigCommand, PolicyCommand, TemplateCommand,
+};
 use crate::frontend::UiKind;
 use crate::wiring::{ProjectAccess, Wiring, home_dir};
 
@@ -122,20 +123,19 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
 fn project_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow::Result<Wiring> {
     let home = env.home.as_deref();
     let loaded = load_profile(home, profile)?;
-    let project_allowed = env
-        .policy
-        .as_ref()
-        .is_none_or(|loaded| loaded.policy.project.config);
-    let project = if project_allowed {
-        let rules = anvil_types::project::load(&env.cwd)?;
-        for line in &rules.ignored {
-            eprintln!("warning: {line}");
-        }
-        let trusted = trust::decide(&env.cwd, home, ask_trust)?;
-        ProjectAccess { trusted, rules }
+    if let Some(policy) = &env.policy {
+        policy::check_config(policy, &loaded)?;
+    }
+    let rules = anvil_types::project::load(&env.cwd)?;
+    for line in &rules.ignored {
+        eprintln!("warning: {line}");
+    }
+    let trusted = if anvil_types::policy::allows_project_trust(env.policy.as_deref()) {
+        trust::decide(&env.cwd, home, ask_trust)?
     } else {
-        ProjectAccess::default()
+        false
     };
+    let project = ProjectAccess { trusted, rules };
     let wiring = Wiring::new_in(env.cwd.clone(), env.home.clone(), loaded.config, project)?;
     match &env.policy {
         Some(policy) => wiring.with_policy(Arc::clone(policy)),
@@ -144,17 +144,13 @@ fn project_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow::
 }
 
 /// The egress rules `anvil setup --endpoint` probes under: the policy's
-/// endpoints, or personal mode with the user's own http hosts if a
+/// endpoints, or unmanaged mode with the user's own http hosts if a
 /// configuration already exists.
 fn setup_egress(env: &Env) -> anyhow::Result<anvil_core::provider::Egress> {
     use anvil_core::provider::Egress;
     if let Some(loaded) = &env.policy {
-        let endpoints = &loaded.policy.endpoints;
-        return Egress::managed(
-            &endpoints.allowed_base_urls,
-            endpoints.allow_http_hosts.clone(),
-        )
-        .context("[endpoints] in the managed policy");
+        let network = &loaded.policy.network;
+        return Ok(Egress::managed(&network.allowed_hosts, network.require_tls));
     }
     let hosts = load_profile(env.home.as_deref(), None)
         .map(|loaded| loaded.config.network.allow_http_hosts)
@@ -162,13 +158,18 @@ fn setup_egress(env: &Env) -> anyhow::Result<anvil_core::provider::Egress> {
     Ok(Egress::personal(hosts))
 }
 
-/// Deletes this repository's session folders older than the policy's
-/// `retention_days`, before a new session starts.
-fn prune_old_sessions(wiring: &Wiring) {
+/// Prepares a session: says which policy is in force (on stderr, for the
+/// line renderer; the full-screen UI shows it on its startup screen), and
+/// deletes this repository's session folders older than the policy's
+/// `retention_days`.
+fn before_session(wiring: &Wiring, ui: UiKind) {
+    if ui == UiKind::Plain {
+        eprintln!("{}", policy::startup_line(wiring.policy.as_deref()));
+    }
     let Some(days) = wiring
         .policy
         .as_ref()
-        .and_then(|loaded| loaded.policy.sessions.retention_days)
+        .and_then(|loaded| loaded.policy.data.retention_days)
     else {
         return;
     };
@@ -191,7 +192,6 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         policy::SkipFlags {
             yes: cli.yes,
             allow_tool: !cli.allow_tools.is_empty(),
-            profile: cli.profile.is_some(),
         },
     )?;
     match cli.command {
@@ -236,6 +236,23 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             secrets::run(cwd, &files)
         }
         Some(Command::Trust { revoke }) => trust::run(cwd, home, revoke),
+        Some(Command::Policy {
+            command: PolicyCommand::Show,
+        }) => {
+            let loaded = load_config(home).ok();
+            print!(
+                "{}",
+                policy::show(env.policy.as_deref(), loaded.as_ref(), profile)
+            );
+            Ok(0)
+        }
+        Some(Command::Policy {
+            command: PolicyCommand::Check { file, ownership },
+        }) => {
+            let (text, code) = policy::check_file(&file, ownership);
+            print!("{text}");
+            Ok(code)
+        }
         Some(Command::Sessions) => {
             commands::sessions(&policy::sessions_root(cwd, env.policy.as_deref()))?;
             Ok(0)
@@ -294,23 +311,33 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
                 build::status(cwd, id.as_deref())?;
                 return Ok(0);
             }
+            let mut args = args;
+            let caps = policy::check_build(
+                env.policy.as_deref(),
+                policy::BuildCaps {
+                    tokens: args.budget_tokens,
+                    usd: args.budget_usd,
+                },
+            )?;
+            args.budget_tokens = caps.tokens;
+            args.budget_usd = caps.usd;
             let mut wiring = project_wiring(&env, profile, ask_trust)?;
             wiring.allow_tools(&cli.allow_tools)?;
-            prune_old_sessions(&wiring);
+            before_session(&wiring, UiKind::Plain);
             wiring.load_mcp().await;
             build::execute(args, wiring, cli.yes).await
         }
         Some(Command::Chat) => {
             let mut wiring = project_wiring(&env, profile, ask_trust)?;
             wiring.allow_tools(&cli.allow_tools)?;
-            prune_old_sessions(&wiring);
+            before_session(&wiring, ui);
             wiring.load_mcp().await;
             chat::chat(&wiring, cli.yes, ui).await
         }
         Some(Command::Resume { id }) => {
             let mut wiring = project_wiring(&env, profile, ask_trust)?;
             wiring.allow_tools(&cli.allow_tools)?;
-            prune_old_sessions(&wiring);
+            before_session(&wiring, ui);
             wiring.load_mcp().await;
             commands::resume(&wiring, &id, cli.yes, ui).await
         }
@@ -336,7 +363,7 @@ async fn run(
     let task = words.join(" ");
     let mut wiring = project_wiring(env, profile, ui == UiKind::Tui)?;
     wiring.allow_tools(allow_tools)?;
-    prune_old_sessions(&wiring);
+    before_session(&wiring, ui);
     wiring.load_mcp().await;
     commands::run_task(&wiring, task, yes, ui).await
 }
@@ -371,7 +398,7 @@ mod tests {
         write(
             &policy_path,
             &format!(
-                "[endpoints]\nallowed_base_urls = [\"https://models.corp.example/v1\"]\n{extra}"
+                "version = 1\n[network]\nallowed_hosts = [\"models.internal.example:443\"]\n{extra}"
             ),
         );
         let policy = policy::load_from(&policy_path)
@@ -387,20 +414,36 @@ mod tests {
     }
 
     #[test]
-    fn with_project_config_off_the_repository_is_ignored_entirely() {
+    fn without_allow_trust_nothing_the_repository_ships_loads_but_its_rules_apply() {
         let dir = tempfile::tempdir().expect("dir");
-        let open = project_wiring(&env(dir.path(), ""), None, false).expect("wiring");
+        let open = project_wiring(
+            &env(dir.path(), "[projects]\nallow_trust = true\n"),
+            None,
+            false,
+        )
+        .expect("wiring");
         assert!(open.project.trusted, "the user's trust decision counts");
         assert_eq!(open.project.rules.deny, ["shell"]);
 
         let dir = tempfile::tempdir().expect("dir");
-        let off = project_wiring(&env(dir.path(), "[project]\nconfig = false\n"), None, false)
-            .expect("wiring");
-        assert!(!off.project.trusted, "trust no longer loads anything");
-        assert!(
-            off.project.rules.deny.is_empty(),
-            "the repository's rules are not read"
-        );
+        let off = project_wiring(&env(dir.path(), ""), None, false).expect("wiring");
+        assert!(!off.project.trusted, "the policy forbids trust by default");
         assert_eq!(off.trusted_root(), None);
+        assert_eq!(
+            off.project.rules.deny,
+            ["shell"],
+            "the repository's tightening rules still apply"
+        );
+    }
+
+    #[test]
+    fn a_user_configuration_that_conflicts_with_the_policy_stops_the_session() {
+        let dir = tempfile::tempdir().expect("dir");
+        let env = env(dir.path(), "[models]\nproviders = [\"other\"]\n");
+        let error = project_wiring(&env, None, false).err().expect("refused");
+        assert!(
+            format!("{error:#}").contains("[models] providers"),
+            "{error:#}"
+        );
     }
 }

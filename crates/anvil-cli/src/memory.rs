@@ -86,6 +86,9 @@ pub fn open_rules(home: &Path) -> anyhow::Result<RuleSet> {
 ///
 /// * `home` - The home directory; without one there are no sections.
 /// * `cwd` - The project root, which names the project's facts file.
+/// * `facts` - Whether remembered facts may be read; `false` under a
+///   policy with `[features] memory = false`, and then nothing under
+///   `~/.anvil/memory` is opened.
 ///
 /// # Returns
 ///
@@ -94,7 +97,11 @@ pub fn open_rules(home: &Path) -> anyhow::Result<RuleSet> {
 /// # Errors
 ///
 /// When the rules file is malformed.
-pub fn prompt_sections(home: Option<&Path>, cwd: &Path) -> anyhow::Result<PromptSections> {
+pub fn prompt_sections(
+    home: Option<&Path>,
+    cwd: &Path,
+    facts: bool,
+) -> anyhow::Result<PromptSections> {
     let Some(home) = home else {
         return Ok(PromptSections::default());
     };
@@ -112,6 +119,9 @@ pub fn prompt_sections(home: Option<&Path>, cwd: &Path) -> anyhow::Result<Prompt
             heading: RULES_HEADING.to_owned(),
             text,
         });
+    }
+    if !facts {
+        return Ok(sections);
     }
     let store = FactStore::new(paths::memory_dir(home));
     if let Some(loaded) = load_memory(&store, &paths::repo_name(cwd), MEMORY_TOKEN_CAP) {
@@ -414,8 +424,8 @@ pub async fn finish_session(
     console: &Console,
     telemetry: Option<&SessionTelemetry>,
 ) {
-    if !wiring.summarizer_calls_allowed() {
-        console.notice("memory: skipped (the managed policy turns the summarizer off)");
+    if !wiring.memory_allowed() {
+        console.notice("memory: skipped (the managed policy's [features] memory = false)");
         return;
     }
     let outcome = async {
@@ -544,7 +554,7 @@ mod tests {
                 .is_file()
         );
 
-        let sections = prompt_sections(Some(home.path()), cwd.path()).expect("sections");
+        let sections = prompt_sections(Some(home.path()), cwd.path(), true).expect("sections");
         assert_eq!(sections.coder.len(), 1, "no facts yet, so only the rules");
         assert_eq!(sections.review.len(), 1);
         let prompt = system_prompt(&PromptInputs {
@@ -603,7 +613,7 @@ mod tests {
         .expect("write");
 
         let (coder, review) =
-            texts(&prompt_sections(Some(home.path()), rust.path()).expect("rust"));
+            texts(&prompt_sections(Some(home.path()), rust.path(), true).expect("rust"));
         for text in [&coder, &review] {
             assert!(!text.contains("[py-only]"), "{text}");
             assert!(
@@ -612,7 +622,7 @@ mod tests {
             );
         }
         let (coder, review) =
-            texts(&prompt_sections(Some(home.path()), python.path()).expect("python"));
+            texts(&prompt_sections(Some(home.path()), python.path(), true).expect("python"));
         for text in [&coder, &review] {
             assert!(
                 text.contains("[py-only]") && text.contains("[any]"),
@@ -639,7 +649,7 @@ mod tests {
         )
         .expect("write");
         let all = open_rules(home.path()).expect("seeded rules");
-        let sections = prompt_sections(Some(home.path()), project.path()).expect("sections");
+        let sections = prompt_sections(Some(home.path()), project.path(), true).expect("sections");
         assert_eq!(sections.coder[0].text, all.prompt_section().expect("coder"));
         assert_eq!(
             sections.review[0].text,

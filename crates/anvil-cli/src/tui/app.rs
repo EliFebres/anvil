@@ -744,6 +744,7 @@ mod tests {
             ],
             skills: 3,
             mcp_servers: 1,
+            policy: "unmanaged".to_owned(),
             recent_sessions: vec![
                 RecentSession {
                     id: "01K9ABCDEFGHJKMNPQRSTVWXYZ".to_owned(),
@@ -819,6 +820,7 @@ mod tests {
                 target: Some(command.to_owned()),
                 arguments: serde_json::json!({ "command": command }),
                 needs_person: false,
+                may_save: true,
             },
             reply: tx,
         }));
@@ -1076,6 +1078,7 @@ mod tests {
                 target: Some("src/lib.rs".to_owned()),
                 arguments: serde_json::json!({"path": "src/lib.rs", "old": "fn b() {}", "new": "fn beta() {}"}),
                 needs_person: false,
+                may_save: true,
             },
             reply: tx,
         }));
@@ -1118,6 +1121,7 @@ mod tests {
                 target: Some("cargo test".to_owned()),
                 arguments: serde_json::json!({"command": "cargo test"}),
                 needs_person: false,
+                may_save: true,
             },
             reply: tx,
         }));

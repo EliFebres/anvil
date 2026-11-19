@@ -2,11 +2,11 @@
 source: crates/anvil-cli/src/tui/app.rs
 expression: terminal.backend()
 ---
-"  / /| | /  |/ /| | / // // /     project                                                                               "
-" / ___ |/ /|  / | |/ // // /___   coder    main (test-model)                                                            "
-"/_/  |_/_/ |_/  |___/___/_____/   reviewer reviewer (test-reviewer)                                                     "
-"                                  mode     ask  shift+tab to cycle                                                      "
+"  / /| | /  |/ /| | / // // /     coder    main (test-model)                                                            "
+" / ___ |/ /|  / | |/ // // /___   reviewer reviewer (test-reviewer)                                                     "
+"/_/  |_/_/ |_/  |___/___/_____/   mode     ask  shift+tab to cycle                                                      "
 "                                  loaded   2 rules · 3 skills · 1 mcp server                                            "
+"                                  policy   unmanaged                                                                    "
 "                                                                                                                        "
 "standing rules                                                                                                          "
 "  docstrings  Every public item gets a doc comment.                                                                     "

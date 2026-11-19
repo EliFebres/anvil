@@ -13,13 +13,76 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// Folders outside the project root that the tools may also open.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+
+/// Compiled path globs the file tools refuse; see [`deny_globs`].
+pub type DeniedPaths = GlobSet;
+
+/// Folders outside the project root that the tools may also open, and
+/// paths they refuse on top of the built-in secret list.
+#[derive(Debug, Clone, Default)]
 pub struct Workspace {
     /// Folders the tools may read and write, from `[tools] extra_dirs`.
     pub extra_dirs: Vec<PathBuf>,
-    /// Folders the tools may only read, such as installed skills.
+    /// Folders the tools may only read, such as installed skills and a
+    /// managed policy's `[files] extra_roots`.
     pub read_only_dirs: Vec<PathBuf>,
+    /// Path globs the tools refuse and searches skip, from a managed
+    /// policy's `[files] deny`; see [`deny_globs`].
+    pub denied: Option<DeniedPaths>,
+}
+
+impl Workspace {
+    /// Whether the file tools must not open `path`: it holds secrets
+    /// ([`holds_secrets`]) or matches a denied glob.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path, ideally already resolved.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the tools refuse it and searches skip it.
+    pub fn refuses(&self, path: &Path) -> bool {
+        holds_secrets(path)
+            || self
+                .denied
+                .as_ref()
+                .is_some_and(|globs| globs.is_match(path))
+    }
+}
+
+/// Compiles path globs for [`Workspace::denied`], without regard to case.
+///
+/// # Arguments
+///
+/// * `patterns` - Globs such as `**/*.kdbx`, matched against the whole
+///   resolved path with `/` as the separator on every system.
+///
+/// # Returns
+///
+/// The set, or `None` when there are no patterns.
+///
+/// # Errors
+///
+/// A message naming the first pattern that does not compile.
+pub fn deny_globs(patterns: &[String]) -> Result<Option<DeniedPaths>, String> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = GlobBuilder::new(pattern)
+            .case_insensitive(true)
+            .literal_separator(true)
+            .build()
+            .map_err(|error| format!("`{pattern}` is not a valid glob: {error}"))?;
+        builder.add(glob);
+    }
+    builder
+        .build()
+        .map(Some)
+        .map_err(|error| format!("the deny globs do not compile: {error}"))
 }
 
 /// Path pieces that mark a credential, key or browser store, as consecutive
@@ -240,5 +303,23 @@ mod tests {
         let inside = canonical(&dir.path().join("sub"));
         assert!(is_within(dir.path(), &inside));
         assert!(!is_within(&dir.path().join("sub"), &canonical(dir.path())));
+    }
+
+    #[test]
+    fn denied_globs_match_whole_paths_without_regard_to_case() {
+        let workspace = Workspace {
+            denied: deny_globs(&["**/*.kdbx".to_owned(), "**/secrets/**".to_owned()])
+                .expect("compiles"),
+            ..Workspace::default()
+        };
+        assert!(workspace.refuses(Path::new("/work/repo/Vault.KDBX")));
+        assert!(workspace.refuses(Path::new("/work/repo/secrets/a.txt")));
+        assert!(!workspace.refuses(Path::new("/work/repo/src/main.rs")));
+        assert!(
+            Workspace::default().refuses(Path::new("/work/.env")),
+            "the built-in list"
+        );
+        assert!(deny_globs(&["a[".to_owned()]).is_err());
+        assert!(deny_globs(&[]).expect("empty").is_none());
     }
 }

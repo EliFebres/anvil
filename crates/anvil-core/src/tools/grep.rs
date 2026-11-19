@@ -108,7 +108,7 @@ impl Tool for Grep {
             let files: Vec<PathBuf> = if root.is_file() {
                 vec![root.clone()]
             } else {
-                walk(&root)
+                walk(&root, &ctx.workspace)
                     .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
                     .map(|entry| entry.path().to_path_buf())
                     .filter(|path| {

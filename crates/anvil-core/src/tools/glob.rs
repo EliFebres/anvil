@@ -5,7 +5,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Access, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for, workspace};
+use super::workspace::Workspace;
+use super::{Access, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for};
 
 /// Most paths returned before the list is cut.
 pub const MAX_RESULTS: usize = 1000;
@@ -68,7 +69,7 @@ impl Tool for Glob {
                 ));
             }
             let mut paths = Vec::new();
-            for entry in walk(&root) {
+            for entry in walk(&root, &ctx.workspace) {
                 if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                     continue;
                 }
@@ -96,15 +97,19 @@ impl Tool for Glob {
 }
 
 /// Walks `root` respecting `.gitignore`, skipping hidden entries, the root
-/// itself and anything that holds secrets. Symlinks are not followed.
-pub(crate) fn walk(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
+/// itself and anything the workspace refuses (secrets and denied globs).
+/// Symlinks are not followed.
+pub(crate) fn walk<'a>(
+    root: &Path,
+    workspace: &'a Workspace,
+) -> impl Iterator<Item = ignore::DirEntry> + 'a {
     ignore::WalkBuilder::new(root)
         .require_git(false)
         .sort_by_file_name(|a, b| a.cmp(b))
         .build()
         .filter_map(Result::ok)
         .filter(|entry| entry.depth() > 0)
-        .filter(|entry| !workspace::holds_secrets(entry.path()))
+        .filter(move |entry| !workspace.refuses(entry.path()))
 }
 
 /// The path relative to `root` with forward slashes.
