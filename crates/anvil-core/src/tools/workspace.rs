@@ -108,6 +108,8 @@ const SECRET_DIRS: &[&[&str]] = &[
     &[".gnupg"],
     &[".password-store"],
     &[".anvil", ".env"],
+    // A repository's own git config can hold remote URLs with tokens.
+    &[".git", "config"],
     // Browser profiles: Linux, macOS, Windows.
     &[".mozilla"],
     &[".config", "google-chrome"],
@@ -129,13 +131,32 @@ const SECRET_DIRS: &[&[&str]] = &[
 ];
 
 /// File names that hold credentials wherever they are.
-const SECRET_FILES: &[&str] = &[".netrc", "_netrc", ".git-credentials", ".pgpass"];
+const SECRET_FILES: &[&str] = &[
+    ".netrc",
+    "_netrc",
+    ".git-credentials",
+    ".pgpass",
+    ".npmrc",
+    ".pypirc",
+];
+
+/// Starts of file names that hold private keys or credentials: SSH keys
+/// (`id_rsa`, `id_ed25519` and their `.pub` and backup copies) and any
+/// `credentials*` file.
+const SECRET_PREFIXES: &[&str] = &["id_rsa", "id_ed25519", "credentials"];
+
+/// Extensions of key and certificate stores.
+const SECRET_EXTENSIONS: &[&str] = &[".pem", ".key", ".pfx", ".p12"];
 
 /// Suffixes of `.env.*` files that hold examples rather than secrets.
 const ENV_EXAMPLE_SUFFIXES: &[&str] = &[".example", ".sample", ".template"];
 
 /// Whether `path` is, or lies inside, a place that holds secrets: a `.env`
-/// file, an SSH, cloud or GPG folder, a browser profile, or a keychain.
+/// file, a key or certificate file (`*.pem`, `*.key`, `*.pfx`, `*.p12`,
+/// `id_rsa*`, `id_ed25519*`), a credentials file (`credentials*`,
+/// `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`), a repository's
+/// `.git/config`, an SSH, cloud or GPG folder, a browser profile, or a
+/// keychain.
 ///
 /// # Arguments
 ///
@@ -153,7 +174,14 @@ pub fn holds_secrets(path: &Path) -> bool {
         })
         .collect();
     if let Some(name) = parts.last()
-        && (is_env_file(name) || SECRET_FILES.contains(&name.as_str()))
+        && (is_env_file(name)
+            || SECRET_FILES.contains(&name.as_str())
+            || SECRET_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+            || SECRET_EXTENSIONS
+                .iter()
+                .any(|extension| name.ends_with(extension)))
     {
         return true;
     }
@@ -363,6 +391,37 @@ mod tests {
         ] {
             let path = path.replace(['\\', '/'], std::path::MAIN_SEPARATOR_STR);
             assert!(holds_secrets(Path::new(&path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn keys_certificates_and_credential_files_hold_secrets_anywhere() {
+        for path in [
+            "certs/server.pem",
+            "deploy/tls.KEY",
+            "win/cert.pfx",
+            "win/cert.p12",
+            "keys/id_rsa",
+            "keys/id_rsa.pub",
+            "backup/id_ed25519.old",
+            "credentials",
+            "config/credentials.json",
+            "home/.npmrc",
+            "home/.pypirc",
+            "repo/.git/config",
+            "repo/.GIT/Config",
+        ] {
+            let path = path.replace('/', std::path::MAIN_SEPARATOR_STR);
+            assert!(holds_secrets(Path::new(&path)), "{path}");
+        }
+        for path in [
+            "src/keyboard.rs",
+            "docs/pem-format.md",
+            "src/credential_store.rs",
+            ".git/HEAD",
+            "config/git.toml",
+        ] {
+            assert!(!holds_secrets(Path::new(path)), "{path}");
         }
     }
 

@@ -32,6 +32,9 @@ pub mod workspace;
 /// The `write_file` tool.
 pub mod write_file;
 
+#[cfg(test)]
+mod boundary_tests;
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -307,6 +310,11 @@ impl ToolContext {
         let resolved = permissions::resolve_path(&root, path).ok_or_else(|| {
             format!("`{path}` cannot be resolved safely (a dangling or looping link)")
         })?;
+        if write && workspace::inside_git_dir(&resolved) {
+            return Err(format!(
+                "`{path}` is inside a git directory (hooks, config and the rest of .git); anvil's file tools never write there"
+            ));
+        }
         if workspace::holds_secrets(&resolved) {
             return Err(format!(
                 "`{path}` holds secrets or credentials; anvil's file tools never open it"
@@ -315,11 +323,6 @@ impl ToolContext {
         if self.workspace.refuses(&resolved) {
             return Err(format!(
                 "`{path}` matches the managed policy's [files] deny; anvil's file tools never open it"
-            ));
-        }
-        if write && workspace::inside_git_dir(&resolved) {
-            return Err(format!(
-                "`{path}` is inside a git directory (hooks, config and the rest of .git); anvil's file tools never write there"
             ));
         }
         if write && workspace::grants_power(&resolved) {
@@ -2301,13 +2304,22 @@ mod tests {
         );
         assert!(!root.join(".git").join("hooks").join("pre-commit").exists());
 
+        let read = jailed(&ctx, "read_file", serde_json::json!({"path": ".git/HEAD"})).await;
+        assert!(
+            read.result.content.contains("ref:"),
+            "reads of .git stay allowed"
+        );
         let read = jailed(
             &ctx,
             "read_file",
             serde_json::json!({"path": ".git/config"}),
         )
         .await;
-        assert!(read.result.content.contains("[core]"), "reads stay allowed");
+        assert!(
+            read.result.content.contains("holds secrets"),
+            "except .git/config, which can hold a remote URL with a token: {}",
+            read.result.content
+        );
         for path in [".gitignore", ".github/workflows/ci.yml", "git/notes.md"] {
             let run = jailed(
                 &ctx,

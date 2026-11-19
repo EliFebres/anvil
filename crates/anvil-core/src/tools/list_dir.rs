@@ -50,6 +50,7 @@ impl Tool for ListDir {
             };
             let mut names: Vec<String> = entries
                 .filter_map(Result::ok)
+                .filter(|entry| !ctx.workspace.refuses(&entry.path()))
                 .map(|entry| {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
