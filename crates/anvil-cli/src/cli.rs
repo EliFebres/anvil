@@ -119,12 +119,6 @@ pub enum Command {
         #[command(subcommand)]
         command: TemplateCommand,
     },
-    /// Work with what anvil remembers about you.
-    Memory {
-        /// Which memory action to take.
-        #[command(subcommand)]
-        command: MemoryCommand,
-    },
     /// Summarize this project's telemetry: sessions, completion rate, tokens and cost.
     Stats {
         /// How far back to look: a number followed by m, h, d or w.
@@ -196,14 +190,6 @@ pub enum TemplateCommand {
         #[arg(long)]
         force: bool,
     },
-}
-
-/// Subcommands under `anvil memory`.
-#[derive(Debug, Subcommand)]
-pub enum MemoryCommand {
-    /// Find files you edited after anvil wrote them and propose rules from the changes; you
-    /// keep or drop each one, and nothing reaches `rules.toml` until you keep it.
-    Learn,
 }
 
 /// Subcommands under `anvil rules`.

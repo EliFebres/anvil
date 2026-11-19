@@ -153,9 +153,8 @@ pub struct SessionsPolicy {
     /// session starts. Default: kept.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention_days: Option<u32>,
-    /// Whether the automatic summarizer calls run: the rule proposals at
-    /// session start and the memory extraction at session end. Default
-    /// `false`.
+    /// Whether the automatic summarizer call at session end, which
+    /// proposes facts for memory, runs. Default `false`.
     pub summarizer_calls: bool,
 }
 
@@ -260,7 +259,7 @@ impl LoadedPolicy {
             )
         });
         if !p.sessions.summarizer_calls {
-            lines.push("the automatic summarizer calls at session start and end".to_owned());
+            lines.push("the automatic summarizer call at session end".to_owned());
         }
         lines
     }

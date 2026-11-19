@@ -52,6 +52,6 @@ skill_dirs = ['C:\ProgramData\Anvil\skills']
 transcript_dir = 'D:\anvil-sessions'
 # Delete session folders older than this when a session starts (default: keep).
 retention_days = 30
-# Whether the automatic summarizer calls at session start and end run
+# Whether the automatic summarizer call at session end runs
 # (default: false).
 summarizer_calls = false

@@ -8,7 +8,6 @@ mod config_init;
 mod console;
 mod doctor;
 mod frontend;
-mod learn;
 mod legacy;
 mod logging;
 mod memory;
@@ -36,9 +35,7 @@ use anvil_types::policy::LoadedPolicy;
 use anyhow::Context;
 use clap::Parser;
 
-use crate::cli::{
-    BuildCommand, Cli, Command, CompatCommand, ConfigCommand, MemoryCommand, TemplateCommand,
-};
+use crate::cli::{BuildCommand, Cli, Command, CompatCommand, ConfigCommand, TemplateCommand};
 use crate::frontend::UiKind;
 use crate::wiring::{ProjectAccess, Wiring, home_dir};
 
@@ -272,12 +269,6 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             description.as_deref(),
             force,
         ),
-        Some(Command::Memory {
-            command: MemoryCommand::Learn,
-        }) => {
-            let wiring = project_wiring(&env, profile, false)?;
-            learn::run(&wiring).await
-        }
         Some(Command::Stats { since }) => {
             let config = load_config(home).ok().map(|loaded| loaded.config);
             stats::run(config.as_ref(), cwd, &since)

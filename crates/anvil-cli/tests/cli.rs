@@ -561,7 +561,7 @@ fn removed_commands_are_not_part_of_the_binary() {
         .filter_map(|line| line.split_whitespace().next())
         .collect();
     assert!(commands.contains(&"doctor"), "{stdout}");
-    for removed in ["ticket", "update", "learn"] {
+    for removed in ["ticket", "update", "memory"] {
         assert!(
             !commands.contains(&removed),
             "`{removed}` in:
