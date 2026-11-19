@@ -1,10 +1,28 @@
 //! Command-line definition for `anvil`.
 
+use std::sync::LazyLock;
+
 use clap::{ArgAction, Args, Parser, Subcommand};
+
+/// The commit a release build was made from, set by the release workflow
+/// through `ANVIL_BUILD_SHA`; `None` for a build from source.
+pub const BUILD_COMMIT: Option<&str> = option_env!("ANVIL_BUILD_SHA");
+
+/// What `anvil --version` prints after the program name.
+static VERSION: LazyLock<String> =
+    LazyLock::new(|| version_line(env!("CARGO_PKG_VERSION"), BUILD_COMMIT));
+
+/// The version line: the package version, plus the build commit when known.
+fn version_line(version: &str, commit: Option<&str>) -> String {
+    match commit.map(str::trim).filter(|commit| !commit.is_empty()) {
+        Some(commit) => format!("{version} ({commit})"),
+        None => version.to_owned(),
+    }
+}
 
 /// A CLI coding agent.
 #[derive(Debug, Parser)]
-#[command(name = "anvil", version, about, arg_required_else_help = true)]
+#[command(name = "anvil", version = VERSION.as_str(), about, arg_required_else_help = true)]
 pub struct Cli {
     /// Skip plan approval and every permission prompt; run unattended.
     #[arg(long, global = true)]
@@ -285,6 +303,18 @@ pub enum ConfigCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_version_names_the_build_commit_when_there_is_one() {
+        assert_eq!(version_line("0.2.0", Some("abc123")), "0.2.0 (abc123)");
+        assert_eq!(version_line("0.2.0", Some(" ")), "0.2.0");
+        assert_eq!(version_line("0.2.0", None), "0.2.0");
+        let rendered = <Cli as clap::CommandFactory>::command().render_version();
+        assert!(
+            rendered.starts_with(&format!("anvil {}", env!("CARGO_PKG_VERSION"))),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn allow_tool_repeats_before_or_after_the_subcommand() {
