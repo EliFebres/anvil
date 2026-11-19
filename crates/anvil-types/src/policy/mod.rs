@@ -547,10 +547,12 @@ pub fn load(path: &Path) -> Result<Option<LoadedPolicy>, PolicyError> {
 ///
 /// # Errors
 ///
-/// [`PolicyError::Unsafe`] when the file or its folder could be changed
-/// by someone other than an administrator, otherwise as [`load`].
+/// [`PolicyError::Read`] when the file or its folder cannot be inspected
+/// (permission denied, the folder is not a folder), [`PolicyError::Unsafe`]
+/// when either could be changed by someone other than an administrator,
+/// otherwise as [`load`].
 pub fn load_checked(path: &Path) -> Result<Option<LoadedPolicy>, PolicyError> {
-    if !path.exists() {
+    if !is_present(path)? {
         return Ok(None);
     }
     ownership::check(path).map_err(|detail| PolicyError::Unsafe {
@@ -558,6 +560,39 @@ pub fn load_checked(path: &Path) -> Result<Option<LoadedPolicy>, PolicyError> {
         detail,
     })?;
     load(path)
+}
+
+/// Whether the policy file is there. Only a file that is not found, in a
+/// folder that is not found or is a folder, counts as absent: any other
+/// error, such as a folder the user may not list, stops anvil instead of
+/// running it unmanaged.
+fn is_present(path: &Path) -> Result<bool, PolicyError> {
+    use std::io::ErrorKind::NotFound;
+    let read_error = |source: std::io::Error| PolicyError::Read {
+        path: path.to_path_buf(),
+        source,
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => return Ok(true),
+        Err(error) if error.kind() == NotFound => {}
+        Err(error) => return Err(read_error(error)),
+    }
+    let Some(folder) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(false);
+    };
+    let folder_meta = match std::fs::symlink_metadata(folder) {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::metadata(folder),
+        other => other,
+    };
+    match folder_meta {
+        Ok(meta) if meta.is_dir() => Ok(false),
+        Err(error) if error.kind() == NotFound => Ok(false),
+        Ok(_) => Err(read_error(std::io::Error::other(format!(
+            "{} is not a folder",
+            folder.display()
+        )))),
+        Err(error) => Err(read_error(error)),
+    }
 }
 
 #[cfg(test)]
@@ -580,6 +615,21 @@ mod tests {
         assert_eq!(load_checked(&path).expect("loads"), None);
         assert_eq!(label(None), UNMANAGED);
         assert!(allows_project_trust(None));
+    }
+
+    #[test]
+    fn a_policy_path_that_cannot_be_inspected_stops_anvil() {
+        let dir = tempfile::tempdir().expect("dir");
+        let file = write(dir.path(), "file.txt", "not a folder");
+        let error = load_checked(&file.join(POLICY_FILE))
+            .expect_err("a path that cannot be inspected is not an absent policy");
+        assert!(matches!(error, PolicyError::Read { .. }), "{error}");
+        assert!(error.to_string().contains("cannot be read"), "{error}");
+        assert_eq!(
+            load_checked(&dir.path().join("absent").join(POLICY_FILE)).expect("absent"),
+            None,
+            "a missing folder is unmanaged"
+        );
     }
 
     #[test]
