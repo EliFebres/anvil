@@ -197,14 +197,11 @@ version = "0.1.0"
 dependencies = [
  "anvil-types",
  "chrono",
- "insta",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
- "toml",
  "tracing",
- "ulid",
 ]
 
 [[package]]
@@ -222,7 +219,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dotenvy",
- "insta",
  "serde",
  "serde_json",
  "tempfile",
