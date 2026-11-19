@@ -8,7 +8,6 @@ mod config_init;
 mod console;
 mod doctor;
 mod frontend;
-mod legacy;
 mod logging;
 mod memory;
 mod policy;
@@ -68,14 +67,12 @@ fn main() {
     std::process::exit(code);
 }
 
-/// Loads the managed policy, moves old-name directories aside, loads the
-/// user's `.env` file, picks the front end, then starts the runtime and
+/// Loads the managed policy, loads the user's `.env` file, picks the front end, then starts the runtime and
 /// runs the command.
 ///
 /// The policy comes first: when it exists but cannot be used, anvil stops
-/// before it touches anything.
-/// The migration runs before anything creates `.anvil/`, so an old
-/// directory is moved rather than reported as a duplicate. The files are loaded before any thread exists: filling the environment
+/// before it touches anything. The `.env` file is loaded before any thread
+/// exists: filling the environment
 /// is only sound while the process is single-threaded, and the log filter
 /// (`ANVIL_LOG`) may come from a `.env` file. The front end is chosen
 /// before logging starts, because the full-screen UI must not share
@@ -84,13 +81,6 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
     let policy = policy::load_system()?.map(Arc::new);
     let cwd = std::env::current_dir()?;
     let home = home_dir();
-    for (parent, prefix) in [(home.as_deref(), "~/"), (Some(cwd.as_path()), "")] {
-        if let Some(parent) = parent
-            && let Some(line) = legacy::migrate(parent, prefix)?
-        {
-            eprintln!("{line}");
-        }
-    }
     let env_files = dotenv::env_files(home.as_deref());
     let loaded_env = dotenv::load(&env_files)?;
     let interactive = matches!(

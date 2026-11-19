@@ -16,7 +16,6 @@ use anvil_types::{AnvilConfig, Protocol};
 use tokio::process::Command;
 
 use crate::commands;
-use crate::legacy;
 use crate::secrets;
 use crate::wiring::Wiring;
 
@@ -172,7 +171,6 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
         }
     );
     report_env(&mut report, options.env_files, options.loaded_env);
-    report_legacy(&mut report, wiring.home.as_deref(), &wiring.cwd);
     let bad_keys = report_keys(&mut report, config);
     report_providers(&mut report, wiring, &bad_keys).await;
     report_tools(&mut report).await;
@@ -207,20 +205,6 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
     }
     println!("doctor: all checks passed");
     Ok(0)
-}
-
-/// The `legacy` row: directories and variables still carrying the old name.
-fn report_legacy(report: &mut Report, home: Option<&Path>, cwd: &Path) {
-    let left = legacy::leftovers(home, cwd);
-    if left.is_empty() {
-        report.pass("legacy", "nothing left from the old name");
-        return;
-    }
-    report.fail(
-        "legacy",
-        format!("still present: {}", left.join(", ")),
-        "delete or merge the old directories into .anvil and rename the variables to ANVIL_*",
-    );
 }
 
 /// The `env` row: which `.env` files were loaded.
