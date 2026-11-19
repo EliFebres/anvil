@@ -23,7 +23,6 @@ mod status;
 mod telemetry;
 mod templates;
 mod terminal;
-mod ticket;
 mod trust;
 mod tui;
 mod wiring;
@@ -295,13 +294,6 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             )?;
             Ok(0)
         }
-        Some(Command::Ticket { command }) => {
-            let queue_allowed = env
-                .policy
-                .as_ref()
-                .is_none_or(|loaded| loaded.policy.tickets.queue);
-            ticket::run(command, home, cwd, queue_allowed).await
-        }
         Some(Command::Compat {
             command: CompatCommand::Check { path },
         }) => {
@@ -429,25 +421,5 @@ mod tests {
             "the repository's rules are not read"
         );
         assert_eq!(off.trusted_root(), None);
-    }
-
-    #[tokio::test]
-    async fn the_ticket_queue_is_refused_unless_the_policy_allows_it() {
-        let dir = tempfile::tempdir().expect("dir");
-        let error = ticket::run(
-            cli::TicketCommand::Submit {
-                id: None,
-                all: true,
-            },
-            Some(dir.path()),
-            dir.path(),
-            false,
-        )
-        .await
-        .expect_err("refused");
-        assert!(
-            format!("{error:#}").contains("disabled by the managed policy"),
-            "{error:#}"
-        );
     }
 }

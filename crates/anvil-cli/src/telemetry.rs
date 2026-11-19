@@ -1,6 +1,5 @@
-//! Telemetry wiring: loop events become content-free records, permission
-//! answers are recorded as they happen, and a finished session is
-//! classified into signals for `anvil ticket draft`.
+//! Telemetry wiring: loop events become content-free records and
+//! permission answers are recorded as they happen.
 //!
 //! Everything here translates; the rules that keep content out of the
 //! files live in `anvil_telemetry::record`.
@@ -20,23 +19,16 @@ use anvil_core::tools::{
     DecisionScope, PermissionDecision, PermissionObserver, PermissionPrompt, PermissionRequest,
     PromptAnswer, ToolOutcome, ToolRegistry, permissions,
 };
-use anvil_telemetry::paths::signals_file;
 use anvil_telemetry::{
     CheckOrigin, PermissionAnswer, PermissionScope, RecordKind, Recorder, SessionMode,
-    SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass, append_signals, classify,
-    load_records, session_records,
+    SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass,
 };
-use anvil_types::TelemetryConfig;
-use chrono::{Duration, Utc};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::status::StatusReporter;
 use crate::wiring::Wiring;
-
-/// How far back the cross-session history reaches.
-const HISTORY_DAYS: i64 = 90;
 
 /// Which provider plays which role, so a turn can be attributed.
 #[derive(Debug, Clone)]
@@ -58,7 +50,6 @@ pub struct SessionTelemetry {
     roles: Arc<Mutex<Roles>>,
     /// Provider name to model name, from config.
     models: Arc<BTreeMap<String, String>>,
-    thresholds: TelemetryConfig,
     /// Told of every loop event, so the session's `status.json` follows the loop.
     status: Option<StatusReporter>,
 }
@@ -89,7 +80,6 @@ impl SessionTelemetry {
                 .iter()
                 .map(|(name, provider)| (name.clone(), provider.model.clone()))
                 .collect(),
-            wiring.config.telemetry,
         );
         this.set_planner(wiring.config.roles.planner.as_deref());
         this.set_worker(wiring.config.roles.worker.as_deref());
@@ -107,7 +97,6 @@ impl SessionTelemetry {
         reviewer: Option<&str>,
         summarizer: &str,
         models: BTreeMap<String, String>,
-        thresholds: TelemetryConfig,
     ) -> Self {
         Self {
             recorder: Arc::new(Recorder::open(cwd, home, session)),
@@ -119,7 +108,6 @@ impl SessionTelemetry {
                 summarizer: summarizer.to_owned(),
             })),
             models: Arc::new(models),
-            thresholds,
             status: None,
         }
     }
@@ -293,7 +281,7 @@ impl SessionTelemetry {
         })
     }
 
-    /// Records how a run ended, then classifies the session.
+    /// Records how a run ended.
     ///
     /// # Arguments
     ///
@@ -310,35 +298,13 @@ impl SessionTelemetry {
         self.finish(session_outcome(status));
     }
 
-    /// Records how a session ended, then classifies it. Problems are
-    /// reported as warnings and never fail the command.
+    /// Records how a session ended.
     ///
     /// # Arguments
     ///
     /// * `outcome` - How the session ended.
     pub fn finish(&self, outcome: SessionOutcome) {
         self.record(RecordKind::SessionEnded { outcome });
-        match self.classify_session() {
-            Ok(0) => {}
-            Ok(count) => eprintln!(
-                "telemetry: {count} signal(s) recorded; `anvil ticket draft` turns them into tickets"
-            ),
-            Err(error) => eprintln!("warning: telemetry classification skipped: {error}"),
-        }
-    }
-
-    /// Runs the classifier and appends its signals to the project.
-    fn classify_session(&self) -> Result<usize, anvil_telemetry::TelemetryError> {
-        let since = Some(Utc::now() - Duration::days(HISTORY_DAYS));
-        let project = load_records(self.recorder.project_dir(), since)?;
-        let session = session_records(&project, self.recorder.session());
-        let history = match self.recorder.home_dir() {
-            Some(dir) => load_records(dir, since)?,
-            None => project,
-        };
-        let signals = classify(&session, &history, &self.thresholds);
-        append_signals(&signals_file(self.recorder.project_dir()), &signals)?;
-        Ok(signals.len())
     }
 
     /// The project-local telemetry folder.
@@ -616,42 +582,19 @@ fn outcome_kind(outcome: ToolOutcome) -> ToolOutcomeKind {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
-    use std::pin::Pin;
-
     use anvil_core::agent::{
         AgentLoop, AutoApprove, CheckCommand, LoopConfig, LoopProviders, State,
     };
     use anvil_core::provider::{FakeProvider, ToolCall};
     use anvil_core::tools::{Permissions, PromptAnswer, StaticPrompt, ToolContext};
-    use anvil_telemetry::{DraftFuture, Drafter, Signal, SignalKind, TicketStore, draft_all};
+    use anvil_telemetry::load_records;
     use anvil_types::LimitsConfig;
 
     use super::*;
 
     /// Appears in tool arguments and tool results and must never be written
-    /// anywhere under the telemetry or ticket folders.
+    /// anywhere under the telemetry folders.
     const MARKER: &str = "MARKER_7f3e_project_secret";
-
-    /// Returns one canned draft and remembers every prompt it saw.
-    struct CapturingDrafter {
-        prompts: Mutex<Vec<String>>,
-    }
-
-    impl Drafter for CapturingDrafter {
-        fn complete<'a>(&'a self, system: &'a str, user: &'a str) -> DraftFuture<'a> {
-            self.prompts
-                .lock()
-                .expect("lock")
-                .push(format!("{system}\n{user}"));
-            let reply: Pin<Box<dyn Future<Output = Result<String, String>> + Send>> = Box::pin(
-                async {
-                    Ok("```json\n{\"symptom\": \"anvil keeps failing a tool\", \"spec\": \"make it not fail\", \"acceptance\": [\"it passes\"]}\n```".to_owned())
-                },
-            );
-            reply
-        }
-    }
 
     fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
         ToolCall {
@@ -690,7 +633,6 @@ mod tests {
             None,
             "fast",
             BTreeMap::new(),
-            TelemetryConfig::default(),
         );
         let request = PermissionRequest {
             tool: "write_file".to_owned(),
@@ -720,7 +662,6 @@ mod tests {
             None,
             "fast",
             BTreeMap::new(),
-            TelemetryConfig::default(),
         );
         let secret_name = format!("{MARKER}-file.txt");
         let secret_text = format!("{MARKER} contents\n");
@@ -781,7 +722,6 @@ mod tests {
             None,
             "fast",
             BTreeMap::new(),
-            TelemetryConfig::default(),
         );
         let config: anvil_types::AnvilConfig =
             toml::from_str(anvil_types::config::CONFIG_TEMPLATE).expect("config parses");
@@ -837,7 +777,6 @@ mod tests {
                 ("dear".to_owned(), "big-model".to_owned()),
                 ("judge".to_owned(), "judge-model".to_owned()),
             ]),
-            TelemetryConfig::default(),
         );
         telemetry.set_planner(Some("dear"));
         let planner = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
@@ -908,7 +847,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn marker_in_tool_results_never_reaches_telemetry_or_tickets() {
+    async fn marker_in_tool_results_never_reaches_telemetry() {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
         let session = ulid::Ulid::generate().to_string();
@@ -920,7 +859,6 @@ mod tests {
             None,
             "fast",
             BTreeMap::from([("fast".to_owned(), "m1".to_owned())]),
-            TelemetryConfig::default(),
         );
         telemetry.record(RecordKind::SessionStarted {
             mode: SessionMode::Run,
@@ -1007,32 +945,10 @@ mod tests {
                 .any(|r| matches!(&r.kind, RecordKind::SessionEnded { .. }))
         );
 
-        let signals_path = signals_file(&telemetry.project_dir());
-        let mut signals = anvil_telemetry::load_signals(&signals_path).expect("signals");
-        assert!(
-            signals.iter().any(
-                |s| matches!(&s.kind, SignalKind::ToolMissing { tool, .. } if tool == "browser")
-            ),
-            "{signals:?}"
-        );
-        signals.push(Signal::new(
-            &session,
-            SignalKind::ReviewLoopExhausted { items: 2 },
-        ));
-        let drafter = CapturingDrafter {
-            prompts: Mutex::new(Vec::new()),
-        };
-        let mut store = TicketStore::load(cwd.path()).expect("store");
-        let report = draft_all(&mut signals, &project, &mut store, &drafter, Utc::now())
-            .await
-            .expect("drafts");
-        assert_eq!(report.created.len(), signals.len(), "{report:?}");
-
         let mut checked = 0;
         for root in [
             cwd.path().join(".anvil").join("telemetry"),
             home.path().join(".anvil").join("telemetry"),
-            cwd.path().join("tickets"),
         ] {
             for file in files_under(&root) {
                 let text = std::fs::read_to_string(&file).expect("text file");
@@ -1049,11 +965,7 @@ mod tests {
                 checked += 1;
             }
         }
-        assert!(checked >= 4, "{checked} files checked");
-        for prompt in drafter.prompts.lock().expect("lock").iter() {
-            assert!(!prompt.contains(MARKER));
-            assert!(!prompt.contains("notes.txt"));
-        }
+        assert!(checked >= 2, "{checked} files checked");
     }
 
     #[test]

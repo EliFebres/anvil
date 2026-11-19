@@ -1,4 +1,4 @@
-//! Where telemetry and tickets live on disk.
+//! Where telemetry lives on disk.
 
 use std::path::{Path, PathBuf};
 
@@ -6,16 +6,6 @@ use chrono::NaiveDate;
 
 /// Project-local telemetry folder, relative to the project root.
 pub const TELEMETRY_DIR: &str = ".anvil/telemetry";
-
-/// The signals file inside a telemetry folder.
-pub const SIGNALS_FILE: &str = "signals.jsonl";
-
-/// Drafted tickets, relative to the ticket store's root (`~/.anvil`).
-pub const DRAFT_DIR: &str = "tickets/draft";
-
-/// Submitted tickets, relative to the ticket store's root, and the folder a
-/// submitted ticket lands in on the queue's state branch.
-pub use anvil_types::ticket::dirs::OPEN_DIR;
 
 /// The telemetry folder of a project.
 ///
@@ -57,19 +47,6 @@ pub fn day_file(dir: &Path, date: NaiveDate) -> PathBuf {
     dir.join(format!("{}.jsonl", date.format("%Y-%m-%d")))
 }
 
-/// The signals file of a telemetry folder.
-///
-/// # Arguments
-///
-/// * `dir` - A telemetry folder.
-///
-/// # Returns
-///
-/// `<dir>/signals.jsonl`.
-pub fn signals_file(dir: &Path) -> PathBuf {
-    dir.join(SIGNALS_FILE)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +67,5 @@ mod tests {
             day_file(&project_telemetry_dir(root), date),
             Path::new("proj/.anvil/telemetry/2026-10-30.jsonl")
         );
-        assert_eq!(signals_file(Path::new("t")), Path::new("t/signals.jsonl"));
     }
 }

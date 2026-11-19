@@ -5,13 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-/// The files allowed to start git directly: the safe entry point itself,
-/// and the ticket queue, which runs git in anvil's own cache under
-/// `~/.anvil` and never in a project.
-const ALLOWED: [&str; 2] = [
-    "crates/anvil-core/src/git.rs",
-    "crates/anvil-telemetry/src/git.rs",
-];
+/// The one file allowed to start git directly: the safe entry point itself.
+const ALLOWED: [&str; 1] = ["crates/anvil-core/src/git.rs"];
 
 /// Text that starts git directly.
 const FORBIDDEN: &str = "Command::new(\"git\")";

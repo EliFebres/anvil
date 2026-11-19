@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, ValidationError};
@@ -85,16 +84,6 @@ summarizer = "runpod"
 # [memory]
 # always_summarize = false
 
-# Lines that turn provider statistics into tickets. Defaults shown.
-# [telemetry]
-# slow_median_ms = 60000       # median completion latency over the last 20 sessions
-# error_rate_percent = 20      # provider errors as a share of completions
-
-# The git repository `anvil ticket submit` pushes `tickets/<id>` branches to.
-# Unset by default, and while it is unset nothing is ever sent.
-# [tickets]
-# queue = "https://github.com/<owner>/<queue-repository>.git"
-
 # Report the session to herdr (a terminal multiplexer for coding agents) when it
 # runs in a herdr pane.
 # [integrations]
@@ -116,7 +105,7 @@ summarizer = "runpod"
 ///
 /// A file that still sets one fails to load with that reason, so nobody
 /// believes a feature is on when it no longer exists.
-const REMOVED_SECTIONS: [(&str, &str); 2] = [
+const REMOVED_SECTIONS: [(&str, &str); 4] = [
     (
         "update",
         "self-update was removed; updates come from whoever distributes the anvil binary",
@@ -124,6 +113,14 @@ const REMOVED_SECTIONS: [(&str, &str); 2] = [
     (
         "notify",
         "webhook notifications were removed; anvil no longer posts session updates anywhere",
+    ),
+    (
+        "tickets",
+        "tickets were removed; anvil no longer drafts or submits tickets",
+    ),
+    (
+        "telemetry",
+        "the ticket signal thresholds were removed with ticket drafting",
     ),
 ];
 
@@ -215,19 +212,10 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # [memory]
 # always_summarize = false
 
-# Lines that turn provider statistics into tickets. Defaults shown.
-# [telemetry]
-# slow_median_ms = 60000       # median completion latency over the last 20 sessions
-# error_rate_percent = 20      # provider errors as a share of completions
-
-# The git repository `anvil ticket submit` pushes `tickets/<id>` branches to.
-# Unset by default, and while it is unset nothing is ever sent.
-# [tickets]
-# queue = "https://github.com/<owner>/<queue-repository>.git"
 "#;
 
 /// Wire protocol a provider speaks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     /// OpenAI chat-completions style API.
@@ -240,7 +228,7 @@ pub enum Protocol {
 }
 
 /// What a provider charges, in USD per million tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Price {
     /// Price of uncached input tokens.
@@ -278,7 +266,7 @@ impl Price {
 }
 
 /// One model endpoint.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     /// Which API shape to speak.
@@ -379,7 +367,7 @@ impl ProviderConfig {
 }
 
 /// Which provider handles each job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Roles {
     /// Provider that writes code in the agent loop.
@@ -419,7 +407,7 @@ impl Roles {
 }
 
 /// What one agent-loop state may spend before the session ends as incomplete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StateBudget {
     /// Model completions allowed in the state, summed over every visit.
@@ -439,7 +427,7 @@ impl Default for StateBudget {
 }
 
 /// Retry, timeout and budget limits. Every field has a default.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LimitsConfig {
     /// Wall-clock seconds allowed for one completion, including streaming and retries.
@@ -474,7 +462,7 @@ impl Default for LimitsConfig {
 }
 
 /// Settings for the built-in tools.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ToolsConfig {
     /// Program behind the `shell` tool, such as `pwsh` or `bash`. `None`
@@ -497,7 +485,7 @@ pub struct ToolsConfig {
 }
 
 /// When the end-of-session memory summarizer runs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MemoryConfig {
     /// Run the summarizer after every session, including an uneventful one
@@ -506,7 +494,7 @@ pub struct MemoryConfig {
 }
 
 /// Rules for anvil's outbound requests.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct NetworkConfig {
     /// Hosts a provider may be reached on over plain http. Every other
@@ -516,46 +504,15 @@ pub struct NetworkConfig {
 }
 
 /// Optional reports to other tools.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct IntegrationsConfig {
     /// Report the session's state to herdr when running in a herdr pane.
     pub herdr: bool,
 }
 
-/// Lines above which provider statistics become tickets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, default)]
-pub struct TelemetryConfig {
-    /// Median completion latency, in milliseconds, over the last 20 sessions
-    /// above which a provider counts as slow.
-    pub slow_median_ms: u64,
-    /// Provider errors as a percentage of completions over the last 20
-    /// sessions above which a provider counts as failing.
-    pub error_rate_percent: u8,
-}
-
-impl Default for TelemetryConfig {
-    fn default() -> Self {
-        Self {
-            slow_median_ms: 60_000,
-            error_rate_percent: 20,
-        }
-    }
-}
-
-/// Where submitted tickets go.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, default)]
-pub struct TicketsConfig {
-    /// The git URL of the ticket queue `anvil ticket submit` pushes
-    /// `tickets/<id>` branches to. `None`, the default, sends nothing.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue: Option<String>,
-}
-
 /// Lines a profile adds to the coder's system prompt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PromptConfig {
     /// One instruction per entry, shown under a "Profile notes" heading.
@@ -575,7 +532,7 @@ impl Default for PromptConfig {
 }
 
 /// What a call gets when no permission rule matches it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Unmatched {
     /// Run it.
@@ -593,7 +550,7 @@ pub enum Unmatched {
 /// A project keeps them in `.anvil/permissions.toml`; a profile under
 /// `~/.anvil/profiles/` carries them as its `[permissions]` table, which
 /// then replaces the project file.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PermissionRules {
     /// Calls that run without asking.
@@ -633,7 +590,7 @@ impl PermissionRules {
 }
 
 /// The whole anvil configuration file.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnvilConfig {
     /// Named model endpoints.
@@ -650,12 +607,6 @@ pub struct AnvilConfig {
     /// When the end-of-session memory summarizer runs.
     #[serde(default)]
     pub memory: MemoryConfig,
-    /// Lines that turn provider statistics into tickets.
-    #[serde(default)]
-    pub telemetry: TelemetryConfig,
-    /// Where submitted tickets go.
-    #[serde(default)]
-    pub tickets: TicketsConfig,
     /// Extra lines for the coder's system prompt.
     #[serde(default)]
     pub prompt: PromptConfig,
@@ -911,7 +862,12 @@ mod tests {
     #[test]
     fn removed_sections_fail_with_the_reason() {
         let home = tempfile::tempdir().expect("home");
-        for (section, expected) in [("update", "self-update was removed"), ("notify", "webhook")] {
+        for (section, expected) in [
+            ("update", "self-update was removed"),
+            ("notify", "webhook"),
+            ("tickets", "tickets were removed"),
+            ("telemetry", "ticket signal thresholds"),
+        ] {
             let text = format!("{SETUP_PROVIDERS}\n[{section}]\n");
             write(home.path(), &text);
             let error = load(Some(home.path())).expect_err("removed section");
@@ -1279,28 +1235,6 @@ delegate_guidance = false
                 name: "runpod".to_owned()
             })
         );
-    }
-
-    #[test]
-    fn telemetry_and_tickets_tables_default() {
-        let config = template();
-        assert_eq!(config.telemetry, TelemetryConfig::default());
-        assert_eq!(config.telemetry.slow_median_ms, 60_000);
-        assert_eq!(config.telemetry.error_rate_percent, 20);
-        assert_eq!(config.tickets.queue, None, "no queue, so nothing is sent");
-        let text = format!(
-            "{CONFIG_TEMPLATE}\n[telemetry]\nslow_median_ms = 5\n[tickets]\nqueue = \"https://example.com/q.git\"\n"
-        );
-        let config: AnvilConfig = toml::from_str(&text).expect("parses");
-        assert_eq!(config.telemetry.slow_median_ms, 5);
-        assert_eq!(config.telemetry.error_rate_percent, 20);
-        assert_eq!(
-            config.tickets.queue.as_deref(),
-            Some("https://example.com/q.git")
-        );
-        let old = format!("{CONFIG_TEMPLATE}\n[tickets]\nremote = \"origin\"\n");
-        let error = toml::from_str::<AnvilConfig>(&old).expect_err("the old key is refused");
-        assert!(error.to_string().contains("queue"), "{error}");
     }
 
     #[test]

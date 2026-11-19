@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Usage recording, failure classification and ticket drafting for anvil."
+description = "Content-free usage records for anvil."
 
 [dependencies]
 chrono.workspace = true

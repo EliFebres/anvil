@@ -9,7 +9,7 @@
 //! else stays out, in particular the provider keys anvil read from
 //! `~/.anvil/.env` and any token in the user's own environment.
 //!
-//! anvil's own `git` calls (the session diff, the ticket queue) are not
+//! anvil's own `git` calls (the session diff, build commits) are not
 //! model-driven and keep the full environment, so a git credential helper
 //! or SSH agent still works for them.
 

@@ -157,6 +157,7 @@ impl Wiring {
     ///
     /// When the current directory cannot be determined, or when
     /// `permissions.allow_tools` names an invalid tool.
+    #[cfg(test)]
     pub fn new(config: AnvilConfig, project: ProjectAccess) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir().context("cannot determine the current directory")?;
         Self::new_in(cwd, home_dir(), config, project)

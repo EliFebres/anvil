@@ -10,15 +10,6 @@ use thiserror::Error;
 /// its own in a log line or a CLI error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ValidationError {
-    /// A ticket title exceeds the character limit.
-    #[error("ticket title is {len} characters; the limit is {max}")]
-    TitleTooLong {
-        /// Length of the offending title in characters.
-        len: usize,
-        /// The limit that was exceeded.
-        max: usize,
-    },
-
     /// A session `status.json` breaks a rule of the format.
     #[error("session status: {reason}")]
     Status {
@@ -31,30 +22,6 @@ pub enum ValidationError {
     EmptyField {
         /// Name of the empty field.
         field: &'static str,
-    },
-
-    /// A ticket has no acceptance checks.
-    #[error("ticket needs at least one acceptance check")]
-    EmptyAcceptance,
-
-    /// A ticket text field references a file path outside the project.
-    #[error("field `{field}` references a path outside the project: `{path}`")]
-    OutsidePath {
-        /// Name of the field that holds the path.
-        field: &'static str,
-        /// The offending token as written.
-        path: String,
-    },
-
-    /// A ticket text field contains more code than the boundary allows.
-    #[error("field `{field}` contains {lines} lines of code; the limit is {max}")]
-    TooMuchCode {
-        /// Name of the field that holds the code.
-        field: &'static str,
-        /// Number of code lines counted.
-        lines: usize,
-        /// The limit that was exceeded.
-        max: usize,
     },
 
     /// A role names a provider that is not declared in `[providers]`.
@@ -105,15 +72,6 @@ pub enum ValidationError {
         name: String,
         /// Name of the empty field.
         field: &'static str,
-    },
-
-    /// A ticket in some status lacks a field that status implies.
-    #[error("a ticket with status `{status:?}` needs `{field}`")]
-    MissingForStatus {
-        /// Name of the missing field.
-        field: &'static str,
-        /// The status that requires it.
-        status: crate::ticket::TicketStatus,
     },
 
     /// A skill name is not kebab-case or is too long.

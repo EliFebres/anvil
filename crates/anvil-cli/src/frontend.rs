@@ -308,7 +308,7 @@ impl Frontend {
 /// The slash commands the chat itself handles, for Tab completion.
 pub const BUILTIN_COMMANDS: &[&str] = &[
     "/plan", "/build", "/review", "/compact", "/model", "/cost", "/mode", "/expand", "/plain",
-    "/help", "/ticket", "/quit", "/exit",
+    "/help", "/quit", "/exit",
 ];
 
 /// What the UI shows about a session.

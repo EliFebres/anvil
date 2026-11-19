@@ -520,21 +520,9 @@ fn skill_add_list_show_and_remove_in_project_scope() {
 }
 
 #[test]
-fn ticket_list_and_stats_work_on_an_empty_project() {
+fn stats_work_on_an_empty_project() {
     let dir = tempfile::tempdir().expect("tempdir");
     let home = tempfile::tempdir().expect("home");
-    let list = anvil(dir.path())
-        .env("ANVIL_HOME", home.path())
-        .args(["ticket", "list"])
-        .output()
-        .expect("anvil runs");
-    assert!(
-        list.status.success(),
-        "{}",
-        String::from_utf8_lossy(&list.stderr)
-    );
-    assert!(String::from_utf8_lossy(&list.stdout).contains("no tickets"));
-
     let stats = anvil(dir.path())
         .env("ANVIL_HOME", home.path())
         .args(["stats", "--since", "2w"])
@@ -556,93 +544,27 @@ fn ticket_list_and_stats_work_on_an_empty_project() {
         .expect("anvil runs");
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("not a duration"));
-
-    let missing = anvil(dir.path())
-        .env("ANVIL_HOME", home.path())
-        .args(["ticket", "show", "01NOPE"])
-        .output()
-        .expect("anvil runs");
-    assert!(!missing.status.success());
 }
 
 #[test]
-fn ticket_submit_help_states_the_outbound_rule() {
+fn removed_commands_are_not_part_of_the_binary() {
     let dir = tempfile::tempdir().expect("tempdir");
     let help = anvil(dir.path())
-        .args(["ticket", "submit", "--help"])
+        .arg("--help")
         .output()
         .expect("anvil runs");
     assert!(help.status.success());
     let stdout = String::from_utf8_lossy(&help.stdout);
-    assert!(
-        stdout.contains("only thing that ever leaves this machine"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("--all"), "{stdout}");
-}
-
-#[test]
-fn ticket_submit_without_a_queue_sends_nothing_and_keeps_the_draft() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let home = tempfile::tempdir().expect("home");
-    write(
-        &home.path().join(".anvil").join("config.toml"),
-        anvil_types::config::SETUP_PROVIDERS,
-    );
-    let ticket = anvil_types::Ticket {
-        id: ulid::Ulid::generate(),
-        created_at: chrono::Utc::now(),
-        kind: anvil_types::TicketKind::Bug,
-        title: "A draft from an earlier anvil".to_owned(),
-        symptom: "Something went wrong.".to_owned(),
-        repro: None,
-        spec: "Make it right.".to_owned(),
-        acceptance: vec!["it is right".to_owned()],
-        evidence: Vec::new(),
-        priority: anvil_types::Priority::P2,
-        status: anvil_types::TicketStatus::Draft,
-        origin: anvil_types::TicketOrigin::Human,
-        claimed_at: None,
-        claimed_by: None,
-        pr: None,
-        note: None,
-    };
-    ticket.validate().expect("a valid draft");
-    let id = ticket.id.to_string();
-    let old_draft = dir
-        .path()
-        .join("tickets")
-        .join("draft")
-        .join(format!("{id}.toml"));
-    write(&old_draft, &toml::to_string(&ticket).expect("serializes"));
-
-    let out = anvil(dir.path())
-        .env("ANVIL_HOME", home.path())
-        .args(["ticket", "submit", "--all"])
-        .output()
-        .expect("anvil runs");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no ticket queue is configured"), "{stderr}");
-    assert!(stderr.contains("[tickets]"), "{stderr}");
-    assert!(
-        !home.path().join(".anvil").join("queue.git").exists(),
-        "no cache, so nothing was fetched or pushed"
-    );
-
-    let moved = home
-        .path()
-        .join(".anvil")
-        .join("tickets")
-        .join("draft")
-        .join(format!("{id}.toml"));
-    assert!(
-        moved.is_file(),
-        "the old project draft moved to the anvil home"
-    );
-    assert!(!old_draft.exists());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("moved 1 draft(s)"), "{stdout}");
+    let commands: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert!(commands.contains(&"doctor"), "{stdout}");
+    for removed in ["ticket", "update", "learn"] {
+        assert!(!commands.contains(&removed), "`{removed}` in:
+{stdout}");
+    }
 }
 
 /// The escape sequence that enters the alternate screen; the full-screen

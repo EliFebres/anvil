@@ -27,7 +27,3 @@ no-old-name:
 [windows]
 no-old-name:
     git grep -i -I -E --untracked 'f[o]rge' -- . ':!crates/anvil-cli/src/legacy.rs' ':!crates/anvil-cli/tests/legacy.rs' ; if ($LASTEXITCODE -ne 1) { exit 1 }; exit 0
-
-# Print the Ticket JSON Schema.
-schema:
-    cargo run -q -p anvil-types -- --schema

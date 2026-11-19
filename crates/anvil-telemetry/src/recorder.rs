@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::error::TelemetryError;
-use crate::paths::{SIGNALS_FILE, day_file, home_telemetry_dir, project_telemetry_dir};
+use crate::paths::{day_file, home_telemetry_dir, project_telemetry_dir};
 use crate::record::{Record, RecordKind, digest, hex};
 
 /// Writes one session's records to the project's telemetry folder and, when
@@ -174,13 +174,9 @@ pub fn load_records(
     Ok(records)
 }
 
-/// The date of a day file, or `None` for anything else (such as the
-/// signals file).
+/// The date of a day file, or `None` for anything else.
 fn day_file_date(path: &Path) -> Option<NaiveDate> {
     let name = path.file_name()?.to_str()?;
-    if name == SIGNALS_FILE {
-        return None;
-    }
     let stem = name.strip_suffix(".jsonl")?;
     NaiveDate::parse_from_str(stem, "%Y-%m-%d").ok()
 }

@@ -17,7 +17,7 @@ use anvil_core::agent::{EventSink, LoopEvent, Role, State, diff};
 use anvil_core::context::{Conversation, discover_instructions};
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
-use anvil_telemetry::{RecordKind, SessionMode, SessionOutcome};
+use anvil_telemetry::{SessionMode, SessionOutcome};
 use anyhow::Context;
 use tokio::sync::watch;
 
@@ -43,7 +43,6 @@ rule: <text>     save a standing rule to ~/.anvil/rules.toml
 /mode [mode]     show or set the permission mode label: ask, accept-edits, plan, bypass
 /expand          expand every tool call (full-screen UI only)
 /plain           drop to the line renderer for the rest of the session
-/ticket <text>   flag something about anvil for a ticket; `anvil ticket draft` writes it
 /quit            leave";
 
 /// Runs the REPL until the user quits, then proposes facts to remember.
@@ -300,23 +299,6 @@ impl ChatSession<'_> {
                         .warn("\ncommands (from .anvil/commands and .claude/commands):");
                     for line in commands {
                         self.console.warn(line);
-                    }
-                }
-            }
-            ("ticket", _) => {
-                let text = command.trim_start_matches("ticket").trim();
-                if text.is_empty() {
-                    self.console
-                        .warn("usage: /ticket <what anvil should do better>");
-                } else {
-                    match RecordKind::user_flag(text) {
-                        Ok(flag) => {
-                            self.telemetry.record(flag);
-                            self.console.notice(
-                                "flagged; `anvil ticket draft` after this chat turns it into a ticket",
-                            );
-                        }
-                        Err(error) => self.console.error(format!("not recorded: {error}")),
                     }
                 }
             }

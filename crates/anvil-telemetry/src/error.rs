@@ -1,13 +1,12 @@
-//! The error type for recording, drafting and submitting.
+//! The error type for recording and reading usage records.
 
 use std::path::PathBuf;
 
-use anvil_types::ValidationError;
 use thiserror::Error;
 
-/// Why a telemetry or ticket operation could not finish.
+/// Why a telemetry operation could not finish.
 ///
-/// Every variant names the file, id or command concerned, so the message
+/// Every variant names the file or value concerned, so the message
 /// stands on its own in a log line or a CLI error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TelemetryError {
@@ -31,59 +30,11 @@ pub enum TelemetryError {
         detail: String,
     },
 
-    /// A drafted ticket failed the ticket data boundary.
-    #[error("draft rejected by the ticket validator: {0}")]
-    Validation(#[from] ValidationError),
-
-    /// The drafter's reply held no usable JSON draft.
-    #[error("the drafter's reply is not a ticket draft: {detail}")]
-    BadDraft {
-        /// What was wrong.
-        detail: String,
-    },
-
-    /// The drafter (the summarizer model) failed.
-    #[error("drafting failed: {detail}")]
-    Drafter {
-        /// The provider's message.
-        detail: String,
-    },
-
-    /// No draft has this id or prefix.
-    #[error("no draft ticket matches `{id}`; `anvil ticket list` shows them")]
-    UnknownTicket {
-        /// The id or prefix asked for.
-        id: String,
-    },
-
-    /// More than one draft matches an id prefix.
-    #[error("`{id}` matches more than one draft; give more of the id")]
-    AmbiguousTicket {
-        /// The prefix asked for.
-        id: String,
-    },
-
-    /// A git command failed.
-    #[error("git {command} failed: {detail}")]
-    Git {
-        /// The subcommand and its arguments.
-        command: String,
-        /// Git's stderr, trimmed.
-        detail: String,
-    },
-
     /// A `--since` value is not a duration.
     #[error("`{text}` is not a duration; use a number followed by m, h, d or w")]
     BadDuration {
         /// The text as given.
         text: String,
-    },
-
-    /// A session id is not a ULID, so it cannot be a ticket evidence ref.
-    #[error("session id `{id}` is not a ULID")]
-    BadSessionId {
-        /// The id as recorded.
-        id: String,
     },
 }
 

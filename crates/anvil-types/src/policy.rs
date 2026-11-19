@@ -143,15 +143,6 @@ pub struct ExtensionsPolicy {
     pub herdr: bool,
 }
 
-/// What may leave the machine as a ticket.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct TicketsPolicy {
-    /// Whether `anvil ticket submit` may push to a configured queue.
-    /// Default `false`.
-    pub queue: bool,
-}
-
 /// Where sessions are kept and what runs around them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -185,9 +176,6 @@ pub struct Policy {
     /// What may load and run besides the built-in tools.
     #[serde(default)]
     pub extensions: ExtensionsPolicy,
-    /// What may leave the machine as a ticket.
-    #[serde(default)]
-    pub tickets: TicketsPolicy,
     /// Where sessions are kept and what runs around them.
     #[serde(default)]
     pub sessions: SessionsPolicy,
@@ -275,9 +263,6 @@ impl LoadedPolicy {
         });
         if !p.extensions.herdr {
             lines.push("herdr reporting".to_owned());
-        }
-        if !p.tickets.queue {
-            lines.push("ticket submission to a queue".to_owned());
         }
         if !p.sessions.summarizer_calls {
             lines.push("the automatic summarizer calls at session start and end".to_owned());
@@ -397,18 +382,10 @@ mod tests {
         assert!(p.extensions.mcp_commands.is_empty());
         assert!(p.extensions.skill_dirs.is_empty());
         assert!(!p.extensions.herdr);
-        assert!(!p.tickets.queue);
         assert!(!p.sessions.summarizer_calls);
         assert_eq!(loaded.sessions_root(dir.path()), None);
         let disabled = loaded.disables().join("\n");
-        for word in [
-            "--yes",
-            "hooks",
-            "MCP servers",
-            "skills",
-            "summarizer",
-            "ticket",
-        ] {
+        for word in ["--yes", "hooks", "MCP servers", "skills", "summarizer"] {
             assert!(disabled.contains(word), "{word} in:\n{disabled}");
         }
     }

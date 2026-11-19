@@ -22,10 +22,6 @@
 //! cannot undo these. Diffs also pass [`NO_DIFF_PROGRAMS`]. Aliases need
 //! nothing: git never lets an alias replace a built-in command, and anvil
 //! runs built-in commands only.
-//!
-//! The ticket queue in `anvil-telemetry` is the one other place that runs
-//! git. It works in anvil's own cache under `~/.anvil`, never in the
-//! project, and it must reach the queue's remote.
 
 use std::path::Path;
 use std::process::Command;

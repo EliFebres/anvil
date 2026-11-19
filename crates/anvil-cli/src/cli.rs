@@ -141,12 +141,6 @@ pub enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Draft, review and submit improvement tickets from this project's telemetry.
-    Ticket {
-        /// Which ticket action to take.
-        #[command(subcommand)]
-        command: TicketCommand,
-    },
 }
 
 /// Arguments of `anvil build`.
@@ -210,42 +204,6 @@ pub enum MemoryCommand {
     /// Find files you edited after anvil wrote them and propose rules from the changes; you
     /// keep or drop each one, and nothing reaches `rules.toml` until you keep it.
     Learn,
-}
-
-/// Subcommands under `anvil ticket`.
-#[derive(Debug, Subcommand)]
-pub enum TicketCommand {
-    /// Turn recorded signals into ticket drafts under `~/.anvil/tickets/draft/` with the summarizer.
-    Draft,
-    /// List drafts and open tickets.
-    List,
-    /// Print one ticket.
-    Show {
-        /// A ticket id or a unique prefix of one.
-        id: String,
-    },
-    /// Validate a draft, move it to `~/.anvil/tickets/open/`, commit it on a `tickets/<id>`
-    /// branch and push it to the ticket queue named by `[tickets] queue`.
-    ///
-    /// With no queue configured nothing is sent. Otherwise the queue is
-    /// fetched into ~/.anvil/queue.git and this push is the only thing that
-    /// ever leaves this machine. The ticket carries no project code, paths
-    /// or session text; the validator refuses one that does.
-    Submit {
-        /// A ticket id or a unique prefix of one.
-        #[arg(required_unless_present = "all")]
-        id: Option<String>,
-        /// Submit every draft.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Delete a draft.
-    Drop {
-        /// A ticket id or a unique prefix of one.
-        id: String,
-    },
-    /// Walk through every draft and submit, drop or edit each one.
-    Review,
 }
 
 /// Subcommands under `anvil rules`.

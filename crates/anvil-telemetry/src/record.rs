@@ -5,8 +5,6 @@
 //! reduces it to a size, a digest, a class or a scrubbed line; the raw
 //! strings never reach the file.
 
-use anvil_types::ValidationError;
-use anvil_types::boundary;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -395,11 +393,6 @@ pub enum RecordKind {
         /// The missing tool.
         tool: String,
     },
-    /// The user typed `/ticket <text>`.
-    UserFlag {
-        /// The text, which passed the boundary check.
-        text: String,
-    },
     /// The end-of-session memory summarizer was skipped.
     MemorySkipped {
         /// Why.
@@ -554,27 +547,6 @@ impl RecordKind {
         }
     }
 
-    /// A user flag, refused when the text fails the boundary check.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - What the user typed after `/ticket`.
-    ///
-    /// # Returns
-    ///
-    /// The record.
-    ///
-    /// # Errors
-    ///
-    /// When the text names a path outside the repository or holds too much
-    /// code.
-    pub fn user_flag(text: &str) -> Result<Self, ValidationError> {
-        boundary::check_text("ticket", text)?;
-        Ok(Self::UserFlag {
-            text: text.trim().to_owned(),
-        })
-    }
-
     /// The tag written to the file, such as `tool_result`.
     ///
     /// # Returns
@@ -595,7 +567,6 @@ impl RecordKind {
             Self::ProviderError { .. } => "provider_error",
             Self::Warning { .. } => "warning",
             Self::SkillRequires { .. } => "skill_requires",
-            Self::UserFlag { .. } => "user_flag",
             Self::MemorySkipped { .. } => "memory_skipped",
             Self::SessionEnded { .. } => "session_ended",
         }
@@ -823,15 +794,6 @@ mod tests {
         );
         let back: Record = serde_json::from_str(&json).expect("parses");
         assert_eq!(back, record);
-    }
-
-    #[test]
-    fn user_flag_is_boundary_checked() {
-        assert!(RecordKind::user_flag("the glob tool ignores .gitignore").is_ok());
-        assert!(matches!(
-            RecordKind::user_flag("see /home/me/proj/x.rs"),
-            Err(ValidationError::OutsidePath { .. })
-        ));
     }
 
     #[test]
