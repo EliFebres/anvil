@@ -94,7 +94,7 @@ supports_tools = true
 supports_reasoning = true
 ```
 
-Everything lives in your own `~/.anvil/`: `anvil config init --global` writes a commented template there. A repository's `.anvil/config.toml` can only add permission rules that refuse calls or make them ask (`anvil config init` writes that template); anything else in it is ignored with a warning. Keys never live in configuration files: they come from the environment or `~/.anvil/.env`, never from the repository, and `anvil scan-keys` fails if a tracked file contains one.
+Everything lives in your own `~/.anvil/`: `anvil config init --global` writes a commented template there. A repository's `.anvil/config.toml` can only add permission rules that refuse calls or make them ask (`anvil config init` writes that template); one that tries to set providers, roles, tools, network rules or `allow` rules stops anvil with an error naming the key. A repository's `.anvil/permissions.toml` may add `allow` rules, which apply only after you trust the repository, and any later change to them asks again. Keys never live in configuration files: they come from the environment or `~/.anvil/.env`, never from the repository, and `anvil scan-keys` fails if a tracked file contains one.
 
 ## Basic use
 

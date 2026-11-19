@@ -36,7 +36,7 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 
 ## Trust
 
-- **Pinning of repository instruction files, with re-approval on change.** Trust is per repository path today, so a trusted repository can change its hooks or `CLAUDE.md` later without a new prompt.
+- **Refusing shell writes to the files that grant power.** File tools never write `.anvil/permissions.toml`, `.mcp.json` or the settings files, but an approved shell command can; the trust digest catches the change before it takes effect, and the shell modes of a later phase would make the write itself impossible outside the container executor.
 
 ## The model host
 

@@ -7,7 +7,9 @@ One page. For each threat: what stops it today, what does not, and what is on th
 A cloned repository tries to make anvil act against the developer: send the API key to its own server, run commands without asking, plant instructions, or read the developer's secrets.
 
 **Stopped today**
-- The repository's `.anvil/config.toml` and `.anvil/permissions.toml` can only add `deny`, `ask` and `shell_programs`. Providers, `base_url`, `allow` rules, defaults, tool settings and every other key are ignored with a warning.
+- The repository's `.anvil/config.toml` can only add `deny`, `ask` and `shell_programs`. Providers, `base_url`, roles, tool and network settings, `allow` rules, defaults and pre-approved tools are errors that stop anvil and name the key. `.anvil/permissions.toml` may also hold `allow` rules, which apply only once the developer trusts the repository.
+- Trust is pinned to a SHA-256 digest of everything the repository ships that loosens anvil or steers the model; any change asks again.
+- anvil's file tools never write `.anvil/config.toml`, `.anvil/permissions.toml`, the hook settings files, `.mcp.json` or anything in `~/.anvil`, so the model cannot raise its own permissions through them.
 - The repository's `.anvil/.env` is never loaded, so it cannot set keys, `ANVIL_HOME` or proxies.
 - Hooks, MCP servers, skills, commands, agents and instruction files load only after the developer trusts the repository, from a prompt that lists each of them with its command line. Without a terminal, nothing loads. A policy can forbid repository content entirely.
 - A repository instruction file cannot `@import` a file outside the repository.
