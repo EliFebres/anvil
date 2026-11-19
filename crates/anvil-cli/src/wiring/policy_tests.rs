@@ -409,6 +409,53 @@ async fn policy_rules_beat_the_users_and_allow_tools_is_refused() {
     );
 }
 
+#[test]
+fn a_default_of_allow_conflicts_with_allow_yes_false_in_every_user_layer() {
+    let s = setup();
+    let text = refused(
+        &s,
+        "[permissions]\ndefault = \"allow\"\n",
+        load_policy(&s.policy_dir, ""),
+    );
+    assert!(text.contains("[permissions] allow_yes = false"), "{text}");
+    assert!(text.contains("default = \"allow\""), "{text}");
+
+    write(
+        &s.home.join(".anvil").join("profiles").join("loose.toml"),
+        "[permissions]\ndefault = \"allow\"\n",
+    );
+    let loaded = loaded_config(&s, "", Some("loose"));
+    let error = crate::policy::check_config(&load_policy(&s.policy_dir, ""), &loaded)
+        .expect_err("a profile's default of allow conflicts");
+    assert!(
+        format!("{error:#}").contains("[permissions] allow_yes = false"),
+        "{error:#}"
+    );
+
+    let saved = anvil_types::trust::user_permissions_path(&s.home, &s.project);
+    write(&saved, "default = \"allow\"\n");
+    let text = refused(
+        &s,
+        "",
+        load_policy(&s.policy_dir, "[permissions]\nallow_always = true\n"),
+    );
+    assert!(text.contains("[permissions] allow_yes = false"), "{text}");
+
+    wiring(
+        &s,
+        "[permissions]\ndefault = \"allow\"\n",
+        Some(load_policy(
+            &s.policy_dir,
+            "[permissions]\nallow_yes = true\n",
+        )),
+    );
+    wiring(
+        &s,
+        "[permissions]\ndefault = \"ask\"\n",
+        Some(load_policy(&s.policy_dir, "")),
+    );
+}
+
 #[tokio::test]
 async fn saved_always_rules_and_the_always_answer_follow_allow_always() {
     let s = setup();

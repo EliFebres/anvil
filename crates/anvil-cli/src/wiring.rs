@@ -24,7 +24,7 @@ use anvil_types::{AnvilConfig, ProjectRules, PromptConfig};
 use anyhow::Context;
 
 use crate::memory::{self, RuleChecks};
-use crate::policy::{check_allow_rules, conflict};
+use crate::policy::{check_allow_rules, check_unmatched, conflict};
 use crate::templates;
 use crate::terminal::TerminalPrompt;
 
@@ -386,7 +386,9 @@ impl Wiring {
                         ),
                     ));
                 }
-                check_allow_rules(p, &rules.rules().allow, &saved.display().to_string())?;
+                let source = saved.display().to_string();
+                check_allow_rules(p, &rules.rules().allow, &source)?;
+                check_unmatched(p, rules.rules(), &source)?;
             }
         }
 

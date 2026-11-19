@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use anvil_core::context::project_sessions_root;
 use anvil_core::net::host_port;
-use anvil_types::config::LoadedConfig;
+use anvil_types::config::{LoadedConfig, PermissionRules, Unmatched};
 use anvil_types::policy::{self, LoadedPolicy, Policy};
 
 /// Loads the policy from the one system path, after checking that only an
@@ -178,6 +178,35 @@ pub fn check_allow_rules(policy: &Policy, allows: &[String], source: &str) -> an
     Ok(())
 }
 
+/// Refuses `default = "allow"` when the policy forbids `--yes`: it
+/// approves every call no rule names without a person, which is `--yes`
+/// in effect.
+///
+/// # Arguments
+///
+/// * `policy` - The policy.
+/// * `rules` - The source's permission rules.
+/// * `source` - Where they are set, for the message.
+///
+/// # Errors
+///
+/// Naming `[permissions] allow_yes = false` and the source.
+pub fn check_unmatched(
+    policy: &Policy,
+    rules: &PermissionRules,
+    source: &str,
+) -> anyhow::Result<()> {
+    if rules.unmatched == Some(Unmatched::Allow) && !policy.permissions.allow_yes {
+        return Err(conflict(
+            "[permissions] allow_yes = false",
+            &format!(
+                "[permissions] default = \"allow\" in {source}; it approves every unnamed call without a person"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Where a configuration was read from, for messages.
 fn config_label(loaded: &LoadedConfig) -> String {
     if loaded.sources.is_empty() {
@@ -263,6 +292,7 @@ pub fn check_config(policy: &LoadedPolicy, loaded: &LoadedConfig) -> anyhow::Res
             ));
         }
         check_allow_rules(p, &rules.allow, &source)?;
+        check_unmatched(p, rules, &source)?;
     }
     if config.memory.always_summarize && !p.features.memory {
         return Err(conflict(

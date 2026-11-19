@@ -65,7 +65,7 @@ Two policies ship as starting points: `policies/restricted.toml` (one model serv
 | `[models] models` | any | Model names (`model = ...`) the user's configuration may use. |
 | `[permissions] deny` | none | Rules (`tool` or `tool:glob`) that refuse a call whatever else allows it. |
 | `[permissions] ask` | none | Rules that make a call ask a person whatever the user allows. A user or profile `allow` rule for the same tool and pattern is an error. |
-| `[permissions] allow_yes` | `false` | Whether `--yes` may be used. |
+| `[permissions] allow_yes` | `false` | Whether `--yes` may be used, and whether a user's configuration, profile or saved rules file may set `[permissions] default = "allow"`, which approves every call no rule names without a person. Either one is an error when this is off. |
 | `[permissions] allow_allow_tool` | `false` | Whether `--allow-tool` and `permissions.allow_tools` may be used. |
 | `[permissions] allow_always` | `false` | Whether the `always` prompt answer saves a rule, and saved rules under `~/.anvil/permissions/` are read. A saved rules file is an error when this is off. |
 | `[permissions] require_plan_approval` | `false` | A person approves every plan, even under `--yes`; in `anvil build`, the top-level plan. |
