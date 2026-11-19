@@ -575,10 +575,6 @@ pub struct PermissionRequest {
     pub target: Option<String>,
     /// The full arguments, for display.
     pub arguments: serde_json::Value,
-    /// Whether only a person may answer: the call writes a settings file
-    /// that can define hooks. An unattended prompt refuses it, and a
-    /// `session` or `always` answer covers this one call only.
-    pub needs_person: bool,
     /// Whether an `always` answer may save a rule; `false` when a managed
     /// policy sets `[permissions] allow_always = false`.
     pub may_save: bool,
@@ -869,18 +865,13 @@ pub trait PermissionPrompt: Send + Sync {
     fn ask(&self, request: &PermissionRequest) -> PromptAnswer;
 }
 
-/// A prompt that always gives the same answer, as `--yes` does, except
-/// that it refuses a request that needs a person.
+/// A prompt that always gives the same answer, as `--yes` does.
 #[derive(Debug, Clone, Copy)]
 pub struct StaticPrompt(pub PromptAnswer);
 
 impl PermissionPrompt for StaticPrompt {
-    fn ask(&self, request: &PermissionRequest) -> PromptAnswer {
-        if request.needs_person {
-            PromptAnswer::No
-        } else {
-            self.0
-        }
+    fn ask(&self, _request: &PermissionRequest) -> PromptAnswer {
+        self.0
     }
 }
 
@@ -1233,7 +1224,6 @@ mod tests {
             tool: "shell".to_owned(),
             target: Some("ls".to_owned()),
             arguments: serde_json::json!({"command": "ls"}),
-            needs_person: false,
             may_save: true,
         };
         assert_eq!(prompt.ask(&request), PromptAnswer::Always);
@@ -1432,7 +1422,6 @@ mod tests {
             tool: tool.to_owned(),
             target: None,
             arguments: serde_json::json!({}),
-            needs_person: false,
             may_save: true,
         };
         assert!(request("shell").offers_always());

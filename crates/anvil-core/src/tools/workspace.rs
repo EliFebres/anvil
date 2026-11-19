@@ -30,6 +30,10 @@ pub struct Workspace {
     /// Path globs the tools refuse and searches skip, from a managed
     /// policy's `[files] deny`; see [`deny_globs`].
     pub denied: Option<DeniedPaths>,
+    /// Folders the tools never write, wherever they lie: the user's own
+    /// `~/.anvil`, which holds the configuration, saved permission rules
+    /// and trust decisions.
+    pub protected_dirs: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -183,16 +187,17 @@ fn is_git_directory(dir: &Path) -> bool {
     dir.join("HEAD").is_file() && dir.join("objects").is_dir() && dir.join("refs").is_dir()
 }
 
-/// Folders whose settings files can define hooks, lower-cased.
-const HOOK_SETTINGS_DIRS: &[&str] = &[".claude", ".anvil"];
+/// Files in a `.anvil` folder that grant power, lower-cased: the
+/// repository's rules and the settings that define hooks and MCP servers.
+const ANVIL_POWER_FILES: &[&str] = &["config.toml", "permissions.toml"];
 
-/// Settings file names that can define hooks, lower-cased.
-const HOOK_SETTINGS_FILES: &[&str] = &["settings.json", "settings.local.json"];
-
-/// Whether `path` is a settings file that can define hooks:
-/// `settings.json` or `settings.local.json` in a `.claude` or `.anvil`
-/// folder, anywhere. A hook written there runs in a later session without
-/// a prompt, so a write to one always needs a person's answer.
+/// Whether `path` is a file that grants anvil, or a tool it runs, more
+/// power: `.anvil/config.toml`, `.anvil/permissions.toml`, a
+/// `settings*.json` in a `.claude` or `.anvil` folder (hooks, MCP servers,
+/// permissions), or a `.mcp.json`, anywhere and in any letter case. A
+/// model that could write one could raise its own permissions or plant a
+/// program that runs later without a prompt, so file tools never write
+/// them.
 ///
 /// # Arguments
 ///
@@ -201,14 +206,17 @@ const HOOK_SETTINGS_FILES: &[&str] = &["settings.json", "settings.local.json"];
 /// # Returns
 ///
 /// `true` for such a file.
-pub fn is_hook_settings(path: &Path) -> bool {
+pub fn grants_power(path: &Path) -> bool {
     let lower = |part: Option<&std::ffi::OsStr>| {
         part.map(|part| part.to_string_lossy().to_lowercase())
             .unwrap_or_default()
     };
     let name = lower(path.file_name());
     let folder = lower(path.parent().and_then(Path::file_name));
-    HOOK_SETTINGS_FILES.contains(&name.as_str()) && HOOK_SETTINGS_DIRS.contains(&folder.as_str())
+    let settings = name.starts_with("settings") && name.ends_with(".json");
+    name == ".mcp.json"
+        || (folder == ".anvil" && (settings || ANVIL_POWER_FILES.contains(&name.as_str())))
+        || (folder == ".claude" && settings)
 }
 
 /// Whether a lower-cased file name is `.env` or a `.env.*` that is not an example.
@@ -293,6 +301,36 @@ mod tests {
             "library/cookies.rs",
         ] {
             assert!(!holds_secrets(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn files_that_grant_power_are_recognised_in_any_case_and_folder() {
+        for path in [
+            ".anvil/config.toml",
+            ".anvil/permissions.toml",
+            ".anvil/settings.json",
+            ".anvil/settings.local.json",
+            ".claude/settings.json",
+            ".claude/settings.local.json",
+            ".claude/settings.dev.json",
+            ".mcp.json",
+            "sub/.mcp.json",
+            "sub/.ANVIL/Permissions.TOML",
+            ".Claude/Settings.Local.JSON",
+        ] {
+            let path = path.replace('/', std::path::MAIN_SEPARATOR_STR);
+            assert!(grants_power(Path::new(&path)), "{path}");
+        }
+        for path in [
+            "config.toml",
+            "permissions.toml",
+            "settings.json",
+            ".claude/agents/a.md",
+            ".anvil/rules.toml",
+            "mcp.json",
+        ] {
+            assert!(!grants_power(Path::new(path)), "{path}");
         }
     }
 

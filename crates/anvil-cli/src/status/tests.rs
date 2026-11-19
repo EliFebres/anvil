@@ -31,7 +31,6 @@ fn request() -> PermissionRequest {
         tool: "shell".to_owned(),
         target: Some("cargo test".to_owned()),
         arguments: serde_json::json!({}),
-        needs_person: false,
         may_save: true,
     }
 }

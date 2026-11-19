@@ -638,7 +638,6 @@ mod tests {
             tool: "write_file".to_owned(),
             target: Some("notes.txt".to_owned()),
             arguments: serde_json::json!({"path": "notes.txt"}),
-            needs_person: false,
             may_save: true,
         };
         let prompt = telemetry.recording(Box::new(StaticPrompt(PromptAnswer::Yes)));

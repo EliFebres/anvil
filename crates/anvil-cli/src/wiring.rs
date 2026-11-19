@@ -824,7 +824,8 @@ impl Wiring {
     ///
     /// The context, with the configured shell and the folders outside the
     /// project the file tools may open: `[tools] extra_dirs`, and the
-    /// loaded skills' folders for reading their supporting files.
+    /// loaded skills' folders for reading their supporting files; and the
+    /// user's `~/.anvil`, which they never write.
     pub fn tool_context(&self) -> ToolContext {
         ToolContext {
             shell: Shell::from_config(self.config.tools.shell.as_deref()),
@@ -842,6 +843,11 @@ impl Wiring {
                     )
                     .collect(),
                 denied: self.denied_paths.clone(),
+                protected_dirs: self
+                    .home
+                    .iter()
+                    .map(|home| home.join(anvil_types::config::CONFIG_DIR))
+                    .collect(),
             },
             ..ToolContext::new(self.cwd.clone())
         }

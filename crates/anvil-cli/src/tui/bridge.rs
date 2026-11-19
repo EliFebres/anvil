@@ -315,7 +315,6 @@ mod tests {
             tool: "shell".to_owned(),
             target: Some("ls".to_owned()),
             arguments: Value::Null,
-            needs_person: false,
             may_save: true,
         };
         assert_eq!(
@@ -342,7 +341,6 @@ mod tests {
             tool: "shell".to_owned(),
             target: None,
             arguments: Value::Null,
-            needs_person: false,
             may_save: true,
         };
         assert_eq!(TuiPrompt::new(ui.clone()).ask(&request), PromptAnswer::No);

@@ -115,7 +115,6 @@ mod tests {
             tool: tool.to_owned(),
             target: Some(target.to_owned()),
             arguments: serde_json::json!({}),
-            needs_person: false,
             may_save: true,
         }
     }

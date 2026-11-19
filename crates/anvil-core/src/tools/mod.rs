@@ -276,7 +276,8 @@ impl ToolContext {
     /// then lie inside `cwd`, the session folder or an extra folder, or,
     /// for a read, a read-only folder; it must not hold secrets (see
     /// [`workspace::holds_secrets`]); and a write must not land in a git
-    /// directory (see [`workspace::inside_git_dir`]).
+    /// directory (see [`workspace::inside_git_dir`]), in a file that grants
+    /// power (see [`workspace::grants_power`]) or in a protected folder.
     ///
     /// # Arguments
     ///
@@ -308,6 +309,22 @@ impl ToolContext {
         if write && workspace::inside_git_dir(&resolved) {
             return Err(format!(
                 "`{path}` is inside a git directory (hooks, config and the rest of .git); anvil's file tools never write there"
+            ));
+        }
+        if write && workspace::grants_power(&resolved) {
+            return Err(format!(
+                "`{path}` sets anvil's permissions, hooks or MCP servers; anvil's file tools never write it, so a model cannot raise its own permissions"
+            ));
+        }
+        if write
+            && self
+                .workspace
+                .protected_dirs
+                .iter()
+                .any(|dir| workspace::is_within(dir, &resolved))
+        {
+            return Err(format!(
+                "`{path}` is in anvil's own settings folder; anvil's file tools never write there"
             ));
         }
         let mut allowed: Vec<&Path> = vec![&self.cwd];
@@ -883,19 +900,8 @@ impl ToolRegistry {
                 ToolOutcome::Blocked,
             ));
         }
-        // A write to a hook settings file always asks a person: no allow
-        // rule, pre-approved tool, session approval or `--yes` covers it.
-        let needs_person = tool.access() == Access::Write
-            && tool.target_is_path()
-            && target
-                .and_then(|target| permissions::resolve_path(&workspace::canonical(root), target))
-                .is_some_and(|resolved| workspace::is_hook_settings(&resolved));
         let by_rule = permissions.rule_decision(name, target);
-        let decision = match by_rule.unwrap_or(tool.access().default_decision()) {
-            Decision::Allow if needs_person => Decision::Ask,
-            decision => decision,
-        };
-        match decision {
+        match by_rule.unwrap_or(tool.access().default_decision()) {
             Decision::Allow => {
                 if by_rule.is_some() {
                     self.observe(name, DecisionScope::Rule, true);
@@ -914,7 +920,7 @@ impl ToolRegistry {
                 // Held across the prompt so a registry sharing these approvals
                 // waits for this answer and then rechecks, instead of prompting too.
                 let mut approvals = lock_or_recover(&self.approvals);
-                if !needs_person && approvals.covers(name, target, root, tool.target_is_path()) {
+                if approvals.covers(name, target, root, tool.target_is_path()) {
                     self.observe(name, DecisionScope::Session, true);
                     return None;
                 }
@@ -922,7 +928,6 @@ impl ToolRegistry {
                     tool: name.to_owned(),
                     target: target.map(str::to_owned),
                     arguments: args.clone(),
-                    needs_person,
                     may_save: self.always_allowed,
                 };
                 match self.prompt.ask(&request) {
@@ -930,20 +935,11 @@ impl ToolRegistry {
                         self.observe(name, DecisionScope::Once, false);
                         None
                     }
-                    PromptAnswer::Session | PromptAnswer::Always if needs_person => {
-                        self.observe(name, DecisionScope::Once, false);
-                        None
-                    }
                     PromptAnswer::No => {
                         self.observe(name, DecisionScope::Deny, false);
                         tracing::info!(tool = name, ?target, "declined by user");
-                        let message = if needs_person {
-                            "this call writes a settings file that can define hooks, so a person must approve it, and no one did"
-                        } else {
-                            "the user declined this call"
-                        };
                         Some((
-                            ToolOutput::error(message.to_owned()),
+                            ToolOutput::error("the user declined this call".to_owned()),
                             ToolOutcome::DeclinedByUser,
                         ))
                     }
@@ -1164,7 +1160,6 @@ mod tests {
             tool: "shell".to_owned(),
             target: None,
             arguments: Value::Null,
-            needs_person: false,
             may_save: false,
         };
         assert!(!request.offers_always());
@@ -2006,123 +2001,159 @@ mod tests {
         }
     }
 
-    /// The settings files that can define hooks, as a model might name them.
-    const HOOK_SETTINGS: [&str; 6] = [
+    /// Files that grant power, as a model might name them.
+    const POWER_FILES: [&str; 10] = [
+        ".anvil/permissions.toml",
+        ".anvil/config.toml",
         ".claude/settings.json",
         ".claude/settings.local.json",
         ".anvil/settings.json",
         ".anvil/settings.local.json",
-        ".claude/../.claude/settings.json",
-        ".CLAUDE/Settings.JSON",
+        ".mcp.json",
+        "src/../.anvil/permissions.toml",
+        "./.claude/../.claude/settings.json",
+        "sub/.mcp.json",
     ];
 
     /// Writes `path` through `write_file` and then `edit_file`, returning
-    /// both outcomes.
+    /// both runs.
     async fn write_and_edit(
         registry: &ToolRegistry,
         ctx: &ToolContext,
         path: &str,
-    ) -> [ToolOutcome; 2] {
-        let mut outcomes = [ToolOutcome::Completed, ToolOutcome::Completed];
-        for (slot, (tool, args)) in outcomes.iter_mut().zip([
+    ) -> Vec<Execution> {
+        let mut runs = Vec::new();
+        for (tool, args) in [
             (
                 "write_file",
-                serde_json::json!({"path": path, "content": "{\"hooks\": {}}"}),
+                serde_json::json!({"path": path, "content": "allow = [\"shell\"]"}),
             ),
             (
                 "edit_file",
-                serde_json::json!({"path": path, "old": "{}", "new": "{\"x\": 1}"}),
+                serde_json::json!({"path": path, "old": "deny", "new": "allow"}),
             ),
-        ]) {
+        ] {
             let call = ToolCall {
                 id: "h1".to_owned(),
                 name: tool.to_owned(),
                 arguments_json: args.to_string(),
             };
-            *slot = registry.execute(&call, ctx).await.outcome;
+            runs.push(registry.execute(&call, ctx).await);
         }
-        outcomes
+        runs
     }
 
-    #[tokio::test]
-    async fn hook_settings_writes_are_refused_without_a_person() {
-        let project = tempfile::tempdir().expect("project");
-        let ctx = ToolContext::new(project.path());
+    /// A registry that allows every write, pre-approves the write tools and
+    /// answers every prompt with `always`: everything a rule, profile,
+    /// `--allow-tool`, `--yes` or a person could grant.
+    fn everything_allowed() -> ToolRegistry {
         let rules = "default = \"allow\"\nallow = [\"write_file\", \"edit_file\"]\n";
-        let unattended = ToolRegistry::with_builtins(
+        ToolRegistry::with_builtins(
             Permissions::from_toml(rules, None).expect("rules"),
-            Box::new(StaticPrompt(PromptAnswer::Yes)),
+            Box::new(StaticPrompt(PromptAnswer::Always)),
         )
         .with_session_approvals(Arc::new(Mutex::new(
             SessionApprovals::preapproved(["write_file", "edit_file"]).expect("valid"),
-        )));
-        for path in HOOK_SETTINGS {
-            assert_eq!(
-                write_and_edit(&unattended, &ctx, path).await,
-                [ToolOutcome::DeclinedByUser, ToolOutcome::DeclinedByUser],
-                "{path}"
-            );
-        }
-        assert!(
-            !project
-                .path()
-                .join(".claude")
-                .join("settings.json")
-                .exists()
-        );
-        assert!(!project.path().join(".anvil").join("settings.json").exists());
-
-        // Other files in the same folders are not affected.
-        for path in [".claude/agents/a.md", ".anvil/config.toml", "settings.json"] {
-            let [write, _] = write_and_edit(&unattended, &ctx, path).await;
-            assert_eq!(write, ToolOutcome::Completed, "{path}");
-        }
-
-        // A deny rule still refuses without asking.
-        let prompt = Arc::new(ScriptedPrompt::new(vec![]));
-        let denied = ToolRegistry::with_builtins(
-            Permissions::from_toml("deny = [\"write_file\", \"edit_file\"]", None).expect("rules"),
-            Box::new(SharedPrompt(Arc::clone(&prompt))),
-        );
-        assert_eq!(
-            write_and_edit(&denied, &ctx, HOOK_SETTINGS[0]).await,
-            [ToolOutcome::DeniedByRule, ToolOutcome::DeniedByRule]
-        );
-        assert!(prompt.requests().is_empty());
+        )))
     }
 
     #[tokio::test]
-    async fn a_person_is_asked_about_every_hook_settings_write() {
+    async fn tool_writes_to_files_that_grant_power_are_refused() {
         let project = tempfile::tempdir().expect("project");
+        std::fs::create_dir_all(project.path().join(".anvil")).expect("mkdir");
+        std::fs::create_dir_all(project.path().join("src")).expect("mkdir");
+        let original = "deny = [\"shell\"]\n";
+        std::fs::write(project.path().join(".anvil/permissions.toml"), original).expect("write");
         let ctx = ToolContext::new(project.path());
-        let prompt = Arc::new(ScriptedPrompt::new(vec![
-            PromptAnswer::Session,
-            PromptAnswer::Always,
-            PromptAnswer::No,
-            PromptAnswer::No,
-        ]));
-        let registry = ToolRegistry::with_builtins(
-            Permissions::from_toml("allow = [\"write_file\", \"edit_file\"]", None).expect("rules"),
-            Box::new(SharedPrompt(Arc::clone(&prompt))),
-        );
-        let path = ".claude/settings.json";
+        let registry = everything_allowed();
+        let absolute = project
+            .path()
+            .join(".anvil")
+            .join("permissions.toml")
+            .display()
+            .to_string();
+        let mut paths: Vec<&str> = POWER_FILES.to_vec();
+        paths.push(&absolute);
+        if cfg!(windows) {
+            paths.extend([
+                ".ANVIL/Permissions.toml",
+                ".Claude/SETTINGS.json",
+                ".MCP.json",
+            ]);
+        }
+        for path in paths {
+            for run in write_and_edit(&registry, &ctx, path).await {
+                assert!(run.result.is_error, "{path}: {}", run.result.content);
+                assert!(
+                    run.result.content.contains("never write it"),
+                    "{path}: {}",
+                    run.result.content
+                );
+            }
+        }
         assert_eq!(
-            write_and_edit(&registry, &ctx, path).await,
-            [ToolOutcome::Completed, ToolOutcome::Completed],
-            "a person answered session, then always"
+            std::fs::read_to_string(project.path().join(".anvil/permissions.toml"))
+                .expect("still there"),
+            original
         );
-        assert_eq!(
-            write_and_edit(&registry, &ctx, path).await,
-            [ToolOutcome::DeclinedByUser, ToolOutcome::DeclinedByUser],
-            "neither answer carried over to the next call"
-        );
-        let requests = prompt.requests();
-        assert_eq!(requests.len(), 4, "every call asked");
-        assert!(requests.iter().all(|request| request.needs_person));
-        assert_eq!(
-            std::fs::read_to_string(project.path().join(path)).expect("written"),
-            "{\"hooks\": {\"x\": 1}}"
-        );
+        assert!(!project.path().join(".claude").exists());
+        assert!(!project.path().join(".mcp.json").exists());
+
+        // Other files in the same folders are not affected.
+        for path in [".claude/agents/a.md", ".anvil/notes.md", "settings.json"] {
+            let runs = write_and_edit(&registry, &ctx, path).await;
+            assert_eq!(runs[0].outcome, ToolOutcome::Completed, "{path}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlink_to_a_file_that_grants_power_is_refused() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::create_dir_all(project.path().join(".anvil")).expect("mkdir");
+        std::fs::write(project.path().join(".anvil/permissions.toml"), "").expect("write");
+        std::os::unix::fs::symlink(
+            project.path().join(".anvil/permissions.toml"),
+            project.path().join("notes.toml"),
+        )
+        .expect("symlink");
+        let ctx = ToolContext::new(project.path());
+        for run in write_and_edit(&everything_allowed(), &ctx, "notes.toml").await {
+            assert!(
+                run.result.content.contains("never write it"),
+                "{}",
+                run.result.content
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_writes_into_the_users_anvil_folder_are_refused() {
+        let home = tempfile::tempdir().expect("home");
+        let anvil_home = home.path().join(".anvil");
+        std::fs::create_dir_all(anvil_home.join("permissions")).expect("mkdir");
+        let ctx = ToolContext {
+            workspace: Workspace {
+                extra_dirs: vec![home.path().to_path_buf()],
+                protected_dirs: vec![anvil_home.clone()],
+                ..Workspace::default()
+            },
+            ..ToolContext::new(home.path())
+        };
+        let registry = everything_allowed();
+        for path in [
+            ".anvil/trust.toml",
+            ".anvil/permissions/repo.toml",
+            ".anvil/rules.toml",
+            ".anvil/profiles/strict.toml",
+        ] {
+            for run in write_and_edit(&registry, &ctx, path).await {
+                assert!(run.result.is_error, "{path}: {}", run.result.content);
+            }
+        }
+        assert!(!anvil_home.join("trust.toml").exists());
+        let runs = write_and_edit(&registry, &ctx, "notes.md").await;
+        assert_eq!(runs[0].outcome, ToolOutcome::Completed);
     }
 
     /// Runs plain git for test setup; `false` when git is unavailable.
