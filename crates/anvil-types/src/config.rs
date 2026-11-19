@@ -38,9 +38,9 @@ protocol = "openai"          # "openai" or "anthropic"
 base_url = "https://models.internal.example/v1"
 api_key_env = "ANVIL_ENDPOINT_KEY"   # environment variable that holds the API key
 model = "<model name as served>"
-context_window = 131072
+context_window = 32768
 supports_tools = true
-supports_reasoning = true
+supports_reasoning = false
 # max_output_tokens = 16384   # optional; Anthropic requires one and defaults to 16384
 # USD per million tokens, used by `anvil stats` to estimate cost. Optional;
 # `cached` falls back to `input`.
@@ -897,7 +897,7 @@ mod tests {
         let loaded = load_profile(Some(home.path()), Some("ci")).expect("loads");
         let endpoint = &loaded.config.providers["endpoint"];
         assert_eq!(endpoint.model, "local-model");
-        assert_eq!(endpoint.context_window, 131_072, "config field kept");
+        assert_eq!(endpoint.context_window, 32_768, "config field kept");
         assert_eq!(loaded.sources.len(), 2);
         assert_eq!(loaded.sources[1], profile);
         assert_eq!(loaded.config.limits.session_tokens, 7);
@@ -1026,8 +1026,14 @@ mod tests {
         assert_eq!(config.roles.reviewer, None);
         let endpoint = &config.providers["endpoint"];
         assert_eq!(endpoint.protocol, Protocol::Openai);
-        assert_eq!(endpoint.context_window, 131_072);
-        assert!(endpoint.supports_tools && endpoint.supports_reasoning);
+        assert_eq!(endpoint.context_window, 32_768);
+        assert!(endpoint.supports_tools && !endpoint.supports_reasoning);
+    }
+
+    #[test]
+    fn setup_and_config_init_write_the_same_example_provider() {
+        let setup: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
+        assert_eq!(setup.providers, template().providers);
     }
 
     #[test]

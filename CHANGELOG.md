@@ -16,7 +16,8 @@ machine, who controls those limits, and what record is left behind.
 
 - `anvil update` (self-update), its `[update]` configuration and the release
   lookup behind it. A newer binary comes from whoever distributes anvil.
-- Everything that served the separate ticket factory: `anvil ticket` and its
+- Everything that served the separate repository that consumed the ticket
+  schema: `anvil ticket` and its
   subcommands, the `/ticket` chat command, ticket drafting, the ticket queue
   and its git push, the Ticket schema and its `--schema` binary, and the
   `[tickets]` configuration.

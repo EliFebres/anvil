@@ -10,21 +10,21 @@ description = "Claude Code compatibility for anvil: SKILL.md, CLAUDE.md, command
 
 [dependencies]
 anvil-core.workspace = true
-futures-util.workspace = true
 anvil-types.workspace = true
 regex.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+futures-util.workspace = true
 insta.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

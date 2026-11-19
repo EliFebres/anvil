@@ -87,7 +87,7 @@ pub enum Command {
     },
     /// Write ~/.anvil/.env and ~/.anvil/config.toml without overwriting anything
     /// already filled in; exit 2 while placeholders remain. With --endpoint, set up
-    /// one OpenAI-compatible server for every role instead of the hosted providers.
+    /// one OpenAI-compatible server for every role instead of the example provider.
     Setup {
         /// The base URL of an OpenAI-compatible server, such as
         /// `https://gpu.example/v1`; its model list is read first.

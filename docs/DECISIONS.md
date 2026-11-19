@@ -5,7 +5,7 @@ Choices made while hardening anvil for regulated, restricted-network environment
 ## Taken with the repository owner before the run
 
 - **The work continues on `enterprise/hardening` and draft pull request #43.** The branch already held the first round of hardening (removals, repository trust, the file jail, the scrubbed child environment, one HTTP module, the managed policy). Starting again from `main` would have redone that work for no gain.
-- **The Ticket schema leaves anvil.** `anvil-types` no longer has `Ticket`, its validator, `ticket::dirs` or the `--schema` binary. The separate factory repository still imports them at a pinned commit, so it keeps building; before it moves its pin past this branch it must copy `Ticket` and `ticket::dirs` into its own types crate. Nothing in this repository was changed to accommodate it.
+- **The Ticket schema leaves anvil.** `anvil-types` no longer has `Ticket`, its validator, `ticket::dirs` or the `--schema` binary. The separate repository that consumed the ticket schema still imports them at a pinned commit, so it keeps building; before it moves its pin past this branch it must copy `Ticket` and `ticket::dirs` into its own types crate. Nothing in this repository was changed to accommodate it.
 - **This plan overrides the decisions of 2026-11-17 where they conflict.** herdr reporting is deleted rather than kept behind a policy switch. HTTP MCP servers come back only behind the network allowlist of a later phase. Provider tolerance for self-hosted servers and the `anvil doctor` acceptance test stay on the roadmap.
 
 ## Phase 1: removals
