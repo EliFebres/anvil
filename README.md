@@ -1,6 +1,8 @@
 # Anvil
 
-Anvil is a coding agent you run from the terminal, written in Rust. It works with open-weight models served behind an OpenAI-compatible endpoint (vLLM, llama.cpp, a rented GPU) and with hosted APIs (Anthropic, OpenAI, Google). Models are configuration, not code: any endpoint can play any role.
+Anvil is a coding agent harness for open-weight models in regulated, restricted-network environments.
+
+It is a terminal program written in Rust. It talks to a self-hosted, OpenAI-compatible model server (vLLM, llama.cpp, an internal gateway); hosted APIs (Anthropic, OpenAI) are a configuration option, not a default. Models are configuration, not code: any endpoint can play any role.
 
 ## What it is
 
@@ -26,13 +28,13 @@ Let anvil write its configuration:
 anvil setup
 ```
 
-This writes `~/.anvil/.env` (API keys) and `~/.anvil/config.toml` (providers and roles), never overwriting a value that is already filled in, and exits 2 while placeholders remain. Fill in the keys you have, then check everything:
+This writes `~/.anvil/.env` (the key) and `~/.anvil/config.toml` with one example provider, `endpoint`: a self-hosted, OpenAI-compatible server at `https://models.internal.example/v1`, used for every role. It never overwrites a value that is already filled in, and exits 2 while a placeholder remains. Replace the URL and model (or use `--endpoint` below), fill in the key, then check everything:
 
 ```sh
 anvil doctor
 ```
 
-For one self-hosted or rented model server instead (vLLM, llama.cpp, an internal gateway), point setup at it. It reads the server's model list, writes one `endpoint` provider with the context size the server reports, and makes it every role:
+Better, point setup at your model server (vLLM, llama.cpp, an internal gateway). It reads the server's model list, writes one `endpoint` provider with the context size the server reports, and makes it every role:
 
 ```sh
 anvil setup --endpoint https://gpu.example/v1 [--model <id>] [--key-env NAME]
@@ -55,6 +57,19 @@ supports_reasoning = false
 [roles]
 coder = "local"
 summarizer = "local"
+```
+
+A hosted API is a provider like any other; setup never writes one. For example:
+
+```toml
+[providers.anthropic]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "<model id>"
+context_window = 200000
+supports_tools = true
+supports_reasoning = true
 ```
 
 Everything lives in your own `~/.anvil/`: `anvil config init --global` writes a commented template there. A repository's `.anvil/config.toml` can only add permission rules that refuse calls or make them ask (`anvil config init` writes that template); anything else in it is ignored with a warning. Keys never live in configuration files: they come from the environment or `~/.anvil/.env`, never from the repository, and `anvil scan-keys` fails if a tracked file contains one.
@@ -82,11 +97,11 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 
 ## Security model
 
-- anvil never runs a model. It sends prompts, and the files and command output its tools read, over HTTPS to the endpoints you configure, through one HTTP client that does not follow redirects. It has no telemetry upload, no self-update and no update check; the only other thing that reaches the network is `anvil ticket submit`, which you run yourself after configuring a queue.
+- anvil never runs a model. It sends prompts, and the files and command output its tools read, over HTTPS to the endpoints you configure, through one HTTP client that does not follow redirects. It has no telemetry upload, no self-update and no update check.
 - File writes, edits and shell commands ask first. Your own rules (in `~/.anvil/config.toml`, a `--profile`, or what `always` saved under `~/.anvil/permissions/`) change that; a repository can only add `deny` and `ask` rules; a few destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `Remove-Item -Recurse`) are refused even under `--yes` unless a rule names them.
 - Keys are read from the environment and `~/.anvil/.env`, never from configuration, and are not passed to the commands anvil runs: those get a short list of variables plus `[tools] pass_env`.
 - The file tools stay inside the project (plus `[tools] extra_dirs`), reads included, and never open `.env` files, SSH or cloud credentials, browser profiles or keychains. `profiles/strict.toml` limits `shell` to single listed programs. An approved shell command still runs with your own rights; anvil does not sandbox it.
-- An administrator can install a managed policy (`C:\ProgramData\Anvil\policy.toml`, `/etc/anvil/policy.toml` or `/Library/Application Support/Anvil/policy.toml`) that limits endpoints, extensions, prompts, tickets and transcripts, and that the user cannot override; see SECURITY.md and `docs/enterprise/policy.example.toml`. `anvil doctor` shows it.
+- An administrator can install a managed policy (`C:\ProgramData\Anvil\policy.toml`, `/etc/anvil/policy.toml` or `/Library/Application Support/Anvil/policy.toml`) that limits endpoints, extensions, prompts and transcripts, and that the user cannot override; see SECURITY.md and `docs/enterprise/policy.example.toml`. `anvil doctor` shows it.
 - anvil does not trust the repository it runs in. Its hooks, MCP servers, skills, commands, agents and instruction files load only after you answer the trust prompt, which lists each of them; `anvil trust` asks again and `anvil trust --revoke` withdraws it. Without a terminal, an undecided repository is untrusted.
 
 [SECURITY.md](SECURITY.md) has the details, with file references and the test behind each control: what is enforced and what is not, every network destination and what triggers it, what is stored where, where keys come from, the permission defaults, the managed policy, and how releases are built. For a firm's reviewers, `docs/enterprise/` holds the data flow, the threat model, a pilot scope template and an example policy; `docs/ROADMAP.md` lists what is deliberately not done yet; `docs/CODE_TOUR.md` walks one request through the code.
@@ -98,7 +113,7 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 | command | what happens |
 |---|---|
 | `anvil "<task>"` or `anvil run <task>` | One task through the state machine: `plan` (you approve the plan, which ends with a `Check:` command) → `build` → `verify` (your rules, the project's checks and the plan's check, with no model turn) → `review` (a second model, which sees the check output). A project with no check command at all is reviewed first and then verified by the model. Exit code 0 when done, 2 when incomplete. |
-| `anvil chat` | A conversation with tools, outside the state machine. `/plan`, `/build` and `/review` switch the prompt and tool set; `rule: <text>` saves a standing rule on the spot; `/compact`, `/model <name>`, `/cost`, `/ticket <text>`, `/help`. |
+| `anvil chat` | A conversation with tools, outside the state machine. `/plan`, `/build` and `/review` switch the prompt and tool set; `rule: <text>` saves a standing rule on the spot; `/compact`, `/model <name>`, `/cost`, `/help`. |
 | `anvil build <spec.md>` | Work through a specification across many sessions: a plan of work items, one fresh session per item, a commit per finished item. See [Long builds](#long-builds). `anvil build resume [id]` continues one, `anvil build status [id]` shows it. |
 | `anvil resume <id>` | Continue a saved session from where it stopped. `anvil sessions` lists them. |
 | `anvil status [--json] [--all]` | Where every session of this project stands, newest first: state, loop step, age, spend, task, id. See [Watching a session](#watching-a-session). |
@@ -137,7 +152,7 @@ Three kinds of state live under `~/.anvil/`, all plain files you can edit:
 
 - **Rules** (`rules.toml`): standing coding rules. They enter the system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
 - **Memory** (`memory/`): one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`, loaded under a token cap. At the end of a session the summarizer proposes new facts and you keep or drop each one. A run that finished with no reviewer rejection, no failed check and a diff under 50 lines has nothing new to teach, so it skips that turn and says so; `[memory] always_summarize = true` runs it every time.
-- **Telemetry** (`telemetry/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates, and with a planner configured adds a per-role table, each role priced by its own provider. A classifier turns them into signals, and `anvil ticket draft` has the summarizer write ticket drafts from the signals alone.
+- **Telemetry** (`telemetry/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates, and with a planner configured adds a per-role table, each role priced by its own provider. They never leave the machine.
 
 #### Workers
 
@@ -155,17 +170,6 @@ Several `delegate` calls in one turn run at the same time, at most four, when th
 Every `run`, `resume` and `chat` keeps a `status.json` in its session folder (`.anvil/sessions/<id>/`), replaced atomically on every change, so you can see from outside whether a session is working, stuck or waiting for you. `state` is one of `working`, `needs_input` (a permission prompt, a plan approval or a question is waiting), `blocked` (a budget ran out, the provider cannot be reached, or the loop stopped unfinished; `detail` says which), `done` and `failed`. It also holds the loop step, the tokens and cost so far, and when it started and last changed.
 
 `anvil status` lists the sessions of the current project from those files; `--json` prints them as a JSON array and `--all` covers every project that has run a session. A session that says `working` or `needs_input` but whose process is gone shows as `stale` (the running process holds a lock on `status.lock`; `stale` is never written to the file). Sessions from before status files existed are skipped.
-
-One optional table in `config.toml` reports the session to a terminal multiplexer:
-
-```toml
-# Report the session to herdr when it runs in a herdr pane: working, blocked
-# (with the reason) or idle, released when the session exits.
-[integrations]
-herdr = false
-```
-
-A missing `herdr` never affects the session.
 
 #### Long builds
 
@@ -191,22 +195,11 @@ resuming build 01JC4ZQ8M2: 2 item(s) left
 
 `--budget-usd` and `--budget-tokens` cap the whole build and are checked between items; the build then stops as `blocked` with the reason, and `resume` accepts new caps. Each item's session gets an even share of what is left, through the usual session token limit. An item gets two attempts: after the first failure the second is told why; after the second, the build stops as `needs_input`, the failed attempt is committed on `anvil-build/<id>/item-<n>-attempt-<k>`, and your branch is back at the last good commit with a clean tree. `anvil build resume [id]` (the newest unfinished build by default) starts at the first item that is not done, even after a crash; an item left in progress has its changes saved to a side branch first. Exit code 0 when every item is done, 2 when the build stopped. A `--budget-usd` cap is only applied inside a session when the coder has a `price_per_mtoken`.
 
-#### Learning how you work
+#### Rules and templates
 
-Three more things build on those files.
+Two more things build on those files.
 
 **Rules by relevance.** Each rule lists the `languages` it applies to. A session sends the coder and the reviewer only the rules for languages present in the project (from file extensions, honoring `.gitignore`, at most 5,000 files), plus every `*` rule and any rule for a language anvil cannot detect. An empty project has no languages yet, so it gets every rule. A Python-only rule stays out of a Rust-only project; the prompt is otherwise unchanged. The reviewer uses the project's languages too, since the changed files are not known when the prompt is built.
-
-**Learning from your edits.** At the end of a session in a git repository, anvil records the text files it changed (each at most 32 KiB, 128 KiB in all) with a SHA-256 of their bytes in `~/.anvil/memory/corrections/<repo>.toml`. At the start of the next session in that project, and whenever you run `anvil memory learn`, the files you edited since are compared with what anvil left, and the summarizer proposes rules from the difference. You keep or drop each one, exactly as with proposed facts; nothing reaches `rules.toml` until you keep it, and an edit is never proposed twice. Lock files, minified files, `target/`, `dist/`, `node_modules/` and anything in the project's `.gitignore` are skipped, the diff sent to the model is cut at 16 KiB, and when nothing was edited there is no model call. Each proposal names one language and says when a mechanical check is realistic. Under `--yes` the start-of-session step is skipped (nobody can answer); `anvil memory learn` picks the edits up later. `[memory] always_summarize` does not apply, because this step only runs a model when you really edited something.
-
-```
-$ anvil memory learn
-memory: you edited 2 file(s) anvil wrote; asking the summarizer for rules
-memory: 1 proposed rule(s), written to ~/.anvil/memory/proposed.md
-[rule] (python) Annotate every parameter and return type.
-  keep? [k]eep / [d]rop: k
-memory: kept 1 rule(s) in ~/.anvil/rules.toml
-```
 
 **Project templates.** `~/.anvil/templates/<name>/` holds a directory tree and a `template.toml` with `name` (the directory name), a one-line `description` and `languages`. A directory without a valid `template.toml` is ignored with a warning.
 
@@ -218,35 +211,22 @@ $ anvil new rust-cli ./my-tool                                              # co
 
 `template save` honors `.gitignore` and skips `.git/` and `.anvil/`, and refuses to overwrite a template without `--force`. `anvil new` creates the directory, or fills an existing one that holds no files other than dot-directories such as `.git`; an unknown name lists the templates you have. When a task starts in such an empty directory, the Plan prompt lists each template's name and description so the plan can start from the one that fits (`anvil new <name> .`); with files present or no templates, the prompt is unchanged.
 
-#### Tickets
-
-`anvil ticket draft` has the summarizer turn telemetry signals into improvement tickets: a symptom, the interface wanted, an optional synthetic reproduction and acceptance checks, never project code or paths (a validator refuses a ticket that names a path outside the project or holds more than 40 lines of code). Drafts stay on your machine in `~/.anvil/tickets/draft/`; `anvil ticket list|show|review|drop` manage them.
-
-`anvil ticket submit` sends a ticket only when `[tickets] queue` names a git repository to receive it:
-
-```toml
-[tickets]
-queue = "https://github.com/<owner>/<queue-repository>.git"
-```
-
-The key is unset by default, so a stock install never pushes anywhere; `submit` then says what to set and sends nothing. With a queue set, it fetches the queue into `~/.anvil/queue.git` and pushes the ticket there as a `tickets/<id>` branch with your own git credentials. The current project's remotes are never used.
-
-Other commands: `anvil skill add|list|show|remove` (install Claude Code skills from a local folder), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, tools, keys in tracked files), `anvil ticket` (above), `anvil memory learn`, `anvil new`, `anvil template save`.
+Other commands: `anvil skill add|list|show|remove` (install Claude Code skills from a local folder), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, tools, keys in tracked files), `anvil new`, `anvil template save`.
 
 ## Repository layout
 
 | path | what it holds |
 |---|---|
-| `crates/anvil-types` | Shared types: ticket schema, provider and roles config, telemetry references, skill manifest, session status, and their validators. `cargo run -p anvil-types -- --schema` prints the Ticket JSON Schema. |
+| `crates/anvil-types` | Shared types: provider and roles config, the managed policy, skill manifest, session status, and their validators. |
 | `crates/anvil-core` | The agent loop, tool registry, provider adapters (OpenAI and Anthropic protocols) and context management. |
 | `crates/anvil-compat` | Claude Code compatibility: skills, `CLAUDE.md`, commands, agents, hooks, the MCP client. |
 | `crates/anvil-memory` | Cross-project memory and coding rules. |
-| `crates/anvil-telemetry` | Usage records, failure classification, ticket drafts. |
+| `crates/anvil-telemetry` | Content-free usage records and `anvil stats`. |
 | `crates/anvil-tui` | The palette and pure layout helpers the full-screen UI draws with. |
 | `crates/anvil-cli` | The `anvil` binary: argument parsing, wiring, the line renderer and the full-screen UI. |
 | `skills/` | Claude Code-format skills that ship with anvil. |
 | `SECURITY.md` | What is enforced and what is not, network destinations, stored files, keys, permissions, the managed policy and the release build, for a reviewer. |
-| `docs/` | `enterprise/` (data flow, threat model, pilot scope, example policy), `ROADMAP.md`, `CODE_TOUR.md`. |
+| `docs/` | `enterprise/` (data flow, threat model, pilot scope, example policy), `ROADMAP.md`, `CODE_TOUR.md`, `DECISIONS.md`. |
 | `profiles/` | Profiles that ship with anvil, such as `strict.toml`. |
 
 `CLAUDE.md` is the contract: conventions, which crate may depend on which, and what every check enforces.

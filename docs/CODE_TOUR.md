@@ -8,13 +8,12 @@ This walks through what happens when someone types `anvil "add a --dry-run flag"
 
 `main` parses the arguments with clap (`crates/anvil-cli/src/cli.rs`) and calls `start`. Whatever goes wrong, it prints one error line and exits with code 1.
 
-`start` does five things, in this order:
+`start` does four things, in this order:
 
 1. **Loads the managed policy**, `policy::load_system` in `crates/anvil-cli/src/policy.rs`, from the one fixed path `anvil_types::policy::system_path()`: `C:\ProgramData\Anvil\policy.toml` on Windows, `/etc/anvil/policy.toml` on Linux. No environment variable or flag can change that path. If the file exists but is broken, `start` returns the error and anvil stops here, before it touches anything. *Safe because a policy that cannot be read is never silently skipped.*
-2. Moves directories left by the old name of the program (`legacy.rs`).
-3. **Loads the user's `.env` file**, `anvil_types::dotenv::env_files` and `load`. Only `~/.anvil/.env` is loaded, never the repository's. *Safe because a cloned repository cannot set a key, `ANVIL_HOME` or a proxy.*
-4. Picks the full-screen UI or the plain line renderer (`UiKind::choose` in `frontend.rs`).
-5. Starts logging into `.anvil/logs/` and the async runtime, then calls `dispatch`.
+2. **Loads the user's `.env` file**, `anvil_types::dotenv::env_files` and `load`. Only `~/.anvil/.env` is loaded, never the repository's. *Safe because a cloned repository cannot set a key, `ANVIL_HOME` or a proxy.*
+3. Picks the full-screen UI or the plain line renderer (`UiKind::choose` in `frontend.rs`).
+4. Starts logging into `.anvil/logs/` and the async runtime, then calls `dispatch`.
 
 **`dispatch`** first calls **`policy::check_flags`**. Under a policy that does not allow skipping prompts, `--yes`, `--allow-tool` and `--profile` stop anvil here with an error naming the policy file. Then it matches the subcommand; a bare task goes to `run`, which calls `project_wiring`.
 
@@ -26,7 +25,7 @@ This walks through what happens when someone types `anvil "add a --dry-run flag"
 2. **The repository's rules**, `anvil_types::project::load` in `crates/anvil-types/src/project.rs`. From the repository's `.anvil/config.toml` and `.anvil/permissions.toml` it keeps only `deny`, `ask` and `shell_programs`; everything else becomes a warning line naming the key. Under a policy with `[project] config = false` this step is skipped entirely.
 3. **Trust**, `trust::decide` in `crates/anvil-cli/src/trust.rs`. It looks the repository up in `~/.anvil/trust.toml`. If the user never decided and a person is at the terminal, `shipped` lists everything the repository would load (each hook and MCP server with its command line) and asks once; the answer is saved. With `--plain`, `--yes` or no terminal, an undecided repository stays untrusted and nothing is recorded. *Safe because nothing the repository ships can run or steer the model before a person has seen the list and said yes.*
 4. **The wiring**, `Wiring::new_in` in `crates/anvil-cli/src/wiring.rs`. This is the one place skills, commands, agents, hooks and MCP servers are discovered. It passes the repository root to each discovery only when the repository is trusted, otherwise `None`, so only the user's own files under `~` are found. It also records the user's `[tools] pass_env` for child processes and builds the personal-mode `Egress` (https only, plus the user's `allow_http_hosts`).
-5. **The policy**, `Wiring::with_policy`, when one is installed. This one function is every effect the policy has on a session, and it reads top to bottom: the egress becomes the policy's allowed endpoints, hooks are dropped unless allowed, MCP servers are filtered to the allowed commands, skills come only from the policy's folders, herdr is turned off unless allowed, and the configuration's `allow_tools` stops counting. Later, `Wiring::user_permissions` swaps in the policy's forced profile.
+5. **The policy**, `Wiring::with_policy`, when one is installed. This one function is every effect the policy has on a session, and it reads top to bottom: the egress becomes the policy's allowed endpoints, hooks are dropped unless allowed, MCP servers are filtered to the allowed commands, skills come only from the policy's folders, and the configuration's `allow_tools` stops counting. Later, `Wiring::user_permissions` swaps in the policy's forced profile.
 
 Back in `run`, `prune_old_sessions` deletes this repository's session folders older than the policy's `retention_days`, and `Wiring::load_mcp` starts the remaining MCP servers.
 
@@ -37,7 +36,6 @@ Back in `run`, `prune_old_sessions` deletes this repository's session folders ol
 `run_task` creates the session folder with `Wiring::new_session_dir`, which puts it under `Wiring::sessions_root()`: the policy's `transcript_dir` or the repository's `.anvil/sessions`. `run_session_in` then:
 
 - starts the front end;
-- runs `learn::at_session_start`, the one automatic summarizer call at the start, only if `Wiring::summarizer_calls_allowed` says so (always in personal mode, only when the policy turns it on);
 - builds the tool registry with `Wiring::registry` (step 5);
 - builds the loop settings with `Wiring::loop_config`, including whether the repository's instruction files may load (`trusted_project`);
 - runs the `SessionStart` hooks, of which there are none unless the user's or a trusted repository's settings define them and the policy allows hooks;

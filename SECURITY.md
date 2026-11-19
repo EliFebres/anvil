@@ -47,30 +47,26 @@ Every HTTP request anvil makes goes to a model endpoint, through a client built 
 
 | destination | what triggers it | on by default |
 |---|---|---|
-| **Model providers**: each `[providers.<name>] base_url`. `anvil setup` writes `https://api.anthropic.com/v1`, `https://api.openai.com/v1` and `https://generativelanguage.googleapis.com/v1beta/openai`; `anvil setup --endpoint <url>` writes one provider for the given server; there is no built-in default (`crates/anvil-types/src/config.rs`). Requests go to `{base_url}/messages` or `{base_url}/chat/completions` (`crates/anvil-core/src/provider/`). | Every model turn of `anvil run`, `chat`, `resume` and `build`. Also, inside a session and without a separate prompt: context compaction; the end-of-session memory summarizer; and at session start the summarizer call that proposes rules from files the user edited after anvil wrote them (it sends a diff of those edits, at most 16 KiB). Under a managed policy the two summarizer calls are off unless the policy turns them on. `anvil memory learn` and `anvil ticket draft` call the summarizer too. `anvil doctor` sends a one-token request to every configured provider. | Yes, whenever those commands run. They are the product. |
+| **Model providers**: each `[providers.<name>] base_url`. `anvil setup` writes one example, `https://models.internal.example/v1`, to be replaced; `anvil setup --endpoint <url>` writes one provider for the given server; hosted APIs are only ever added by hand; there is no built-in default (`crates/anvil-types/src/config.rs`). Requests go to `{base_url}/messages` or `{base_url}/chat/completions` (`crates/anvil-core/src/provider/`). | Every model turn of `anvil run`, `chat`, `resume` and `build`. Also, inside a session and without a separate prompt: context compaction and the end-of-session memory summarizer. Under a managed policy the summarizer call is off unless the policy turns it on. `anvil doctor` sends a one-token request to every configured provider. | Yes, whenever those commands run. They are the product. |
 | **The model list of an endpoint being set up**: `GET {url}/models` (and `{url}/v1/models` when the URL has no `/v1`), with the key as a bearer token when it is set (`crates/anvil-core/src/provider/models.rs`). Same egress rules as providers. | `anvil setup --endpoint <url>` only. | No. |
-| **The ticket queue**: the git URL in `[tickets] queue`. A `git fetch` into `~/.anvil/queue.git`, then `git push queue refs/heads/tickets/<id>`, with the user's own git credentials (`crates/anvil-telemetry/src/git.rs`). | `anvil ticket submit` and the submit key of `anvil ticket review` only. A managed policy refuses it unless `[tickets] queue = true`. | No. Unset by default; while unset, `submit` says what to set and sends nothing. |
 | **MCP servers**: local programs only. Definitions with a `url` are refused, so no MCP server makes anvil contact a host itself. Sources: `~/.anvil/mcp.toml` and, for a trusted repository, its `.mcp.json` and `.claude/settings*.json` (`crates/anvil-compat/src/mcp/mod.rs`). | Started when a session starts unless `.anvil/mcp-cache/` holds a fresh listing. Calling a tool asks first unless the server marks it read-only. Under a policy only listed commands start. | Only when such a file defines servers. |
 | **Hooks**: shell commands from `~/.claude/settings.json`, `~/.anvil/settings.json` and, for a trusted repository, its `.claude/settings*.json` and `.anvil/settings.json` (`crates/anvil-compat/src/hooks.rs`). They can do anything a shell command can. | At session start and around tool calls once defined. Off under a policy unless `[extensions] hooks = true`. | Only when such a file defines hooks. |
 | **The `shell` tool**: whatever command the model runs, once approved. | A model turn; asks first by default. | Asks. |
 
-herdr reporting (`[integrations] herdr = true`) runs a local program and makes no network call. There is no web search or web fetch tool. The removed features (self-update, webhooks, remote MCP servers, downloading skills) are gone from the code; a configuration that still sets `[update]` or `[notify]` fails to load and says why.
+There is no web search or web fetch tool. The removed features (self-update, webhooks, tickets and the ticket queue, herdr reporting, learning from the owner's edits, remote MCP servers, downloading skills) are gone from the code; a configuration that still sets `[update]`, `[notify]`, `[tickets]`, `[telemetry]` or `[integrations]` fails to load and says why.
 
 ## Files anvil writes
 
-Nothing anvil records leaves the machine on its own. There is no upload code; the only way a record's content leaves is a ticket the user submits, and `anvil ticket draft` sends signals and usage records to the summarizer provider to write a draft.
+Nothing anvil records leaves the machine. There is no upload code.
 
 | what | where | content |
 |---|---|---|
 | Session transcripts | `<project>/.anvil/sessions/<id>/`, or under a policy's `transcript_dir` (one subfolder per repository) | `session.jsonl` holds the full conversation, including file contents and command output the tools returned; `tool-output/` the untruncated outputs; `status.json` the session's state. Kept until deleted, or for the policy's `retention_days`. |
-| Usage records | `<project>/.anvil/telemetry/<date>.jsonl` and a copy in `~/.anvil/telemetry/` | Content-free: provider, model, tokens, latency, retries, stop reasons, tool names with argument and result sizes and digests, permission decisions, check results by program name and command digest, provider error kinds. The project path is stored as a digest. The text of a `/ticket` note is kept after the ticket boundary check. |
-| Signals | `<project>/.anvil/telemetry/signals.jsonl` | What the classifier derived from the records. |
+| Usage records | `<project>/.anvil/telemetry/<date>.jsonl` and a copy in `~/.anvil/telemetry/` | Content-free: provider, model, tokens, latency, retries, stop reasons, tool names with argument and result sizes and digests, permission decisions, check results by program name and command digest, provider error kinds. The project path is stored as a digest. |
 | Logs | `<project>/.anvil/logs/` | Structured logs; `ANVIL_LOG` sets the level. Requests are logged by URL and attempt, never with headers. |
 | Memory and rules | `~/.anvil/memory/`, `~/.anvil/rules.toml` | Facts and rules the user chose to keep. |
-| Files anvil left | `~/.anvil/memory/corrections/<repo>.toml` | The text of files anvil changed at the end of a session (at most 32 KiB each, 128 KiB in all), to compare with later edits. |
 | Trust decisions | `~/.anvil/trust.toml` | Each repository path the user answered the trust prompt for, and the answer. |
 | Saved permission rules | `~/.anvil/permissions/<repository>.toml` | The rules an `always` answer saved. |
-| Tickets | `~/.anvil/tickets/draft/`, `~/.anvil/tickets/open/`, `~/.anvil/queue.git` | Drafts, submitted tickets, and a bare clone of the queue made on the first submit. |
 | MCP listings | `<project>/.anvil/mcp-cache/` | Tool lists the servers returned. |
 
 The `.gitignore` of this repository keeps `.anvil/telemetry/`, `.anvil/sessions/`, `.anvil/logs/` and `.anvil/mcp-cache/` out of commits; other projects need the same lines.
@@ -107,7 +103,6 @@ The `.gitignore` of this repository keeps `.anvil/telemetry/`, `.anvil/sessions/
   - `protocol.allow=never`: no remote is contacted, so `core.sshCommand`, credential helpers and proxies never run.
 
   Diffs also pass `--no-ext-diff --no-textconv`, so `diff.external` and the diff drivers named in `.gitattributes` never run. Aliases need nothing: git never lets an alias replace a built-in command, and anvil runs built-in commands only. Clean and smudge filters and commit signing programs cannot be switched off from the command line without also switching off the user's own (Git LFS, a signing key). So when the repository's own config names one (`filter.<name>.clean`, `smudge` or `process`, `gpg.program` or `gpg.<format>.program`), anvil refuses to run git there and names the key to remove; the same keys in the user's or the system's config are the user's choice and are used. This needs git 2.26 or later (`git config --show-scope`). A test fails the build if non-test code starts git in any other way.
-- **The ticket queue's git calls** run in anvil's own bare cache, `~/.anvil/queue.git`, never in the project, and keep the full environment so the user's credential helper or SSH agent can push.
 - **Not confined.** An approved `shell` command, see "What is not enforced".
 
 ## Running in a repository you do not trust
@@ -126,22 +121,17 @@ An administrator can install a policy file that the user cannot override (`crate
 - **Location.** `C:\ProgramData\Anvil\policy.toml` on Windows, `/Library/Application Support/Anvil/policy.toml` on macOS, `/etc/anvil/policy.toml` on Linux. The path is fixed in the code. No environment variable or flag points anvil at another file, and the Windows path is not read from `%ProgramData%`, which a user can change for their own processes. On Windows a non-administrator can create `C:\ProgramData\Anvil` while it does not exist; that user can only restrict themselves, but the administrator should create the folder with an access list that lets only administrators write.
 - **Precedence.** The policy is a floor. The user's configuration and the repository can add restrictions and cannot remove one.
 - **Failure.** A policy file that exists but cannot be read or is invalid stops anvil before it does anything else, with the reason. Without a policy file anvil runs in personal mode.
-- **Defaults.** Only `[endpoints] allowed_base_urls` is required. Every other key defaults to the restrictive choice: with a policy installed, hooks, MCP servers, skills, herdr reporting, the ticket queue, the automatic summarizer calls and every flag that skips a prompt are off until the policy turns them on.
+- **Defaults.** Only `[endpoints] allowed_base_urls` is required. Every other key defaults to the restrictive choice: with a policy installed, hooks, MCP servers, skills, the automatic summarizer call and every flag that skips a prompt are off until the policy turns them on.
 - **Keys.**
   - `[endpoints] allowed_base_urls`, `allow_http_hosts`: the only endpoints, and the only plain-http hosts.
   - `[project] config`: `false` ignores the repository's `.anvil/` and everything it ships.
   - `[permissions] allow_skip_prompts`: whether `--yes`, `--allow-tool`, `permissions.allow_tools` and `--profile` may be used; when not, the flags stop anvil with an error naming the policy and the configuration's list is ignored.
   - `[permissions] profile`: a profile in the policy's own folder whose `[permissions]` table replaces the user's rules.
   - `[permissions] require_plan_approval`: a person approves the plan of every `anvil run` and chat session, even under `--yes`. In `anvil build` it covers only the top-level build plan: once a person approves it, the sessions build runs for each item approve their own plans without asking. Those item sessions still ask before writes and shell commands unless rules or `--yes` allow them.
-  - `[extensions] hooks`, `mcp_commands`, `skill_dirs`, `herdr`: what may load and run besides the built-in tools.
-  - `[tickets] queue`: whether `anvil ticket submit` may push.
-  - `[sessions] transcript_dir`, `retention_days`, `summarizer_calls`: where transcripts go, how long they are kept, and whether the automatic summarizer calls run.
+  - `[extensions] hooks`, `mcp_commands`, `skill_dirs`: what may load and run besides the built-in tools.
+  - `[sessions] transcript_dir`, `retention_days`, `summarizer_calls`: where transcripts go, how long they are kept, and whether the automatic summarizer call runs.
 - **Review.** `anvil doctor` prints the policy's path, its forced profile and transcript folder, and one line per thing it disables.
-- **Where it is applied.** The keys that change a session are applied in one function, `Wiring::with_policy` in `crates/anvil-cli/src/wiring.rs`; the flags, `project.config`, the summarizer calls, the queue, plan approval and retention at startup in `crates/anvil-cli/src/main.rs`.
-
-## Tickets
-
-`anvil ticket draft` asks the summarizer provider to write drafts from telemetry signals and keeps them in `~/.anvil/tickets/draft/`. `anvil ticket submit` does nothing until `[tickets] queue` names a git repository; a stock install has no queue and never pushes anywhere. With a queue set, it validates the draft against the ticket boundary in `crates/anvil-types/src/boundary.rs` (no paths outside the repository, at most 40 lines of code in `repro` or `spec`), fetches the queue into `~/.anvil/queue.git`, and pushes the ticket as a `tickets/<id>` branch with the user's own git credentials. The current project's remotes are never used. The push carries only the ticket file, and only when the user runs the command.
+- **Where it is applied.** The keys that change a session are applied in one function, `Wiring::with_policy` in `crates/anvil-cli/src/wiring.rs`; the flags, `project.config`, the summarizer call, plan approval and retention at startup in `crates/anvil-cli/src/main.rs`.
 
 ## Release builds
 

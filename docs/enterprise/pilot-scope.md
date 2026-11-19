@@ -37,7 +37,7 @@ The pilot ends on the end date unless a new version of this document extends it.
   - `allowed_base_urls` set to the one endpoint above;
   - `allow_skip_prompts = false` and `require_plan_approval = true`;
   - `profile = "strict.toml"` with `shell_programs` limited to [programs];
-  - `hooks = false`, `mcp_commands = []`, `queue = false`, `summarizer_calls = false`;
+  - `hooks = false`, `mcp_commands = []`, `summarizer_calls = false`;
   - `transcript_dir` set to [folder] and `retention_days` to [days].
 - `anvil doctor` run on each machine at the start, and its policy block attached to this document.
 - Version of anvil: [commit or release], built by [who] from [where].

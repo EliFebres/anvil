@@ -32,7 +32,6 @@ Each model request carries the system prompt (anvil's own instructions, the user
 
 Under a managed policy: nothing. The other destinations in SECURITY.md are each off by default under a policy:
 
-- the ticket queue (`[tickets] queue`), a git push the user runs explicitly;
 - MCP servers and hooks, which are local programs, and which a policy allows only by name;
 - the model list during `anvil setup --endpoint`, which goes to the same allowed endpoint.
 
