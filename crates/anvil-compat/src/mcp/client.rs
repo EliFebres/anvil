@@ -7,9 +7,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::McpServer;
 use super::jsonrpc::{McpError, PROTOCOL_VERSION, Response};
 use super::stdio::StdioTransport;
-use super::{McpServer, Transport};
 
 /// A boxed future returned by a transport.
 pub type RpcFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, McpError>> + Send + 'a>>;
@@ -102,15 +102,14 @@ impl McpClient {
     ///
     /// Any [`McpError`] from spawning, connecting or the handshake.
     pub async fn connect(server: &McpServer, cwd: &std::path::Path) -> Result<Self, McpError> {
-        let transport: Box<dyn RpcTransport> = match &server.transport {
-            Transport::Stdio { command, args, env } => Box::new(StdioTransport::spawn(
-                &server.name,
-                command,
-                args,
-                env,
-                cwd,
-            )?),
-        };
+        let launch = server.launch()?;
+        let transport: Box<dyn RpcTransport> = Box::new(StdioTransport::spawn(
+            &server.name,
+            &launch.command,
+            &launch.args,
+            &launch.env,
+            cwd,
+        )?);
         let mut client = Self {
             name: server.name.clone(),
             transport,

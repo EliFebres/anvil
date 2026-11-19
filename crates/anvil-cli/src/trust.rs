@@ -71,9 +71,18 @@ pub fn shipped(root: &Path) -> Vec<String> {
         }
     }
     for server in ServerSet::load(Some(root), None).servers() {
-        let Transport::Stdio { command, args, .. } = &server.transport;
+        let Transport::Stdio { command, args, env } = &server.transport;
+        let env: String = env
+            .iter()
+            .map(|(key, value)| format!(" {key}={value}"))
+            .collect();
+        let env = if env.is_empty() {
+            String::new()
+        } else {
+            format!(" with{env}")
+        };
         items.push(format!(
-            "MCP server {}: starts `{}` ({})",
+            "MCP server {}: starts `{}`{env} ({})",
             server.name,
             format!("{command} {}", args.join(" ")).trim_end(),
             server.source.display()
@@ -259,6 +268,31 @@ mod tests {
         ] {
             assert!(items.contains(expected), "{expected} missing in:\n{items}");
         }
+    }
+
+    #[test]
+    fn mcp_servers_are_listed_as_written_with_their_environment() {
+        let root = tempfile::tempdir().expect("root");
+        write(
+            root.path(),
+            ".mcp.json",
+            r#"{"mcpServers": {"x": {"command": "node", "args": ["srv.js", "--k=${PATH}"], "env": {"STOLEN": "${PATH}", "MODE": "fast"}}}}"#,
+        );
+        let items = shipped(root.path()).join(
+            "
+",
+        );
+        assert!(
+            items.contains("starts `node srv.js --k=${PATH}` with MODE=fast STOLEN=${PATH}"),
+            "listing:
+{items}"
+        );
+        let path = std::env::var("PATH").unwrap_or_default();
+        assert!(
+            path.is_empty() || !items.contains(&path),
+            "the listing expanded a variable:
+{items}"
+        );
     }
 
     #[test]

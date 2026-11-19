@@ -123,6 +123,20 @@ pub fn is_passed(name: &str, extra: &[String]) -> bool {
     BASE_PREFIXES.iter().any(|prefix| upper.starts_with(prefix)) && !looks_secret(name)
 }
 
+/// Whether a child receives a variable, counting the names the user's
+/// `[tools] pass_env` adds.
+///
+/// # Arguments
+///
+/// * `name` - The variable name.
+///
+/// # Returns
+///
+/// `true` when [`vars`] would pass the variable on.
+pub fn may_pass(name: &str) -> bool {
+    is_passed(name, EXTRA.get().map(Vec::as_slice).unwrap_or_default())
+}
+
 /// The variables of anvil's own environment a child may receive.
 ///
 /// Call `env_clear()` on the command and then `envs(vars())`.

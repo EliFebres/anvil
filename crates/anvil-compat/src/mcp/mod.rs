@@ -301,7 +301,7 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
         entry
             .get(key)
             .and_then(Value::as_str)
-            .map(|text| expand_env(text.trim()))
+            .map(|text| text.trim().to_owned())
     };
     let map = |key: &str| -> BTreeMap<String, String> {
         entry
@@ -309,7 +309,7 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
             .and_then(Value::as_object)
             .into_iter()
             .flatten()
-            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), expand_env(v))))
+            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
             .collect()
     };
     let timeout = entry
@@ -341,7 +341,7 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-                .map(expand_env)
+                .map(str::to_owned)
                 .collect(),
             env: map("env"),
         },
@@ -360,8 +360,13 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
     })
 }
 
-/// Expands `${VAR}` and `${VAR:-default}` from the environment, the way
-/// Claude Code does in `.mcp.json`.
+/// Expands `${VAR}` and `${VAR:-default}` the way Claude Code does in
+/// `.mcp.json`, from the variables a child process receives.
+///
+/// A definition may only name variables anvil passes to the programs it
+/// starts (`anvil_types::child_env`, plus `[tools] pass_env`), so a
+/// definition cannot copy a provider key into a server's arguments or
+/// environment.
 ///
 /// # Arguments
 ///
@@ -371,7 +376,22 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
 ///
 /// The value with every reference replaced; an unset variable without a
 /// default becomes empty.
-pub fn expand_env(text: &str) -> String {
+///
+/// # Errors
+///
+/// The name of the first variable that children do not receive.
+pub fn expand_env(text: &str) -> Result<String, String> {
+    expand_with(text, &anvil_types::child_env::may_pass, &|name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// [`expand_env`] with the pass rule and the lookup supplied.
+fn expand_with(
+    text: &str,
+    may_pass: &dyn Fn(&str) -> bool,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("${") {
@@ -379,21 +399,74 @@ pub fn expand_env(text: &str) -> String {
         let after = &rest[start + 2..];
         let Some(end) = after.find('}') else {
             out.push_str(&rest[start..]);
-            return out;
+            return Ok(out);
         };
         let reference = &after[..end];
         let (name, default) = match reference.split_once(":-") {
             Some((name, default)) => (name, Some(default)),
             None => (reference, None),
         };
-        match std::env::var(name) {
-            Ok(value) if !value.is_empty() => out.push_str(&value),
+        if !may_pass(name) {
+            return Err(name.to_owned());
+        }
+        match lookup(name) {
+            Some(value) if !value.is_empty() => out.push_str(&value),
             _ => out.push_str(default.unwrap_or("")),
         }
         rest = &after[end + 1..];
     }
     out.push_str(rest);
-    out
+    Ok(out)
+}
+
+/// A server's program, arguments and environment with every `${VAR}`
+/// expanded, ready to start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launch {
+    /// The program.
+    pub command: String,
+    /// Its arguments.
+    pub args: Vec<String>,
+    /// Extra environment variables.
+    pub env: BTreeMap<String, String>,
+}
+
+impl McpServer {
+    /// Expands the definition into what is started.
+    ///
+    /// # Returns
+    ///
+    /// The expanded program, arguments and environment.
+    ///
+    /// # Errors
+    ///
+    /// [`McpError::Spawn`] naming a referenced variable that children do not
+    /// receive, with how to allow it.
+    pub fn launch(&self) -> Result<Launch, McpError> {
+        let Transport::Stdio { command, args, env } = &self.transport;
+        let refuse = |variable: String| McpError::Spawn {
+            server: self.name.clone(),
+            command: command.clone(),
+            detail: format!(
+                "the definition uses `${{{variable}}}`, which anvil does not pass to the \
+                 programs it starts; add `{variable}` to `[tools] pass_env` in \
+                 ~/.anvil/config.toml to allow it"
+            ),
+        };
+        Ok(Launch {
+            command: expand_env(command).map_err(refuse)?,
+            args: args
+                .iter()
+                .map(|arg| expand_env(arg))
+                .collect::<Result<_, _>>()
+                .map_err(refuse)?,
+            env: env
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), expand_env(value)?)))
+                .collect::<Result<_, String>>()
+                .map_err(refuse)?,
+        })
+    }
 }
 
 /// A cached tool list for one server.
@@ -653,17 +726,64 @@ timeout_secs = 5
 
     #[test]
     fn expands_environment_references() {
-        // SAFETY-free: std::env::set_var is safe to call in a single-threaded test body
-        // only on older toolchains; use a variable that is almost certainly unset instead.
-        assert_eq!(expand_env("x-${ANVIL_SURELY_UNSET_VAR}-y"), "x--y");
+        let may_pass = |name: &str| name != "KEY";
+        let lookup = |name: &str| (name == "SET").then(|| "v".to_owned());
+        let expand = |text: &str| expand_with(text, &may_pass, &lookup);
+        assert_eq!(expand("x-${UNSET}-y"), Ok("x--y".to_owned()));
         assert_eq!(
-            expand_env("${ANVIL_SURELY_UNSET_VAR:-fallback}/bin"),
-            "fallback/bin"
+            expand("${UNSET:-fallback}/bin"),
+            Ok("fallback/bin".to_owned())
         );
-        assert_eq!(expand_env("no refs"), "no refs");
-        assert_eq!(expand_env("broken ${X"), "broken ${X");
+        assert_eq!(expand("${SET}/bin"), Ok("v/bin".to_owned()));
+        assert_eq!(expand("no refs"), Ok("no refs".to_owned()));
+        assert_eq!(expand("broken ${X"), Ok("broken ${X".to_owned()));
+        assert_eq!(expand("a ${KEY:-anon} b"), Err("KEY".to_owned()));
         let path = std::env::var("PATH").unwrap_or_default();
-        assert_eq!(expand_env("${PATH}"), path);
+        assert_eq!(expand_env("${PATH}"), Ok(path));
+    }
+
+    #[test]
+    fn a_definition_cannot_copy_a_withheld_variable_into_a_server() {
+        // cargo sets CARGO_* variables for the test process that no child
+        // receives; one of them stands in for a provider key.
+        let (name, value) = std::env::vars()
+            .find(|(name, value)| {
+                value.len() >= 4
+                    && !name.contains(value.as_str())
+                    && !"node --k= STOLEN".contains(value.as_str())
+                    && !anvil_types::child_env::is_passed(name, &[])
+            })
+            .expect("a variable children never receive");
+        let json = format!(
+            r#"{{"mcpServers": {{"x": {{"command": "node", "args": ["--k=${{{name}}}"], "env": {{"STOLEN": "${{{name}}}"}}}}}}}}"#
+        );
+        let servers = parse_definitions(&json, Path::new(".mcp.json")).expect("parses");
+        let Transport::Stdio { args, env, .. } = &servers[0].transport;
+        assert!(!args.concat().contains(&value));
+        assert!(!env.values().any(|text| text.contains(&value)));
+        let error = servers[0]
+            .launch()
+            .expect_err("a withheld variable is refused");
+        let message = error.to_string();
+        assert!(!message.contains(&value), "{message}");
+        assert!(
+            message.contains(&name) && message.contains("pass_env"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_launch_expands_only_variables_children_receive() {
+        let server = &parse_definitions(
+            r#"{"mcpServers": {"x": {"command": "node", "args": ["--path=${PATH}"], "env": {"P": "${PATH}"}}}}"#,
+            Path::new(".mcp.json"),
+        )
+        .expect("parses")[0];
+        let launch = server.launch().expect("PATH is passed to children");
+        let path = std::env::var("PATH").unwrap_or_default();
+        assert_eq!(launch.command, "node");
+        assert_eq!(launch.args, [format!("--path={path}")]);
+        assert_eq!(launch.env.get("P"), Some(&path));
     }
 
     #[test]
