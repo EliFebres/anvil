@@ -41,7 +41,12 @@ jobs:
         run: cargo test --locked --all
       # The container executor against a real docker: no network, not root,
       # a read-only root file system. The test is ignored by default and
-      # returns early without ANVIL_CONTAINER_TEST.
+      # returns early without ANVIL_CONTAINER_TEST. anvil runs containers
+      # with --pull=never, so the image is loaded first, as an administrator
+      # would.
+      - name: load the container test image
+        if: runner.os == 'Linux'
+        run: docker pull alpine:3.20
       - name: container executor (docker)
         if: runner.os == 'Linux'
         env:

@@ -135,6 +135,7 @@ fn unchecked_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow
     if let Some(policy) = &env.policy {
         policy::check_config(policy, &loaded)?;
     }
+    check_plain_http(env.policy.as_deref(), &loaded)?;
     let rules = anvil_types::project::load(&env.cwd)?;
     for line in &rules.ignored {
         eprintln!("warning: {line}");
@@ -147,6 +148,53 @@ fn unchecked_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow
         Some(policy) => wiring.with_policy(Arc::clone(policy)),
         None => Ok(wiring),
     }
+}
+
+/// Applies the plain-http rule to every provider as soon as the
+/// configuration loads, for every command that reads it, `anvil doctor`
+/// included; each request is checked again when it is sent.
+///
+/// # Arguments
+///
+/// * `policy` - The policy, if any: its `require_tls` decides; otherwise
+///   loopback and the user's `[network] allow_http_hosts`.
+/// * `loaded` - The configuration.
+///
+/// # Errors
+///
+/// When a provider's `base_url` uses plain http to a host the rule does
+/// not allow, naming the provider and the file.
+fn check_plain_http(
+    policy: Option<&LoadedPolicy>,
+    loaded: &anvil_types::config::LoadedConfig,
+) -> anyhow::Result<()> {
+    use anvil_core::provider::Egress;
+    use anvil_types::Protocol;
+    use anyhow::Context;
+    let config = &loaded.config;
+    let providers = || {
+        config
+            .providers
+            .iter()
+            .filter(|(_, entry)| entry.protocol != Protocol::Fake)
+    };
+    let egress = match policy {
+        Some(loaded) => Egress::from_policy(&loaded.policy.network),
+        None => Egress::personal(
+            providers().map(|(_, entry)| entry.base_url.as_str()),
+            config.network.allow_http_hosts.clone(),
+        ),
+    };
+    let source = loaded.sources.last().map_or_else(
+        || "the configuration".to_owned(),
+        |p| p.display().to_string(),
+    );
+    for (name, entry) in providers() {
+        egress
+            .check(&entry.base_url)
+            .with_context(|| format!("provider `{name}` in {source}"))?;
+    }
+    Ok(())
 }
 
 /// The egress rules `anvil setup --endpoint` probes under: the policy's,
@@ -454,6 +502,57 @@ mod tests {
             ["shell"],
             "the repository's tightening rules still apply"
         );
+    }
+
+    /// The shipped template with its example provider moved to `base_url`.
+    fn config_with_endpoint(base_url: &str) -> String {
+        anvil_types::config::CONFIG_TEMPLATE.replace("https://models.internal.example/v1", base_url)
+    }
+
+    #[test]
+    fn plain_http_to_a_lan_provider_is_refused_when_the_configuration_loads() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).expect("mkdir");
+        let unmanaged = |config: &str| {
+            write(&home.join(".anvil").join("config.toml"), config);
+            let env = Env {
+                cwd: project.clone(),
+                home: Some(home.clone()),
+                env_files: Vec::new(),
+                loaded_env: Vec::new(),
+                policy: None,
+            };
+            unchecked_wiring(&env, None, false).map(|_| ())
+        };
+        let lan = config_with_endpoint("http://10.0.0.5:8000/v1");
+        let error = unmanaged(&lan).expect_err("refused at load");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("plain http") && text.contains("10.0.0.5"),
+            "{text}"
+        );
+        let listed = format!("{lan}\n[network]\nallow_http_hosts = [\"10.0.0.5\"]\n");
+        assert!(unmanaged(&listed).is_ok(), "the user may name a LAN host");
+        let local = config_with_endpoint("http://127.0.0.1:8000/v1");
+        assert!(unmanaged(&local).is_ok(), "loopback needs no listing");
+
+        let dir = tempfile::tempdir().expect("dir");
+        let managed = env(dir.path(), "");
+        write(
+            &managed
+                .home
+                .as_ref()
+                .expect("home")
+                .join(".anvil")
+                .join("config.toml"),
+            &config_with_endpoint("http://models.internal.example:443/v1"),
+        );
+        let error = unchecked_wiring(&managed, None, false)
+            .err()
+            .expect("refused under require_tls");
+        assert!(format!("{error:#}").contains("require_tls"), "{error:#}");
     }
 
     #[test]

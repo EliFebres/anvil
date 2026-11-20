@@ -427,6 +427,9 @@ pub fn container_args(
     let mut args: Vec<String> = [
         "run",
         "--rm",
+        // The engine would otherwise fetch a missing image from a registry,
+        // a destination no anvil rule covers; administrators pre-load it.
+        "--pull=never",
         "--name",
         name,
         "--network",
@@ -1452,6 +1455,29 @@ mod tests {
                 ),
             ],
             "the git folder is mounted read-only after the workspace, so it wins"
+        );
+    }
+
+    #[test]
+    fn the_container_never_pulls_an_image() {
+        let workspace = std::path::PathBuf::from("/work/repo");
+        let command = vec!["true".to_owned()];
+        let args = container_args(&container_settings(), "anvil-1", &workspace, &command)
+            .expect("arguments");
+        let image = args
+            .iter()
+            .position(|arg| arg == &container_settings().image)
+            .expect("the image is named");
+        let pull = args
+            .iter()
+            .position(|arg| arg == "--pull=never")
+            .expect("--pull=never is passed");
+        assert!(pull < image, "an option after the image is the command's");
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.starts_with("--pull") && arg != "--pull=never"),
+            "{args:?}"
         );
     }
 
