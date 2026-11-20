@@ -103,3 +103,4 @@ Choices made while hardening anvil for regulated, restricted-network environment
 ## Phase 3: review fixes
 
 - **Folded names are refused for reads and searches too.** A read of `server.pem.` passed the `*.pem` check as written and Windows opened `server.pem`; `jx./out.txt` went through a junction the check never saw. `checked_path` now refuses every path whose `win32_fold` differs from what the model wrote, for every file tool and on every system. Opening the resolved path instead was the other choice; refusing is more restrictive and keeps one rule for reads and writes.
+- **Hard links stay documented, not detected.** Std exposes the link count only through platform extensions (`MetadataExt::nlink` on Unix; nothing stable on Windows), so a portable check is not trivial. SECURITY.md now says reads through a hard link are not detected either.
