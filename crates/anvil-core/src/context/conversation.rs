@@ -245,7 +245,7 @@ impl Conversation {
         let summary_path =
             summary_dir.map(|dir| dir.join(format!("compaction-{}.md", self.compactions)));
         if let Some(path) = &summary_path
-            && let Err(error) = std::fs::write(path, &summary)
+            && let Err(error) = anvil_types::private_fs::write(path, &summary)
         {
             tracing::warn!(%error, path = %path.display(), "cannot write the compaction summary");
         }

@@ -63,7 +63,7 @@ rule: <text>     save a standing rule to ~/.anvil/rules.toml
 /// be set up.
 pub async fn chat(wiring: &Wiring, yes: bool, ui: UiKind) -> anyhow::Result<i32> {
     let (session_dir, id) = wiring.new_session_dir();
-    std::fs::create_dir_all(&session_dir).context("creating the session folder")?;
+    anvil_types::private_fs::create_dir_all(&session_dir).context("creating the session folder")?;
     eprintln!("chat session {id}; /help for commands");
     let wiring = &wiring.with_session(&id, &session_dir);
     let status = StatusReporter::start(Setup::from_wiring(wiring, &id, &session_dir, "chat"));

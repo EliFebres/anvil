@@ -281,7 +281,7 @@ pub fn save_template(
         path: manifest_path.clone(),
         detail: error.to_string(),
     })?;
-    std::fs::write(&manifest_path, text)
+    anvil_types::private_fs::write(&manifest_path, text)
         .map_err(|error| MemoryError::io(&manifest_path, &error))?;
     Ok(Template { manifest, dir })
 }

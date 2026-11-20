@@ -207,7 +207,7 @@ async fn drive(
             }
             console.warn(format!("{CANCELLED}; `anvil resume` continues the session"));
             let summary_path = session_dir.join(SUMMARY_FILE);
-            if let Err(error) = std::fs::write(&summary_path, CANCELLED) {
+            if let Err(error) = anvil_types::private_fs::write(&summary_path, CANCELLED) {
                 tracing::warn!(%error, path = %summary_path.display(), "cannot write the summary");
             }
             LoopResult {

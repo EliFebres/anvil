@@ -37,13 +37,15 @@ pub fn run(global: bool) -> anyhow::Result<PathBuf> {
     let dir = path
         .parent()
         .context("config path has no parent directory")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    anvil_types::private_fs::create_dir_all(dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
     let template = if global {
         CONFIG_TEMPLATE
     } else {
         PROJECT_TEMPLATE
     };
-    std::fs::write(&path, template).with_context(|| format!("writing {}", path.display()))?;
+    anvil_types::private_fs::write(&path, template)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }
 

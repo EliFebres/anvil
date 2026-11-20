@@ -11,7 +11,7 @@
 //! caller does not open one). Only a `full` log can be resumed.
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
@@ -377,8 +377,8 @@ impl SessionLog {
             path: path.clone(),
             detail: error.to_string(),
         };
-        std::fs::create_dir_all(session_dir).map_err(io)?;
-        let file = OpenOptions::new()
+        anvil_types::private_fs::create_dir_all(session_dir).map_err(io)?;
+        let file = anvil_types::private_fs::owner_only()
             .create(true)
             .append(true)
             .open(&path)

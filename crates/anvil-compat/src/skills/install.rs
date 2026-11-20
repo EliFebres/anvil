@@ -244,7 +244,7 @@ fn find_candidates(base: &Path, dir: &Path, depth: usize, found: &mut Vec<String
 
 /// Copies a directory tree, skipping `.git`.
 fn copy_dir(from: &Path, to: &Path) -> Result<(), CompatError> {
-    std::fs::create_dir_all(to).map_err(|error| CompatError::io(to, &error))?;
+    anvil_types::private_fs::create_dir_all(to).map_err(|error| CompatError::io(to, &error))?;
     let entries = std::fs::read_dir(from).map_err(|error| CompatError::io(from, &error))?;
     for entry in entries {
         let entry = entry.map_err(|error| CompatError::io(from, &error))?;

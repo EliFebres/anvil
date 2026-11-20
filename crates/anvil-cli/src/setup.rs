@@ -65,7 +65,7 @@ impl std::fmt::Display for Outcome {
 pub fn run(home: Option<&Path>) -> anyhow::Result<i32> {
     let home = home.context("cannot determine the home directory")?;
     let anvil_dir = home.join(CONFIG_DIR);
-    std::fs::create_dir_all(&anvil_dir)
+    anvil_types::private_fs::create_dir_all(&anvil_dir)
         .with_context(|| format!("creating {}", anvil_dir.display()))?;
 
     let env_path = anvil_dir.join(ANVIL_ENV_FILE);
@@ -101,7 +101,8 @@ pub fn run(home: Option<&Path>) -> anyhow::Result<i32> {
 /// comment lines are appended with its first missing variable.
 fn write_env(path: &Path, template: &str) -> anyhow::Result<Outcome> {
     if !path.exists() {
-        std::fs::write(path, template).with_context(|| format!("writing {}", path.display()))?;
+        anvil_types::private_fs::write(path, template)
+            .with_context(|| format!("writing {}", path.display()))?;
         return Ok(Outcome::Written);
     }
     let existing =
@@ -135,7 +136,7 @@ fn write_env(path: &Path, template: &str) -> anyhow::Result<Outcome> {
     } else {
         "\n"
     };
-    std::fs::write(path, format!("{existing}{separator}{additions}"))
+    anvil_types::private_fs::write(path, format!("{existing}{separator}{additions}"))
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(Outcome::Extended(added))
 }
@@ -159,7 +160,7 @@ fn variable_name(line: &str) -> Option<String> {
 /// `[providers.<name>]` tables and `[roles]` keys are appended.
 fn write_config(path: &Path) -> anyhow::Result<Outcome> {
     if !path.exists() {
-        std::fs::write(path, format!("{SETUP_PROVIDERS}{OPTIONAL_SECTIONS}"))
+        anvil_types::private_fs::write(path, format!("{SETUP_PROVIDERS}{OPTIONAL_SECTIONS}"))
             .with_context(|| format!("writing {}", path.display()))?;
         return Ok(Outcome::Written);
     }
@@ -201,7 +202,8 @@ fn write_config(path: &Path) -> anyhow::Result<Outcome> {
     merged
         .validate()
         .with_context(|| format!("{} would not validate after the merge", path.display()))?;
-    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+    anvil_types::private_fs::write(path, text)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(Outcome::Extended(added))
 }
 

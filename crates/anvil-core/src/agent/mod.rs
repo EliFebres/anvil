@@ -418,7 +418,7 @@ impl AgentLoop {
     ///
     /// The result; the summary is also written to the session folder.
     pub async fn run(mut self) -> LoopResult {
-        if let Err(error) = std::fs::create_dir_all(&self.config.session_dir) {
+        if let Err(error) = anvil_types::private_fs::create_dir_all(&self.config.session_dir) {
             self.warn(format!("cannot create the session folder: {error}"));
         }
         if self.baseline.is_none() {
@@ -740,7 +740,7 @@ impl AgentLoop {
             };
             let plan = extract_plan(&text);
             let path = self.config.session_dir.join(PLAN_FILE);
-            if let Err(error) = std::fs::write(&path, &plan) {
+            if let Err(error) = anvil_types::private_fs::write(&path, &plan) {
                 self.warn(format!("cannot write {}: {error}", path.display()));
             }
             self.events.emit(LoopEvent::PlanWritten { path });
@@ -904,7 +904,7 @@ impl AgentLoop {
         if ticked == plan {
             return;
         }
-        match std::fs::write(&path, ticked) {
+        match anvil_types::private_fs::write(&path, ticked) {
             Ok(()) => self.events.emit(LoopEvent::PlanUpdated { path }),
             Err(error) => self.warn(format!("cannot write {}: {error}", path.display())),
         }
@@ -1340,7 +1340,7 @@ impl AgentLoop {
         });
         let summary = self.summary(&status);
         let summary_path = self.config.session_dir.join(SUMMARY_FILE);
-        if let Err(error) = std::fs::write(&summary_path, &summary) {
+        if let Err(error) = anvil_types::private_fs::write(&summary_path, &summary) {
             tracing::warn!(%error, path = %summary_path.display(), "cannot write the summary");
         }
         self.events.emit(LoopEvent::Finished {
@@ -3002,6 +3002,55 @@ mod tests {
         );
         assert!(transcript.contains(r#""type":"redacted","source":"read_file""#));
         assert!(transcript.contains(r#""type":"redacted","source":"user""#));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_file_and_folder_a_session_creates_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![ToolCall {
+                    id: "big".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments_json: r#"{"command": "seq 1 20000"}"#.to_owned(),
+                }]),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+        );
+        let agent = h.default_agent(
+            CheckCommand::Command("true".to_owned()),
+            "allow = [\"shell\"]",
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+        let mut pending = vec![h.session_dir()];
+        let mut files = 0;
+        while let Some(dir) = pending.pop() {
+            let mode = std::fs::metadata(&dir).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", dir.display());
+            for entry in std::fs::read_dir(&dir)
+                .expect("read")
+                .map(|e| e.expect("entry"))
+            {
+                if entry.path().is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    files += 1;
+                    let mode = entry.metadata().expect("meta").permissions().mode() & 0o777;
+                    assert_eq!(mode, 0o600, "{}", entry.path().display());
+                }
+            }
+        }
+        assert!(
+            h.session_dir().join("tool-output").is_dir(),
+            "the full output was kept"
+        );
+        assert!(
+            files >= 4,
+            "session.jsonl, plan, summary and the tool output"
+        );
     }
 
     /// Gives the next agent a planner that replays `scripts`.

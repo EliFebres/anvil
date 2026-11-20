@@ -181,6 +181,7 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
     report_providers(&mut report, wiring, &bad_keys).await;
     report_tools(&mut report).await;
     report_secrets(&mut report, root.as_deref(), options.env_files);
+    report_private_dirs(&mut report, wiring);
 
     print!("{}", report.render());
     let roles = &config.roles;
@@ -239,6 +240,30 @@ fn report_policy(report: &mut Report, policy: Option<&anvil_types::policy::Loade
         ),
     }
     report.pass("policy:sha256", loaded.sha256.clone());
+}
+
+/// The `data:` rows: whether only the user (and SYSTEM and Administrators
+/// on Windows) can open `~/.anvil` and the project's `.anvil`, which hold
+/// transcripts, keys, trust decisions and memory.
+fn report_private_dirs(report: &mut Report, wiring: &Wiring) {
+    let dirs = wiring
+        .home
+        .iter()
+        .map(|home| ("data:~/.anvil", home.join(anvil_types::config::CONFIG_DIR)))
+        .chain(std::iter::once((
+            "data:.anvil",
+            wiring.cwd.join(anvil_types::config::CONFIG_DIR),
+        )));
+    for (name, dir) in dirs {
+        if !dir.is_dir() {
+            report.skip(name, format!("{} does not exist yet", dir.display()));
+            continue;
+        }
+        match anvil_types::policy::ownership::check_private(&dir) {
+            Ok(()) => report.pass(name, format!("only you can open {}", dir.display())),
+            Err(detail) => report.fail(name, "others can open it", detail),
+        }
+    }
 }
 
 /// The `env` row: which `.env` files were loaded.

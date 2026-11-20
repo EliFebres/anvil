@@ -120,7 +120,7 @@ pub(crate) fn write_full(
     content: &str,
 ) -> std::io::Result<PathBuf> {
     let dir = session_dir.join(OUTPUT_DIR);
-    std::fs::create_dir_all(&dir)?;
+    anvil_types::private_fs::create_dir_all(&dir)?;
     let safe: String = call_id
         .chars()
         .map(|c| {
@@ -132,7 +132,7 @@ pub(crate) fn write_full(
         })
         .collect();
     let path = dir.join(format!("{safe}.txt"));
-    std::fs::write(&path, content)?;
+    anvil_types::private_fs::write(&path, content)?;
     Ok(path)
 }
 

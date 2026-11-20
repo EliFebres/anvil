@@ -241,9 +241,10 @@ impl RuleSet {
     pub fn save(&self, path: &Path) -> Result<(), MemoryError> {
         debug_assert!(self.validate().is_ok(), "saving an invalid rule set");
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| MemoryError::io(parent, &error))?;
+            anvil_types::private_fs::create_dir_all(parent)
+                .map_err(|error| MemoryError::io(parent, &error))?;
         }
-        std::fs::write(path, format!("{FILE_HEADER}{}", self.to_toml()))
+        anvil_types::private_fs::write(path, format!("{FILE_HEADER}{}", self.to_toml()))
             .map_err(|error| MemoryError::io(path, &error))
     }
 
@@ -564,8 +565,10 @@ pub fn ensure_check_scripts(checks_dir: &Path) -> Result<bool, MemoryError> {
     if path.is_file() {
         return Ok(false);
     }
-    std::fs::create_dir_all(checks_dir).map_err(|error| MemoryError::io(checks_dir, &error))?;
-    std::fs::write(&path, DOCSTRING_CHECK).map_err(|error| MemoryError::io(&path, &error))?;
+    anvil_types::private_fs::create_dir_all(checks_dir)
+        .map_err(|error| MemoryError::io(checks_dir, &error))?;
+    anvil_types::private_fs::write(&path, DOCSTRING_CHECK)
+        .map_err(|error| MemoryError::io(&path, &error))?;
     Ok(true)
 }
 

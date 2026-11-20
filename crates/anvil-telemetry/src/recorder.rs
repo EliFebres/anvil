@@ -1,7 +1,6 @@
 //! Appending records to the day files and reading them back.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -106,9 +105,10 @@ impl Recorder {
 /// Appends one line, creating the folder and file as needed.
 fn append_line(path: &Path, line: &str) -> Result<(), TelemetryError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TelemetryError::io(parent, &e))?;
+        anvil_types::private_fs::create_dir_all(parent)
+            .map_err(|e| TelemetryError::io(parent, &e))?;
     }
-    let mut file = OpenOptions::new()
+    let mut file = anvil_types::private_fs::owner_only()
         .create(true)
         .append(true)
         .open(path)

@@ -36,8 +36,8 @@ impl StatusFile {
     ///
     /// When the folder or the lock file cannot be created.
     pub fn open(dir: &Path) -> io::Result<Self> {
-        fs::create_dir_all(dir)?;
-        let lock = OpenOptions::new()
+        anvil_types::private_fs::create_dir_all(dir)?;
+        let lock = anvil_types::private_fs::owner_only()
             .create(true)
             .truncate(false)
             .write(true)
@@ -91,7 +91,11 @@ impl StatusFile {
 pub fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let temp = dir.join(format!("{name}.tmp"));
     let result = (|| {
-        let mut file = File::create(&temp)?;
+        let mut file = anvil_types::private_fs::owner_only()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -180,7 +184,7 @@ pub fn session_dirs(sessions_root: &Path) -> Vec<PathBuf> {
 /// When the marker cannot be written.
 pub fn register_project(home: &Path, project: &Path) -> io::Result<()> {
     let dir = home.join(PROJECTS_DIR);
-    fs::create_dir_all(&dir)?;
+    anvil_types::private_fs::create_dir_all(&dir)?;
     let path_text = project.to_string_lossy();
     let digest = Sha256::digest(path_text.as_bytes());
     let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();

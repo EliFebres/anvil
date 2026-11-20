@@ -617,12 +617,14 @@ impl Permissions {
             detail: error.to_string(),
         })?;
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|error| PermissionError::Write {
-                path: path.clone(),
-                detail: error.to_string(),
+            anvil_types::private_fs::create_dir_all(dir).map_err(|error| {
+                PermissionError::Write {
+                    path: path.clone(),
+                    detail: error.to_string(),
+                }
             })?;
         }
-        std::fs::write(path, text).map_err(|error| PermissionError::Write {
+        anvil_types::private_fs::write(path, text).map_err(|error| PermissionError::Write {
             path: path.clone(),
             detail: error.to_string(),
         })

@@ -173,6 +173,104 @@ pub fn sddl_problems(sddl: &str) -> Vec<String> {
     problems
 }
 
+/// SIDs that may open anvil's private data besides the owner: SYSTEM,
+/// Administrators, the owner-rights and creator-owner placeholders.
+const PRIVATE_SIDS: &[&str] = &[
+    "SY",
+    "S-1-5-18",
+    "BA",
+    "S-1-5-32-544",
+    "OW",
+    "S-1-3-4",
+    "CO",
+    "S-1-3-0",
+];
+
+/// What in an SDDL string lets someone other than the object's owner,
+/// SYSTEM or Administrators open it at all, for reading included.
+///
+/// # Arguments
+///
+/// * `sddl` - The security descriptor, such as `Get-Acl` prints in `.Sddl`.
+///
+/// # Returns
+///
+/// One sentence per problem; empty when only those principals have access.
+pub fn private_sddl_problems(sddl: &str) -> Vec<String> {
+    let owner = section(sddl, 'O').unwrap_or_default();
+    let Some(dacl) = section(sddl, 'D') else {
+        return vec!["has no access list, so everyone may open it".to_owned()];
+    };
+    let mut problems = Vec::new();
+    for ace in dacl.split('(').skip(1) {
+        let ace = ace.trim_end_matches(')');
+        let fields: Vec<&str> = ace.split(';').collect();
+        if fields.len() < 6 {
+            problems.push(format!("has an entry anvil cannot read: ({ace})"));
+            continue;
+        }
+        let (kind, flags, sid) = (fields[0], fields[1], fields[5]);
+        let allows = matches!(kind, "A" | "OA" | "XA" | "ZA");
+        let inherit_only = flags.as_bytes().chunks(2).any(|flag| flag == b"IO");
+        let private = sid.eq_ignore_ascii_case(owner)
+            || PRIVATE_SIDS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(sid));
+        if allows && !inherit_only && !private {
+            problems.push(format!("grants {sid} access ({})", fields[2]));
+        }
+    }
+    problems
+}
+
+/// Checks that only the owner (plus SYSTEM and Administrators on
+/// Windows) can open a folder anvil keeps data in.
+///
+/// # Arguments
+///
+/// * `dir` - The folder, such as `~/.anvil` or a project's `.anvil`.
+///
+/// # Errors
+///
+/// A sentence naming who else has access and the command that removes it.
+pub fn check_private(dir: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let problems = private_sddl_problems(&read_sddl(dir)?);
+        if problems.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "{} {}; run: icacls \"{}\" /inheritance:r /grant:r \"%USERNAME%:(OI)(CI)F\" \"*S-1-5-18:(OI)(CI)F\" \"*S-1-5-32-544:(OI)(CI)F\"",
+            dir.display(),
+            problems.join("; "),
+            dir.display()
+        ))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir)
+            .map_err(|error| format!("{} cannot be inspected: {error}", dir.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o077 == 0 {
+            return Ok(());
+        }
+        Err(format!(
+            "{} has mode {:o}, so group or others may open it; run: chmod -R go-rwx {}",
+            dir.display(),
+            mode & 0o777,
+            dir.display()
+        ))
+    }
+    #[cfg(not(any(unix, windows)))]
+    Err(format!(
+        "{}: anvil cannot check access on this system",
+        dir.display()
+    ))
+}
+
 /// Whether a SID names an administrator principal.
 fn is_trusted(sid: &str) -> bool {
     TRUSTED_SIDS
@@ -263,6 +361,41 @@ mod tests {
                 .expect("problem")
                 .contains("writable")
         );
+    }
+
+    #[test]
+    fn private_data_may_be_opened_by_its_owner_system_and_administrators_only() {
+        let user = "S-1-5-21-4158986379-1985627759-715112919-1001";
+        let private =
+            format!("O:{user}G:{user}D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;{user})");
+        assert_eq!(private_sddl_problems(&private), Vec::<String>::new());
+        let inherited = format!(
+            "O:{user}G:{user}D:AI(A;OICIID;FA;;;{user})(A;OICIID;0x1200a9;;;BU)(A;OICIID;0x1301bf;;;AU)"
+        );
+        let problems = private_sddl_problems(&inherited);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems[0].contains("BU"),
+            "read access counts: {problems:?}"
+        );
+        assert!(!private_sddl_problems(&format!("O:{user}")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_others_may_open_is_not_private_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        assert!(
+            check_private(dir.path())
+                .expect_err("open")
+                .contains("chmod -R go-rwx")
+        );
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("chmod");
+        assert_eq!(check_private(dir.path()), Ok(()));
     }
 
     #[test]

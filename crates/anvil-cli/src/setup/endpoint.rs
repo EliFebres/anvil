@@ -77,7 +77,7 @@ pub async fn run(
     let model = choose(&models, args.model)?;
 
     let anvil_dir = home.join(CONFIG_DIR);
-    std::fs::create_dir_all(&anvil_dir)
+    anvil_types::private_fs::create_dir_all(&anvil_dir)
         .with_context(|| format!("creating {}", anvil_dir.display()))?;
     let env_path = anvil_dir.join(ANVIL_ENV_FILE);
     let line = format!(
@@ -225,7 +225,8 @@ fn write_config(
     merged
         .validate()
         .with_context(|| format!("{} would not validate after setup", path.display()))?;
-    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+    anvil_types::private_fs::write(path, text)
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]

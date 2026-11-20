@@ -171,9 +171,9 @@ impl TrustStore {
     /// When the folder or the file cannot be written.
     pub fn save(&self, home: &Path) -> std::io::Result<PathBuf> {
         let path = home.join(TRUST_FILE);
-        std::fs::create_dir_all(home.join(CONFIG_DIR))?;
+        crate::private_fs::create_dir_all(home.join(CONFIG_DIR))?;
         let text = toml::to_string(self).map_err(std::io::Error::other)?;
-        std::fs::write(&path, text)?;
+        crate::private_fs::write(&path, text)?;
         Ok(path)
     }
 }

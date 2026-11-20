@@ -161,8 +161,10 @@ pub async fn start<E: Env>(
     };
     let id = new_session_id();
     let dir = build_dir(&settings.cwd, &id);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    std::fs::write(dir.join("spec.md"), &spec).context("saving a copy of the specification")?;
+    anvil_types::private_fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    anvil_types::private_fs::write(dir.join("spec.md"), &spec)
+        .context("saving a copy of the specification")?;
     let mut state = BuildState {
         schema: SCHEMA_VERSION,
         id,
@@ -192,7 +194,7 @@ pub async fn start<E: Env>(
             .collect(),
     };
     for item in &state.items {
-        std::fs::write(dir.join(&item.file), render_item_file(&item.item))
+        anvil_types::private_fs::write(dir.join(&item.file), render_item_file(&item.item))
             .with_context(|| format!("writing {}", item.file))?;
     }
     state.save(&dir)?;

@@ -32,7 +32,7 @@ pub const FILTER_ENV: &str = "ANVIL_LOG";
 pub fn init(cwd: &Path, console: bool) -> Option<WorkerGuard> {
     let filter = EnvFilter::try_from_env(FILTER_ENV).unwrap_or_else(|_| EnvFilter::new("info"));
     let log_dir = cwd.join(LOG_DIR);
-    if std::fs::create_dir_all(&log_dir).is_err() {
+    if anvil_types::private_fs::create_dir_all(&log_dir).is_err() {
         let console = console.then(|| {
             fmt::layer()
                 .with_writer(std::io::stderr)
@@ -46,6 +46,9 @@ pub fn init(cwd: &Path, console: bool) -> Option<WorkerGuard> {
             .try_init();
         return None;
     }
+    // The appender opens the file with the default mode; creating it first
+    // makes it owner-only on Unix.
+    let _ = anvil_types::private_fs::open_append(log_dir.join("anvil.jsonl"));
     let file = tracing_appender::rolling::never(&log_dir, "anvil.jsonl");
     let (writer, guard) = tracing_appender::non_blocking(file);
     let json = fmt::layer().json().with_writer(writer);

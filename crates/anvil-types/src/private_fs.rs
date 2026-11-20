@@ -21,7 +21,8 @@ use std::path::Path;
 /// # Errors
 ///
 /// When a folder cannot be created.
-pub fn create_dir_all(dir: &Path) -> std::io::Result<()> {
+pub fn create_dir_all(dir: impl AsRef<Path>) -> std::io::Result<()> {
+    let dir = dir.as_ref();
     if dir.is_dir() {
         return Ok(());
     }
@@ -35,8 +36,13 @@ pub fn create_dir_all(dir: &Path) -> std::io::Result<()> {
     builder.create(dir)
 }
 
-/// Options that create a file owner-only on Unix.
-fn options() -> OpenOptions {
+/// Open options that create a file owner-only (0600) on Unix, for callers
+/// that need flags [`write`] and [`open_append`] do not set.
+///
+/// # Returns
+///
+/// The options, with no access mode chosen yet.
+pub fn owner_only() -> OpenOptions {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -70,17 +76,18 @@ fn restrict(file: &File) -> std::io::Result<()> {
 /// # Errors
 ///
 /// When the folder or file cannot be written.
-pub fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let path = path.as_ref();
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_dir_all(parent)?;
     }
-    let mut file = options()
+    let mut file = owner_only()
         .write(true)
         .create(true)
         .truncate(true)
         .open(path)?;
     restrict(&file)?;
-    file.write_all(bytes)
+    file.write_all(bytes.as_ref())
 }
 
 /// Opens a file for appending, creating it and its folder, owner-only on
@@ -97,11 +104,12 @@ pub fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// # Errors
 ///
 /// When the folder or file cannot be created.
-pub fn open_append(path: &Path) -> std::io::Result<File> {
+pub fn open_append(path: impl AsRef<Path>) -> std::io::Result<File> {
+    let path = path.as_ref();
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         create_dir_all(parent)?;
     }
-    let file = options().create(true).append(true).open(path)?;
+    let file = owner_only().create(true).append(true).open(path)?;
     restrict(&file)?;
     Ok(file)
 }
@@ -117,10 +125,10 @@ mod tests {
         write(&file, b"one").expect("write");
         write(&file, b"two").expect("rewrite");
         assert_eq!(std::fs::read_to_string(&file).expect("read"), "two");
-        let mut log = open_append(&dir.path().join("c").join("log")).expect("open");
+        let mut log = open_append(dir.path().join("c").join("log")).expect("open");
         log.write_all(b"x").expect("append");
         drop(log);
-        let mut log = open_append(&dir.path().join("c").join("log")).expect("reopen");
+        let mut log = open_append(dir.path().join("c").join("log")).expect("reopen");
         log.write_all(b"y").expect("append");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("c").join("log")).expect("read"),

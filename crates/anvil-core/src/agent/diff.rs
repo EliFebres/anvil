@@ -33,7 +33,7 @@ const INDEX_FILE: &str = "git-index";
 pub async fn snapshot_tree(cwd: &Path, session_dir: &Path) -> Option<String> {
     let index = session_dir.join(INDEX_FILE);
     let _ = std::fs::remove_file(&index);
-    let _ = std::fs::create_dir_all(session_dir);
+    let _ = anvil_types::private_fs::create_dir_all(session_dir);
     git(cwd, &index, &["add", "-A", "--", ".", ":(exclude).anvil"]).await?;
     let tree = git(cwd, &index, &["write-tree"]).await?;
     let tree = tree.trim().to_owned();
