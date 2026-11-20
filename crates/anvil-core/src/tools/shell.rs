@@ -1117,7 +1117,8 @@ mod tests {
         };
         let execution = registry.execute(&call, &ctx).await;
         assert_eq!(execution.outcome, ToolOutcome::Completed);
-        assert!(execution.result.content.len() < super::super::DEFAULT_OUTPUT_CAP + 200);
+        let body = crate::guard::unwrap_untrusted(&execution.result.content).expect("wrapped");
+        assert!(body.len() < super::super::DEFAULT_OUTPUT_CAP + 200);
         assert!(
             execution
                 .result

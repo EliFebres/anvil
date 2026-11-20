@@ -100,8 +100,9 @@ pub enum LoopEvent {
     Compacted {
         /// How many messages the summary replaced.
         dropped_messages: usize,
-        /// Where the summary was written.
-        summary_path: PathBuf,
+        /// Where the summary was written, when the transcript mode keeps
+        /// conversation text.
+        summary_path: Option<PathBuf>,
         /// Tokens the summarizer used, when reported.
         usage: Option<Usage>,
     },

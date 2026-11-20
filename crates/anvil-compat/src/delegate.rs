@@ -22,6 +22,7 @@ use anvil_core::tools::{
     Access, ModelTurn, Tool, ToolContext, ToolFuture, ToolOutput, ToolRegistry, parse_args,
     schema_for,
 };
+use anvil_types::policy::TranscriptMode;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -255,7 +256,12 @@ async fn run_turns(
     for _ in 0..MAX_TURNS {
         if conversation.needs_compaction(&system, env.context_window()) {
             match conversation
-                .compact(provider.as_ref(), task, &session_dir, 200_000)
+                .compact(
+                    provider.as_ref(),
+                    task,
+                    (ctx.transcript == TranscriptMode::Full).then_some(session_dir.as_path()),
+                    200_000,
+                )
                 .await
             {
                 Ok(Some(compaction)) => turns.push(ModelTurn {

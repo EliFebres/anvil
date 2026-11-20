@@ -2,7 +2,15 @@
 //!
 //! The log is append-only. A `compacted` record carries the whole
 //! conversation as it stands after compaction, so loading is a single pass.
+//!
+//! The policy's transcript mode decides what is kept. `full` keeps every
+//! message as the provider received it. `metadata` keeps roles, tool
+//! names, sizes, SHA-256 digests, token counts, timings, states and
+//! redaction counts, and replaces every message, the task and each tool
+//! argument with its size and digest. `off` writes no log at all (the
+//! caller does not open one). Only a `full` log can be resumed.
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -11,8 +19,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::agent::{State, Status};
-use crate::provider::Message;
+use anvil_types::policy::TranscriptMode;
+use sha2::{Digest, Sha256};
+
+use crate::agent::{Role, State, Status};
+use crate::provider::{Message, Usage};
 
 /// Where sessions live, relative to the project root.
 pub const SESSIONS_DIR: &str = ".anvil/sessions";
@@ -55,6 +66,18 @@ pub enum SessionError {
         /// The file.
         path: PathBuf,
     },
+    /// The session was recorded without its conversation, so it cannot be
+    /// resumed.
+    #[error(
+        "session `{id}` cannot be resumed: its transcript was kept as `{}`, which holds no conversation",
+        mode.as_str()
+    )]
+    NoTranscript {
+        /// The session id.
+        id: String,
+        /// The mode the session was recorded in.
+        mode: TranscriptMode,
+    },
 }
 
 /// What a session is about.
@@ -68,6 +91,126 @@ pub struct SessionMeta {
     pub task: String,
     /// The project root.
     pub cwd: PathBuf,
+    /// What the log keeps. Logs written before modes existed are `full`.
+    #[serde(default)]
+    pub transcript: TranscriptMode,
+}
+
+/// A message as a `metadata` transcript keeps it: sizes and digests, no text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageDigest {
+    /// `user`, `assistant` or `tool_results`.
+    pub role: String,
+    /// Byte length of the message text (for tool results, of all results).
+    pub bytes: usize,
+    /// [`sha256_hex`] of that text.
+    pub sha256: String,
+    /// The tool calls of an assistant turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<CallDigest>,
+    /// The results of a tool results message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<ResultDigest>,
+}
+
+/// A tool call without its arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallDigest {
+    /// The call id.
+    pub id: String,
+    /// The tool name.
+    pub name: String,
+    /// Byte length of the arguments.
+    pub bytes: usize,
+    /// [`sha256_hex`] of the arguments.
+    pub sha256: String,
+}
+
+/// A tool result without its content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultDigest {
+    /// The call id it answers.
+    pub call_id: String,
+    /// Byte length of the content.
+    pub bytes: usize,
+    /// [`sha256_hex`] of the content.
+    pub sha256: String,
+    /// Whether the tool reported an error.
+    pub is_error: bool,
+}
+
+impl MessageDigest {
+    /// Describes a message without its text.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The message.
+    ///
+    /// # Returns
+    ///
+    /// The digest.
+    pub fn of(message: &Message) -> Self {
+        match message {
+            Message::User { text } => Self {
+                role: "user".to_owned(),
+                bytes: text.len(),
+                sha256: sha256_hex(text.as_bytes()),
+                tool_calls: Vec::new(),
+                results: Vec::new(),
+            },
+            Message::Assistant {
+                text, tool_calls, ..
+            } => Self {
+                role: "assistant".to_owned(),
+                bytes: text.len(),
+                sha256: sha256_hex(text.as_bytes()),
+                tool_calls: tool_calls
+                    .iter()
+                    .map(|call| CallDigest {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        bytes: call.arguments_json.len(),
+                        sha256: sha256_hex(call.arguments_json.as_bytes()),
+                    })
+                    .collect(),
+                results: Vec::new(),
+            },
+            Message::ToolResults { results } => {
+                let all: String = results.iter().map(|r| r.content.as_str()).collect();
+                Self {
+                    role: "tool_results".to_owned(),
+                    bytes: all.len(),
+                    sha256: sha256_hex(all.as_bytes()),
+                    tool_calls: Vec::new(),
+                    results: results
+                        .iter()
+                        .map(|result| ResultDigest {
+                            call_id: result.call_id.clone(),
+                            bytes: result.content.len(),
+                            sha256: sha256_hex(result.content.as_bytes()),
+                            is_error: result.is_error,
+                        })
+                        .collect(),
+                }
+            }
+        }
+    }
+}
+
+/// The SHA-256 of some bytes, lowercase hex.
+///
+/// # Arguments
+///
+/// * `bytes` - What to digest.
+///
+/// # Returns
+///
+/// 64 hex digits.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// One line of the log.
@@ -90,8 +233,8 @@ pub enum SessionRecord {
     Compacted {
         /// The whole conversation now.
         messages: Vec<Message>,
-        /// Where the summary was written.
-        summary_path: PathBuf,
+        /// Where the summary was written, if anywhere.
+        summary_path: Option<PathBuf>,
     },
     /// A new conversation replaced the old one: the coder's build
     /// conversation, started from the task and the approved plan.
@@ -111,6 +254,76 @@ pub enum SessionRecord {
         /// How.
         status: Status,
     },
+    /// One completion: who served it, what it cost and how long it took.
+    Turn {
+        /// The state it ran in.
+        state: State,
+        /// Whose provider served it.
+        role: Role,
+        /// Tokens used, when reported.
+        usage: Option<Usage>,
+        /// Milliseconds from request to the end of the answer.
+        latency_ms: u64,
+        /// Retries before the request got through.
+        retries: u32,
+    },
+    /// Secrets were redacted from something before it entered the
+    /// conversation. Kinds and counts only, never a value.
+    Redacted {
+        /// What the text came from: a tool name, `user` or `review`.
+        source: String,
+        /// How many of each kind.
+        counts: BTreeMap<String, usize>,
+    },
+    /// A message, as a `metadata` transcript keeps it.
+    MessageDigest {
+        /// Its sizes and digests.
+        message: MessageDigest,
+    },
+    /// The conversation after a compaction or a rebase, as a `metadata`
+    /// transcript keeps it.
+    ConversationDigest {
+        /// Each message's sizes and digests.
+        messages: Vec<MessageDigest>,
+    },
+}
+
+impl SessionRecord {
+    /// The record as a transcript in `mode` keeps it.
+    ///
+    /// # Arguments
+    ///
+    /// * `mode` - The transcript mode.
+    ///
+    /// # Returns
+    ///
+    /// The record unchanged for `full` (and `off`, which writes nothing);
+    /// for `metadata`, messages and the task replaced by sizes and digests.
+    pub fn kept_as(&self, mode: TranscriptMode) -> Self {
+        if mode != TranscriptMode::Metadata {
+            return self.clone();
+        }
+        match self {
+            Self::Meta(meta) => Self::Meta(SessionMeta {
+                task: format!(
+                    "(not kept: {} bytes, sha256:{})",
+                    meta.task.len(),
+                    sha256_hex(meta.task.as_bytes())
+                ),
+                transcript: mode,
+                ..meta.clone()
+            }),
+            Self::Message { message } => Self::MessageDigest {
+                message: MessageDigest::of(message),
+            },
+            Self::Compacted { messages, .. } | Self::Rebased { messages } => {
+                Self::ConversationDigest {
+                    messages: messages.iter().map(MessageDigest::of).collect(),
+                }
+            }
+            other => other.clone(),
+        }
+    }
 }
 
 /// Appends records to a session log.
@@ -118,6 +331,8 @@ pub enum SessionRecord {
 pub struct SessionLog {
     path: PathBuf,
     file: File,
+    /// What each record keeps.
+    mode: TranscriptMode,
 }
 
 impl SessionLog {
@@ -135,6 +350,28 @@ impl SessionLog {
     ///
     /// [`SessionError::Io`] when the folder or file cannot be created.
     pub fn open(session_dir: &Path) -> Result<Self, SessionError> {
+        Self::open_in_mode(session_dir, TranscriptMode::Full)
+    }
+
+    /// Opens the log for a transcript mode other than `off`.
+    ///
+    /// # Arguments
+    ///
+    /// * `session_dir` - The session folder.
+    /// * `mode` - `full` or `metadata`.
+    ///
+    /// # Returns
+    ///
+    /// The log, positioned at the end.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Io`] when the folder or file cannot be created.
+    pub fn open_in_mode(session_dir: &Path, mode: TranscriptMode) -> Result<Self, SessionError> {
+        debug_assert!(
+            mode != TranscriptMode::Off,
+            "no session log is opened when the transcript is off"
+        );
         let path = session_dir.join(LOG_FILE);
         let io = |error: std::io::Error| SessionError::Io {
             path: path.clone(),
@@ -146,7 +383,7 @@ impl SessionLog {
             .append(true)
             .open(&path)
             .map_err(io)?;
-        Ok(Self { path, file })
+        Ok(Self { path, file, mode })
     }
 
     /// Whether the log has no records yet.
@@ -168,7 +405,8 @@ impl SessionLog {
     ///
     /// [`SessionError::Io`] when the write fails.
     pub fn append(&mut self, record: &SessionRecord) -> Result<(), SessionError> {
-        let mut line = serde_json::to_string(record).map_err(|error| SessionError::Io {
+        let kept = record.kept_as(self.mode);
+        let mut line = serde_json::to_string(&kept).map_err(|error| SessionError::Io {
             path: self.path.clone(),
             detail: error.to_string(),
         })?;
@@ -268,9 +506,22 @@ pub fn session_dir(sessions_root: &Path, id: &str) -> PathBuf {
 ///
 /// # Errors
 ///
-/// [`SessionError::NotFound`] when there is no such session, or a read or
-/// parse error.
+/// [`SessionError::NotFound`] when there is no such session,
+/// [`SessionError::NoTranscript`] when it was recorded in `metadata` mode,
+/// or a read or parse error.
 pub fn load_session(sessions_root: &Path, id: &str) -> Result<SessionSnapshot, SessionError> {
+    let snapshot = read_session(sessions_root, id)?;
+    if snapshot.meta.transcript != TranscriptMode::Full {
+        return Err(SessionError::NoTranscript {
+            id: id.to_owned(),
+            mode: snapshot.meta.transcript,
+        });
+    }
+    Ok(snapshot)
+}
+
+/// Reads a session log back in any transcript mode, for listings.
+fn read_session(sessions_root: &Path, id: &str) -> Result<SessionSnapshot, SessionError> {
     let dir = session_dir(sessions_root, id);
     let path = dir.join(LOG_FILE);
     if !path.is_file() {
@@ -301,6 +552,10 @@ pub fn load_session(sessions_root: &Path, id: &str) -> Result<SessionSnapshot, S
             }
             SessionRecord::State { state, .. } => snapshot.last_state = Some(state),
             SessionRecord::Finished { status } => snapshot.status = Some(status),
+            SessionRecord::Turn { .. }
+            | SessionRecord::Redacted { .. }
+            | SessionRecord::MessageDigest { .. }
+            | SessionRecord::ConversationDigest { .. } => {}
         }
     }
     Ok(snapshot)
@@ -336,7 +591,7 @@ pub fn list_sessions(sessions_root: &Path) -> Result<Vec<SessionSummary>, Sessio
     let mut sessions = Vec::new();
     for entry in entries.filter_map(Result::ok) {
         let id = entry.file_name().to_string_lossy().into_owned();
-        match load_session(sessions_root, &id) {
+        match read_session(sessions_root, &id) {
             Ok(snapshot) => sessions.push(SessionSummary {
                 meta: snapshot.meta,
                 last_state: snapshot.last_state,
@@ -385,6 +640,7 @@ mod tests {
             created_at: Utc::now(),
             task: "do it".to_owned(),
             cwd: PathBuf::from("/proj"),
+            transcript: TranscriptMode::Full,
         }
     }
 
@@ -412,7 +668,7 @@ mod tests {
         .expect("message");
         log.append(&SessionRecord::Compacted {
             messages: vec![Message::user("summary")],
-            summary_path: dir.join("compaction-1.md"),
+            summary_path: Some(dir.join("compaction-1.md")),
         })
         .expect("compacted");
         log.append(&SessionRecord::Message {
@@ -451,6 +707,89 @@ mod tests {
         // Reopening appends rather than truncating.
         let reopened = SessionLog::open(&dir).expect("reopen");
         assert!(!reopened.is_empty());
+    }
+
+    #[test]
+    fn a_metadata_transcript_keeps_sizes_and_digests_but_no_text() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let id = new_session_id();
+        let dir = session_dir(root.path(), &id);
+        let mut log = SessionLog::open_in_mode(&dir, TranscriptMode::Metadata).expect("open");
+        let secret_task = "fix the bug in payroll.rs".to_owned();
+        log.append(&SessionRecord::Meta(SessionMeta {
+            task: secret_task.clone(),
+            ..meta(&id)
+        }))
+        .expect("meta");
+        let call = crate::provider::ToolCall {
+            id: "c1".to_owned(),
+            name: "read_file".to_owned(),
+            arguments_json: "{\"path\":\"payroll.rs\"}".to_owned(),
+        };
+        let messages = [
+            Message::user("the user's words"),
+            Message::Assistant {
+                text: "the model's words".to_owned(),
+                reasoning: Vec::new(),
+                tool_calls: vec![call],
+            },
+            Message::ToolResults {
+                results: vec![crate::provider::ToolResult {
+                    call_id: "c1".to_owned(),
+                    content: "file contents here".to_owned(),
+                    is_error: false,
+                }],
+            },
+        ];
+        for message in &messages {
+            log.append(&SessionRecord::Message {
+                message: message.clone(),
+            })
+            .expect("message");
+        }
+        log.append(&SessionRecord::Rebased {
+            messages: messages.to_vec(),
+        })
+        .expect("rebased");
+        log.append(&SessionRecord::Turn {
+            state: State::Build,
+            role: Role::Coder,
+            usage: Some(Usage::default()),
+            latency_ms: 12,
+            retries: 0,
+        })
+        .expect("turn");
+
+        let text = std::fs::read_to_string(dir.join(LOG_FILE)).expect("reads");
+        for hidden in [
+            secret_task.as_str(),
+            "the user's words",
+            "the model's words",
+            "payroll.rs",
+            "file contents here",
+        ] {
+            assert!(!text.contains(hidden), "{hidden} leaked into {text}");
+        }
+        let digest = sha256_hex(b"file contents here");
+        for kept in [
+            "\"role\":\"tool_results\"",
+            "\"name\":\"read_file\"",
+            "\"bytes\":18",
+            digest.as_str(),
+            "\"latency_ms\":12",
+            "\"transcript\":\"metadata\"",
+        ] {
+            assert!(text.contains(kept), "{kept} missing from {text}");
+        }
+        assert!(matches!(
+            load_session(root.path(), &id),
+            Err(SessionError::NoTranscript {
+                mode: TranscriptMode::Metadata,
+                ..
+            })
+        ));
+        let listed = list_sessions(root.path()).expect("lists");
+        assert_eq!(listed.len(), 1, "a metadata session is still listed");
     }
 
     #[test]

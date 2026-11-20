@@ -5,21 +5,12 @@
 use std::path::{Path, PathBuf};
 
 use anvil_types::dotenv::{is_placeholder, read_values};
+use anvil_types::redact::KEY_SHAPES;
 use anyhow::{Context, bail};
 use regex::Regex;
 
 /// Shortest `.env` value that is treated as a secret worth scanning for.
 const MIN_VALUE_LEN: usize = 12;
-
-/// Key shapes to look for: a label and a pattern. The patterns are written so
-/// that this source file never matches itself.
-const PATTERNS: &[(&str, &str)] = &[
-    ("sk- key", "sk-[A-Za-z0-9_-]{20,}"),
-    ("AIza key", "AIza[0-9A-Za-z_-]{35}"),
-    ("ghp_ token", "ghp_[A-Za-z0-9]{36}"),
-    ("github_pat_ token", "github_pat_[A-Za-z0-9_]{22,}"),
-    ("hf_ token", "hf_[A-Za-z0-9]{20,}"),
-];
 
 /// One place a key-looking string was found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,14 +170,16 @@ pub fn scan_tree(root: &Path, values: &[(String, String)]) -> anyhow::Result<Vec
     Ok(hits)
 }
 
-/// Compiles the patterns and pairs them with the literal values.
+/// Compiles the shared key shapes that are scanned for and pairs them
+/// with the literal values.
 fn needles(values: &[(String, String)]) -> Vec<Needle> {
-    let mut needles: Vec<Needle> = PATTERNS
+    let mut needles: Vec<Needle> = KEY_SHAPES
         .iter()
-        .filter_map(|(label, pattern)| {
-            Regex::new(pattern)
+        .filter(|shape| shape.scan)
+        .filter_map(|shape| {
+            Regex::new(shape.pattern)
                 .ok()
-                .map(|re| Needle::Pattern(label, re))
+                .map(|re| Needle::Pattern(shape.label, re))
         })
         .collect();
     needles.extend(
@@ -247,6 +240,28 @@ mod tests {
             assert!(!hits[0].to_string().contains(value.as_str()));
         }
         assert!(scan_text("f", "sk-short\nghp_x\nnothing here", &needles).is_empty());
+    }
+
+    #[test]
+    fn aws_keys_and_jwts_from_the_shared_shapes_are_caught() {
+        let needles = needles(&[]);
+        let aws = format!("{}{}", "AKIA", "ABCDEFGHIJ234567");
+        let jwt = format!(
+            "{}{}.{}{}.sig",
+            "eyJ", "hbGciOiJIUzI1NiJ9", "eyJ", "zdWIiOiIxIn0"
+        );
+        for (value, kind) in [(aws, "AWS access key"), (jwt, "JWT")] {
+            let hits = scan_text(
+                "f",
+                &format!(
+                    "x = {value}
+"
+                ),
+                &needles,
+            );
+            assert_eq!(hits.len(), 1, "{kind}");
+            assert_eq!(hits[0].kind, kind);
+        }
     }
 
     #[test]

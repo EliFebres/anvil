@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anvil_types::LimitsConfig;
+use anvil_types::policy::TranscriptMode;
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
@@ -237,7 +238,7 @@ impl AgentLoop {
     ///
     /// The loop.
     pub fn new(
-        config: LoopConfig,
+        mut config: LoopConfig,
         providers: LoopProviders,
         mut registry: ToolRegistry,
         mut ctx: ToolContext,
@@ -245,6 +246,10 @@ impl AgentLoop {
         events: EventSink,
     ) -> Self {
         ctx.session_dir = Some(config.session_dir.clone());
+        // The task goes to the provider, the transcript and the reviewer, so
+        // it is redacted once, before any of them sees it.
+        let task = ctx.guard.redact("user", &config.task);
+        config.task = task.text;
         registry.register(Box::new(complete_step::CompleteStep));
         let session_glob = format!("{}/**", ctx.display_path(&config.session_dir));
         let rules = [
@@ -257,7 +262,11 @@ impl AgentLoop {
                 tracing::warn!(%error, rule, "could not allow session folder writes");
             }
         }
-        let log = match SessionLog::open(&config.session_dir) {
+        let opened = match ctx.transcript {
+            TranscriptMode::Off => Err(None),
+            mode => SessionLog::open_in_mode(&config.session_dir, mode).map_err(Some),
+        };
+        let mut log = match opened {
             Ok(mut log) => {
                 if log.is_empty() {
                     let meta = SessionMeta {
@@ -269,6 +278,7 @@ impl AgentLoop {
                         created_at: chrono::Utc::now(),
                         task: config.task.clone(),
                         cwd: config.cwd.clone(),
+                        transcript: ctx.transcript,
                     };
                     if let Err(error) = log.append(&SessionRecord::Meta(meta)) {
                         tracing::warn!(%error, "cannot write the session meta record");
@@ -276,11 +286,21 @@ impl AgentLoop {
                 }
                 Some(log)
             }
-            Err(error) => {
+            Err(Some(error)) => {
                 tracing::warn!(%error, "session will not be persisted");
                 None
             }
+            Err(None) => None,
         };
+        if !task.counts.is_empty()
+            && let Some(log) = &mut log
+            && let Err(error) = log.append(&SessionRecord::Redacted {
+                source: "user".to_owned(),
+                counts: task.counts,
+            })
+        {
+            tracing::warn!(%error, "cannot append to the session log");
+        }
         Self {
             config,
             providers,
@@ -478,12 +498,36 @@ impl AgentLoop {
         self.log(SessionRecord::State { state, visit });
     }
 
-    /// Appends to the conversation and the session log.
+    /// Appends to the conversation and the session log. User text (the
+    /// task, feedback with check output) is redacted first; tool results
+    /// were redacted by the registry.
     fn push_message(&mut self, message: Message) {
+        let message = match message {
+            Message::User { text } => Message::user(self.redacted("user", &text)),
+            other => other,
+        };
         self.log(SessionRecord::Message {
             message: message.clone(),
         });
         self.conversation.push(message);
+    }
+
+    /// Redacts text the loop is about to send and records the kinds.
+    fn redacted(&mut self, source: &str, text: &str) -> String {
+        let out = self.ctx.guard.redact(source, text);
+        self.note_redactions(source, out.counts);
+        out.text
+    }
+
+    /// Records in the session log how many secrets of each kind were
+    /// redacted from one source.
+    fn note_redactions(&mut self, source: &str, counts: BTreeMap<String, usize>) {
+        if !counts.is_empty() {
+            self.log(SessionRecord::Redacted {
+                source: source.to_owned(),
+                counts,
+            });
+        }
     }
 
     /// Appends a record to the session log, if there is one.
@@ -644,7 +688,8 @@ impl AgentLoop {
             .compact(
                 &*summarizer,
                 &self.config.task,
-                &self.config.session_dir,
+                (self.ctx.transcript == TranscriptMode::Full)
+                    .then_some(self.config.session_dir.as_path()),
                 max_chars,
             )
             .await;
@@ -773,17 +818,21 @@ impl AgentLoop {
         }
         let diff = self.session_diff().await;
         let mut brief = format!(
-            "# Task\n\n{}\n\n# Round\n\n{}\n\n# Plan\n\n{}\n\n# Diff\n\n```diff\n{diff}\n```",
+            "# Task\n\n{}\n\n# Round\n\n{}\n\n# Plan\n\n{}\n\n# Diff\n\n{}",
             self.config.task,
             self.rounds.review + 1,
-            self.plan.as_deref().unwrap_or("(no plan)")
+            self.plan.as_deref().unwrap_or("(no plan)"),
+            self.ctx
+                .guard
+                .wrap("diff", &format!("```diff\n{diff}\n```"))
         );
         if let Lane::Checked { runs } = &self.lane {
             brief.push_str("\n\n# Check");
             for (command, tail) in runs {
-                brief.push_str(&format!("\n\n`{command}` passed:\n\n```\n{tail}\n```"));
+                brief.push_str(&format!("\n\n`{command}` passed:\n\n{tail}"));
             }
         }
+        let brief = self.redacted("review", &brief);
         let mut messages = vec![Message::user(brief)];
         let mut verdict = None;
         for attempt in 0..2 {
@@ -888,7 +937,7 @@ impl AgentLoop {
                     CheckSource::Detected | CheckSource::Standing => String::new(),
                 };
                 self.pending_feedback = Some(format!(
-                    "Verification failed. `{command}` exited with an error:\n```\n{tail}\n```\nFix the cause, then end your turn with what you changed.{hint}"
+                    "Verification failed. `{command}` exited with an error:\n{tail}\nFix the cause, then end your turn with what you changed.{hint}"
                 ));
                 return StateOutcome::VerifyFailed(tail);
             }
@@ -902,7 +951,8 @@ impl AgentLoop {
     }
 
     /// Runs one check command and reports it; returns whether it passed and
-    /// the last lines it printed.
+    /// the last lines it printed, fenced and wrapped as untrusted data for
+    /// the model.
     async fn run_check(&self, source: CheckSource, command: &str) -> (bool, String) {
         self.events.emit(LoopEvent::CheckStarted {
             command: command.to_owned(),
@@ -920,7 +970,10 @@ impl AgentLoop {
             passed,
             output_tail: tail.clone(),
         });
-        (passed, tail)
+        (
+            passed,
+            self.ctx.guard.wrap("check", &format!("```\n{tail}\n```")),
+        )
     }
 
     /// Runs the checks supplied from outside the loop on the changed files.
@@ -948,9 +1001,12 @@ impl AgentLoop {
             .iter()
             .map(|failure| {
                 format!(
-                    "Standing rule `{}` check failed on the changed files:\n```\n{}\n```",
+                    "Standing rule `{}` check failed on the changed files:\n{}",
                     failure.name,
-                    failure.output.trim_end()
+                    self.ctx.guard.wrap(
+                        "rule_check",
+                        &format!("```\n{}\n```", failure.output.trim_end())
+                    )
                 )
             })
             .collect::<Vec<_>>()
@@ -1137,6 +1193,7 @@ impl AgentLoop {
         for turn in &execution.model_turns {
             self.record_completion(state, Role::Worker, turn);
         }
+        self.note_redactions(&call.name, execution.redactions);
         self.events.emit(LoopEvent::ToolFinished {
             call_id: call.id.clone(),
             name: call.name.clone(),
@@ -1169,6 +1226,13 @@ impl AgentLoop {
 
     /// Adds one completion to the state's and the role's spend and reports it.
     fn record_completion(&mut self, state: State, role: Role, turn: &ModelTurn) {
+        self.log(SessionRecord::Turn {
+            state,
+            role,
+            usage: turn.usage,
+            latency_ms: turn.latency_ms,
+            retries: turn.retries,
+        });
         let spend = self.spend.entry(state).or_default();
         spend.turns += 1;
         spend.tokens = spend
@@ -1499,10 +1563,22 @@ mod tests {
                     summarizer: Arc::clone(&self.summarizer) as Arc<dyn Provider>,
                 },
                 registry,
-                ToolContext::new(self.dir.path()),
+                self.ctx(),
                 gate,
                 EventSink::new(tx),
             )
+        }
+
+        /// A tool context with a fixed delimiter nonce, so request
+        /// snapshots are stable.
+        fn ctx(&self) -> ToolContext {
+            ToolContext {
+                guard: crate::guard::DataGuard::with_nonce(
+                    Arc::new(anvil_types::redact::Redactor::builtin()),
+                    "testnonce",
+                ),
+                ..ToolContext::new(self.dir.path())
+            }
         }
 
         fn default_agent(&mut self, check: CheckCommand, rules: &str) -> AgentLoop {
@@ -2878,6 +2954,56 @@ mod tests {
         insta::assert_snapshot!(requests);
     }
 
+    #[tokio::test]
+    async fn a_secret_in_tool_output_does_not_reach_the_provider_or_the_transcript() {
+        let key = format!("sk-{}", "q7".repeat(16));
+        let aws = format!("{}{}", "AKIA", "QWERTYUIOP234567");
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::tool_turn(vec![ToolCall {
+                    id: "r1".to_owned(),
+                    name: "read_file".to_owned(),
+                    arguments_json: r#"{"path": "notes.txt"}"#.to_owned(),
+                }]),
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+        );
+        std::fs::write(
+            h.dir.path().join("notes.txt"),
+            format!("api = {key}\naws = {aws}\n"),
+        )
+        .expect("write");
+        let mut config = h.config(CheckCommand::Command("cat notes.txt".to_owned()));
+        config.task = format!("use the key {key} to fix the client");
+        let agent = h.agent(
+            config,
+            Arc::clone(&h.coder) as Arc<dyn Provider>,
+            "",
+            Box::new(AutoApprove),
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+
+        let sent = serde_json::to_string(&h.coder.requests()).expect("serialize")
+            + &serde_json::to_string(&h.reviewer.requests()).expect("serialize");
+        let transcript =
+            std::fs::read_to_string(h.session_dir().join(crate::context::session::LOG_FILE))
+                .expect("transcript");
+        for (what, text) in [("provider requests", &sent), ("transcript", &transcript)] {
+            assert!(!text.contains(&key), "the key reached the {what}");
+            assert!(!text.contains(&aws), "the AWS key reached the {what}");
+            assert!(text.contains("[REDACTED:api_key]"), "{what}");
+            assert!(text.contains("[REDACTED:aws_access_key]"), "{what}");
+        }
+        assert!(
+            sent.contains(r#"source=\"read_file\""#),
+            "the file read is wrapped as untrusted data"
+        );
+        assert!(transcript.contains(r#""type":"redacted","source":"read_file""#));
+        assert!(transcript.contains(r#""type":"redacted","source":"user""#));
+    }
+
     /// Gives the next agent a planner that replays `scripts`.
     fn add_planner(h: &mut Harness, scripts: Vec<Script>) -> Arc<FakeProvider> {
         let planner = Arc::new(FakeProvider::new(scripts));
@@ -3286,7 +3412,11 @@ mod tests {
     fn contents(results: &[ToolResult]) -> Vec<String> {
         results
             .iter()
-            .map(|result| result.content.clone())
+            .map(|result| {
+                crate::guard::unwrap_untrusted(&result.content)
+                    .expect("a tool result is one untrusted-data element")
+                    .to_owned()
+            })
             .collect()
     }
 

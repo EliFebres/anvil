@@ -183,10 +183,13 @@ impl<O: Write, E: Write> Renderer<O, E> {
                 ..
             } => {
                 self.end_line();
-                self.err_line(&format!(
-                    "compacted {dropped_messages} messages; summary at {}",
-                    summary_path.display()
-                ));
+                match summary_path {
+                    Some(path) => self.err_line(&format!(
+                        "compacted {dropped_messages} messages; summary at {}",
+                        path.display()
+                    )),
+                    None => self.err_line(&format!("compacted {dropped_messages} messages")),
+                }
             }
             LoopEvent::Escalated { reason, round } => {
                 self.end_line();
@@ -390,7 +393,7 @@ mod tests {
             },
             LoopEvent::Compacted {
                 dropped_messages: 3,
-                summary_path: PathBuf::from("summary.md"),
+                summary_path: Some(PathBuf::from("summary.md")),
                 usage: None,
             },
             LoopEvent::Warning("careful".to_owned()),

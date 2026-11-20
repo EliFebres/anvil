@@ -47,6 +47,9 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use anvil_types::policy::TranscriptMode;
+
+use crate::guard::{self, DataGuard};
 use crate::provider::lock_or_recover;
 use crate::provider::types::{StopReason, ToolCall, ToolResult, ToolSpec, Usage};
 
@@ -268,6 +271,12 @@ pub struct ToolContext {
     pub runner: Runner,
     /// Folders outside `cwd` the file tools may also open.
     pub workspace: Workspace,
+    /// Redaction and the untrusted-data delimiters every tool result and
+    /// hook output gets before it goes back to the model.
+    pub guard: DataGuard,
+    /// What the session folder keeps. Below `full`, no untruncated tool
+    /// output and no compaction summary is written there.
+    pub transcript: TranscriptMode,
 }
 
 impl ToolContext {
@@ -287,6 +296,8 @@ impl ToolContext {
             shell: Shell::for_platform(),
             runner: Runner::default(),
             workspace: Workspace::default(),
+            guard: DataGuard::default(),
+            transcript: TranscriptMode::Full,
         }
     }
 
@@ -503,6 +514,9 @@ pub struct Execution {
     pub stats: OutputStats,
     /// Completions the tool made itself, to count against the session.
     pub model_turns: Vec<ModelTurn>,
+    /// How many secrets of each kind were redacted from the output and
+    /// hook text. Never holds a value.
+    pub redactions: BTreeMap<String, usize>,
 }
 
 /// A boxed future returned by a [`ToolHook`].
@@ -804,12 +818,15 @@ impl ToolRegistry {
         if let Some(hook) = &self.hook
             && let HookDecision::Block { reason } = hook.before(call, &args, ctx).await
         {
-            tracing::info!(tool = %call.name, reason, "blocked by a hook");
-            return Execution::finished(
+            tracing::info!(tool = %call.name, "blocked by a hook");
+            let (reason, counts) = ctx.guard.guard("hook", &reason);
+            let mut execution = Execution::finished(
                 call,
                 ToolOutput::error(format!("blocked by a hook: {reason}")),
                 ToolOutcome::Blocked,
             );
+            execution.redactions = counts;
+            return execution;
         }
 
         // Under an allowlist a command runs without a shell interpreter,
@@ -830,7 +847,9 @@ impl ToolRegistry {
         } else {
             ctx
         };
-        let output = tool.run(args.clone(), ctx).await;
+        let mut output = tool.run(args.clone(), ctx).await;
+        let redacted = ctx.guard.redact(&call.name, &output.content);
+        output.content = redacted.text;
         let outcome = if output.is_error {
             ToolOutcome::Failed
         } else {
@@ -839,16 +858,19 @@ impl ToolRegistry {
         let mut execution = match output::truncate(&output.content, tool.output_cap()) {
             None => Execution::finished(call, output, outcome),
             Some(truncated) => {
-                let full_output =
-                    ctx.session_dir.as_deref().and_then(|dir| {
-                        match output::write_full(dir, &call.id, &output.content) {
+                let full_output = ctx
+                    .session_dir
+                    .as_deref()
+                    .filter(|_| ctx.transcript == TranscriptMode::Full)
+                    .and_then(
+                        |dir| match output::write_full(dir, &call.id, &output.content) {
                             Ok(path) => Some(path),
                             Err(error) => {
                                 tracing::warn!(%error, "could not keep full tool output");
                                 None
                             }
-                        }
-                    });
+                        },
+                    );
                 let content =
                     output::with_note(truncated, output.content.len(), full_output.as_deref());
                 Execution {
@@ -861,14 +883,23 @@ impl ToolRegistry {
                     full_output,
                     stats: OutputStats::of(&output.content, true),
                     model_turns: output.model_turns,
+                    redactions: BTreeMap::new(),
                 }
             }
         };
-        if let Some(hook) = &self.hook
-            && let Some(note) = hook.after(call, &args, &execution.result, ctx).await
-        {
+        execution.redactions = redacted.counts;
+        // A PostToolUse hook sees the redacted output as the tool produced
+        // it, without the delimiters, so existing hook scripts keep working.
+        let note = match &self.hook {
+            Some(hook) => hook.after(call, &args, &execution.result, ctx).await,
+            None => None,
+        };
+        execution.result.content = ctx.guard.wrap(&call.name, &execution.result.content);
+        if let Some(note) = note {
+            let (note, counts) = ctx.guard.guard("hook", note.trim_end());
+            guard::add_counts(&mut execution.redactions, counts);
             execution.result.content.push_str("\n\n[hook] ");
-            execution.result.content.push_str(note.trim_end());
+            execution.result.content.push_str(&note);
         }
         execution
     }
@@ -1098,6 +1129,7 @@ impl Execution {
             },
             outcome,
             full_output: None,
+            redactions: BTreeMap::new(),
         }
     }
 }
@@ -1199,7 +1231,10 @@ mod tests {
             .execute(&call(r#"{"text": "hi"}"#), &ToolContext::new("."))
             .await;
         assert_eq!(execution.outcome, ToolOutcome::Completed);
-        assert_eq!(execution.result.content, "hi");
+        assert_eq!(
+            crate::guard::unwrap_untrusted(&execution.result.content),
+            Some("hi")
+        );
         assert!(!execution.result.is_error);
         assert_eq!(execution.result.call_id, "c1");
     }
@@ -1316,9 +1351,8 @@ mod tests {
             digest(std::fs::read_to_string(&path).expect("file").as_bytes())
         );
         assert!(
-            execution
-                .result
-                .content
+            crate::guard::unwrap_untrusted(&execution.result.content)
+                .expect("wrapped")
                 .starts_with(&"0123456789".repeat(10))
         );
         assert!(execution.result.content.contains("100 of 500 bytes shown"));
@@ -1393,24 +1427,32 @@ mod tests {
     async fn a_hook_can_block_a_call_and_annotate_a_result() {
         let mut registry = make_registry("allow = [\"echo\"]", vec![]);
         registry.set_hook(Arc::new(ScriptedHook));
+        let ctx = ToolContext::new(".");
         let blocked = registry
-            .execute(
-                &call(r#"{"text": "x", "block": true}"#),
-                &ToolContext::new("."),
-            )
+            .execute(&call(r#"{"text": "x", "block": true}"#), &ctx)
             .await;
         assert_eq!(blocked.outcome, ToolOutcome::Blocked);
         assert!(blocked.result.is_error);
-        assert_eq!(blocked.result.content, "blocked by a hook: policy says no");
+        assert_eq!(
+            blocked.result.content,
+            format!(
+                "blocked by a hook: {}",
+                ctx.guard.wrap("hook", "policy says no")
+            )
+        );
 
         let noted = registry
-            .execute(
-                &call(r#"{"text": "hi", "note": "seen"}"#),
-                &ToolContext::new("."),
-            )
+            .execute(&call(r#"{"text": "hi", "note": "seen"}"#), &ctx)
             .await;
         assert_eq!(noted.outcome, ToolOutcome::Completed);
-        assert!(noted.result.content.ends_with("\n\n[hook] seen after 2"));
+        assert_eq!(
+            noted.result.content,
+            format!(
+                "{}\n\n[hook] {}",
+                ctx.guard.wrap("echo", "hi"),
+                ctx.guard.wrap("hook", "seen after 2")
+            )
+        );
     }
 
     #[tokio::test]

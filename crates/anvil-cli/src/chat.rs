@@ -18,6 +18,7 @@ use anvil_core::context::{Conversation, discover_instructions};
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
 use anvil_telemetry::{SessionMode, SessionOutcome};
+use anvil_types::policy::TranscriptMode;
 use anyhow::Context;
 use tokio::sync::watch;
 
@@ -86,9 +87,7 @@ async fn chat_session(
     let hooks = wiring.hook_runner();
     let mut session_context = Vec::new();
     if let Some(hooks) = &hooks {
-        session_context.extend(Wiring::session_start_instruction(
-            hooks.session_start().await,
-        ));
+        session_context.extend(wiring.session_start_instruction(hooks.session_start().await));
     }
     let info = session_info(wiring, SessionKind::Chat, false, State::Build);
     let (mut frontend, events_tx) = Frontend::start(ui, info);
@@ -384,6 +383,7 @@ impl ChatSession<'_> {
 
     /// The model and tool loop of one turn.
     async fn run_turn(&mut self, line: &str) -> String {
+        let line = self.ctx.guard.redact("user", line).text;
         self.conversation.push(Message::user(line));
         let tools = self.tools();
         loop {
@@ -477,16 +477,19 @@ impl ChatSession<'_> {
             .compact(
                 &*summarizer,
                 "interactive chat",
-                &self.session_dir,
+                (self.ctx.transcript == TranscriptMode::Full).then_some(self.session_dir.as_path()),
                 max_chars,
             )
             .await
         {
-            Ok(Some(compaction)) => self.console.notice(format!(
-                "compacted {} messages; summary at {}",
-                compaction.dropped_messages,
-                compaction.summary_path.display()
-            )),
+            Ok(Some(compaction)) => self.console.notice(match &compaction.summary_path {
+                Some(path) => format!(
+                    "compacted {} messages; summary at {}",
+                    compaction.dropped_messages,
+                    path.display()
+                ),
+                None => format!("compacted {} messages", compaction.dropped_messages),
+            }),
             Ok(None) => self
                 .console
                 .notice("nothing to compact yet (fewer than five turns)"),

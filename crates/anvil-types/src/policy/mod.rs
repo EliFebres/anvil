@@ -298,8 +298,53 @@ pub struct ProjectsPolicy {
     pub allow_trust: bool,
 }
 
-/// `[data]`: where session records go and how long they stay.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// How much of a session the transcript (`session.jsonl` and
+/// `tool-output/`) keeps.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptMode {
+    /// Every message, as the provider received it (after redaction), and
+    /// the untruncated tool outputs. The unmanaged default.
+    #[default]
+    Full,
+    /// Roles, tool names, sizes, SHA-256 digests, token counts, timings and
+    /// states; no message text, file contents or command output, and no
+    /// `tool-output/` files. A session cannot be resumed.
+    Metadata,
+    /// No `session.jsonl` and no `tool-output/` files. A session cannot be
+    /// resumed. The default under a policy.
+    Off,
+}
+
+impl TranscriptMode {
+    /// The name the configuration uses.
+    ///
+    /// # Returns
+    ///
+    /// `full`, `metadata` or `off`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Metadata => "metadata",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// One pattern a policy adds to redaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedactionPattern {
+    /// The kind written into `[REDACTED:<kind>]`: lowercase letters,
+    /// digits and `_`.
+    pub kind: String,
+    /// The regular expression (Rust `regex` syntax).
+    pub regex: String,
+}
+
+/// `[data]`: redaction, what the transcript keeps, where session records
+/// go and how long they stay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DataPolicy {
     /// Where session folders go, one subfolder per repository. Default:
@@ -310,6 +355,55 @@ pub struct DataPolicy {
     /// session starts. Default: kept.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention_days: Option<u32>,
+    /// Whether secrets are redacted from tool results, file contents and
+    /// prompts. Default `true`; only a policy can turn it off.
+    pub redaction: bool,
+    /// Patterns redacted besides the built-in shapes.
+    pub patterns: Vec<RedactionPattern>,
+    /// What the transcript keeps. Default `off`.
+    pub transcript: TranscriptMode,
+}
+
+impl Default for DataPolicy {
+    fn default() -> Self {
+        Self {
+            transcript_dir: None,
+            retention_days: None,
+            redaction: true,
+            patterns: Vec::new(),
+            transcript: TranscriptMode::Off,
+        }
+    }
+}
+
+impl DataPolicy {
+    /// The policy's patterns in the form the redactor takes.
+    ///
+    /// # Returns
+    ///
+    /// One [`crate::redact::ExtraPattern`] per entry of `patterns`.
+    pub fn extra_patterns(&self) -> Vec<crate::redact::ExtraPattern> {
+        self.patterns
+            .iter()
+            .map(|pattern| crate::redact::ExtraPattern {
+                kind: pattern.kind.clone(),
+                regex: pattern.regex.clone(),
+            })
+            .collect()
+    }
+}
+
+/// What the transcript keeps under a policy, or unmanaged.
+///
+/// # Arguments
+///
+/// * `policy` - The policy, if any.
+///
+/// # Returns
+///
+/// [`TranscriptMode::Full`] when unmanaged, otherwise `[data] transcript`.
+pub fn transcript_mode(policy: Option<&LoadedPolicy>) -> TranscriptMode {
+    policy.map_or(TranscriptMode::Full, |loaded| loaded.policy.data.transcript)
 }
 
 /// `[limits]`: ceilings on spending.
@@ -564,8 +658,9 @@ pub fn split_host_port(text: &str) -> Option<(&str, u16)> {
 /// [`PolicyError::Parse`] for bad TOML or an unknown key, and
 /// [`PolicyError::Invalid`] when a value breaks a rule: a wrong version,
 /// no allowed host, a host without a numeric port, an allowlist mode
-/// without servers, an empty rule, a ceiling of zero, or a `[shell]` table
-/// whose keys do not fit together.
+/// without servers, an empty rule, a ceiling of zero, a `[shell]` table
+/// whose keys do not fit together, or a `[data]` pattern that does not
+/// compile, matches the empty string or has a bad kind.
 pub fn parse(text: &str, path: &Path) -> Result<Policy, PolicyError> {
     let policy: Policy = toml::from_str(text).map_err(|source| PolicyError::Parse {
         path: path.to_path_buf(),
@@ -594,6 +689,10 @@ pub fn parse(text: &str, path: &Path) -> Result<Policy, PolicyError> {
         }
     }
     validate_network(&policy.network).map_err(invalid)?;
+    for pattern in &policy.data.patterns {
+        crate::redact::compile_extra(&pattern.kind, &pattern.regex)
+            .map_err(|error| invalid(format!("[data] patterns: {error}")))?;
+    }
     let features = &policy.features;
     for rule in &features.mcp_servers {
         let url_ok = rule
@@ -1032,6 +1131,52 @@ mod tests {
         let loaded = load(&path).expect("loads").expect("present");
         let root = loaded.sessions_root(dir.path()).expect("moved");
         assert!(root.starts_with("/var/anvil"), "{root:?}");
+    }
+
+    #[test]
+    fn the_data_table_sets_redaction_patterns_and_the_transcript_mode() {
+        let dir = tempfile::tempdir().expect("dir");
+        let minimal = load(&write(dir.path(), POLICY_FILE, MINIMAL))
+            .expect("loads")
+            .expect("present");
+        assert!(minimal.policy.data.redaction, "redaction is on by default");
+        assert_eq!(minimal.policy.data.transcript, TranscriptMode::Off);
+        assert_eq!(transcript_mode(Some(&minimal)), TranscriptMode::Off);
+        assert_eq!(transcript_mode(None), TranscriptMode::Full);
+
+        let text = format!(
+            "{MINIMAL}[data]
+redaction = false
+transcript = \"metadata\"
+patterns = [{{ kind = \"ticket\", regex = 'TCK-[0-9]+' }}]
+"
+        );
+        let loaded = load(&write(dir.path(), "set.toml", &text))
+            .expect("loads")
+            .expect("present");
+        let data = &loaded.policy.data;
+        assert!(!data.redaction);
+        assert_eq!(data.transcript, TranscriptMode::Metadata);
+        assert_eq!(data.extra_patterns()[0].kind, "ticket");
+
+        for bad in [
+            "transcript = \"some\"",
+            "patterns = [{ kind = \"Bad\", regex = 'x' }]",
+            "patterns = [{ kind = \"k\", regex = '(' }]",
+            "patterns = [{ kind = \"k\", regex = 'x*' }]",
+            "patterns = [{ kind = \"k\" }]",
+        ] {
+            let path = write(
+                dir.path(),
+                "bad.toml",
+                &format!(
+                    "{MINIMAL}[data]
+{bad}
+"
+                ),
+            );
+            assert!(load(&path).is_err(), "{bad}");
+        }
     }
 
     #[test]

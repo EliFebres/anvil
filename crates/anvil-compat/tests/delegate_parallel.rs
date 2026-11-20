@@ -202,7 +202,12 @@ async fn run_loop_planning(
             Message::ToolResults { results } => Some(
                 results
                     .iter()
-                    .map(|result| (result.call_id.clone(), result.content.clone()))
+                    .map(|result| {
+                        // A call the loop refused is anvil's own text, not wrapped.
+                        let body = anvil_core::guard::unwrap_untrusted(&result.content)
+                            .unwrap_or(&result.content);
+                        (result.call_id.clone(), body.to_owned())
+                    })
                     .collect(),
             ),
             _ => None,

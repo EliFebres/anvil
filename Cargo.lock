@@ -161,6 +161,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -222,6 +223,7 @@ version = "0.2.0"
 dependencies = [
  "chrono",
  "dotenvy",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

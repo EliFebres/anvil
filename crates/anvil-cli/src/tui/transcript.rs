@@ -422,10 +422,13 @@ impl Transcript {
                 ..
             } => {
                 self.close_model();
-                let text = format!(
-                    "compacted {dropped_messages} messages; summary at {}",
-                    self.display_path(summary_path)
-                );
+                let text = match summary_path {
+                    Some(path) => format!(
+                        "compacted {dropped_messages} messages; summary at {}",
+                        self.display_path(path)
+                    ),
+                    None => format!("compacted {dropped_messages} messages"),
+                };
                 self.notice(text, Level::Info);
             }
             LoopEvent::Warning(message) => {

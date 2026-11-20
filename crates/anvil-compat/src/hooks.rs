@@ -815,6 +815,8 @@ mod tests {
             .content
             .split_once("\n\n[hook] ")
             .expect("hook note appended");
+        let note =
+            anvil_core::guard::unwrap_untrusted(note).expect("hook output is untrusted data");
         let payload: Value = serde_json::from_str(note.trim()).expect("payload is JSON");
         assert_eq!(payload["hook_event_name"], "PostToolUse");
         assert_eq!(payload["tool_name"], "LS");

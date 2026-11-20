@@ -93,7 +93,10 @@ async fn registers_the_servers_tools_and_round_trips_a_call() {
     let ctx = anvil_core::tools::ToolContext::new(project.path());
     let execution = registry.execute(&echo_call("hi there"), &ctx).await;
     assert_eq!(execution.outcome, ToolOutcome::Completed);
-    assert_eq!(execution.result.content, "echo: hi there");
+    assert_eq!(
+        anvil_core::guard::unwrap_untrusted(&execution.result.content),
+        Some("echo: hi there")
+    );
 
     // The second load registers from the cache without connecting, and the
     // first call connects lazily.
@@ -102,7 +105,10 @@ async fn registers_the_servers_tools_and_round_trips_a_call() {
     let mut registry = fresh_registry();
     cached.register(&mut registry);
     let execution = registry.execute(&echo_call("again"), &ctx).await;
-    assert_eq!(execution.result.content, "echo: again");
+    assert_eq!(
+        anvil_core::guard::unwrap_untrusted(&execution.result.content),
+        Some("echo: again")
+    );
 }
 
 #[tokio::test]

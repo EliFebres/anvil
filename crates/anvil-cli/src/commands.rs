@@ -23,6 +23,7 @@ use crate::telemetry::SessionTelemetry;
 use crate::tui::{SessionKind, UiMsg, wait_cancel};
 use crate::wiring::{Wiring, home_dir};
 use anvil_types::LoadedConfig;
+use anvil_types::policy::TranscriptMode;
 
 /// What a cancelled run reports as its summary and its status detail.
 const CANCELLED: &str = "cancelled by the user";
@@ -144,9 +145,7 @@ pub(crate) async fn run_session_in(
     if let Some(hooks) = &hooks {
         config
             .extra_instructions
-            .extend(Wiring::session_start_instruction(
-                hooks.session_start().await,
-            ));
+            .extend(wiring.session_start_instruction(hooks.session_start().await));
     }
     let (sink, tee) = telemetry.sink(Some(events));
     let mut agent = AgentLoop::new(
@@ -239,6 +238,13 @@ async fn remember(
     result: &LoopResult,
 ) {
     let console = frontend.console();
+    if wiring.transcript != TranscriptMode::Full {
+        console.notice(format!(
+            "memory: skipped (the managed policy's [data] transcript = \"{}\" keeps no conversation to learn from)",
+            wiring.transcript.as_str()
+        ));
+        return;
+    }
     match context::load_session(&wiring.sessions_root(), id) {
         Ok(snapshot) => {
             let diff_lines = match &snapshot.baseline {
@@ -296,9 +302,15 @@ async fn run_stop_hooks(
 ///
 /// # Errors
 ///
-/// When the session cannot be loaded or providers or the front end cannot
-/// be built.
+/// When the policy's transcript mode keeps no conversation, the session
+/// cannot be loaded, or providers or the front end cannot be built.
 pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow::Result<i32> {
+    if wiring.transcript != TranscriptMode::Full {
+        anyhow::bail!(
+            "anvil resume needs the full transcript, and the managed policy's [data] transcript = \"{}\" keeps no conversation; start a new session instead",
+            wiring.transcript.as_str()
+        );
+    }
     let snapshot =
         context::load_session(&wiring.sessions_root(), id).context("loading the session")?;
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
@@ -344,9 +356,7 @@ async fn resume_session(
     if let Some(hooks) = &hooks {
         config
             .extra_instructions
-            .extend(Wiring::session_start_instruction(
-                hooks.session_start().await,
-            ));
+            .extend(wiring.session_start_instruction(hooks.session_start().await));
     }
     let (sink, tee) = telemetry.sink(Some(events));
     let mut agent = AgentLoop::resume(

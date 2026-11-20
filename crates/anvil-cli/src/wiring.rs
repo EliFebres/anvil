@@ -13,6 +13,7 @@ use anvil_core::agent::{
     ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders, PromptSection,
 };
 use anvil_core::context;
+use anvil_core::guard::DataGuard;
 use anvil_core::net::{self, HttpClient};
 use anvil_core::provider::{self, Egress, Provider, SharedBudget, TokenBudget};
 use anvil_core::tools::shell::SHELL_TOOL_NAME;
@@ -21,7 +22,8 @@ use anvil_core::tools::{
     PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
     SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry, Workspace,
 };
-use anvil_types::policy::{LoadedPolicy, McpMode, SkillsMode};
+use anvil_types::policy::{LoadedPolicy, McpMode, SkillsMode, TranscriptMode};
+use anvil_types::redact::Redactor;
 use anvil_types::shell::ShellMode;
 use anvil_types::trust::user_permissions_path;
 use anvil_types::{AnvilConfig, ProjectRules, PromptConfig, Protocol};
@@ -56,6 +58,21 @@ fn endpoint_urls(config: &AnvilConfig, servers: &ServerSet) -> Vec<String> {
             Transport::Stdio { .. } => None,
         });
     providers.chain(mcp).collect()
+}
+
+/// The redactor for a session: the built-in shapes, `extra` patterns and
+/// the values of secret-looking variables in anvil's environment, which
+/// includes `~/.anvil/.env` and each provider's `api_key_env`.
+fn redactor(
+    config: &AnvilConfig,
+    extra: &[anvil_types::redact::ExtraPattern],
+) -> Result<Redactor, anvil_types::redact::RedactError> {
+    let key_names: Vec<String> = config
+        .providers
+        .values()
+        .map(|entry| entry.api_key_env.clone())
+        .collect();
+    Redactor::new(extra, std::env::vars(), &key_names)
 }
 
 /// The name of a skills mode as the policy file spells it.
@@ -142,6 +159,12 @@ pub struct Wiring {
     pub shell: ShellSettings,
     /// Path globs the file tools refuse, from the policy's `[files] deny`.
     denied_paths: Option<DeniedPaths>,
+    /// Redaction and untrusted-data delimiters, shared by every tool
+    /// context so the session and its subagents use one nonce.
+    pub guard: DataGuard,
+    /// What session folders keep: `full` unmanaged, the policy's
+    /// `[data] transcript` otherwise.
+    pub transcript: TranscriptMode,
     /// The session this wiring serves, once one exists.
     session: Option<SessionInfo>,
     /// Session-scoped tool approvals, shared by every registry and clone so
@@ -262,6 +285,9 @@ impl Wiring {
             config.network.allow_http_hosts.clone(),
         );
         let shell = ShellSettings::resolve(&config.shell, None);
+        let guard = DataGuard::new(Arc::new(
+            redactor(&config, &[]).context("building the redactor")?,
+        ));
         Ok(Self {
             cwd,
             home,
@@ -277,6 +303,8 @@ impl Wiring {
             mcp: Arc::new(McpTools::default()),
             shell,
             denied_paths: None,
+            guard,
+            transcript: TranscriptMode::Full,
             session: None,
             approvals,
             observer: Arc::new(Mutex::new(None)),
@@ -328,6 +356,18 @@ impl Wiring {
             .collect();
         let is_own = |path: &Path| own.iter().any(|dir| path.starts_with(dir));
         self.egress = Egress::from_policy(&p.network);
+        self.transcript = p.data.transcript;
+        let redactor = if p.data.redaction {
+            redactor(&self.config, &p.data.extra_patterns())
+                .context("the managed policy's [data] patterns")?
+        } else {
+            tracing::warn!("redaction is off: the managed policy sets [data] redaction = false");
+            eprintln!(
+                "note: secrets are not redacted: the managed policy's [data] redaction = false"
+            );
+            Redactor::disabled()
+        };
+        self.guard = DataGuard::new(Arc::new(redactor));
 
         if !p.features.hooks {
             let sources: BTreeSet<PathBuf> = self
@@ -645,7 +685,8 @@ impl Wiring {
         )))
     }
 
-    /// Wraps `SessionStart` hook output as a prompt section.
+    /// Wraps `SessionStart` hook output as a prompt section, redacted and
+    /// inside the session's untrusted-data delimiters.
     ///
     /// # Arguments
     ///
@@ -654,10 +695,10 @@ impl Wiring {
     /// # Returns
     ///
     /// The section, or `None` when they printed nothing.
-    pub fn session_start_instruction(context: Vec<String>) -> Option<Instruction> {
+    pub fn session_start_instruction(&self, context: Vec<String>) -> Option<Instruction> {
         (!context.is_empty()).then(|| Instruction {
             source: "SessionStart hooks".to_owned(),
-            text: context.join("\n"),
+            text: self.guard.guard("hook", &context.join("\n")).0,
         })
     }
 
@@ -1011,6 +1052,8 @@ impl Wiring {
                         .map(String::as_str),
                 ),
             },
+            guard: self.guard.clone(),
+            transcript: self.transcript,
             ..ToolContext::new(self.cwd.clone())
         }
     }

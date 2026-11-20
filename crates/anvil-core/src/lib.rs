@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod context;
 pub mod git;
+pub mod guard;
 pub mod net;
 pub mod outline;
 pub mod provider;

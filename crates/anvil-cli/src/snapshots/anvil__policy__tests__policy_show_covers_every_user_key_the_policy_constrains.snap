@@ -4,7 +4,10 @@ expression: text
 ---
 policy: managed ([dir]/policy.toml, sha256:33c3e571f4c732db2e3ef97aeb461906fdb5ba93358ba1adf457defb63d8a743)
 version = 1  (policy)
+[data] patterns = []  (default)
+[data] redaction = true  (default)
 [data] retention_days = (default: kept until deleted)  (default)
+[data] transcript = "off"  (default)
 [data] transcript_dir = (default: <project>/.anvil/sessions)  (default)
 [features] build = false  (default)
 [features] delegation = false  (default)

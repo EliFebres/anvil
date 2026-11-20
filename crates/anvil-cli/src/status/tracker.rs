@@ -424,7 +424,7 @@ mod tests {
         assert_eq!(tracker.snapshot().spend.cost_usd, Some(211.0));
         tracker.observe(&LoopEvent::Compacted {
             dropped_messages: 1,
-            summary_path: "s.md".into(),
+            summary_path: Some("s.md".into()),
             usage: Some(Usage {
                 input: 1_000_000,
                 output: 0,
@@ -439,7 +439,7 @@ mod tests {
         let mut tracker = Tracker::new(Prices::default());
         tracker.observe(&LoopEvent::Compacted {
             dropped_messages: 1,
-            summary_path: "s.md".into(),
+            summary_path: Some("s.md".into()),
             usage: Some(Usage {
                 input: 3,
                 output: 4,
