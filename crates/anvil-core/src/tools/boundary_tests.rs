@@ -361,10 +361,11 @@ async fn secret_paths_are_refused_inside_the_workspace_and_skipped_by_searches()
 #[tokio::test]
 async fn a_policy_deny_glob_extends_the_secret_list() {
     let project = tempfile::tempdir().expect("project");
-    std::fs::write(project.path().join("vault.kdbx"), "needle\n").expect("write");
+    // A file type the built-in list does not cover, so only the policy refuses it.
+    std::fs::write(project.path().join("customers.sqlite"), "needle\n").expect("write");
     let mut ctx = ToolContext::new(project.path());
-    ctx.workspace.denied = workspace::deny_globs(&["**/*.kdbx".to_owned()]).expect("compiles");
-    let run = unrestricted(&ctx, "read_file", json!({"path": "vault.kdbx"})).await;
+    ctx.workspace.denied = workspace::deny_globs(&["**/*.sqlite".to_owned()]).expect("compiles");
+    let run = unrestricted(&ctx, "read_file", json!({"path": "customers.sqlite"})).await;
     assert!(
         run.result.content.contains("[files] deny"),
         "{}",
@@ -372,7 +373,7 @@ async fn a_policy_deny_glob_extends_the_secret_list() {
     );
     let list = unrestricted(&ctx, "list_dir", json!({})).await;
     assert!(
-        !list.result.content.contains("vault.kdbx"),
+        !list.result.content.contains("customers.sqlite"),
         "{}",
         list.result.content
     );
