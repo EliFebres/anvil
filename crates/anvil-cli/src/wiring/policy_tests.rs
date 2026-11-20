@@ -713,6 +713,71 @@ fn memory_off_reads_nothing_under_the_memory_folder() {
     );
 }
 
+#[tokio::test]
+async fn memory_off_writes_nothing_under_the_memory_folder_and_loads_no_facts() {
+    let s = setup();
+    let memory = s.home.join(".anvil").join("memory");
+    write(
+        &memory.join("tooling.md"),
+        "- the build uses just
+",
+    );
+    let before = std::fs::read_dir(&memory).expect("list").count();
+    let managed = wiring(
+        &s,
+        "",
+        Some(load_policy(
+            &s.policy_dir,
+            "[shell]
+mode = \"ask\"
+",
+        )),
+    );
+    assert!(!managed.memory_allowed());
+
+    let registry = managed
+        .registry(Box::new(StaticPrompt(PromptAnswer::No)))
+        .expect("registry");
+    let config = managed
+        .loop_config("task".to_owned(), s.project.join("session"), &registry)
+        .expect("config");
+    assert!(
+        config
+            .sections
+            .iter()
+            .all(|section| !section.text.contains("just")),
+        "no remembered fact reaches the prompt"
+    );
+
+    let messages = [
+        anvil_core::provider::Message::user("task"),
+        anvil_core::provider::Message::Assistant {
+            text: "done; the build uses just".to_owned(),
+            reasoning: Vec::new(),
+            tool_calls: Vec::new(),
+        },
+    ];
+    crate::memory::finish_session(
+        &managed,
+        "t1",
+        &messages,
+        Box::new(|_: &anvil_memory::Proposal| anvil_memory::Decision::Keep),
+        &crate::console::Console::Stderr,
+        None,
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_dir(&memory).expect("list").count(),
+        before,
+        "nothing is written under ~/.anvil/memory"
+    );
+    assert_eq!(
+        std::fs::read_to_string(memory.join("tooling.md")).expect("read"),
+        "- the build uses just
+"
+    );
+}
+
 #[test]
 fn plan_approval_and_transcripts_follow_the_policy() {
     let s = setup();
