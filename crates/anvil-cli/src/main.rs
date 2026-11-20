@@ -311,6 +311,15 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             print!("{text}");
             Ok(code)
         }
+        Some(Command::Purge { older_than }) => {
+            let root = policy::sessions_root(cwd, env.policy.as_deref());
+            let removed = policy::prune_sessions(&root, older_than, std::time::SystemTime::now());
+            println!(
+                "purge: removed {removed} session folder(s) older than {older_than} day(s) from {}",
+                root.display()
+            );
+            Ok(0)
+        }
         Some(Command::Sessions) => {
             commands::sessions(&policy::sessions_root(cwd, env.policy.as_deref()))?;
             Ok(0)

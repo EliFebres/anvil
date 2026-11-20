@@ -602,3 +602,41 @@ fn plain_is_selected_without_a_tty() {
         );
     }
 }
+
+#[test]
+fn purge_removes_session_folders_older_than_the_given_days() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sessions = dir.path().join(".anvil").join("sessions");
+    let session = sessions.join("01JAAAAAAAAAAAAAAAAAAAAAAA");
+    std::fs::create_dir_all(&session).expect("mkdir");
+    std::fs::write(session.join("session.jsonl"), "{}\n").expect("write");
+    let other = sessions.join("not-a-session");
+    std::fs::create_dir_all(&other).expect("mkdir");
+
+    let kept = anvil(dir.path())
+        .args(["purge", "--older-than", "30"])
+        .output()
+        .expect("anvil runs");
+    assert!(
+        kept.status.success(),
+        "{}",
+        String::from_utf8_lossy(&kept.stderr)
+    );
+    assert!(session.is_dir(), "a fresh session is kept");
+
+    let out = anvil(dir.path())
+        .args(["purge", "--older-than", "0"])
+        .output()
+        .expect("anvil runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("removed 1 session folder(s)"));
+    assert!(!session.exists(), "an older session is removed");
+    assert!(
+        other.is_dir(),
+        "a folder that is not a session is left alone"
+    );
+}

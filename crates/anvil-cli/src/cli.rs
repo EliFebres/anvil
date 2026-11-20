@@ -73,6 +73,13 @@ pub enum Command {
     },
     /// List saved sessions, newest first.
     Sessions,
+    /// Delete this repository's session folders (transcripts, tool outputs,
+    /// plans and summaries) last changed more than the given number of days ago.
+    Purge {
+        /// Age in days; `0` deletes every session folder.
+        #[arg(long, value_name = "DAYS")]
+        older_than: u32,
+    },
     /// Show what this repository ships (hooks, MCP servers, skills, commands,
     /// agents, instruction files) and decide whether anvil may load it.
     Trust {
