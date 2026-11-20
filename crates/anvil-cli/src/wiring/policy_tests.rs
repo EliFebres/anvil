@@ -1032,6 +1032,76 @@ fn the_policys_container_executor_reaches_every_tool_context() {
     }
 }
 
+/// Lets a test keep a handle on the prompt a registry owns.
+struct SharedPrompt(Arc<anvil_core::tools::ScriptedPrompt>);
+
+impl PermissionPrompt for SharedPrompt {
+    fn ask(&self, request: &PermissionRequest) -> PromptAnswer {
+        self.0.ask(request)
+    }
+}
+
+/// The ticket "Permission friction on `edit_file`" reported five prompts
+/// for one rule after a "session" answer. Unmanaged, as a session wires it:
+/// the session's registry and a subagent's, sharing the wiring's approvals.
+#[tokio::test]
+async fn a_session_answer_holds_for_later_edits_in_the_same_session() {
+    let s = setup();
+    for i in 0..6 {
+        write(&s.project.join(format!("f{i}.txt")), "old\n");
+    }
+    let unmanaged = wiring(&s, "", None);
+    let prompt = Arc::new(anvil_core::tools::ScriptedPrompt::new(vec![
+        PromptAnswer::Session,
+    ]));
+    let registry = unmanaged
+        .registry(Box::new(SharedPrompt(Arc::clone(&prompt))))
+        .expect("registry");
+    let ctx = unmanaged.tool_context();
+    let edit = |id: &str, path: String| ToolCall {
+        id: id.to_owned(),
+        name: "edit_file".to_owned(),
+        arguments_json: serde_json::json!({"path": path, "old": "old", "new": "new"}).to_string(),
+    };
+    let absolute = s.project.join("f2.txt").display().to_string();
+    for (i, path) in [
+        "f0.txt".to_owned(),
+        "./f1.txt".to_owned(),
+        absolute,
+        "f3.txt".to_owned(),
+        "f4.txt".to_owned(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let run = registry
+            .execute(&edit(&format!("e{i}"), path.clone()), &ctx)
+            .await;
+        assert_eq!(
+            run.outcome,
+            ToolOutcome::Completed,
+            "{path}: {}",
+            run.result.content
+        );
+    }
+    let env: &dyn SubagentEnv = &unmanaged;
+    let subagent = env.registry(true).expect("subagent registry");
+    let run = subagent
+        .execute(&edit("e5", "f5.txt".to_owned()), &env.tool_context())
+        .await;
+    assert_eq!(
+        run.outcome,
+        ToolOutcome::Completed,
+        "{}",
+        run.result.content
+    );
+    assert_eq!(
+        prompt.requests().len(),
+        1,
+        "only the first edit of the session asks"
+    );
+}
+
 #[test]
 fn the_shell_tool_describes_the_shell_mode_in_force() {
     let s = setup();
