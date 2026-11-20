@@ -8,14 +8,17 @@
 //! Input and output go through a [`Frontend`]: the line renderer or the
 //! full-screen UI.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anvil_audit::{SessionMode, SessionOutcome};
 use anvil_core::agent::prompts::{self, PromptInputs};
 use anvil_core::agent::turn::complete_turn;
 use anvil_core::agent::{EventSink, LoopEvent, Role, State, file_change_events};
-use anvil_core::context::{Conversation, discover_instructions};
+use anvil_core::context::{
+    Conversation, SessionLog, SessionMeta, SessionRecord, discover_instructions,
+};
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
 use anvil_types::policy::TranscriptMode;
@@ -112,6 +115,7 @@ async fn chat_session(
             session_dir: Some(session_dir.clone()),
             ..wiring.tool_context()
         },
+        redactions: RedactionLog::new(&session_dir, &id, &wiring.cwd, wiring.transcript),
         session_dir,
         conversation: Conversation::new(),
         touched: BTreeSet::new(),
@@ -201,6 +205,8 @@ struct ChatSession<'a> {
     registry: ToolRegistry,
     ctx: ToolContext,
     session_dir: std::path::PathBuf,
+    /// Where redaction counts are recorded, as the loop records them.
+    redactions: RedactionLog,
     conversation: Conversation,
     touched: BTreeSet<std::path::PathBuf>,
     tokens_used: u64,
@@ -345,7 +351,11 @@ impl ChatSession<'_> {
         };
         self.console
             .warn(format!("a Stop hook asked for more work: {reason}"));
-        let Some(text) = self.turn(&reason).await else {
+        // The reason is hook output, so it reaches the model as data.
+        let redacted = self.ctx.guard.redact("hook", &reason);
+        self.redactions.note("hook", redacted.counts);
+        let wrapped = self.ctx.guard.wrap("hook", &redacted.text);
+        let Some(text) = self.turn(&wrapped).await else {
             return;
         };
         if let Some(reason) = hooks.stop(&text, true).await {
@@ -401,8 +411,9 @@ impl ChatSession<'_> {
     /// The model and tool loop of one turn.
     async fn run_turn(&mut self, line: &str) -> String {
         self.usage.prompt(line);
-        let line = self.ctx.guard.redact("user", line).text;
-        self.conversation.push(Message::user(line));
+        let redacted = self.ctx.guard.redact("user", line);
+        self.redactions.note("user", redacted.counts);
+        self.conversation.push(Message::user(redacted.text));
         let tools = self.tools();
         loop {
             let system = self.system_prompt(&tools);
@@ -468,6 +479,8 @@ impl ChatSession<'_> {
                 for event in file_change_events(call, &execution) {
                     self.events.emit(event);
                 }
+                self.redactions
+                    .note(&call.name, execution.redactions.clone());
                 results.push(execution.result);
             }
             self.conversation.push(Message::ToolResults { results });
@@ -572,5 +585,119 @@ impl ChatSession<'_> {
             tools,
             task: "Interactive chat: do what the user asks in each message.",
         })
+    }
+}
+
+/// A chat's `redacted` records, the same records the loop writes to its
+/// session log. Chat keeps no transcript, so the log holds the session's
+/// meta record and these only; it is opened on the first redaction, and
+/// never when the transcript mode is `off`.
+struct RedactionLog {
+    /// The session folder.
+    dir: PathBuf,
+    /// The meta record written first.
+    meta: SessionMeta,
+    /// The log, once opened.
+    log: Option<SessionLog>,
+}
+
+impl RedactionLog {
+    /// A log for the chat session `id` in `dir`.
+    fn new(dir: &Path, id: &str, cwd: &Path, mode: TranscriptMode) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            meta: SessionMeta {
+                id: id.to_owned(),
+                created_at: chrono::Utc::now(),
+                task: CHAT_TASK.to_owned(),
+                cwd: cwd.to_path_buf(),
+                transcript: mode,
+            },
+            log: None,
+        }
+    }
+
+    /// Records that `counts` secrets were redacted from `source`.
+    fn note(&mut self, source: &str, counts: BTreeMap<String, usize>) {
+        if counts.is_empty() || self.meta.transcript == TranscriptMode::Off {
+            return;
+        }
+        if self.log.is_none() {
+            match SessionLog::open_in_mode(&self.dir, self.meta.transcript) {
+                Ok(mut log) => {
+                    if let Err(error) = log.append(&SessionRecord::Meta(self.meta.clone())) {
+                        tracing::warn!(%error, "cannot append to the session log");
+                    }
+                    self.log = Some(log);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "cannot open the session log");
+                    return;
+                }
+            }
+        }
+        let record = SessionRecord::Redacted {
+            source: source.to_owned(),
+            counts,
+        };
+        if let Some(log) = &mut self.log
+            && let Err(error) = log.append(&record)
+        {
+            tracing::warn!(%error, "cannot append to the session log");
+        }
+    }
+}
+
+/// The task a chat session's log names; `anvil resume` refuses it.
+pub const CHAT_TASK: &str = "(chat: only redaction counts are kept)";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn counts() -> BTreeMap<String, usize> {
+        BTreeMap::from([("api_key".to_owned(), 2)])
+    }
+
+    #[test]
+    fn chat_records_redaction_counts_as_the_loop_does() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut log = RedactionLog::new(dir.path(), "01J", dir.path(), TranscriptMode::Metadata);
+        log.note("user", BTreeMap::new());
+        assert!(
+            !dir.path().join("session.jsonl").exists(),
+            "nothing to record yet"
+        );
+        log.note("user", counts());
+        log.note("read_file", counts());
+        let text = std::fs::read_to_string(dir.path().join("session.jsonl")).expect("log");
+        let records: Vec<SessionRecord> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("record"))
+            .collect();
+        assert!(
+            matches!(&records[0], SessionRecord::Meta(meta) if meta.task.starts_with("(not kept"))
+        );
+        assert_eq!(
+            records[1..],
+            [
+                SessionRecord::Redacted {
+                    source: "user".to_owned(),
+                    counts: counts()
+                },
+                SessionRecord::Redacted {
+                    source: "read_file".to_owned(),
+                    counts: counts()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chat_with_the_transcript_off_writes_no_session_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut log = RedactionLog::new(dir.path(), "01J", dir.path(), TranscriptMode::Off);
+        log.note("user", counts());
+        assert!(!dir.path().join("session.jsonl").exists());
     }
 }

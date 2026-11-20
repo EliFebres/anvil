@@ -22,8 +22,8 @@ use thiserror::Error;
 use anvil_types::policy::TranscriptMode;
 use sha2::{Digest, Sha256};
 
-use crate::agent::{Role, State, Status};
-use crate::provider::{Message, Usage};
+use crate::agent::{IncompleteReason, Role, State, Status};
+use crate::provider::{Message, ProviderError, Usage};
 
 /// Where sessions live, relative to the project root.
 pub const SESSIONS_DIR: &str = ".anvil/sessions";
@@ -321,9 +321,74 @@ impl SessionRecord {
                     messages: messages.iter().map(MessageDigest::of).collect(),
                 }
             }
+            Self::Finished { status } => Self::Finished {
+                status: status_without_text(status),
+            },
             other => other.clone(),
         }
     }
+}
+
+/// A final status with every free-text field replaced by its size, for a
+/// `metadata` transcript: a provider's error body or message, a transport
+/// detail and an unexpected-state detail can hold whatever the provider or
+/// the conversation said. Kinds, codes and counts stay.
+fn status_without_text(status: &Status) -> Status {
+    match status {
+        Status::ProviderError { error } => Status::ProviderError {
+            error: error_without_text(error),
+        },
+        Status::Incomplete {
+            reason: IncompleteReason::Unexpected { detail },
+        } => Status::Incomplete {
+            reason: IncompleteReason::Unexpected {
+                detail: not_kept(detail),
+            },
+        },
+        Status::Denied {
+            reason: IncompleteReason::Unexpected { detail },
+        } => Status::Denied {
+            reason: IncompleteReason::Unexpected {
+                detail: not_kept(detail),
+            },
+        },
+        other => other.clone(),
+    }
+}
+
+/// [`status_without_text`] for a provider error.
+fn error_without_text(error: &ProviderError) -> ProviderError {
+    match error {
+        ProviderError::Http { status, body } => ProviderError::Http {
+            status: *status,
+            body: not_kept(body),
+        },
+        ProviderError::Transport { detail } => ProviderError::Transport {
+            detail: not_kept(detail),
+        },
+        ProviderError::RetriesExhausted { attempts, last } => ProviderError::RetriesExhausted {
+            attempts: *attempts,
+            last: Box::new(error_without_text(last)),
+        },
+        ProviderError::Api { kind, message } => ProviderError::Api {
+            kind: kind.clone(),
+            message: not_kept(message),
+        },
+        ProviderError::Refused { detail } => ProviderError::Refused {
+            detail: not_kept(detail),
+        },
+        ProviderError::Malformed { detail } => ProviderError::Malformed {
+            detail: not_kept(detail),
+        },
+        ProviderError::MissingApiKey { .. }
+        | ProviderError::Timeout { .. }
+        | ProviderError::BudgetExceeded { .. } => error.clone(),
+    }
+}
+
+/// What replaces a free-text field a `metadata` transcript does not keep.
+fn not_kept(text: &str) -> String {
+    format!("(not kept: {} bytes)", text.len())
 }
 
 /// Appends records to a session log.
@@ -707,6 +772,62 @@ mod tests {
         // Reopening appends rather than truncating.
         let reopened = SessionLog::open(&dir).expect("reopen");
         assert!(!reopened.is_empty());
+    }
+
+    #[test]
+    fn a_metadata_transcript_keeps_the_final_status_by_kind_and_code_only() {
+        use crate::agent::IncompleteReason;
+        use crate::provider::ProviderError;
+        let body = "provider says: customer 4711 owes".to_owned();
+        let cases = [
+            (
+                Status::ProviderError {
+                    error: ProviderError::RetriesExhausted {
+                        attempts: 3,
+                        last: Box::new(ProviderError::Http {
+                            status: 503,
+                            body: body.clone(),
+                        }),
+                    },
+                },
+                "503",
+            ),
+            (
+                Status::ProviderError {
+                    error: ProviderError::Api {
+                        kind: "overloaded".to_owned(),
+                        message: body.clone(),
+                    },
+                },
+                "overloaded",
+            ),
+            (
+                Status::ProviderError {
+                    error: ProviderError::Transport {
+                        detail: body.clone(),
+                    },
+                },
+                "transport",
+            ),
+            (
+                Status::Incomplete {
+                    reason: IncompleteReason::Unexpected {
+                        detail: body.clone(),
+                    },
+                },
+                "unexpected",
+            ),
+        ];
+        for (status, kept_word) in cases {
+            let record = SessionRecord::Finished { status };
+            let metadata = serde_json::to_string(&record.kept_as(TranscriptMode::Metadata))
+                .expect("serializes");
+            assert!(!metadata.contains("customer"), "{metadata}");
+            assert!(metadata.contains(kept_word), "{metadata}");
+            let full =
+                serde_json::to_string(&record.kept_as(TranscriptMode::Full)).expect("serializes");
+            assert!(full.contains("customer"), "full keeps the text: {full}");
+        }
     }
 
     #[test]

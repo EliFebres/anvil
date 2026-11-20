@@ -141,9 +141,9 @@ const SECRET_FILES: &[&str] = &[
 ];
 
 /// Starts of file names that hold private keys or credentials: SSH keys
-/// (`id_rsa`, `id_ed25519` and their `.pub` and backup copies) and any
-/// `credentials*` file.
-const SECRET_PREFIXES: &[&str] = &["id_rsa", "id_ed25519", "credentials"];
+/// (`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, their `_sk` security-key
+/// forms and their `.pub` and backup copies) and any `credentials*` file.
+const SECRET_PREFIXES: &[&str] = &["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials"];
 
 /// Extensions of key and certificate stores.
 const SECRET_EXTENSIONS: &[&str] = &[".pem", ".key", ".pfx", ".p12"];
@@ -153,7 +153,7 @@ const ENV_EXAMPLE_SUFFIXES: &[&str] = &[".example", ".sample", ".template"];
 
 /// Whether `path` is, or lies inside, a place that holds secrets: a `.env`
 /// file, a key or certificate file (`*.pem`, `*.key`, `*.pfx`, `*.p12`,
-/// `id_rsa*`, `id_ed25519*`), a credentials file (`credentials*`,
+/// `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*`), a credentials file (`credentials*`,
 /// `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`), a repository's
 /// `.git/config`, an SSH, cloud or GPG folder, a browser profile, or a
 /// keychain.
@@ -404,6 +404,11 @@ mod tests {
             "keys/id_rsa",
             "keys/id_rsa.pub",
             "backup/id_ed25519.old",
+            "keys/id_ecdsa",
+            "keys/id_ecdsa.pub",
+            "keys/id_ecdsa_sk",
+            "keys/id_ed25519_sk.old",
+            "keys/id_dsa",
             "credentials",
             "config/credentials.json",
             "home/.npmrc",

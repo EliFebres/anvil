@@ -28,7 +28,8 @@ pub struct KeyShape {
 
 /// The built-in secret shapes, most specific first.
 ///
-/// Private key blocks are redacted but not scanned for: a repository may
+/// Private key blocks, and runs of three or more 60 to 76 character base64
+/// lines that look like the body of one, are redacted but not scanned for: a repository may
 /// commit test-only keys on purpose (this one does, for its TLS tests), and
 /// the file tools already refuse `*.key` and `*.pem` files.
 pub const KEY_SHAPES: &[KeyShape] = &[
@@ -36,6 +37,12 @@ pub const KEY_SHAPES: &[KeyShape] = &[
         kind: "private_key",
         label: "private key block",
         pattern: r"(?s)-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----.*?(-----END ([A-Z0-9]+ )*PRIVATE KEY-----|\z)",
+        scan: false,
+    },
+    KeyShape {
+        kind: "private_key_body",
+        label: "private key body",
+        pattern: r"(?mR)^(?:[A-Za-z0-9+/]{60,76}={0,2}\r?\n){2,}[A-Za-z0-9+/]{60,76}={0,2}(?:\r?\n[A-Za-z0-9+/]{1,75}={0,2})?$",
         scan: false,
     },
     KeyShape {
@@ -47,7 +54,7 @@ pub const KEY_SHAPES: &[KeyShape] = &[
     KeyShape {
         kind: "aws_access_key",
         label: "AWS access key",
-        pattern: r"\b(AKIA|ASIA)[0-9A-Z]{16}\b",
+        pattern: r"(AKIA|ASIA)[0-9A-Z]{16}",
         scan: true,
     },
     KeyShape {
@@ -270,6 +277,28 @@ impl Redactor {
         Ok(redactor)
     }
 
+    /// This redactor, also matching each environment value as it appears
+    /// inside a JSON string, for log lines the JSON sink writes.
+    ///
+    /// # Returns
+    ///
+    /// The redactor.
+    pub fn with_json_escaped_values(mut self) -> Self {
+        let escaped: Vec<(String, String)> = self
+            .values
+            .iter()
+            .filter_map(|(kind, value)| {
+                let quoted = serde_json::to_string(value).ok()?;
+                let inner = quoted.get(1..quoted.len().saturating_sub(1))?.to_owned();
+                (inner != *value).then(|| (kind.clone(), inner))
+            })
+            .collect();
+        self.values.extend(escaped);
+        self.values
+            .sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+        self
+    }
+
     /// Whether this redactor replaces anything.
     ///
     /// # Returns
@@ -292,6 +321,30 @@ impl Redactor {
     ///
     /// The redacted text and the count of each kind.
     pub fn redact(&self, text: &str) -> Redacted {
+        self.redact_with(text, false)
+    }
+
+    /// Replaces every secret in `text` and keeps its line count: a match
+    /// that spans lines becomes the marker followed by as many line breaks
+    /// as it held, so line numbers after it stay right.
+    ///
+    /// The file tools redact a whole file this way before they cut out
+    /// the lines they show, so a key block is redacted whichever of its
+    /// lines are shown.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - Any text.
+    ///
+    /// # Returns
+    ///
+    /// The redacted text and the count of each kind.
+    pub fn redact_lines(&self, text: &str) -> Redacted {
+        self.redact_with(text, true)
+    }
+
+    /// [`Redactor::redact`] and [`Redactor::redact_lines`] in one.
+    fn redact_with(&self, text: &str, keep_lines: bool) -> Redacted {
         let mut out = Redacted {
             text: text.to_owned(),
             counts: BTreeMap::new(),
@@ -299,17 +352,28 @@ impl Redactor {
         if !self.enabled {
             return out;
         }
+        let replacement = |kind: &str, found: &str| {
+            let mut marker = marker(kind);
+            if keep_lines {
+                marker.extend(std::iter::repeat_n('\n', found.matches('\n').count()));
+            }
+            marker
+        };
         for (kind, value) in &self.values {
             let found = out.text.matches(value.as_str()).count();
             if found > 0 {
-                out.text = out.text.replace(value.as_str(), &marker(kind));
+                out.text = out.text.replace(value.as_str(), &replacement(kind, value));
                 *out.counts.entry(kind.clone()).or_default() += found;
             }
         }
         for (kind, re) in &self.patterns {
             let found = re.find_iter(&out.text).count();
             if found > 0 {
-                out.text = re.replace_all(&out.text, marker(kind)).into_owned();
+                out.text = re
+                    .replace_all(&out.text, |caps: &regex::Captures<'_>| {
+                        replacement(kind, &caps[0])
+                    })
+                    .into_owned();
                 *out.counts.entry(kind.clone()).or_default() += found;
             }
         }
@@ -373,6 +437,12 @@ pub(crate) mod fakes {
             "{}{}.{}{}.{}",
             "eyJ", "hbGciOiJIUzI1NiJ9", "eyJ", "zdWIiOiIxIn0", "c2lnbmF0dXJl"
         )
+    }
+
+    /// The base64 body of a fake key: four full lines and a short one.
+    pub fn pem_body() -> String {
+        let full = "TUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lC";
+        format!("{full}\n{full}\n{full}\n{full}\nAQAB==")
     }
 
     /// A fake PEM private key block.
@@ -473,6 +543,40 @@ mod tests {
         assert_eq!(out.text, text);
         assert_eq!(out.total(), 0);
         assert!(!Redactor::disabled().is_enabled());
+    }
+
+    #[test]
+    fn a_private_key_body_without_its_header_is_redacted() {
+        let body = pem_body();
+        let out = Redactor::builtin().redact(&format!("x\n{body}\ny"));
+        assert_eq!(out.text, "x\n[REDACTED:private_key_body]\ny");
+        assert_eq!(out.counts.get("private_key_body"), Some(&1));
+        let crlf = body.replace('\n', "\r\n");
+        let out = Redactor::builtin().redact(&format!("x\r\n{crlf}\r\ny"));
+        assert_eq!(out.text, "x\r\n[REDACTED:private_key_body]\r\ny");
+    }
+
+    #[test]
+    fn two_long_base64_lines_are_not_a_key_body() {
+        let line = "QUJD".repeat(16);
+        let text = format!("{line}\n{line}\n");
+        assert_eq!(Redactor::builtin().redact(&text).text, text);
+    }
+
+    #[test]
+    fn redact_lines_keeps_the_line_count() {
+        let text = format!("a\n{}\nb\n{}\nc", pem(), pem_body());
+        let out = Redactor::builtin().redact_lines(&text);
+        assert_eq!(out.text.lines().count(), text.lines().count());
+        assert!(out.text.ends_with("\nc"), "{}", out.text);
+        assert!(!out.text.contains("MIIB"), "{}", out.text);
+        assert_eq!(out.total(), 2);
+    }
+
+    #[test]
+    fn an_aws_key_id_glued_to_a_word_is_redacted() {
+        let out = Redactor::builtin().redact(&format!("_x{}y", aws()));
+        assert_eq!(out.text, "_x[REDACTED:aws_access_key]y");
     }
 
     #[test]

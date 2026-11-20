@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -8,6 +10,9 @@ use super::{
 
 /// Lines returned when the model does not set a limit.
 pub const DEFAULT_LIMIT: usize = 2000;
+
+/// The name the model calls this tool by.
+const READ_FILE_TOOL: &str = "read_file";
 
 /// Most files one call may read.
 pub const MAX_FILES: usize = 20;
@@ -54,7 +59,7 @@ pub struct ReadFile;
 
 impl Tool for ReadFile {
     fn name(&self) -> &str {
-        "read_file"
+        READ_FILE_TOOL
     }
 
     fn description(&self) -> &str {
@@ -101,10 +106,13 @@ impl Tool for ReadFile {
                         offset: args.offset,
                         limit: args.limit,
                     };
-                    match read_range(&range, ctx, usize::MAX) {
+                    let mut counts = BTreeMap::new();
+                    let output = match read_range(&range, ctx, usize::MAX, &mut counts) {
                         Ok(text) => ToolOutput::ok(text),
                         Err(error) => ToolOutput::error(error),
-                    }
+                    };
+                    ctx.guard.record(READ_FILE_TOOL, &counts);
+                    output.with_redactions(counts)
                 }
                 (None, Some(files)) => read_many(&files, ctx),
                 (Some(_), Some(_)) => {
@@ -133,10 +141,11 @@ fn read_many(files: &[FileRange], ctx: &ToolContext) -> ToolOutput {
     let share = (DEFAULT_OUTPUT_CAP / files.len()).saturating_sub(HEADER_ALLOWANCE);
     let mut out = String::new();
     let mut failures = 0;
+    let mut counts = BTreeMap::new();
     for range in files {
         let shown = ctx.display_path(&ctx.resolve(&range.path));
         out.push_str(&format!("==> {shown} <==\n"));
-        match read_range(range, ctx, share) {
+        match read_range(range, ctx, share, &mut counts) {
             Ok(text) => out.push_str(&text),
             Err(error) => {
                 failures += 1;
@@ -147,21 +156,34 @@ fn read_many(files: &[FileRange], ctx: &ToolContext) -> ToolOutput {
             out.push('\n');
         }
     }
-    if failures == files.len() {
+    ctx.guard.record(READ_FILE_TOOL, &counts);
+    let output = if failures == files.len() {
         ToolOutput::error(out)
     } else {
         ToolOutput::ok(out)
-    }
+    };
+    output.with_redactions(counts)
 }
 
 /// Reads one range of one file, numbered, in at most `max_bytes`.
-fn read_range(range: &FileRange, ctx: &ToolContext, max_bytes: usize) -> Result<String, String> {
+///
+/// The whole file is redacted before the range is cut out, so a key block
+/// is redacted even when only its middle lines are asked for; what was
+/// replaced is added to `counts`.
+fn read_range(
+    range: &FileRange,
+    ctx: &ToolContext,
+    max_bytes: usize,
+    counts: &mut BTreeMap<String, usize>,
+) -> Result<String, String> {
     let path = ctx.checked_path(&range.path, false)?;
     let shown = ctx.display_path(&path);
     let bytes = std::fs::read(&path).map_err(|error| format!("cannot read {shown}: {error}"))?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{shown} is not valid UTF-8 text"))?;
+    let redacted = ctx.guard.redact_lines(&text);
+    crate::guard::add_counts(counts, redacted.counts);
     Ok(number_lines(
-        &text,
+        &redacted.text,
         range.offset.unwrap_or(1).max(1),
         range.limit.unwrap_or(DEFAULT_LIMIT),
         max_bytes,
@@ -199,7 +221,7 @@ fn number_lines(text: &str, offset: usize, limit: usize, max_bytes: usize) -> St
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
@@ -263,6 +285,46 @@ mod tests {
             .run(json!({"files": [{"path": "nope"}]}), &ctx)
             .await;
         assert!(all_missing.is_error);
+    }
+
+    /// A file holding a fake key block between two ordinary lines.
+    pub(crate) fn key_file() -> String {
+        let label = ["PRIVATE", "KEY"].join(" ");
+        let line = "TUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lC";
+        format!(
+            "first\n-----BEGIN {label}-----\n{line}\n{line}\n{line}\n{line}\nAQAB\n-----END {label}-----\nlast\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn a_key_block_is_redacted_whichever_lines_are_shown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("deploy_key.txt"), key_file()).expect("write");
+        let ctx = ToolContext::new(dir.path());
+        for args in [
+            json!({"path": "deploy_key.txt", "offset": 3, "limit": 1}),
+            json!({"path": "deploy_key.txt", "offset": 4}),
+            json!({"files": [{"path": "deploy_key.txt", "offset": 5, "limit": 2}]}),
+        ] {
+            let output = ReadFile.run(args.clone(), &ctx).await;
+            assert!(
+                !output.content.contains("TUlJ"),
+                "{args}: {}",
+                output.content
+            );
+            assert!(
+                !output.content.contains("AQAB"),
+                "{args}: {}",
+                output.content
+            );
+            assert_eq!(output.redactions.get("private_key"), Some(&1), "{args}");
+        }
+        let whole = ReadFile
+            .run(json!({"path": "deploy_key.txt"}), &ctx)
+            .await
+            .content;
+        assert!(whole.contains("     1\tfirst\n     2\t[REDACTED:private_key]\n"));
+        assert!(whole.contains("     9\tlast\n"), "{whole}");
     }
 
     #[tokio::test]

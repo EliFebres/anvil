@@ -95,6 +95,9 @@ pub struct ToolOutput {
     pub exit_code: Option<i32>,
     /// Files the tool wrote, for `write_file` and `edit_file`.
     pub changes: Vec<FileChange>,
+    /// Secrets the tool redacted itself, by kind, before it chose what to
+    /// show; `read_file` and `grep` redact whole files this way.
+    pub redactions: BTreeMap<String, usize>,
 }
 
 /// One file a tool wrote, by SHA-256 before and after. A command run by
@@ -127,7 +130,22 @@ impl ToolOutput {
             model_turns: Vec::new(),
             exit_code: None,
             changes: Vec::new(),
+            redactions: BTreeMap::new(),
         }
+    }
+
+    /// The output with the counts of what the tool redacted itself.
+    ///
+    /// # Arguments
+    ///
+    /// * `redactions` - Kinds and counts.
+    ///
+    /// # Returns
+    ///
+    /// The output.
+    pub fn with_redactions(mut self, redactions: BTreeMap<String, usize>) -> Self {
+        self.redactions = redactions;
+        self
     }
 
     /// The output with one written file added.
@@ -160,6 +178,7 @@ impl ToolOutput {
             model_turns: Vec::new(),
             exit_code: None,
             changes: Vec::new(),
+            redactions: BTreeMap::new(),
         }
     }
 }
@@ -921,6 +940,7 @@ impl ToolRegistry {
             ctx
         };
         let mut output = tool.run(args.clone(), ctx).await;
+        let redacted_by_tool = std::mem::take(&mut output.redactions);
         let redacted = ctx.guard.redact(&call.name, &output.content);
         output.content = redacted.text;
         let outcome = if output.is_error {
@@ -962,6 +982,7 @@ impl ToolRegistry {
             }
         };
         execution.redactions = redacted.counts;
+        guard::add_counts(&mut execution.redactions, redacted_by_tool);
         // A PostToolUse hook sees the redacted output as the tool produced
         // it, without the delimiters, so existing hook scripts keep working.
         let note = match &self.hook {

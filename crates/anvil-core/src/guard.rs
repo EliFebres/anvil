@@ -122,19 +122,44 @@ impl DataGuard {
     /// The redacted text and what was replaced.
     pub fn redact(&self, source: &str, text: &str) -> Redacted {
         let out = self.redactor.redact(text);
-        self.replaced.fetch_add(
-            u64::try_from(out.total()).unwrap_or(u64::MAX),
-            Ordering::Relaxed,
-        );
-        if out.total() > 0 {
+        self.record(source, &out.counts);
+        out
+    }
+
+    /// Replaces secrets in a whole file's text, keeping its line count,
+    /// without counting them yet; see [`Redactor::redact_lines`]. The tool
+    /// passes what it shows to [`DataGuard::record`].
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The file's text.
+    ///
+    /// # Returns
+    ///
+    /// The redacted text and what was replaced.
+    pub fn redact_lines(&self, text: &str) -> Redacted {
+        self.redactor.redact_lines(text)
+    }
+
+    /// Counts and logs replacements a tool made through
+    /// [`DataGuard::redact_lines`].
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - What the text came from, for the log line.
+    /// * `counts` - Kinds and counts.
+    pub fn record(&self, source: &str, counts: &BTreeMap<String, usize>) {
+        let total: usize = counts.values().sum();
+        self.replaced
+            .fetch_add(u64::try_from(total).unwrap_or(u64::MAX), Ordering::Relaxed);
+        if total > 0 {
             tracing::info!(
                 source,
-                count = out.total(),
-                kinds = ?out.counts.keys().collect::<Vec<_>>(),
+                count = total,
+                kinds = ?counts.keys().collect::<Vec<_>>(),
                 "redacted secrets"
             );
         }
-        out
     }
 
     /// Replaces secrets in `text` without counting or logging them, for a

@@ -13,6 +13,7 @@ use super::glob::{relative_slashes, walk};
 use super::{
     Access, DEFAULT_OUTPUT_CAP, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for,
 };
+use crate::guard::{self, DataGuard};
 use crate::outline;
 
 /// Most matching lines returned before the search stops.
@@ -104,6 +105,7 @@ impl Tool for Grep {
                 .binary_detection(BinaryDetection::quit(b'\x00'))
                 .build();
             let mut hits = Vec::new();
+            let mut found = Found::default();
             let mut cut = false;
             let files: Vec<PathBuf> = if root.is_file() {
                 vec![root.clone()]
@@ -120,15 +122,25 @@ impl Tool for Grep {
             };
             for file in files {
                 let shown = ctx.display_path(&file);
-                if search_file(&mut searcher, &matcher, file, shown, &mut hits) {
+                if search_file(
+                    &mut searcher,
+                    &matcher,
+                    &ctx.guard,
+                    file,
+                    shown,
+                    &mut hits,
+                    &mut found,
+                ) {
                     cut = true;
                     break;
                 }
             }
+            ctx.guard.record("grep", &found.redactions);
             if hits.is_empty() {
-                return ToolOutput::ok(format!("no matches for `{}`", args.pattern));
+                return ToolOutput::ok(format!("no matches for `{}`", args.pattern))
+                    .with_redactions(found.redactions);
             }
-            let mut text = with_context(&hits)
+            let mut text = with_context(&hits, &found.texts)
                 .filter(|text| text.len() <= DEFAULT_OUTPUT_CAP)
                 .unwrap_or_else(|| bare(&hits));
             if cut {
@@ -136,19 +148,42 @@ impl Tool for Grep {
                     "\n[stopped after {MAX_MATCHES} matches; narrow the pattern or path]"
                 ));
             }
-            ToolOutput::ok(text)
+            ToolOutput::ok(text).with_redactions(found.redactions)
         })
     }
 }
 
+/// The redacted text of every file with a match, and what was redacted
+/// from those files.
+#[derive(Default)]
+struct Found {
+    /// Each matching file's text after redaction, for the context lines.
+    texts: BTreeMap<PathBuf, String>,
+    /// Secrets redacted from the matching files, by kind.
+    redactions: BTreeMap<String, usize>,
+}
+
 /// Collects each match in `file`; returns whether the cap was hit.
+///
+/// The whole file is redacted first and the pattern runs over the result,
+/// so a secret can neither match nor appear as a context line.
 fn search_file(
     searcher: &mut Searcher,
     matcher: &RegexMatcher,
+    data_guard: &DataGuard,
     file: PathBuf,
     shown: String,
     hits: &mut Vec<Hit>,
+    files: &mut Found,
 ) -> bool {
+    let bytes = match std::fs::read(&file) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::debug!(path = %file.display(), %error, "skipping unreadable file");
+            return false;
+        }
+    };
+    let redacted = data_guard.redact_lines(&String::from_utf8_lossy(&bytes));
     let mut hit_cap = false;
     let mut found = Vec::new();
     let sink = UTF8(|number, line| {
@@ -156,8 +191,12 @@ fn search_file(
         hit_cap = hits.len() + found.len() >= MAX_MATCHES;
         Ok(!hit_cap)
     });
-    if let Err(error) = searcher.search_path(matcher, &file, sink) {
+    if let Err(error) = searcher.search_slice(matcher, redacted.text.as_bytes(), sink) {
         tracing::debug!(path = %file.display(), %error, "skipping unreadable file");
+    }
+    if !found.is_empty() {
+        guard::add_counts(&mut files.redactions, redacted.counts);
+        files.texts.insert(file.clone(), redacted.text);
     }
     hits.extend(found.into_iter().map(|(line, text)| Hit {
         file: file.clone(),
@@ -178,8 +217,8 @@ fn bare(hits: &[Hit]) -> String {
 
 /// Every match with [`CONTEXT_LINES`] around it, nearby matches merged into
 /// one group, each group headed by its enclosing item; `None` above
-/// [`CONTEXT_MATCHES`] matches.
-fn with_context(hits: &[Hit]) -> Option<String> {
+/// [`CONTEXT_MATCHES`] matches. `texts` holds each file's redacted text.
+fn with_context(hits: &[Hit], texts: &BTreeMap<PathBuf, String>) -> Option<String> {
     if hits.len() > CONTEXT_MATCHES {
         return None;
     }
@@ -197,13 +236,13 @@ fn with_context(hits: &[Hit]) -> Option<String> {
     }
     for file in order {
         let file_hits = &by_file[file];
-        let Ok(text) = std::fs::read_to_string(file) else {
+        let Some(text) = texts.get(file) else {
             groups.extend(file_hits.iter().map(|hit| bare(std::slice::from_ref(*hit))));
             continue;
         };
         let lines: Vec<&str> = text.lines().collect();
         let items = if outline::is_source(file) {
-            outline::outline_source(file, &text, usize::MAX)
+            outline::outline_source(file, text, usize::MAX)
         } else {
             Vec::new()
         };
@@ -299,6 +338,27 @@ mod tests {
     #[test]
     fn schema_snapshot() {
         insta::assert_json_snapshot!(Grep.schema());
+    }
+
+    #[tokio::test]
+    async fn a_key_body_line_never_matches_and_is_never_shown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut text = String::from("header\n");
+        text.push_str(&"\n".repeat(20));
+        text.push_str(&crate::tools::read_file::tests::key_file());
+        std::fs::write(dir.path().join("notes.txt"), &text).expect("write");
+        let ctx = ToolContext::new(dir.path());
+        let body = Grep.run(json!({"pattern": "TUlJ"}), &ctx).await;
+        assert!(body.content.starts_with("no matches"), "{}", body.content);
+        let near = Grep.run(json!({"pattern": "last"}), &ctx).await;
+        assert!(!near.content.contains("TUlJ"), "{}", near.content);
+        assert!(!near.content.contains("AQAB"), "{}", near.content);
+        assert!(
+            near.content.contains("notes.txt:30:last"),
+            "{}",
+            near.content
+        );
+        assert_eq!(near.redactions.get("private_key"), Some(&1));
     }
 
     #[tokio::test]

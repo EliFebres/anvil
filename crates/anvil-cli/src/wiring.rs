@@ -342,9 +342,9 @@ impl Wiring {
             config.network.allow_http_hosts.clone(),
         );
         let shell = ShellSettings::resolve(&config.shell, None);
-        let guard = DataGuard::new(Arc::new(
-            redactor(&config, &[]).context("building the redactor")?,
-        ));
+        let session_redactor = redactor(&config, &[]).context("building the redactor")?;
+        crate::logging::use_redactor(&session_redactor);
+        let guard = DataGuard::new(Arc::new(session_redactor));
         Ok(Self {
             cwd,
             home,
@@ -427,6 +427,7 @@ impl Wiring {
             );
             Redactor::disabled()
         };
+        crate::logging::use_redactor(&redactor);
         self.guard = DataGuard::new(Arc::new(redactor));
 
         if !p.features.hooks {

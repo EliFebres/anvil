@@ -708,6 +708,7 @@ impl CommandRun {
             model_turns: Vec::new(),
             exit_code: self.exit_code,
             changes: Vec::new(),
+            redactions: std::collections::BTreeMap::new(),
         }
     }
 }

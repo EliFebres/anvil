@@ -421,6 +421,11 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
     }
     let snapshot =
         context::load_session(&wiring.sessions_root(), id).context("loading the session")?;
+    if snapshot.messages.is_empty() {
+        anyhow::bail!(
+            "session {id} kept no conversation to resume (a chat keeps only redaction counts); start a new session instead"
+        );
+    }
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
     let wiring = wiring.with_session(id, &snapshot.dir);
     let status = StatusReporter::start(Setup::from_wiring(
