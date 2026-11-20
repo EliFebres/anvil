@@ -56,7 +56,7 @@ Choices made while hardening anvil for regulated, restricted-network environment
 - **One SBOM for the anvil binary, all targets.** `cargo cyclonedx --target all` lists the dependencies of every platform in one CycloneDX 1.5 file, which is simpler for a reviewer than one file per target and never omits a platform-specific crate.
 - **No build cache in the release workflow.** `Swatinem/rust-cache` was removed from `release.yml` so a release is built from a clean state; CI keeps the cache.
 - **Release notes come from `CHANGELOG.md`.** The release job fails when the tagged version has no section, so a tag cannot publish without a changelog entry.
-- **`aarch64-apple-darwin` added, `x86_64-apple-darwin` not.** The `macos-14` runner is Apple silicon and builds natively; an Intel build would need cross-compilation or a deprecated runner.
+- **`aarch64-apple-darwin` added, `x86_64-apple-darwin` not.** The `macos-15` runner is Apple silicon and builds natively; an Intel build would need cross-compilation or a deprecated runner. The release first named `macos-14`, which GitHub retired on 2026-11-02, so the first `v0.2.0` run got no runner for this build; `macos-15` is named instead of `macos-latest` so the build image changes only by an edit here.
 
 ## Phase 2: project trust
 
