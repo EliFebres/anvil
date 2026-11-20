@@ -11,7 +11,6 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 
 - **`[network]` TLS client settings and proxy mode**: a CA bundle, a client certificate and key for mutual TLS, and `proxy = "none" | "system" | <url>`. Today anvil uses the system's trust store and reqwest's environment proxy handling.
 - **HTTP MCP servers behind `[network] allowed_hosts`.** Only stdio MCP servers exist today.
-- **`[shell]`**: mode (`off`, `allowlist`, `ask`), the allowlist and the executor (`host` or `container`).
 - **`[data]` redaction and transcript modes** (`full`, `metadata`, `off`).
 - **`[audit]`**: a required audit sink, a mirror directory, and full or digested arguments.
 
@@ -36,7 +35,8 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 
 ## Trust
 
-- **Refusing shell writes to the files that grant power.** File tools never write `.anvil/permissions.toml`, `.mcp.json` or the settings files, but an approved shell command can; the trust digest catches the change before it takes effect, and the shell modes of a later phase would make the write itself impossible outside the container executor.
+- **Refusing shell writes to the files that grant power.** File tools never write `.anvil/permissions.toml`, `.mcp.json` or the settings files, but an approved shell command can, on the host or in the container executor, whose workspace mount is writable; the trust digest catches the change before it takes effect. A read-only mount of those files inside the container would close this for the container executor.
+- **Hooks and MCP servers in the container executor.** Only the `shell` tool, checks and acceptance commands run in the container; hooks and stdio MCP servers still start on the host.
 
 ## The model host
 

@@ -7,7 +7,7 @@ One page. For each threat: what stops it today, what does not, and what is on th
 A cloned repository tries to make anvil act against the developer: send the API key to its own server, run commands without asking, plant instructions, or read the developer's secrets.
 
 **Stopped today**
-- The repository's `.anvil/config.toml` can only add `deny`, `ask` and `shell_programs`. Providers, `base_url`, roles, tool and network settings, `allow` rules, defaults and pre-approved tools are errors that stop anvil and name the key. `.anvil/permissions.toml` may also hold `allow` rules, which apply only once the developer trusts the repository.
+- The repository's `.anvil/config.toml` can only add `deny`, `ask` and `shell_programs`. Providers, `base_url`, roles, tool, network and shell settings, `allow` rules, defaults and pre-approved tools are errors that stop anvil and name the key. `.anvil/permissions.toml` may also hold `allow` rules, which apply only once the developer trusts the repository.
 - Trust is pinned to a SHA-256 digest of everything the repository ships that loosens anvil or steers the model; any change asks again.
 - anvil's file tools never write `.anvil/config.toml`, `.anvil/permissions.toml`, the hook settings files, `.mcp.json` or anything in `~/.anvil`, so the model cannot raise its own permissions through them.
 - The repository's `.anvil/.env` is never loaded, so it cannot set keys, `ANVIL_HOME` or proxies.
@@ -18,7 +18,7 @@ A cloned repository tries to make anvil act against the developer: send the API 
 - Tests build a hostile repository that tries each of these and assert it is refused.
 
 **Not stopped**
-- Text in ordinary source files can still try to persuade the model (prompt injection). The model's tool calls still go through the permission rules, the workspace jail and `shell_programs`, but an approved command does what it says.
+- Text in ordinary source files can still try to persuade the model (prompt injection). The model's tool calls still go through the permission rules, the workspace boundary, the deny categories and the shell mode, but an approved command does what it says.
 - After trust is given, a repository can change its hooks or instructions and the new versions load.
 
 **Roadmap:** pin instruction files and hooks by content, with re-approval on change.
@@ -30,13 +30,13 @@ Source code, secrets or customer data reach a server the firm did not approve.
 **Stopped today**
 - Requests go only to configured endpoints, over https unless a host is named, without following redirects; under a policy only to the `host:port` pairs in `[network] allowed_hosts`. Only one module can build an HTTP client, enforced by a lint and a test.
 - No telemetry upload, update check or analytics exists. Webhooks, remote MCP servers and skill downloads were removed.
-- File tools cannot read outside the workspace or open `.env` files, SSH, cloud and GPG credentials, browser profiles or keychains.
+- File tools cannot read outside the workspace or open `.env` files, key and certificate files, credentials files, `.git/config`, SSH, cloud and GPG credentials, browser profiles or keychains.
 - Programs anvil starts do not inherit API keys or tokens.
 - The API key is redacted from error bodies and never logged.
 
 **Not stopped**
 - Everything a session reads is sent to the model endpoint by design. Choose the endpoint and its host accordingly.
-- An approved shell command can reach the network directly.
+- An approved shell command on the host can reach the network directly when it gets past the deny categories, which match text only. `allowlist` mode or the container executor (`--network none`) closes this.
 - Secrets inside ordinary files are sent and stored in transcripts like any other text.
 
 **Roadmap:** secret redaction in prompts and transcripts; operating-system sandboxing of shell commands with network control; an append-only, hash-chained audit log with export.
@@ -62,8 +62,8 @@ The model misunderstands the task, deletes or breaks files, runs a harmful comma
 
 **Stopped today**
 - Writes and shell commands ask first unless the developer's own rules allow them; a policy can force a strict profile and require a person to approve plans (in `anvil build`, only the top-level plan).
-- `shell_programs` limits commands to single listed programs without chaining, redirection or substitution; no answer or `--yes` lifts it.
-- File tools cannot write outside the workspace, and never write inside `.git`, so a session cannot plant a git hook or change the repository's git config. A write to a settings file that defines anvil or Claude Code hooks always needs a person's answer, even under `--yes`.
+- `[shell] mode = "allowlist"` (and `shell_programs`) limits commands to listed programs started without a shell, refusing chaining, redirection and substitution; `"off"` removes the tool; no answer or `--yes` lifts either.
+- File tools cannot write outside the workspace, and never write inside `.git`, so a session cannot plant a git hook or change the repository's git config. A tool write to a file that grants power (a settings file that defines hooks or MCP servers, `.mcp.json`, the repository's permission rules) is refused, even under `--yes`.
 - The loop plans before it builds, runs the project's checks, and has the change reviewed before it finishes. Every change is an ordinary diff in the working tree.
 
 **Not stopped**

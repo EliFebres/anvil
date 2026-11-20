@@ -54,7 +54,7 @@ The policy is a plain file, so roll it out with the configuration management the
 
 ## Keys
 
-Two policies ship as starting points: `policies/restricted.toml` (one model server, no extensions, no trust in repositories, every write and command asks) and `policies/standard.toml`. Every key except `version` and `[network] allowed_hosts` is optional; the default of each is the restrictive choice.
+Two policies ship as starting points: `policies/restricted.toml` (one model server, no extensions, no trust in repositories, every write and command asks, commands limited to an allowlist and started without a shell) and `policies/standard.toml` (the shell in `ask` mode). Every key except `version` and `[network] allowed_hosts` is optional; the default of each is the restrictive choice.
 
 | key | default | meaning |
 |---|---|---|
@@ -78,13 +78,29 @@ Two policies ship as starting points: `policies/restricted.toml` (one model serv
 | `[features] memory` | `false` | Whether remembered facts are read and the end-of-session summarizer proposes new ones. When off, nothing under `~/.anvil/memory` is read or written. |
 | `[features] build` | `false` | Whether `anvil build` may run. |
 | `[features] delegation` | `false` | Whether the `delegate` tool (subagents) is available. |
+| `[shell] mode` | `"off"` | `"off"` (no `shell` tool; `anvil build` refuses to start), `"allowlist"` or `"ask"`. A user mode that is looser is an error; a stricter one applies. |
+| `[shell] allow` | none | With `"allowlist"`: argument-prefix patterns such as `"cargo test *"` (`*` only as the last word). A command must be one program with plain arguments, matching a pattern here and in the user's own `[shell] allow` and `shell_programs` if they set them. A pattern that names a deny-category command (`"git push origin *"`) allows it. |
+| `[shell] executor` | `"host"` | `"host"` or `"container"`. The user cannot choose another. |
+| `[shell.container] runtime` | `"docker"` | `"docker"` or `"podman"`, found on the `PATH` anvil passes to programs. |
+| `[shell.container] image` | required with `"container"` | The image commands run in; pin it by digest. |
+| `[shell.container] user` | `"65534:65534"` | The user inside the container, never root. Commands can write the workspace only if this user may write its files on the host. |
+| `[shell.container] memory`, `pids_limit` | `"2g"`, `256` | The container's memory and process limits. |
 | `[projects] allow_trust` | `false` | Whether a repository can be trusted, so its hooks, MCP servers, skills, commands, agents, instruction files and `.anvil/permissions.toml` `allow` rules take effect. Its `deny` and `ask` rules apply either way. |
 | `[data] transcript_dir` | the repository's `.anvil/sessions` | Where session folders go, one subfolder per repository. |
 | `[data] retention_days` | kept | Session folders older than this are deleted when a session starts. |
 | `[limits] session_tokens` | none | The most tokens one session may use; a larger user value is an error, and the default is capped. |
 | `[limits] build_tokens`, `build_usd` | none | The most an `anvil build` may spend; a larger flag is an error, and without a flag the ceiling is the cap. |
 
+A user `[tools] check` command is an error when `[shell] mode = "off"`, or when the mode is `"allowlist"` and no pattern allows it.
+
 Hooks, MCP servers and skills the policy forbids are errors when the user's own files define them, under `~/.anvil` or `~/.claude` (Claude Code's folder) alike, so a developer who uses Claude Code hooks or skills must remove them before anvil starts, or you allow them. The same items shipped by a trusted repository are left out with a note naming the key.
+
+### Choosing a shell mode
+
+- `"off"` suits review-only or documentation work: the model reads and edits files and runs nothing.
+- `"allowlist"` is a boundary on the workstation: no shell interprets the command, so chaining, redirection and substitution cannot happen, and only the listed commands start. An allowed program can still run code it is given (`cargo test` runs tests and build scripts), so keep the list to what the work needs.
+- `"ask"` runs commands in the user's shell after a person (or `--yes`) approves them. The built-in deny categories (network clients such as `curl`, `wget`, `Invoke-WebRequest` and `ssh`; `git push`, `git clone`, `git remote add` and `set-url`; `pip`, `npm`, `cargo` and `gem` installs; `sudo`, `runas`, `doas`; `rm -rf` and three other destructive patterns) apply in every mode, but they match command text, and a shell can hide a command from a text match. Treat them as a guard rail, not a security boundary.
+- `executor = "container"` is the other boundary: each command runs through docker or podman with `--network none`, the workspace as the only host folder, a read-only root file system with an in-memory `/tmp`, a non-root user, `--cap-drop ALL`, `--security-opt no-new-privileges` and the process and memory limits. It combines with either mode. Provide an image with the project's toolchain, and make sure the container user can write the workspace (for example, the developers' shared group id) if commands need to.
 
 ## Inspecting a machine
 

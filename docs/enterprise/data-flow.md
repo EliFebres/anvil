@@ -40,5 +40,5 @@ anvil has no telemetry upload, update check, analytics, web search or web fetch.
 ## What anvil does not control
 
 - **The model host** receives everything listed above. How long it keeps prompts, who can read them, and how the server is secured are the host's responsibility.
-- **Approved shell commands** run with the developer's rights. A command such as `curl` or a build script that downloads dependencies can reach the network directly. Limit `shell` with `shell_programs` (the strict profile does), and add an operating-system sandbox or network control around anvil where that matters.
+- **Approved shell commands** run with the developer's rights in `ask` mode on the host. `curl`, `wget`, `ssh`, `git push` and package installs are refused by the built-in deny categories, but a build script that downloads dependencies, or a command hidden from that text match, can still reach the network. `[shell] mode = "allowlist"` starts only listed programs without a shell, and `executor = "container"` runs commands with no network at all; otherwise add an operating-system sandbox or network control around anvil where that matters.
 - **Transcripts** contain everything the session read, in plain files. Place them with `transcript_dir`, keep them only as long as needed with `retention_days`, and protect the folder like source code.
