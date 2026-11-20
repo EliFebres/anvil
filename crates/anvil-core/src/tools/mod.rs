@@ -277,7 +277,9 @@ impl ToolContext {
     /// for a read, a read-only folder; it must not hold secrets (see
     /// [`workspace::holds_secrets`]); and a write must not land in a git
     /// directory (see [`workspace::inside_git_dir`]), in a file that grants
-    /// power (see [`workspace::grants_power`]) or in a protected folder.
+    /// power (see [`workspace::grants_power`]) or in a protected folder, and
+    /// its spelling must be one Windows does not fold (see
+    /// [`workspace::win32_fold`]), so the path checked is the path written.
     ///
     /// # Arguments
     ///
@@ -292,6 +294,14 @@ impl ToolContext {
     ///
     /// A message for the model saying why the path is refused.
     pub fn checked_path(&self, path: &str, write: bool) -> Result<PathBuf, String> {
+        // Windows strips trailing dots and spaces and reads `:` as a data
+        // stream, so a name that folds differently could reach a file the
+        // checks below never saw.
+        if write && workspace::win32_fold(Path::new(path)).as_deref() != Some(Path::new(path)) {
+            return Err(format!(
+                "`{path}` has a name that ends in a dot or a space or names a data stream (`:`); Windows would open a different file, so anvil's file tools never write it"
+            ));
+        }
         let root = workspace::canonical(&self.cwd);
         let resolved = permissions::resolve_path(&root, path).ok_or_else(|| {
             format!("`{path}` cannot be resolved safely (a dangling or looping link)")
@@ -2104,6 +2114,57 @@ mod tests {
             let runs = write_and_edit(&registry, &ctx, path).await;
             assert_eq!(runs[0].outcome, ToolOutcome::Completed, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn names_windows_folds_onto_a_file_that_grants_power_are_refused() {
+        let project = tempfile::tempdir().expect("project");
+        std::fs::create_dir_all(project.path().join(".anvil")).expect("mkdir");
+        std::fs::create_dir_all(project.path().join(".claude")).expect("mkdir");
+        let ctx = ToolContext::new(project.path());
+        let registry = everything_allowed();
+        for path in [
+            ".anvil/config.toml.",
+            ".anvil/permissions.toml ",
+            ".claude/settings.json::$DATA",
+            ".mcp.json.",
+            ".anvil./config.toml",
+            "notes.md.",
+        ] {
+            for run in write_and_edit(&registry, &ctx, path).await {
+                assert!(run.result.is_error, "{path}: {}", run.result.content);
+                assert!(
+                    run.result
+                        .content
+                        .contains("Windows would open a different file"),
+                    "{path}: {}",
+                    run.result.content
+                );
+            }
+        }
+        for written in [
+            ".anvil/config.toml",
+            ".anvil/permissions.toml",
+            ".claude/settings.json",
+            ".mcp.json",
+            "notes.md",
+        ] {
+            assert!(
+                !project.path().join(written).exists(),
+                "{written} was written"
+            );
+        }
+        let names: Vec<String> = std::fs::read_dir(project.path().join(".anvil"))
+            .expect("list")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(names.is_empty(), "{names:?}");
     }
 
     #[cfg(unix)]

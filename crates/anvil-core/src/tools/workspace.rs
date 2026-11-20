@@ -219,6 +219,37 @@ pub fn grants_power(path: &Path) -> bool {
         || (folder == ".claude" && settings)
 }
 
+/// The path Windows opens for `path`: trailing dots and spaces stripped
+/// from every component, as the Win32 layer does before it reaches the
+/// file system. The same folding runs on every system so the check is
+/// testable everywhere.
+///
+/// # Arguments
+///
+/// * `path` - The path as the model wrote it.
+///
+/// # Returns
+///
+/// The folded path, or `None` when a component contains `:` (an
+/// alternate data stream such as `::$DATA`) or folds to nothing.
+pub fn win32_fold(path: &Path) -> Option<PathBuf> {
+    let mut folded = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                let name = name.to_string_lossy();
+                let trimmed = name.trim_end_matches(['.', ' ']);
+                if trimmed.is_empty() || name.contains(':') {
+                    return None;
+                }
+                folded.push(trimmed);
+            }
+            other => folded.push(other),
+        }
+    }
+    Some(folded)
+}
+
 /// Whether a lower-cased file name is `.env` or a `.env.*` that is not an example.
 fn is_env_file(name: &str) -> bool {
     name == ".env"
@@ -332,6 +363,33 @@ mod tests {
         ] {
             assert!(!grants_power(Path::new(path)), "{path}");
         }
+    }
+
+    #[test]
+    fn win32_fold_strips_trailing_dots_and_spaces_and_refuses_streams() {
+        let fold = |text: &str| win32_fold(Path::new(text));
+        assert_eq!(
+            fold(".anvil/config.toml."),
+            Some(PathBuf::from(".anvil/config.toml"))
+        );
+        assert_eq!(
+            fold(".anvil/permissions.toml "),
+            Some(PathBuf::from(".anvil/permissions.toml"))
+        );
+        assert_eq!(
+            fold(".anvil./config.toml"),
+            Some(PathBuf::from(".anvil/config.toml"))
+        );
+        assert_eq!(fold(".mcp.json. . "), Some(PathBuf::from(".mcp.json")));
+        assert_eq!(fold("../a/./b.txt"), Some(PathBuf::from("../a/b.txt")));
+        assert_eq!(fold("src/main.rs"), Some(PathBuf::from("src/main.rs")));
+        assert_eq!(fold(".claude/settings.json::$DATA"), None);
+        assert_eq!(fold("notes.txt:hidden"), None);
+        assert_eq!(
+            fold("a/.../b"),
+            None,
+            "a name of only dots folds to nothing"
+        );
     }
 
     #[test]
