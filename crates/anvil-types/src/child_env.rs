@@ -1,6 +1,6 @@
-//! The environment anvil gives the programs it starts for the model or a
-//! repository: `shell` tool commands, check commands, hooks, MCP servers
-//! and rule checks.
+//! The environment anvil gives every program it starts: `shell` tool
+//! commands, check and acceptance commands, hooks, MCP servers, rule checks
+//! and anvil's own git calls.
 //!
 //! Those programs do not inherit anvil's environment. They get an explicit
 //! list of variables (the search path, the home and temp folders, the
@@ -9,9 +9,10 @@
 //! else stays out, in particular the provider keys anvil read from
 //! `~/.anvil/.env` and any token in the user's own environment.
 //!
-//! anvil's own `git` calls (the session diff, build commits) are not
-//! model-driven and keep the full environment, so a git credential helper
-//! or SSH agent still works for them.
+//! anvil's own `git` calls (the session diff, build commits) get this list
+//! too, plus the author and committer identity and the location of the
+//! user's git config (`anvil_core::git::GIT_VARS`); they never contact a
+//! remote, so no credential helper or SSH agent is needed.
 
 use std::ffi::OsString;
 use std::sync::OnceLock;

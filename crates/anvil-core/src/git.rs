@@ -4,10 +4,15 @@
 //! anvil runs git in the project to snapshot and diff a session's changes,
 //! to commit the items of `anvil build`, to list changed files for
 //! `anvil rules check`, and to list tracked files for `anvil scan-keys`.
-//! These calls keep the user's environment, because git needs the user's
-//! identity and settings. The repository's own config (`.git/config`, the
-//! files it includes, and `config.worktree`) is not the user's, so every
-//! call made through [`command`]:
+//! Like every other program anvil starts, git begins with a cleared
+//! environment: the variables of [`anvil_types::child_env`] (search path,
+//! home, temp, locale, what Windows needs) plus [`GIT_VARS`], the author and
+//! committer identity and the variables that say where the user's own git
+//! config is. Provider keys and tokens never reach it, nor do variables
+//! such as `GIT_DIR` or `GIT_SSH_COMMAND` that would change what git does.
+//! The repository's own config (`.git/config`, the files it includes, and
+//! `config.worktree`) is not the user's, so every call made through
+//! [`command`]:
 //!
 //! - runs no hooks (`core.hooksPath` points at a folder that cannot exist)
 //!   and no file system monitor (`core.fsmonitor=false`);
@@ -26,7 +31,24 @@
 use std::path::Path;
 use std::process::Command;
 
+use anvil_types::child_env;
 use thiserror::Error;
+
+/// Variables git receives on top of [`child_env::vars`] when they are set:
+/// the identity a build commit is made with, and where the user's own
+/// config lives (git reads the identity from there otherwise). anvil's git
+/// calls never contact a remote, so no SSH agent or credential variable
+/// is passed.
+pub const GIT_VARS: &[&str] = &[
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "XDG_CONFIG_HOME",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+];
 
 /// Options given before every git command anvil runs in a project.
 pub const SAFE_ARGS: &[&str] = &[
@@ -111,10 +133,18 @@ pub fn command(cwd: &Path) -> Result<Command, GitError> {
     Ok(safe_git(cwd))
 }
 
-/// `git` with [`SAFE_ARGS`], run in `cwd`.
+/// `git` with [`SAFE_ARGS`], run in `cwd` with a cleared environment
+/// refilled from [`child_env::vars`] and [`GIT_VARS`].
 fn safe_git(cwd: &Path) -> Command {
     let mut command = Command::new("git");
-    command.args(SAFE_ARGS).current_dir(cwd);
+    command
+        .args(SAFE_ARGS)
+        .current_dir(cwd)
+        .env_clear()
+        .envs(child_env::vars())
+        .envs(GIT_VARS.iter().filter_map(|name| {
+            std::env::var_os(name).map(|value| (std::ffi::OsString::from(name), value))
+        }));
     command
 }
 
@@ -143,6 +173,59 @@ pub fn repository_keys(listing: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// The variable that makes a re-run of this test binary print what git
+    /// passes on to a program it starts.
+    const GIT_ENV_PROBE: &str = "ANVIL_TEST_GIT_ENV_PROBE";
+
+    #[test]
+    fn git_helpers_start_from_a_cleared_environment() {
+        let dir = tempfile::tempdir().expect("dir");
+        if std::env::var_os(GIT_ENV_PROBE).is_some() {
+            let Ok(mut git) = command(dir.path()) else {
+                return;
+            };
+            let output = git
+                .args(["-c", "alias.anvil-probe=!env", "anvil-probe"])
+                .output()
+                .expect("git runs");
+            let text = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "{text}");
+            for value in [
+                "probe-openai-value",
+                "probe-github-value",
+                "probe-ssh-value",
+            ] {
+                assert!(!text.contains(value), "{value} reached git:\n{text}");
+            }
+            assert!(
+                text.contains("GIT_AUTHOR_NAME=Probe Author"),
+                "the identity is passed:\n{text}"
+            );
+            return;
+        }
+        if !run(dir.path(), &["--version"]) {
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary");
+        let output = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "git::tests::git_helpers_start_from_a_cleared_environment",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(GIT_ENV_PROBE, "1")
+            .env("OPENAI_API_KEY", "probe-openai-value")
+            .env("GITHUB_TOKEN", "probe-github-value")
+            .env("GIT_SSH_COMMAND", "probe-ssh-value")
+            .env("GIT_AUTHOR_NAME", "Probe Author")
+            .output()
+            .expect("re-runs the test binary");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{text}");
+        assert!(text.contains("1 passed"), "the probe ran: {text}");
+    }
 
     #[test]
     fn only_the_repository_scopes_count() {
