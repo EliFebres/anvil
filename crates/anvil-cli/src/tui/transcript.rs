@@ -115,6 +115,9 @@ pub struct ToolEntry {
     pub expanded: bool,
     /// The result text and whether it was an error, once the hook saw it.
     pub result: Option<(String, bool)>,
+    /// Made for a result or finish that arrived before the call's start
+    /// event; the start event fills it in instead of adding a second row.
+    pub placeholder: bool,
 }
 
 /// Where a tool call is.
@@ -335,13 +338,33 @@ impl Transcript {
             }
             LoopEvent::ToolStarted { call } => {
                 self.close_model();
-                self.push(Entry::Tool(ToolEntry {
-                    summary: crate::render::call_summary(call),
-                    call: call.clone(),
-                    status: ToolStatus::Running { started: now },
-                    expanded: false,
-                    result: None,
-                }));
+                let summary = crate::render::call_summary(call);
+                // The hook's result reaches the UI on its own channel and can
+                // overtake this event, which comes through the usage task.
+                let placeholder = self.slots.iter().rposition(|slot| {
+                    matches!(&slot.entry, Entry::Tool(tool) if tool.placeholder && tool.call.id == call.id)
+                });
+                match placeholder {
+                    Some(index) => {
+                        if let Entry::Tool(tool) = &mut self.slots[index].entry {
+                            tool.call = call.clone();
+                            tool.summary = summary;
+                            tool.placeholder = false;
+                            if let ToolStatus::Running { started } = &mut tool.status {
+                                *started = now;
+                            }
+                        }
+                        self.slots[index].cache = None;
+                    }
+                    None => self.push(Entry::Tool(ToolEntry {
+                        summary,
+                        call: call.clone(),
+                        status: ToolStatus::Running { started: now },
+                        expanded: false,
+                        result: None,
+                        placeholder: false,
+                    })),
+                }
             }
             LoopEvent::ToolFinished {
                 call_id,
@@ -453,11 +476,19 @@ impl Transcript {
     /// # Arguments
     ///
     /// * `call_id` - The call.
+    /// * `name` - The tool, shown if the call is not known yet.
     /// * `text` - The result as the model saw it, already capped.
     /// * `is_error` - Whether the tool failed.
     /// * `now` - The current time, in case the call is not known yet.
-    pub fn set_tool_result(&mut self, call_id: &str, text: String, is_error: bool, now: Instant) {
-        let index = self.ensure_tool(call_id, "tool", now);
+    pub fn set_tool_result(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        text: String,
+        is_error: bool,
+        now: Instant,
+    ) {
+        let index = self.ensure_tool(call_id, name, now);
         if let Entry::Tool(tool) = &mut self.slots[index].entry {
             tool.result = Some((text, is_error));
             self.slots[index].cache = None;
@@ -841,6 +872,7 @@ impl Transcript {
                     status: ToolStatus::Running { started: now },
                     expanded: false,
                     result: None,
+                    placeholder: true,
                 }));
                 self.slots.len() - 1
             }
@@ -1588,14 +1620,14 @@ mod tests {
                 now,
             );
             if result_first {
-                transcript.set_tool_result("c1", "a\nb".to_owned(), false, now);
+                transcript.set_tool_result("c1", "shell", "a\nb".to_owned(), false, now);
             }
             transcript.apply(
                 &finished("c1", "shell", ToolOutcome::Completed, "a"),
                 now + Duration::from_millis(340),
             );
             if !result_first {
-                transcript.set_tool_result("c1", "a\nb".to_owned(), false, now);
+                transcript.set_tool_result("c1", "shell", "a\nb".to_owned(), false, now);
             }
             assert_eq!(transcript.entries().len(), 1);
             let collapsed = joined(&mut transcript, 40);
@@ -1616,10 +1648,42 @@ mod tests {
     }
 
     #[test]
+    fn a_result_before_the_start_event_fills_one_named_row() {
+        let now = Instant::now();
+        let mut transcript = fresh();
+        transcript.set_tool_result("g1", "grep", "src/a.rs:1:x".to_owned(), false, now);
+        assert_eq!(
+            joined(&mut transcript, 40).split_whitespace().nth(1),
+            Some("grep"),
+            "a row made from the result alone still names its tool"
+        );
+        transcript.apply(
+            &LoopEvent::ToolStarted {
+                call: call("g1", "grep", "{\"pattern\":\"x\"}"),
+            },
+            now,
+        );
+        transcript.apply(
+            &finished("g1", "grep", ToolOutcome::Completed, "src/a.rs:1:x"),
+            now + Duration::from_millis(20),
+        );
+        transcript.cancel_running(now + Duration::from_secs(9));
+        assert_eq!(transcript.entries().len(), 1);
+        let text = joined(&mut transcript, 40);
+        assert!(text.starts_with("ok     grep  x"), "{text:?}");
+
+        let mut orphan = fresh();
+        orphan.set_tool_result("g2", "grep", "out".to_owned(), false, now);
+        orphan.cancel_running(now + Duration::from_secs(3));
+        let text = joined(&mut orphan, 40);
+        assert!(text.starts_with("cancelled grep"), "{text:?}");
+    }
+
+    #[test]
     fn a_result_for_an_unknown_call_makes_a_placeholder() {
         let now = Instant::now();
         let mut transcript = fresh();
-        transcript.set_tool_result("zz", "out".to_owned(), true, now);
+        transcript.set_tool_result("zz", "shell", "out".to_owned(), true, now);
         transcript.apply(&finished("zz", "shell", ToolOutcome::Failed, "out"), now);
         assert_eq!(transcript.entries().len(), 1);
         transcript.expand_all();

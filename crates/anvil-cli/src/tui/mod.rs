@@ -239,6 +239,8 @@ pub enum UiMsg {
     ToolResult {
         /// The call.
         call_id: String,
+        /// The tool, so a row made before the start event shows its name.
+        name: String,
         /// The result as the model saw it, already capped.
         text: String,
         /// Whether the tool failed.

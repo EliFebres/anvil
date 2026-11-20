@@ -149,11 +149,12 @@ impl App {
             }
             UiMsg::ToolResult {
                 call_id,
+                name,
                 text,
                 is_error,
             } => {
                 self.transcript
-                    .set_tool_result(&call_id, text, is_error, self.now);
+                    .set_tool_result(&call_id, &name, text, is_error, self.now);
                 None
             }
             UiMsg::Plan { path, text } => {
@@ -1029,6 +1030,7 @@ mod tests {
         }));
         app.handle(UiMsg::ToolResult {
             call_id: "e1".to_owned(),
+            name: "edit_file".to_owned(),
             text: "replaced 1 occurrence(s) in src/lib.rs".to_owned(),
             is_error: false,
         });
@@ -1287,6 +1289,74 @@ mod tests {
         assert_eq!(hits, 1, "{}", drawn.join("\n"));
     }
 
+    /// The tool hook sends a result straight to the UI while the start and
+    /// finish events pass the usage task first, so a result can arrive
+    /// before its call's start event. Replays that order for one call and
+    /// for two calls of one turn, then ends the turn: every call must show
+    /// as one finished row with its tool name, and none as cancelled.
+    #[test]
+    fn a_result_that_overtakes_its_start_event_leaves_no_orphan_row() {
+        let (mut app, base) = new_app();
+        let at = |ms: u64| base + Duration::from_millis(ms);
+        let call = |id: &str, name: &str, args: &str| ToolCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments_json: args.to_owned(),
+        };
+        let finished = |id: &str, name: &str| {
+            UiMsg::Loop(LoopEvent::ToolFinished {
+                call_id: id.to_owned(),
+                name: name.to_owned(),
+                outcome: ToolOutcome::Completed,
+                preview: "done".to_owned(),
+                stats: OutputStats::default(),
+            })
+        };
+        let result = |id: &str, name: &str| UiMsg::ToolResult {
+            call_id: id.to_owned(),
+            name: name.to_owned(),
+            text: "done".to_owned(),
+            is_error: false,
+        };
+        let read = call("r1", "read_file", r#"{"path": "app/Hero.tsx"}"#);
+        let first = call("d1", "delegate", r#"{"agent": "explore", "task": "a"}"#);
+        let second = call("d2", "delegate", r#"{"agent": "explore", "task": "b"}"#);
+        app.handle(UiMsg::Busy(true));
+        app.handle(UiMsg::Tick(at(0)));
+        app.handle(result("r1", "read_file"));
+        app.handle(UiMsg::Loop(LoopEvent::ToolStarted { call: read }));
+        app.handle(finished("r1", "read_file"));
+        app.handle(UiMsg::Tick(at(10)));
+        app.handle(result("d2", "delegate"));
+        app.handle(UiMsg::Loop(LoopEvent::ToolStarted { call: first }));
+        app.handle(result("d1", "delegate"));
+        app.handle(UiMsg::Loop(LoopEvent::ToolStarted { call: second }));
+        app.handle(UiMsg::Tick(at(900)));
+        app.handle(finished("d1", "delegate"));
+        app.handle(finished("d2", "delegate"));
+        app.handle(UiMsg::Tick(at(5_000)));
+        app.handle(UiMsg::Busy(false));
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let drawn = rows(&terminal);
+        let tool_rows: Vec<&String> = drawn
+            .iter()
+            .filter(|row| {
+                row.starts_with("ok ") || row.starts_with("cancelled") || row.starts_with("..")
+            })
+            .collect();
+        assert_eq!(tool_rows.len(), 3, "{}", drawn.join("\n"));
+        assert!(
+            !drawn.iter().any(|row| row.contains("cancelled")),
+            "{}",
+            drawn.join("\n")
+        );
+        for (row, name) in tool_rows.iter().zip(["read_file", "delegate", "delegate"]) {
+            assert!(row.starts_with(&format!("ok     {name}  ")), "{row:?}");
+        }
+    }
+
     #[test]
     fn expanded_tool_call() {
         let (mut app, base) = new_app();
@@ -1298,6 +1368,7 @@ mod tests {
         app.handle(UiMsg::Loop(LoopEvent::ToolStarted { call }));
         app.handle(UiMsg::ToolResult {
             call_id: "c1".to_owned(),
+            name: "shell".to_owned(),
             text: "running 3 tests\ntest a ... ok\ntest b ... ok\ntest c ... ok\n\ntest result: ok. 3 passed".to_owned(),
             is_error: false,
         });

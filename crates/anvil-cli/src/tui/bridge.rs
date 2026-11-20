@@ -205,6 +205,7 @@ impl ToolHook for ResultTee {
         Box::pin(async move {
             self.ui.send(UiMsg::ToolResult {
                 call_id: result.call_id.clone(),
+                name: call.name.clone(),
                 text: result.content.clone(),
                 is_error: result.is_error,
             });
@@ -279,10 +280,12 @@ mod tests {
         match rx.try_recv() {
             Ok(UiMsg::ToolResult {
                 call_id,
+                name,
                 text,
                 is_error,
             }) => {
                 assert_eq!(call_id, "c1");
+                assert_eq!(name, "shell");
                 assert_eq!(text, "out");
                 assert!(is_error);
             }
