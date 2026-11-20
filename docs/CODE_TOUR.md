@@ -1,123 +1,152 @@
-# Code tour: one request, start to finish
+# Code tour: the security code, in reading order
 
-This walks through what happens when someone types `anvil "add a --dry-run flag"` in a repository, in the order the code runs. Each step names the file and the function, says in plain language what it does, and says why it is safe. Paths are relative to the repository root. The managed policy appears at every step where it changes something, so the same tour serves for personal and managed mode.
+A reading order for someone learning Anvil's security code. It follows the order a session meets each control: the policy first, then configuration and trust, then the checks every request and tool call passes, then the records. Each stop names the file, says what it does, names the one function to read first, and gives a test to run to see it work. Paths are relative to the repository root.
 
-## 1. The command line
+Run a test with `cargo test -p <crate> <test name>`; the crate is the folder after `crates/`. Every test named here is also listed in [SECURITY_TESTS.md](SECURITY_TESTS.md) against the claim it proves. CLAUDE.md says which crate may depend on which.
 
-**`crates/anvil-cli/src/main.rs`: `main`, then `start`.**
+## 1. The policy file
 
-`main` parses the arguments with clap (`crates/anvil-cli/src/cli.rs`) and calls `start`. Whatever goes wrong, it prints one error line and exits with code 1.
+**`crates/anvil-types/src/policy/mod.rs`, `crates/anvil-types/src/policy/ownership.rs`**
 
-`start` does four things, in this order:
+The managed policy's schema, its validation and its loading. `system_path` returns a literal path per system, so nothing a user controls can move the file. `load_checked` treats only a missing file as unmanaged; any other failure (unsafe ownership, unreadable, unknown key, a broken rule) is an error that stops Anvil. `ownership::check` requires root ownership and no group or other write on Unix, and only Administrators, SYSTEM or TrustedInstaller with write rights on Windows, read as SDDL.
 
-1. **Loads the managed policy**, `policy::load_system` in `crates/anvil-cli/src/policy.rs`, from the one fixed path `anvil_types::policy::system_path()`: `C:\ProgramData\anvil\policy.toml` on Windows, `/etc/anvil/policy.toml` on Linux and macOS. No environment variable or flag can change that path. `anvil_types::policy::load_checked` first runs `ownership::check` (root-owned and not group or other writable on Unix; only Administrators, SYSTEM or TrustedInstaller may own or change it on Windows), then parses the file. If the file exists but is unsafe or broken, `start` returns the error and anvil stops here, before it touches anything. *Safe because a policy that cannot be trusted or read is never silently skipped.*
-2. **Loads the user's `.env` file**, `anvil_types::dotenv::env_files` and `load`. Only `~/.anvil/.env` is loaded, never the repository's. *Safe because a cloned repository cannot set a key, `ANVIL_HOME` or a proxy.*
-3. Picks the full-screen UI or the plain line renderer (`UiKind::choose` in `frontend.rs`).
-4. Starts logging into `.anvil/logs/` and the async runtime, then calls `dispatch`.
+- Read: `load_checked`, then `ownership::check`.
+- Run: `cargo test -p anvil-types broken_policies_are_errors`
 
-**`dispatch`** first calls **`policy::check_flags`**. Under a policy with `allow_yes` or `allow_allow_tool` off, `--yes` or `--allow-tool` stops anvil here with an error naming the policy key. Then it matches the subcommand; a bare task goes to `run`, which calls `project_wiring`.
+## 2. Applying the policy at startup
 
-## 2. Configuration, the repository, and trust
+**`crates/anvil-cli/src/policy.rs`**
 
-**`crates/anvil-cli/src/main.rs`: `project_wiring`.**
+Loads the policy from the system path and applies the parts that must hold before anything else runs. `check_flags` refuses `--yes` and `--allow-tool` unless the policy allows them; `check_config` refuses a user configuration or profile that conflicts with the policy (a provider host, a looser shell mode, a token limit above the ceiling), always naming the policy key. It also holds `prune_sessions` and `prune_all`, the retention code behind `retention_days` and `anvil purge`.
 
-1. **The user's configuration**, `anvil_types::config::load_profile` in `crates/anvil-types/src/config.rs`. It reads `~/.anvil/config.toml` and, with `--profile`, `~/.anvil/profiles/<name>.toml`. It never reads the repository's config. A section that was removed (`[update]`, `[notify]`, `[tickets]`, `[integrations]`, the old table of ticket signal thresholds) fails with a sentence saying why. *Safe because providers, URLs, keys and settings only ever come from the user's own files.*
-2. **The repository's rules**, `anvil_types::project::load` in `crates/anvil-types/src/project.rs`. From the repository's `.anvil/config.toml` and `.anvil/permissions.toml` it keeps `deny`, `ask` and `shell_programs` (plus `allow` from `permissions.toml`, used only once the repository is trusted); a key that would loosen anvil (providers, roles, `[tools]`, `[network]`, `[shell]`, `allow` in `config.toml`, `default`, `allow_tools`) is an error naming it, and any other key becomes a warning line. These rules always apply; under a policy, whether the repository can be trusted at all is `[projects] allow_trust`.
-3. **Trust**, `trust::decide` in `crates/anvil-cli/src/trust.rs`. It looks the repository up in `~/.anvil/trust.toml`, where a decision to trust is stored with `fingerprint`, a SHA-256 digest of everything the repository ships; a changed digest counts as undecided. When the policy forbids trust (`allow_trust` false) it returns untrusted without asking. If the user never decided and a person is at the terminal, `shipped` lists everything the repository would load (each hook and MCP server with its command line) and asks once; the answer is saved. With `--plain`, `--yes` or no terminal, an undecided repository stays untrusted and nothing is recorded. *Safe because nothing the repository ships can run or steer the model before a person has seen the list and said yes.*
-4. **The wiring**, `Wiring::new_in` in `crates/anvil-cli/src/wiring.rs`. This is the one place skills, commands, agents, hooks and MCP servers are discovered. It passes the repository root to each discovery only when the repository is trusted, otherwise `None`, so only the user's own files under `~` are found. It also records the user's `[tools] pass_env` for child processes, builds the unmanaged-mode `Egress` (only the hosts of the user's providers and HTTP MCP servers it found, https except loopback and the user's `allow_http_hosts`), and resolves the user's `[shell]` table into `ShellSettings` (`crates/anvil-cli/src/wiring/shell.rs`; `ask` on the host by default).
-5. **The policy**, `Wiring::with_policy`, when one is installed. Before the wiring is built, `policy::check_config` refuses a user configuration or profile that conflicts with the policy (a provider host, provider or model the policy does not allow, plain-http hosts, `extra_dirs`, `allow_tools`, an allow rule the policy's `deny` or `ask` covers, a token limit above the ceiling, a looser `[shell] mode`, another executor, a user container, a `[tools] check` the shell mode would not run), naming the key. `with_policy` then reads top to bottom: the egress becomes the policy's `[network]` table (`Egress::from_policy`: its `host:port` list, `require_tls`, CA bundle, client certificate and proxy mode); hooks, MCP servers and skills the policy forbids (an HTTP MCP server also when its host is not allowed) are an error when the user's own files under `~/.anvil` or `~/.claude` define them and are left out with a note when a repository ships them; saved `always` rules are checked; the token budget is capped; the `[files] deny` globs are compiled; `ShellSettings::resolve` combines the user's `[shell]` with the policy's (the stricter mode, every allowlist, the policy's executor). Later, `Wiring::registry_without_delegate` adds the policy's `deny` and `ask` rules, its `allow_always` switch and the shell's allowlist layers, and removes `shell` when the mode is `off`; `Wiring::tool_context` adds its `[files]` settings and the shell's runner (direct start, container); subagents use the same two functions.
+- Read: `check_config`.
+- Run: `cargo test -p anvil-cli skip_flags_are_refused_with_the_policy_key`
 
-Back in `run`, `before_session` prints `policy: unmanaged` or the policy's path and hash (line renderer only; the full-screen UI shows it on its startup screen), deletes this repository's session folders older than the policy's `retention_days`, and `Wiring::load_mcp` starts the remaining MCP servers. Before that, `project_wiring` in `main.rs` calls `Wiring::check_endpoints`, which runs every provider `base_url` and HTTP MCP `url` through the egress rules, so a refused endpoint stops anvil at startup. `anvil doctor --egress` (`crates/anvil-cli/src/doctor/egress.rs`) prints the same rules as a list of destinations.
+## 3. One place where the policy shapes a session
 
-## 3. The session
+**`crates/anvil-cli/src/wiring.rs`**
 
-**`crates/anvil-cli/src/commands.rs`: `run_task`, then `run_session_in`.**
+`Wiring` is where the libraries meet: it discovers skills, hooks and MCP servers, builds the egress rules, the redactor, the tool registry and the tool context. `Wiring::with_policy` applies every in-session effect of the policy, top to bottom, in one function: the network table, forbidden extensions, saved rules, budgets, file deny globs and the shell settings. `registry_without_delegate` and `tool_context` build what the session and its subagents share, so a subagent cannot get looser rules.
 
-`run_task` creates the session folder with `Wiring::new_session_dir`, which puts it under `Wiring::sessions_root()`: the policy's `transcript_dir` or the repository's `.anvil/sessions`. `run_session_in` then:
+- Read: `Wiring::with_policy`, then `registry_without_delegate`.
+- Run: `cargo test -p anvil-cli a_profile_cannot_loosen_the_policy`
 
-- opens the audit log with `SessionUsage::start`, which calls `SessionAudit::open` in `crates/anvil-cli/src/audit.rs`: `audit.jsonl` in the session folder and the policy's mirror, before anything else, so a required log that cannot be written stops the session here. `observe_permissions` then hands the wiring the permission observer, the tap subagents report to, and, when the log is required, the `CallGate` that every provider and registry the wiring builds checks before it works;
-- starts the front end;
-- builds the tool registry with `Wiring::registry` (step 5);
-- builds the loop settings with `Wiring::loop_config`, including whether the repository's instruction files may load (`trusted_project`);
-- runs the `SessionStart` hooks, of which there are none unless the user's or a trusted repository's settings define them and the policy allows hooks;
-- builds the plan gate: under `--yes` plans are approved automatically, except when `Wiring::plans_need_a_person` says the policy requires a person;
-- creates `AgentLoop::new` and calls `AgentLoop::run`.
+## 4. What a repository may say
 
-## 4. The agent loop
+**`crates/anvil-types/src/project.rs`**
 
-**`crates/anvil-core/src/agent/mod.rs`: `AgentLoop::run`, `run_model_state`, `run_tools`.**
+Reads a repository's `.anvil/config.toml` and `.anvil/permissions.toml`. It keeps only rules that tighten (`deny`, `ask`, `shell_programs`) plus `allow` rules that wait for trust, and turns every key that would loosen Anvil (providers, roles, tools, network, shell, `default`, `allow_tools`) into an error naming it. This is why a cloned repository cannot point Anvil at its own server.
 
-The loop is a small state machine: Plan, Build, Verify, Review. In each state `run_model_state`:
+- Read: `load`.
+- Run: `cargo test -p anvil-types every_loosening_key_is_an_error_that_names_it`
 
-1. builds the system prompt with `system_prompt_for`. Instruction files come from `crate::context::discover_instructions` (`crates/anvil-core/src/context/instructions.rs`), which reads the repository's `ANVIL.md`, `CLAUDE.md` and nested `CLAUDE.md` only for a trusted repository. The extra files and `@imports` come from `anvil_compat::instructions::discover_extra`, which refuses an import from a repository file that points outside the repository, so a `CLAUDE.md` cannot pull `~/.ssh` into the prompt;
-2. compacts the conversation if it is close to the context window;
-3. sends the request with `turn::complete_turn` (step 7);
-4. hands the model's tool calls to `run_tools`.
+## 5. Repository trust
 
-In Plan, `run_tools` refuses any call that may write. In Verify, `AgentLoop::project_check` decides the check command once: a command the user configured runs as configured, but one detected from the repository's files (`just check`, `npm test`) is the repository's own code, so it goes through the permission rules like a shell call.
+**`crates/anvil-cli/src/trust.rs`**
 
-Every message is appended to the transcript by `push_message`, through `SessionLog::append` in `crates/anvil-core/src/context/session.rs`. `push_message` first redacts user text (the task, feedback with check output) through `ctx.guard`; the reviewer's brief is redacted the same way, with the diff and check output inside untrusted-data delimiters.
+Decides whether what a repository ships (hooks, MCP servers, skills, commands, agents, instruction files, `allow` rules) may load. `fingerprint` computes a SHA-256 digest over all of it, including scripts its hooks and servers run, and `decide` compares it with the stored decision, so any change asks again. A repository that links a skill, command or agent folder is never trusted, and the policy's `allow_trust` switch is a parameter of the same path.
 
-**Redaction and delimiters: `crates/anvil-core/src/guard.rs`, `crates/anvil-types/src/redact.rs`.** After a tool runs, `ToolRegistry::execute` passes its output through `DataGuard::redact` before anything else (truncation, the `tool-output/` file, the PostToolUse hook), then wraps it with `DataGuard::wrap` in `<untrusted-data id="NONCE" source="tool">` delimiters; hook text is redacted and wrapped on its own. The `Redactor` holds the built-in key shapes, the values of secret-looking environment variables and the policy's `[data] patterns`; `Wiring::new_in` and `Wiring::with_policy` build it once per session, and `Wiring::tool_context` hands the same guard, and so the same nonce, to the session and its subagents. *Safe because there is one choke point between a tool and the conversation, and what the provider receives is what the transcript stores.*
+- Read: `decide`, then `fingerprint`.
+- Run: `cargo test -p anvil-cli any_change_to_what_the_repository_ships_asks_again`
 
-## 5. The permission check
+## 6. The one way out of the process
 
-**`crates/anvil-core/src/tools/mod.rs`: `ToolRegistry::execute`, then `check_permission`.**
-**`crates/anvil-core/src/tools/permissions.rs`: `Permissions`.**
+**`crates/anvil-core/src/net.rs`**
 
-The rules were assembled in `Wiring::registry_without_delegate`: the user's own rules (`Wiring::user_permissions`), then `Permissions::tighten` with the repository's `deny`, `ask` and `shell_programs`, then with the policy's `deny` and `ask`, then `Permissions::limit_shell` with each `[shell] allow` list. Tightening rules are kept apart from the user's, so they can only make a call stricter.
+The only module that builds an HTTP client. `http_client` turns redirects off and applies the policy's CA bundle, client certificate and proxy mode, and hands out an `HttpClient` that never exposes the client inside. `HttpRequest::send` runs `Egress::check` on the final URL before any connection and only then adds the key, and only when the request's `host:port` matches the one the key was configured for. `crates/anvil-core/tests/one_http_client.rs` and `clippy.toml` keep every other crate and module from building a client.
 
-For each call, `check_permission` asks in this order:
+- Read: `HttpRequest::send`, then `Egress::check`.
+- Run: `cargo test -p anvil-core a_host_outside_the_allowed_set_is_refused_before_any_connection`
 
-1. **`Permissions::shell_refusal`** (shell only). If any layer set an allowlist (`[shell] allow` in allowlist mode, or `shell_programs`), the command is split by `anvil_types::shell::split_command`, which refuses `;`, `&`, `|`, `<`, `>`, backticks, `$(`, parentheses, braces and line breaks, and its words must match a pattern of every layer. Then `shell::argument_refusal` checks the words a pattern's `*` left to the model: no argument may name a path outside the project, and git may take no option before its subcommand and none of the options that write a file, read outside the repository or run a program (`crates/anvil-core/src/tools/allowlist_tests.rs`). Nothing below can lift this.
-2. **The deny categories** (`Tool::blocked_reason`, `deny_category` in `shell.rs`): network clients, git commands that reach or change remotes, package installs, privilege tools, `rm -rf` and friends. Only `Permissions::allows_by_name`, a rule or allowlist pattern whose text names the command, lifts one. This matches text, so it is a guard rail.
-3. **The rules**: a `deny` from anywhere, then a tightening `ask`, then the user's `allow` and `ask`, then the default, then the tool's own default (reads run, writes ask).
-4. **Session approvals and the prompt**, for calls that ask. An `always` answer is saved to the user's `~/.anvil/permissions/<repository id>.toml` (see `trust::repo_id`), never into the repository.
+## 7. The permission check
 
-*Safe because the order is fixed, every layer below the user can only tighten, and the strongest refusals come first.*
+**`crates/anvil-core/src/tools/mod.rs`, `crates/anvil-core/src/tools/permissions.rs`**
 
-## 6. Running the tool
+Every tool call goes through `ToolRegistry::execute`, which calls `check_permission`. The order is fixed: the shell allowlist refusal, the built-in deny categories, then the rules (a `deny` from any layer, a tightening `ask`, the user's `allow` and `ask`, the default, a trusted repository's `allow`, the tool's own default), then session approvals and the prompt. Layers below the user are kept apart so they can only tighten, and each decision reports its source to the audit log.
 
-**File tools: `ToolContext::checked_path` in `crates/anvil-core/src/tools/mod.rs`, and `crates/anvil-core/src/tools/workspace.rs`.**
+- Read: `ToolRegistry::check_permission`, then `Permissions::ruling`.
+- Run: `cargo test -p anvil-core a_projects_allow_only_decides_what_no_other_rule_decides`
 
-Every file tool calls `checked_path` before it opens anything. It resolves the path the way the file system will, symlinks, `..`, junctions, drive and UNC prefixes and letter case included (`permissions::resolve_path`), after refusing any spelling Windows would fold onto another name (`workspace::win32_fold`: a trailing dot or space, or `:`), for reads as well as writes. The result must not hold secrets (`workspace::holds_secrets`: `.env`, key and certificate files, `credentials*`, `.npmrc`, `.pypirc`, `.git/config`, `.ssh`, cloud credentials, browser profiles, keychains, plus the policy's `[files] deny`), and it must lie inside the project, the session folder or a `[tools] extra_dirs` folder; skill folders and the policy's `extra_roots` may be read. Directory walks (`glob::walk`) and `list_dir` skip the same secret paths. `crates/anvil-core/src/tools/boundary_tests.rs` tries every tool against every spelling. *Safe because a crafted path, a link or a `../` cannot reach outside, and credential stores are refused even inside the workspace.*
+## 8. The file boundary
 
-**Shell: `shell::run_command` in `crates/anvil-core/src/tools/shell.rs`.**
+**`crates/anvil-core/src/tools/workspace.rs`, `ToolContext::checked_path` in `crates/anvil-core/src/tools/mod.rs`**
 
-`registry.execute` forces `Runner::direct` for the shell tool whenever the rules hold an allowlist, so what was matched is what starts. `prepare` then builds the command: in direct mode it runs `argument_refusal` again, then starts the words from `split_command` with no shell, git through `git::allowlisted` (anvil's safe git settings, diff programs off, and a refusal when the repository's config defines aliases or programs or the subcommand is an alias) (on Windows the program is looked up on the passed `PATH` with `PATHEXT`); otherwise the configured shell; with a container, the runtime program with `container_args` (no network, the workspace as the only mount with its `.git` read-only, read-only root, non-root user, no capabilities, limits). In every case `env_clear()` comes first, followed by `anvil_types::child_env::vars()`: `PATH`, the home and temp folders, the locale, what Windows needs to start programs, the Rust toolchain folders, and the user's `pass_env`. Checks, `anvil build` acceptance commands, hooks, MCP servers, rule checks and anvil's git calls (`git::command`, plus `GIT_VARS`) start their programs from the same list. *Safe because a command cannot read the provider key or a token from its environment, and in allowlist mode no shell can chain a second program. Not a sandbox on the host: an approved command still runs with the user's rights; the container executor is the sandbox.*
+Every file tool calls `checked_path` before it opens anything. It refuses spellings Windows would fold onto another name (`win32_fold`), resolves symlinks, `..`, junctions and letter case, and requires the result to lie in the workspace or an allowed folder. `holds_secrets` refuses credential and key files even inside the workspace, `inside_git_dir` refuses writes into any git directory, and `grants_power` refuses writes to the files that would raise the agent's own permissions. `crates/anvil-core/src/tools/boundary_tests.rs` tries every tool against every spelling.
 
-## 7. The provider call
+- Read: `ToolContext::checked_path`, then `grants_power`.
+- Run: `cargo test -p anvil-core boundary_symlink_escape_is_refused`
 
-**`crates/anvil-core/src/provider/mod.rs`: `from_config`, `build`.**
-**`crates/anvil-core/src/net.rs`: `Egress`, `http_client`, `HttpRequest::send`.**
-**`crates/anvil-core/src/provider/openai.rs`, `anthropic.rs`, `http.rs`.**
+## 9. Running a command
 
-When the wiring builds a provider (`Wiring::provider`), `from_config` first calls **`Egress::check`** on the provider's `base_url`, so a refused endpoint fails before the key is read. Then `read_api_key` reads the key from the environment, and `build` creates the client with **`net::http_client`**, the only function allowed to build one (`clippy.toml` and `crates/anvil-core/tests/one_http_client.rs` enforce that). It turns redirects off, applies the CA bundle, client certificate and proxy mode of the `Egress` (no proxy unless the policy names one), and returns an `HttpClient` that never hands out the reqwest client inside it.
+**`crates/anvil-types/src/shell.rs`, `crates/anvil-core/src/tools/shell.rs`**
 
-`OpenAiProvider::complete` (or the Anthropic one) prepares the request with `client.post(url)` and adds the key with `api_key(header, value, base_url)`. **`HttpRequest::send`** builds the request, runs `Egress::check` on its final URL (the `host:port` must be allowed, plain http only to loopback unless a rule says otherwise), and only then adds the key, and only when the URL's `host:port` is that of the configured `base_url`. A refused request opens no connection. HTTP MCP servers (`crates/anvil-compat/src/mcp/http.rs`) send through the same client, with the headers their definition sets bound to their own URL. `send_attempt` hands the response to `http::start`, which retries connection failures and 5xx responses, applies the deadline, and decodes the server-sent events into text and tool calls. When the server answers with an error, `http::send_attempt` replaces any copy of the key in the error body with `[redacted]` before the error goes anywhere. The provider is wrapped in `Budgeted`, which stops the session at its token budget.
+`split_command` is the conservative parser of allowlist mode: it refuses every shell metacharacter and returns an argument vector. `run_command` is the one way the shell tool, checks and acceptance commands start a program: directly (allowlist), through the shell (`ask`), or in a container. `deny_category` recognises network clients, pushes, installs, privilege tools and destructive patterns; `argument_refusal` refuses arguments that reach outside the project; `container_args` builds the `docker run` line with no network, no root and the workspace as the only mount.
 
-*Safe because there is one way out of the process, every request is checked when it is sent, it cannot be redirected, the key goes only to its own host, and the key cannot leak through an error message.*
+- Read: `run_command`, then `container_args`.
+- Run: `cargo test -p anvil-core the_container_arguments_drop_network_root_capabilities_and_host_mounts`
 
-## 8. The transcript
+## 10. Anvil's own git calls
 
-**`crates/anvil-core/src/context/session.rs`: `SessionLog`, `session_dir`, `load_session`, `list_sessions`.**
+**`crates/anvil-core/src/git.rs`**
 
-`AgentLoop::new` opens the log in the policy's transcript mode (`ToolContext::transcript`): none at all under `off`, and under `metadata` `SessionRecord::kept_as` replaces the task and every message with sizes and SHA-256 digests before `append` writes it. `append` writes one JSON line per record: the task, each message, each completion's tokens and timing, redaction counts, state changes, the final status. Every file and folder is created through `anvil_types::private_fs`, owner-only on Unix. Full tool output goes to `tool-output/` next to it, and `status.json` keeps the session's state for `anvil status`. `anvil resume`, `anvil sessions` and `anvil status` read from the same `sessions_root`, so they find the sessions wherever the policy put them.
+Anvil runs git in the project for snapshots, diffs and build commits. `command` is the only way it does so: a cleared environment and `-c` settings that turn off hooks, the file system monitor, pagers, editors and remotes, plus a refusal when the repository's own config names a filter or signing program. `allowlisted` is the stricter variant for git commands the model runs in allowlist mode. `crates/anvil-core/tests/one_git_entry.rs` fails when any other code starts git in a project.
 
-At the end, `memory::finish_session` runs the end-of-session summarizer only if `Wiring::memory_allowed` and the transcript is `full`, and the Stop hooks run if any are loaded.
+- Read: `command`, then `allowlisted`.
+- Run: `cargo test -p anvil-core hooks_planted_in_the_repository_do_not_run`
 
-MCP servers are loaded before the session in `Wiring::load_mcp`, through `McpTools::load` and `McpStore` (`crates/anvil-compat/src/mcp/approval.rs`): every server is listed live, the listing is compared with the policy's `listing_sha256` pin or the approved SHA-256 in `~/.anvil/mcp-approvals.toml` (recorded with a digest of the definition), and a changed one drops the server. There is no tool cache.
+## 11. What child processes inherit
 
-## 9. The audit log
+**`crates/anvil-types/src/child_env.rs`**
 
-**`crates/anvil-cli/src/usage.rs` (`AuditTap`, `AuditedGate`), `crates/anvil-cli/src/audit.rs`, `crates/anvil-audit/src/audit/`.**
+The one list of environment variables a program Anvil starts may receive: `PATH`, home and temp folders, the locale, what Windows needs to start programs, the Rust toolchain folders, and the names in `[tools] pass_env`. Anything that looks like a key, token, secret or password is left out unless named. Every `Command` in non-test code calls `env_clear()` and then adds `vars()`; `crates/anvil-core/tests/children_start_clean.rs` scans the source for any that does not.
 
-The loop's `EventSink` carries a tap (`EventTap` in `crates/anvil-core/src/agent/events.rs`) that sees every event on the thread that emits it, before it is queued for the front end. `AuditTap` turns model completions, tool calls, tool results and file changes (`LoopEvent::FileChanged`, from `write_file` and `edit_file`) into records; the permission observer adds each decision with the `DecisionSource` that `ToolRegistry::check_permission` reports, `AuditedGate` adds plan answers, and `SessionUsage::prompt` adds prompts. A subagent's sink comes from `SubagentEnv::events`, so its records land in the same chain under its name. `AuditLog::append` seals each record (`chain::seal`) and writes it to the session file and the mirror; a failed write under `[audit] required` sets the gate, and `drive` in `commands.rs` stops the loop. `anvil audit verify` and `anvil audit show` read a file back through `chain::verify` and `show::render`. `verify` re-serializes every record and requires the same bytes; `--mirror` also compares the mirrored copy. `AuditLog::open` seeds a missing mirror with the session file and refuses one that differs, and each append first checks that the file is still the one it opened. A build records its acceptance decisions in its own log through `Env::open_build_log` and `Wiring::permit_shell`.
+- Read: `vars`.
+- Run: `cargo test -p anvil-core a_child_process_that_prints_its_environment_shows_no_key`
 
-## Where to look when demoing
+## 12. Redaction and untrusted data
 
-- Every effect of the policy on a session: `Wiring::with_policy` in `crates/anvil-cli/src/wiring.rs`.
-- Every attack a repository could try, refused: `crates/anvil-cli/src/wiring/hostile_tests.rs` and `crates/anvil-cli/tests/hostile_repo.rs`.
-- Every policy key enforced: `crates/anvil-cli/src/wiring/policy_tests.rs`.
-- The one HTTP client: `crates/anvil-core/src/net.rs`.
-- What the reviewer should read first: SECURITY.md, then `docs/enterprise/`.
+**`crates/anvil-types/src/redact.rs`, `crates/anvil-core/src/guard.rs`**
+
+`Redactor` holds the built-in secret shapes, the values of secret-looking environment variables and the policy's patterns, and replaces each match with `[REDACTED:<kind>]`. `DataGuard` is the one choke point between a tool and the conversation: `ToolRegistry::execute` passes every result through `DataGuard::redact` before anything else, then `DataGuard::wrap` puts it inside `<untrusted-data id="NONCE">` delimiters, escaping anything in the content that looks like a marker. The provider and the transcript therefore receive the same text.
+
+- Read: `DataGuard::wrap`, then `Redactor::redact`.
+- Run: `cargo test -p anvil-core a_secret_in_tool_output_does_not_reach_the_provider_or_the_transcript`
+
+## 13. MCP listing approval
+
+**`crates/anvil-compat/src/mcp/approval.rs`**
+
+Every session start lists each MCP server live. `McpStore::check` hashes the listing (names, titles, descriptions, input schemas, all annotations) together with a digest of the server's definition and compares it with the approved one in `~/.anvil/mcp-approvals.toml`, or with the policy's `listing_sha256` pin. A listing that changed stops the server, so a server cannot quietly turn a tool read-only (no prompt) or rewrite its description.
+
+- Read: `McpStore::check`.
+- Run: `cargo test -p anvil-compat a_changed_read_only_hint_is_detected`
+
+## 14. What stays on disk
+
+**`crates/anvil-core/src/context/session.rs`, `crates/anvil-types/src/private_fs.rs`**
+
+`SessionLog` writes the transcript in the mode the policy sets; `SessionRecord::kept_as` turns every record into sizes and digests under `metadata`, and `off` writes no log at all. `private_fs` creates every file Anvil stores data in 0600 and every folder 0700 on Unix, and narrows existing ones.
+
+- Read: `SessionRecord::kept_as`.
+- Run: `cargo test -p anvil-core a_metadata_transcript_keeps_sizes_and_digests_but_no_text`
+
+## 15. The audit log
+
+**`crates/anvil-audit/src/audit/chain.rs`, `crates/anvil-audit/src/audit/log.rs`, `crates/anvil-cli/src/audit.rs`**
+
+`seal` computes each record's SHA-256 over its canonical JSON, which includes the previous record's hash; `verify` re-serializes every line, requires the same bytes and checks the chain. `AuditLog::append` writes to the session file and the mirror and notices a file that something else removed or changed. `SessionAudit::open` opens the log before the first model request and, when the policy requires it, sets the gate that stops every later call after a failed write.
+
+- Read: `seal` and `verify`, then `AuditLog::append`.
+- Run: `cargo test -p anvil-audit the_audit_chain_detects_edit_removal_and_reorder`
+
+## 16. Tests that guard the structure
+
+These tests read the source tree or the repository rather than calling a function, so a structural rule cannot be broken by accident.
+
+- `crates/anvil-core/tests/one_http_client.rs`: only `net.rs` builds an HTTP client (`cargo test -p anvil-core only_the_net_module_builds_an_http_client`).
+- `crates/anvil-core/tests/children_start_clean.rs`: every program starts from a cleared environment (`cargo test -p anvil-core every_non_test_command_starts_from_a_cleared_environment`).
+- `crates/anvil-core/tests/one_git_entry.rs`: every project git call goes through `git.rs` (`cargo test -p anvil-core only_the_git_module_starts_git_in_a_project`).
+- `crates/anvil-types/tests/workflows.rs`: least-privilege, pinned workflows and the release assets (`cargo test -p anvil-types every_action_is_pinned_to_a_commit_sha`).
+- `crates/anvil-types/tests/docs_match_code.rs`: the tests named in SECURITY_TESTS.md exist, and ADMIN_GUIDE.md lists every policy key (`cargo test -p anvil-types every_test_named_in_security_tests_exists`).
+
+To see a hostile repository refused end to end, read `crates/anvil-cli/tests/hostile_repo.rs` and `crates/anvil-cli/src/wiring/hostile_tests.rs`; every policy key enforced is in `crates/anvil-cli/src/wiring/policy_tests.rs`.

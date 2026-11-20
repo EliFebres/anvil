@@ -75,6 +75,20 @@ machine, who controls those limits, and what record is left behind.
 - Dependabot for Cargo and GitHub Actions, and a `CODEOWNERS` file.
 - The workspace crates are marked `publish = false`.
 
+### Documentation
+
+- README.md and SECURITY.md rewritten for an IT security and platform team:
+  the security posture as a table of control, enforcement point and test, and
+  how to report a vulnerability privately.
+- New: `docs/SECURITY_TESTS.md` (every security claim and the test that
+  proves it, checked by a test), `docs/THREAT_MODEL.md` (with the OWASP Top 10
+  for Agentic Applications 2026 mapping), `docs/CONTROLS.md` (NIST SP 800-53
+  Rev. 5 and SP 800-171 Rev. 3), `docs/DEPLOYMENT.md` and `docs/USAGE.md`.
+  `docs/ADMIN_GUIDE.md` gains release verification, air-gapped installation
+  and manual upgrades, and a test keeps its key table equal to the policy
+  schema. `docs/enterprise/` is folded into these; the pilot scope template is
+  now `docs/PILOT_SCOPE.md`.
+
 ## [0.1.0]
 
 The first version, released continuously from `main` under date tags.
