@@ -131,7 +131,7 @@ async fn an_http_server_outside_the_allowed_set_receives_nothing() {
     let project = tempfile::tempdir().expect("tempdir");
     let set = ServerSet::from_servers(vec![http_server(&url)]);
     let store = McpStore::new(None, project.path());
-    let tools = McpTools::load(&set, project.path(), &elsewhere, true, &store).await;
+    let tools = McpTools::load(&set, project.path(), &elsewhere, &store).await;
     let error = tools.reports()[0].tools.clone().expect_err("refused");
     assert!(error.to_string().contains("is not allowed"), "{error}");
     let managed = http_client(
@@ -139,7 +139,7 @@ async fn an_http_server_outside_the_allowed_set_receives_nothing() {
         Duration::from_secs(5),
     )
     .expect("client");
-    let tools = McpTools::load(&set, project.path(), &managed, true, &store).await;
+    let tools = McpTools::load(&set, project.path(), &managed, &store).await;
     assert!(tools.reports()[0].tools.is_err());
     assert!(
         server
@@ -209,7 +209,7 @@ async fn a_server_that_echoes_its_bearer_token_in_an_error_body_leaks_nothing() 
 
     let set = ServerSet::from_servers(vec![http_server(&bad)]);
     let store = McpStore::new(None, project.path());
-    let tools = McpTools::load(&set, project.path(), &http, true, &store).await;
+    let tools = McpTools::load(&set, project.path(), &http, &store).await;
     let report = tools.reports()[0].tools.clone().expect_err("refused");
     assert!(!report.to_string().contains("t0k3n"), "{report}");
 }

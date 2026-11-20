@@ -255,6 +255,18 @@ pub enum McpError {
         server: String,
     },
 
+    /// Under a managed policy, the listing is not the pinned one, or it
+    /// differs from the first one recorded, or the definition changed.
+    #[error(
+        "mcp server `{server}` lists tools the managed policy has not accepted (sha256:{digest}); only the administrator can accept a listing, by setting `listing_sha256 = \"{digest}\"` on the server's `[features] mcp_servers` entry"
+    )]
+    ListingRefused {
+        /// The server name.
+        server: String,
+        /// [`super::approval::listing_digest`] of what it listed.
+        digest: String,
+    },
+
     /// An HTTP server answered with a failure status.
     #[error("mcp server `{server}`: HTTP {status}: {detail}")]
     Http {

@@ -1073,3 +1073,24 @@ async fn subagents_are_confined_like_the_session() {
         assert_eq!(run.outcome, ToolOutcome::Blocked, "{command}");
     }
 }
+
+#[tokio::test]
+async fn mcp_approve_is_refused_under_a_policy() {
+    let s = setup();
+    let policy = load_policy(
+        &s.policy_dir,
+        "[features]\nmcp = \"allowlist\"\nmcp_servers = [{ name = \"docs\", command = \"mcp-docs\" }]\n",
+    );
+    let managed = wiring(&s, "", Some(policy));
+    let error = crate::commands::mcp_approve(&managed, "docs")
+        .await
+        .expect_err("refused under a policy");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("listing_sha256") && message.contains("[features] mcp_servers"),
+        "{message}"
+    );
+    assert!(managed.mcp_store().is_managed());
+    let unmanaged = wiring(&s, "", None);
+    assert!(!unmanaged.mcp_store().is_managed());
+}

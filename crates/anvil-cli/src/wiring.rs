@@ -751,16 +751,8 @@ impl Wiring {
                 return;
             }
         };
-        self.mcp = Arc::new(
-            McpTools::load(
-                &self.mcp_servers,
-                &self.cwd,
-                &http,
-                false,
-                &self.mcp_store(),
-            )
-            .await,
-        );
+        self.mcp =
+            Arc::new(McpTools::load(&self.mcp_servers, &self.cwd, &http, &self.mcp_store()).await);
         for report in self.mcp.reports() {
             if let Err(error) = &report.tools {
                 eprintln!("warning: {error}");
@@ -768,19 +760,23 @@ impl Wiring {
         }
     }
 
-    /// Where MCP listing approvals and the tool cache live: under
-    /// `~/.anvil`, never in the repository.
+    /// Where MCP listing approvals live (under `~/.anvil`, never in the
+    /// repository), with the policy's `listing_sha256` pins under a policy.
     ///
     /// # Returns
     ///
     /// The store for this project.
     pub fn mcp_store(&self) -> McpStore {
-        McpStore::new(
+        let store = McpStore::new(
             self.home
                 .as_ref()
                 .map(|home| home.join(anvil_types::config::CONFIG_DIR)),
             &self.cwd,
-        )
+        );
+        match &self.policy {
+            Some(policy) => store.managed(policy.mcp_listing_pins()),
+            None => store,
+        }
     }
 
     /// A copy of this wiring bound to a session, so hooks can report it.

@@ -52,12 +52,20 @@ pub trait RpcTransport: Send + Sync {
 pub struct ToolInfo {
     /// The tool's name on the server.
     pub name: String,
+    /// Its display title, when the server gives one.
+    #[serde(default)]
+    pub title: Option<String>,
     /// What it does.
     #[serde(default)]
     pub description: String,
     /// JSON Schema of its arguments.
     #[serde(default = "empty_object_schema")]
     pub input_schema: Value,
+    /// The server's `annotations` object as sent (`readOnlyHint`,
+    /// `destructiveHint`, `idempotentHint`, `openWorldHint`, `title`), or
+    /// null; hashed whole into the approved listing.
+    #[serde(default)]
+    pub annotations: Value,
     /// Whether the server marked it read-only (`annotations.readOnlyHint`).
     #[serde(default)]
     pub read_only: bool,
@@ -195,8 +203,10 @@ impl McpClient {
                 let Some(name) = tool.get("name").and_then(Value::as_str) else {
                     continue;
                 };
+                let annotations = tool.get("annotations").cloned().unwrap_or(Value::Null);
                 tools.push(ToolInfo {
                     name: name.to_owned(),
+                    title: tool.get("title").and_then(Value::as_str).map(str::to_owned),
                     description: tool
                         .get("description")
                         .and_then(Value::as_str)
@@ -207,11 +217,11 @@ impl McpClient {
                         .cloned()
                         .filter(Value::is_object)
                         .unwrap_or_else(empty_object_schema),
-                    read_only: tool
-                        .get("annotations")
-                        .and_then(|a| a.get("readOnlyHint"))
+                    read_only: annotations
+                        .get("readOnlyHint")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    annotations,
                 });
             }
             cursor = result

@@ -18,6 +18,7 @@
 
 pub mod ownership;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -250,6 +251,11 @@ pub struct McpServerRule {
     /// trailing `/`. Its `host:port` must also be in `[network] allowed_hosts`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// The SHA-256 (64 hex digits) of the only tool listing accepted from
+    /// the server, as `anvil mcp list` prints it. Without it the first
+    /// listing is recorded and any later change is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing_sha256: Option<String>,
 }
 
 /// Where skills may load from.
@@ -639,6 +645,24 @@ impl LoadedPolicy {
         }
     }
 
+    /// The `listing_sha256` each `[features] mcp_servers` entry pins, by
+    /// server name.
+    ///
+    /// # Returns
+    ///
+    /// Server name to lowercase digest; entries without a pin are left out.
+    pub fn mcp_listing_pins(&self) -> BTreeMap<String, String> {
+        self.policy
+            .features
+            .mcp_servers
+            .iter()
+            .filter_map(|rule| {
+                let pin = rule.listing_sha256.as_deref()?;
+                Some((rule.name.clone(), pin.to_ascii_lowercase()))
+            })
+            .collect()
+    }
+
     /// Whether an HTTP MCP server may be contacted under `[features] mcp`.
     ///
     /// Its `host:port` must also pass `[network] allowed_hosts`, which the
@@ -778,6 +802,16 @@ pub fn parse(text: &str, path: &Path) -> Result<Policy, PolicyError> {
         if rule.command.is_some() == rule.url.is_some() || !url_ok {
             return Err(invalid(format!(
                 "[features] mcp_servers entry `{}` needs exactly one of `command` and an http(s) `url`",
+                rule.name
+            )));
+        }
+        let pin_ok = rule
+            .listing_sha256
+            .as_deref()
+            .is_none_or(|pin| pin.len() == 64 && pin.chars().all(|c| c.is_ascii_hexdigit()));
+        if !pin_ok {
+            return Err(invalid(format!(
+                "[features] mcp_servers entry `{}`: listing_sha256 must be 64 hex digits, as `anvil mcp list` prints it",
                 rule.name
             )));
         }
@@ -1102,6 +1136,35 @@ mod tests {
         assert_eq!(split_host_port("gpu.lan"), None);
         assert_eq!(split_host_port("::1:80"), None);
         assert_eq!(split_host_port("gpu.lan:http"), None);
+    }
+
+    #[test]
+    fn an_mcp_entry_may_pin_a_listing_digest_of_64_hex_digits() {
+        let dir = tempfile::tempdir().expect("dir");
+        let pin = "AB".repeat(32);
+        let path = write(
+            dir.path(),
+            POLICY_FILE,
+            &format!(
+                "{MINIMAL}[features]\nmcp = \"allowlist\"\nmcp_servers = [{{ name = \"git\", command = \"mcp-git\", listing_sha256 = \"{pin}\" }}, {{ name = \"docs\", command = \"mcp-docs\" }}]\n"
+            ),
+        );
+        let loaded = load(&path).expect("loads").expect("present");
+        assert_eq!(
+            loaded.mcp_listing_pins(),
+            BTreeMap::from([("git".to_owned(), "ab".repeat(32))])
+        );
+        let bad = write(
+            dir.path(),
+            POLICY_FILE,
+            &format!(
+                "{MINIMAL}[features]\nmcp = \"allowlist\"\nmcp_servers = [{{ name = \"git\", command = \"mcp-git\", listing_sha256 = \"abc\" }}]\n"
+            ),
+        );
+        let error = load(&bad)
+            .expect_err("a short digest is refused")
+            .to_string();
+        assert!(error.contains("listing_sha256"), "{error}");
     }
 
     #[test]

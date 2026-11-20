@@ -106,7 +106,7 @@ When the wiring builds a provider (`Wiring::provider`), `from_config` first call
 
 At the end, `memory::finish_session` runs the end-of-session summarizer only if `Wiring::memory_allowed` and the transcript is `full`, and the Stop hooks run if any are loaded.
 
-MCP servers are loaded before the session in `Wiring::load_mcp`, through `McpTools::load` and `McpStore` (`crates/anvil-compat/src/mcp/approval.rs`): a fresh listing is compared with the approved SHA-256 in `~/.anvil/mcp-approvals.toml`, a changed one drops the server, and the cache in `~/.anvil/mcp-cache/` is used only while it hashes to the approved listing.
+MCP servers are loaded before the session in `Wiring::load_mcp`, through `McpTools::load` and `McpStore` (`crates/anvil-compat/src/mcp/approval.rs`): every server is listed live, the listing is compared with the policy's `listing_sha256` pin or the approved SHA-256 in `~/.anvil/mcp-approvals.toml` (recorded with a digest of the definition), and a changed one drops the server. There is no tool cache.
 
 ## 9. The audit log
 

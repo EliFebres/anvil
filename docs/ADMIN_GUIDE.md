@@ -75,7 +75,7 @@ Two policies ship as starting points: `policies/restricted.toml` (one model serv
 | `[files] extra_roots` | none | Folders outside the workspace the file tools may read, never write. The user's `[tools] extra_dirs` is an error under a policy. |
 | `[files] deny` | none | Path globs (such as `**/*.kdbx`) the file tools refuse and searches skip, inside the workspace too. |
 | `[features] mcp` | `"off"` | `"off"`, `"allowlist"` or `"on"`. |
-| `[features] mcp_servers` | none | With `"allowlist"`: entries `{ name = "...", command = "..." }` for a local server or `{ name = "...", url = "https://..." }` for an HTTP server; the name and the program or URL (a trailing `/` aside) must match the definition. An HTTP server's `host:port` must also be in `allowed_hosts`, with `"on"` too. |
+| `[features] mcp_servers` | none | With `"allowlist"`: entries `{ name = "...", command = "..." }` for a local server or `{ name = "...", url = "https://..." }` for an HTTP server; the name and the program or URL (a trailing `/` aside) must match the definition. An HTTP server's `host:port` must also be in `allowed_hosts`, with `"on"` too. An entry may add `listing_sha256 = "<64 hex digits>"`: then only that tool listing is accepted from the server (see "MCP listing approval"). |
 | `[features] hooks` | `false` | Whether hooks run. |
 | `[features] skills` | `"off"` | `"off"`, `"bundled"` (skills that ship with anvil) or `"local"` (also the user's and a trusted repository's). |
 | `[features] memory` | `false` | Whether remembered facts are read and the end-of-session summarizer proposes new ones. When off, nothing under `~/.anvil/memory` is read or written. |
@@ -119,7 +119,12 @@ Hooks, MCP servers and skills the policy forbids are errors when the user's own 
 
 ### MCP listing approval
 
-A server may start only when the policy's `[features] mcp` allows it by name and program or URL. What it offers is approved separately: the first tool listing anvil sees from an allowed server is recorded as a SHA-256 of its tools' names, descriptions and input schemas in the user's `~/.anvil/mcp-approvals.toml`. When a later listing differs, for example because a server update changed a tool description, anvil does not use the server and says so. The developer reviews the new listing with `anvil mcp approve <name>`, which prints the tools and records them; under a policy this works only for a server the policy allows. The approval file belongs to the user, so it detects changes a server makes, not changes the user makes; to stop a server for everyone, remove it from `mcp_servers`.
+A server may start only when the policy's `[features] mcp` allows it by name and program or URL. What it offers is approved separately. Every session start lists every server live and hashes the listing: each tool's name, title, description, input schema and all its annotations (`readOnlyHint`, which lets a call run without a prompt, `destructiveHint`, `idempotentHint`, `openWorldHint`, `title`).
+
+- With `listing_sha256` on the server's `[features] mcp_servers` entry, only that listing is accepted; any other stops the server with an error that prints the digest it saw.
+- Without it, the first listing is recorded in the user's `~/.anvil/mcp-approvals.toml` together with a digest of the definition (command and arguments, or URL). A later listing that differs, or a changed definition, stops the server.
+
+Under a policy `anvil mcp approve` is refused, so a developer cannot accept a changed listing; you accept it by pinning. To find the digest, run `anvil mcp list` on a workstation with the server: it prints `mcp <name>: listing_sha256 = "<digest>"` for each server that answered, accepted or not. Review the listing the same command prints, then add the digest to the entry. The approvals file belongs to the user, so without a pin it detects changes a server makes, not changes the user makes (deleting the file makes the next listing count as the first); a pin does not depend on that file. To stop a server for everyone, remove it from `mcp_servers`.
 
 ### Collecting audit logs
 

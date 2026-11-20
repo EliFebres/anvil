@@ -364,6 +364,12 @@ async fn run_stop_hooks(
 /// When no allowed server has that name, it cannot be reached, or the
 /// approvals file cannot be written.
 pub async fn mcp_approve(wiring: &Wiring, name: &str) -> anyhow::Result<i32> {
+    if wiring.policy.is_some() {
+        anyhow::bail!(
+            "a managed policy is installed, so only the administrator can accept a new listing of `{name}`: \
+             they set `listing_sha256` on its `[features] mcp_servers` entry to the digest `anvil mcp list` prints"
+        );
+    }
     let Some(server) = wiring.mcp_servers.get(name) else {
         anyhow::bail!(
             "no MCP server `{name}` is defined{}",
@@ -592,7 +598,7 @@ pub(crate) async fn report_mcp(wiring: &Wiring) -> usize {
     };
     let started = Instant::now();
     let tools =
-        anvil_compat::McpTools::load(servers, &wiring.cwd, &http, true, &wiring.mcp_store()).await;
+        anvil_compat::McpTools::load(servers, &wiring.cwd, &http, &wiring.mcp_store()).await;
     let millis = started.elapsed().as_millis();
     let mut failures = 0;
     for report in tools.reports() {
@@ -602,6 +608,9 @@ pub(crate) async fn report_mcp(wiring: &Wiring) -> usize {
                 failures += 1;
                 println!("mcp {}: FAILED: {error}", report.name);
             }
+        }
+        if let Some(digest) = &report.listing_sha256 {
+            println!("mcp {}: listing_sha256 = \"{digest}\"", report.name);
         }
     }
     for name in tools.names() {

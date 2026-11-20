@@ -3,13 +3,12 @@
 //!
 //! Servers come from `.mcp.json`, the `mcpServers` key of
 //! `.claude/settings.json`, and `~/.anvil/mcp.toml`. Registration needs
-//! each server's tool list. The first listing a server returns is recorded
+//! each server's tool list, so every server is started and listed live
+//! when a session loads it. The first listing a server returns is recorded
 //! as a SHA-256 in `~/.anvil/mcp-approvals.toml`; a later listing that
-//! differs stops the server until it is approved again (see [`approval`]).
-//! Connecting at every startup would be slow, so an approved list is
-//! cached under `~/.anvil/mcp-cache/<repository>/`, keyed by a SHA-256 of
-//! the server's definition. A server with a fresh cache entry is not
-//! started until one of its tools is called.
+//! differs stops the server until it is approved again, and under a
+//! managed policy only a pinned `listing_sha256` accepts a new one (see
+//! [`approval`]).
 //!
 //! Two transports are supported: local servers that anvil starts as a
 //! child process (stdio), and remote servers reached over the streamable
@@ -541,8 +540,9 @@ pub struct ServerReport {
     pub name: String,
     /// How many tools it offers, when known.
     pub tools: Result<usize, McpError>,
-    /// Whether the list came from the cache (no connection was made).
-    pub from_cache: bool,
+    /// The [`approval::listing_digest`] of what it listed, when it listed
+    /// anything, so an administrator can pin it.
+    pub listing_sha256: Option<String>,
 }
 
 /// Every server's tools, ready to register.
@@ -555,54 +555,39 @@ pub struct McpTools {
 }
 
 impl McpTools {
-    /// Resolves every server's tool list, from the cache when it holds the
-    /// approved listing and by connecting otherwise.
+    /// Starts and lists every server, live, and keeps those whose listing
+    /// is the approved one.
     ///
     /// # Arguments
     ///
     /// * `set` - The servers.
     /// * `cwd` - The project root; stdio servers run there.
     /// * `http` - The client HTTP servers are reached with.
-    /// * `refresh` - Ignore the cache and connect to every server.
-    /// * `store` - The approvals and the cache.
+    /// * `store` - The approvals and the policy's pins.
     ///
     /// # Returns
     ///
     /// The tools. A server that cannot be reached, or whose listing differs
     /// from the approved one, contributes no tools and an error in its
     /// report; the others still load.
-    pub async fn load(
-        set: &ServerSet,
-        cwd: &Path,
-        http: &HttpClient,
-        refresh: bool,
-        store: &McpStore,
-    ) -> Self {
+    pub async fn load(set: &ServerSet, cwd: &Path, http: &HttpClient, store: &McpStore) -> Self {
         let mut tools = Self::default();
         for server in set.servers() {
-            if !refresh && let Some(cached) = store.cached(server) {
-                tools.reports.push(ServerReport {
-                    name: server.name.clone(),
-                    tools: Ok(cached.len()),
-                    from_cache: true,
-                });
-                tools.servers.push((
-                    Arc::new(LazyServer::new(
-                        server.clone(),
-                        cwd.to_path_buf(),
-                        http.clone(),
-                    )),
-                    cached,
-                ));
-                continue;
-            }
             let listed = async {
                 let client = McpClient::connect(server, cwd, http).await?;
                 let list = client.list_tools().await?;
                 Ok::<_, McpError>((client, list))
             }
             .await;
+            let listing_sha256 = listed
+                .as_ref()
+                .ok()
+                .map(|(_, list)| approval::listing_digest(list));
             let listed = listed.and_then(|(client, list)| match store.check(server, &list) {
+                Verdict::Changed if store.is_managed() => Err(McpError::ListingRefused {
+                    server: server.name.clone(),
+                    digest: approval::listing_digest(&list),
+                }),
                 Verdict::Changed => Err(McpError::ListingChanged {
                     server: server.name.clone(),
                 }),
@@ -610,11 +595,10 @@ impl McpTools {
             });
             match listed {
                 Ok((client, list)) => {
-                    store.store(server, &list);
                     tools.reports.push(ServerReport {
                         name: server.name.clone(),
                         tools: Ok(list.len()),
-                        from_cache: false,
+                        listing_sha256,
                     });
                     tools.servers.push((
                         Arc::new(LazyServer::connected(
@@ -631,7 +615,7 @@ impl McpTools {
                     tools.reports.push(ServerReport {
                         name: server.name.clone(),
                         tools: Err(error),
-                        from_cache: false,
+                        listing_sha256,
                     });
                 }
             }
@@ -857,40 +841,5 @@ timeout_secs = 5
         assert_eq!(launch.command, "node");
         assert_eq!(launch.args, [format!("--path={path}")]);
         assert_eq!(launch.env.get("P"), Some(&path));
-    }
-
-    #[test]
-    fn cache_round_trips_and_rejects_a_changed_definition() {
-        let home = tempfile::tempdir().expect("home");
-        let project = tempfile::tempdir().expect("project");
-        let store = McpStore::new(Some(home.path().to_path_buf()), project.path());
-        let tools = vec![ToolInfo {
-            name: "echo".to_owned(),
-            description: "d".to_owned(),
-            input_schema: serde_json::json!({"type": "object"}),
-            read_only: true,
-        }];
-        let server = McpServer {
-            name: "my server/1".to_owned(),
-            transport: Transport::Stdio {
-                command: "srv".to_owned(),
-                args: Vec::new(),
-                env: BTreeMap::new(),
-            },
-            timeout: DEFAULT_TIMEOUT,
-            source: home.path().join("mcp.toml"),
-        };
-        assert_eq!(store.check(&server, &tools), Verdict::Recorded);
-        store.store(&server, &tools);
-        assert_eq!(store.cached(&server), Some(tools));
-        let changed = McpServer {
-            transport: Transport::Stdio {
-                command: "other".to_owned(),
-                args: Vec::new(),
-                env: BTreeMap::new(),
-            },
-            ..server
-        };
-        assert_eq!(store.cached(&changed), None);
     }
 }
