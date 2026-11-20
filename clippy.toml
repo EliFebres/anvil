@@ -8,3 +8,12 @@ disallowed-methods = [
     { path = "reqwest::ClientBuilder::new", reason = "build HTTP clients only in anvil_core::net::http_client" },
     { path = "reqwest::get", reason = "send requests only through anvil_core::net::http_client" },
 ]
+
+# The client types themselves, so a client cannot be had through `Default`
+# (`ClientBuilder::default()`, `<Client as Default>::default()`,
+# `Default::default()`), which `disallowed-methods` cannot name because
+# clippy does not resolve paths to trait implementations.
+disallowed-types = [
+    { path = "reqwest::Client", reason = "build and hold HTTP clients only in anvil_core::net" },
+    { path = "reqwest::ClientBuilder", reason = "build HTTP clients only in anvil_core::net::http_client" },
+]

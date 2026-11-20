@@ -57,6 +57,18 @@ deny = [
     { crate = "openssl-sys", reason = "TLS must come from rustls" },
     { crate = "openssl", reason = "TLS must come from rustls" },
     { crate = "native-tls", reason = "TLS must come from rustls" },
+    # Every HTTP request goes through reqwest in anvil_core::net, which
+    # checks it against the egress rules. Other HTTP clients must not come
+    # in; hyper and hyper-util only as reqwest's own transport (and
+    # wiremock's, a test server).
+    { crate = "ureq", reason = "HTTP goes only through anvil_core::net" },
+    { crate = "isahc", reason = "HTTP goes only through anvil_core::net" },
+    { crate = "attohttpc", reason = "HTTP goes only through anvil_core::net" },
+    { crate = "surf", reason = "HTTP goes only through anvil_core::net" },
+    { crate = "curl", reason = "HTTP goes only through anvil_core::net" },
+    { crate = "curl-sys", reason = "HTTP goes only through anvil_core::net" },
+    { crate = "hyper", wrappers = ["reqwest", "hyper-util", "hyper-rustls", "wiremock"], reason = "HTTP goes only through anvil_core::net" },
+    { crate = "hyper-util", wrappers = ["reqwest", "hyper-rustls", "wiremock"], reason = "HTTP goes only through anvil_core::net" },
 ]
 
 [sources]

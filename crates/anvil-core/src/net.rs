@@ -357,6 +357,7 @@ pub fn host_port(url: &str) -> Result<String, EgressError> {
 #[derive(Debug, Clone)]
 pub struct HttpClient {
     /// The reqwest client, never handed out.
+    #[allow(clippy::disallowed_types)]
     inner: reqwest::Client,
     /// The rules every request is checked against.
     egress: Arc<Egress>,
@@ -557,7 +558,7 @@ impl HttpRequest {
 ///
 /// [`ClientError`] when a certificate or key file cannot be read or used,
 /// the proxy URL is refused, or the TLS backend cannot be set up.
-#[allow(clippy::disallowed_methods)]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub fn http_client(egress: &Egress, connect_timeout: Duration) -> Result<HttpClient, ClientError> {
     let connection = &egress.connection;
     let mut builder = reqwest::Client::builder()
