@@ -108,6 +108,7 @@ From then on nothing a user, profile, flag or repository sets can loosen it, and
 | [docs/CODE_TOUR.md](docs/CODE_TOUR.md) | Engineers reading the code | A reading order through the security code, with a test to run at each stop. |
 | [docs/USAGE.md](docs/USAGE.md) | Developers | Every command, the full-screen UI, workers, long builds, rules and templates. |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Maintainers, reviewers | Every design choice made while hardening Anvil, with the reason. |
+| [docs/HARDENING_REPORT.md](docs/HARDENING_REPORT.md) | Reviewers | What the hardening run did per phase, what it did not, the numbers, and what only the repository owner can do. |
 | [CHANGELOG.md](CHANGELOG.md) | Everyone | What changed in each version. |
 | `policies/`, `profiles/` | Administrators, developers | Example managed policies (`restricted.toml`, `standard.toml`) and the `strict.toml` profile, each parsed by a test. |
 
