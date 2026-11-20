@@ -74,7 +74,7 @@ Every tool call goes through `ToolRegistry::execute`, which calls `check_permiss
 Every file tool calls `checked_path` before it opens anything. It refuses spellings Windows would fold onto another name (`win32_fold`), resolves symlinks, `..`, junctions and letter case, and requires the result to lie in the workspace or an allowed folder. `holds_secrets` refuses credential and key files even inside the workspace, `inside_git_dir` refuses writes into any git directory, and `grants_power` refuses writes to the files that would raise the agent's own permissions. `crates/anvil-core/src/tools/boundary_tests.rs` tries every tool against every spelling.
 
 - Read: `ToolContext::checked_path`, then `grants_power`.
-- Run: `cargo test -p anvil-core boundary_symlink_escape_is_refused`
+- Run: `cargo test -p anvil-core boundary_symlink_escape_is_refused` (Unix only; it matches no test on Windows). On Windows run `cargo test -p anvil-core boundary_windows_drive_paths_are_refused` instead; `cargo test -p anvil-core boundary_dot_dot_traversal_is_refused` runs on every system.
 
 ## 9. Running a command
 

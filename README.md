@@ -49,7 +49,7 @@ anvil setup --endpoint https://models.internal.example/v1 [--model <id>]
 anvil doctor                        # keys, provider, tools; --egress lists every destination
 ```
 
-The key is read from the environment or `~/.anvil/.env`, never from a configuration file or the repository. A non-loopback endpoint must use https. The written configuration (`~/.anvil/config.toml`) looks like this:
+The key is read from the environment or `~/.anvil/.env`, never from a configuration file or the repository. A non-loopback endpoint must use https unless you list its host in `[network] allow_http_hosts` (unmanaged only). The written configuration (`~/.anvil/config.toml`) looks like this:
 
 ```toml
 [providers.endpoint]

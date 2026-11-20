@@ -7,7 +7,7 @@ name: release
 #   - SHA256SUMS, the SHA-256 of every asset;
 #   - anvil.cdx.json, a CycloneDX SBOM of the anvil binary's dependencies;
 #   - anvil-<version>-vendored-src.tar.gz, the source with every dependency
-#     vendored, for an offline build (README.md, "Building offline");
+#     vendored, for an offline build (docs/ADMIN_GUIDE.md, "Air-gapped installation");
 #   - a GitHub artifact attestation (SLSA build provenance) for every asset,
 #     checked with `gh attestation verify <file> --repo EliFebres/anvil`.
 on:

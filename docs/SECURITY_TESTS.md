@@ -20,6 +20,7 @@ The identifiers in the first column (`NET-1`, `FS-3`, ...) are what README.md, S
 | NET-8 | Under a policy, a provider or HTTP MCP server whose host is not allowed stops Anvil at startup with an error naming the key. | `a_provider_host_outside_the_allowlist_is_an_error_naming_the_key`, `http_mcp_servers_need_a_url_rule_and_an_allowed_host` | `crates/anvil-cli/src/wiring/policy_tests.rs` |
 | NET-9 | Unmanaged, the allowed set is the user's endpoints plus those of a repository only once it is trusted. | `unmanaged_egress_allows_the_users_endpoints_and_a_trusted_repositorys_only` | `crates/anvil-cli/src/wiring.rs` |
 | NET-10 | `anvil doctor --egress` lists every destination the HTTP client can reach and sends nothing. | `doctor_egress_lists_each_destination_and_sends_nothing` | `crates/anvil-cli/tests/doctor.rs` |
+| NET-11 | Anvil has no self-update, update check, usage report or webhook: those commands are not in the binary, and a configuration that still sets `[update]`, `[notify]`, `[tickets]`, `[telemetry]` or `[integrations]` fails to load with the reason. Requests go only where NET-1 allows. | `removed_commands_are_not_part_of_the_binary`, `removed_sections_fail_with_the_reason` | `crates/anvil-cli/tests/cli.rs`, `crates/anvil-types/src/config.rs` |
 
 ## Keys and child processes
 
@@ -75,6 +76,9 @@ The identifiers in the first column (`NET-1`, `FS-3`, ...) are what README.md, S
 | PERM-2 | A repository can add a `deny` the user cannot override. | `the_repository_can_still_add_a_deny_the_user_cannot_override` | `crates/anvil-cli/src/wiring/hostile_tests.rs` |
 | PERM-3 | An `always` answer is recorded as `saved` only when its rule was kept. | `an_always_answer_is_reported_as_saved_only_when_its_rule_is_kept` | `crates/anvil-core/src/tools/mod.rs` |
 | PERM-4 | Subagents get the same file boundary, shell mode, allowlist, runner and policy rules as the session. | `subagents_are_confined_like_the_session`, `a_subagent_gets_the_same_policy_rules_and_file_limits` | `crates/anvil-cli/src/wiring/policy_tests.rs` |
+| PERM-5 | The built-in tools are `edit_file`, `glob`, `grep`, `list_dir`, `outline`, `read_file`, `shell` and `write_file`; there is no web search or web fetch tool. | `specs_list_every_builtin_sorted` | `crates/anvil-core/src/tools/mod.rs` |
+| PERM-6 | `write_file`, `edit_file` and `shell` ask a person when no rule decides, and a refused answer changes nothing; reads need no answer. | `the_built_in_writing_tools_and_the_shell_ask_when_no_rule_decides`, `default_for_write_access_is_ask_then_no_declines` | `crates/anvil-core/src/tools/mod.rs` |
+| PERM-7 | While planning, a call whose tool may write, a delegated implementing agent included, is not run. | `planning_refuses_delegated_writes_but_runs_read_only_agents` | `crates/anvil-compat/tests/delegate_parallel.rs` |
 
 ## Repository trust
 
@@ -99,7 +103,9 @@ The identifiers in the first column (`NET-1`, `FS-3`, ...) are what README.md, S
 | POL-5 | Hooks and MCP servers the policy forbids are errors in the user's files and left out of a repository. | `the_users_hooks_conflict_and_project_hooks_do_not_load`, `mcp_servers_need_the_mode_and_a_matching_name_and_program` | `crates/anvil-cli/src/wiring/policy_tests.rs` |
 | POL-6 | `anvil build` follows the policy's feature switch and ceilings. | `build_follows_the_feature_switch_and_the_ceilings` | `crates/anvil-cli/src/policy.rs` |
 | POL-7 | `anvil policy show` prints every schema key and every user setting the policy constrains; doctor shows presence, ownership and hash. | `policy_lines_name_every_key_of_the_schema_set_or_not`, `policy_show_covers_every_user_key_the_policy_constrains`, `show_and_report_name_each_setting_and_its_layer`, `policy_rows_show_presence_ownership_and_hash` | `crates/anvil-cli/src/policy.rs`, `crates/anvil-cli/src/doctor.rs` |
-| POL-8 | `docs/ADMIN_GUIDE.md` lists every policy key and no other. | `the_admin_guide_lists_every_policy_key_and_no_other` | `crates/anvil-types/tests/docs_match_code.rs` |
+| POL-8 | `docs/ADMIN_GUIDE.md` lists every policy key and no other, and states the default the schema applies to each key whose default is a value or an empty list (a key a default leaves unset is described in words and not compared). | `the_admin_guide_lists_every_policy_key_and_no_other`, `the_admin_guide_states_each_policy_default_the_schema_applies` | `crates/anvil-types/tests/docs_match_code.rs` |
+| POL-9 | With `[permissions] require_plan_approval`, every plan needs a person. | `plan_approval_and_transcripts_follow_the_policy` | `crates/anvil-cli/src/wiring/policy_tests.rs` |
+| POL-10 | `[limits] session_tokens` caps the session budget, a larger user value is an error, and a session that spends its budget stops as incomplete. | `the_session_budget_is_capped_and_an_explicit_excess_is_an_error`, `session_budget_is_incomplete_not_a_provider_error` | `crates/anvil-cli/src/wiring/policy_tests.rs`, `crates/anvil-core/src/agent/mod.rs` |
 
 ## Data kept on the machine
 
@@ -125,6 +131,7 @@ The identifiers in the first column (`NET-1`, `FS-3`, ...) are what README.md, S
 | AUD-8 | Each permission decision names its source, and a policy refusal names the policy key. | `permission_records_name_their_source_and_policy_refusals_their_key` | `crates/anvil-cli/src/usage/audit_tests.rs` |
 | AUD-9 | A build's acceptance decisions go to the build's own log. | `acceptance_decisions_go_to_the_build_log_not_the_last_items` | `crates/anvil-cli/src/build/env.rs` |
 | AUD-10 | Under a policy the audit log is required by default, and a mirror path must be absolute. | `audit_is_required_under_a_policy_not_unmanaged_and_a_mirror_must_be_absolute`, `the_restricted_example_requires_the_audit_log` | `crates/anvil-types/src/policy/mod.rs` |
+| AUD-11 | Every record carries its sequence number, a UTC time stamp with millisecond precision (`2026-01-01T00:00:00.000Z`), the session, the agent, the operating system user and host (from environment variables), the version, commit, binary hash and policy hash, and the event. | `every_record_names_who_where_what_and_when_in_utc` | `crates/anvil-audit/src/audit/log.rs` |
 
 ## Supply chain and repository
 
@@ -135,6 +142,7 @@ The identifiers in the first column (`NET-1`, `FS-3`, ...) are what README.md, S
 | SUP-3 | A release runs only on a version tag and builds with `--locked`. | `release_runs_only_on_version_tags_and_builds_locked` | `crates/anvil-types/tests/workflows.rs` |
 | SUP-4 | The release workflow publishes `SHA256SUMS`, a CycloneDX SBOM, a vendored source archive and a build provenance attestation over every checksummed file. | `release_publishes_checksums_an_sbom_vendored_source_and_provenance` | `crates/anvil-types/tests/workflows.rs` |
 | SUP-5 | Every document claim in this file names a test that exists. | `every_test_named_in_security_tests_exists` | `crates/anvil-types/tests/docs_match_code.rs` |
+| SUP-6 | `anvil skill install` installs only from a local folder; a URL or `owner/repo` is refused, and nothing is downloaded. | `only_a_local_directory_is_a_source` | `crates/anvil-compat/src/skills/install.rs` |
 
 ## Checks that are not `cargo test`
 

@@ -2221,6 +2221,48 @@ mod tests {
         insta::assert_json_snapshot!(specs);
     }
 
+    #[tokio::test]
+    async fn the_built_in_writing_tools_and_the_shell_ask_when_no_rule_decides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "old").expect("write");
+        let registry = ToolRegistry::with_builtins(
+            Permissions::empty(),
+            Box::new(StaticPrompt(PromptAnswer::No)),
+        );
+        let ctx = ToolContext::new(dir.path());
+        for (name, args) in [
+            ("write_file", r#"{"path": "b.txt", "content": "new"}"#),
+            (
+                "edit_file",
+                r#"{"path": "a.txt", "old": "old", "new": "new"}"#,
+            ),
+            ("shell", r#"{"command": "echo hi"}"#),
+        ] {
+            let call = ToolCall {
+                id: "c1".to_owned(),
+                name: name.to_owned(),
+                arguments_json: args.to_owned(),
+            };
+            let execution = registry.execute(&call, &ctx).await;
+            assert_eq!(execution.outcome, ToolOutcome::DeclinedByUser, "{name}");
+        }
+        assert!(!dir.path().join("b.txt").exists(), "nothing was written");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).expect("read"),
+            "old"
+        );
+        let read = ToolCall {
+            id: "c2".to_owned(),
+            name: "read_file".to_owned(),
+            arguments_json: r#"{"path": "a.txt"}"#.to_owned(),
+        };
+        assert_eq!(
+            registry.execute(&read, &ctx).await.outcome,
+            ToolOutcome::Completed,
+            "a read needs no answer"
+        );
+    }
+
     #[test]
     fn display_path_is_relative_with_forward_slashes() {
         let ctx = ToolContext::new(Path::new("/proj"));

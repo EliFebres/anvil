@@ -82,6 +82,8 @@ icacls C:\ProgramData\anvil /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*
 
 `S-1-5-32-544` is Administrators, `S-1-5-18` is SYSTEM and `S-1-5-32-545` is Users; security identifiers are used because group names change with the system language. anvil accepts Administrators, SYSTEM and TrustedInstaller as owners and as holders of write, delete, change-permission and take-ownership rights; any other principal holding one of those rights makes anvil refuse to start.
 
+The policy binds only people who are not administrators. A developer who is a local administrator, or can become root, can rewrite or remove the file, and Anvil then runs under their file or unmanaged. On machines where the policy matters, do not give developers administrator rights (docs/THREAT_MODEL.md, "What this model does not cover").
+
 Check the result before rollout:
 
 ```sh

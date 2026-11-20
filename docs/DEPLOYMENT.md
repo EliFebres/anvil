@@ -115,7 +115,7 @@ flowchart LR
 | Extensions (MCP, hooks, skills) | Off under a policy unless allowed; MCP listings pinned by digest | Nothing | Vets and allowlists servers; pins `listing_sha256` |
 | Records | Writes the hash-chained audit log, the mirror, transcripts per policy; fails closed when required (`AUD-*`) | Its own request logs | Provides and collects `mirror_dir`; reviews logs; sets `retention_days`; disk encryption |
 | The model | Nothing: treats model output as untrusted actions | Model provenance, version, patching, availability | Chooses the model and the host |
-| The Anvil binary | Reproducible locked builds with checksums, SBOM, provenance, vendored source (`SUP-*`) | Nothing | Verifies a release, distributes it, pins the version, upgrades by hand |
+| The Anvil binary | Locked builds with checksums, SBOM, provenance, vendored source (`SUP-*`) | Nothing | Verifies a release, distributes it, pins the version, upgrades by hand |
 | Policy file | Refuses an unsafe, broken or unknown-key policy; reports its hash (`POL-*`) | Nothing | Writes, reviews, rolls out and owns the file |
 | Code the agent writes | Plans, runs checks, has it reviewed by a second model; shows every change as a diff | Nothing | Pull request review by a person before merge |
 

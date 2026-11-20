@@ -448,6 +448,45 @@ mod tests {
     }
 
     #[test]
+    fn every_record_names_who_where_what_and_when_in_utc() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = AuditTarget {
+            primary: dir.path().join(AUDIT_FILE),
+            mirror: None,
+            required: true,
+        };
+        let identity = Identity {
+            user: "dev".to_owned(),
+            host: "ws-17".to_owned(),
+            version: "1.2.3".to_owned(),
+            commit: "abc123".to_owned(),
+            binary_sha256: "b".repeat(64),
+            policy: "p".repeat(64),
+        };
+        let log = AuditLog::open("s1", identity.clone(), &target).expect("open");
+        log.append("explore", end("done")).expect("append");
+        let text = std::fs::read_to_string(&target.primary).expect("read");
+        let record = &verify(&text).expect("intact").records[0].body;
+        assert_eq!(record.seq, 0);
+        assert_eq!(record.session, "s1");
+        assert_eq!(record.agent, "explore");
+        assert_eq!(record.user, identity.user);
+        assert_eq!(record.host, identity.host);
+        assert_eq!(record.version, identity.version);
+        assert_eq!(record.commit, identity.commit);
+        assert_eq!(record.binary_sha256, identity.binary_sha256);
+        assert_eq!(record.policy, identity.policy);
+        assert_eq!(record.event.tag(), "session_end");
+        let ts = chrono::DateTime::parse_from_rfc3339(&record.ts).expect("an RFC 3339 time");
+        assert_eq!(ts.offset().local_minus_utc(), 0, "UTC: {}", record.ts);
+        assert!(
+            record.ts.ends_with('Z') && record.ts.len() == "2026-01-01T00:00:00.000Z".len(),
+            "millisecond precision with a Z suffix: {}",
+            record.ts
+        );
+    }
+
+    #[test]
     fn a_required_log_refuses_to_continue_a_broken_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let target = AuditTarget {

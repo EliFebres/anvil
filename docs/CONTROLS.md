@@ -31,32 +31,32 @@ Which NIST SP 800-53 and SP 800-171 controls Anvil's features can support, the f
 | AC-6 Least Privilege | Under a policy the shell, MCP, hooks, skills, memory, `anvil build`, delegation and repository trust are off by default; subagents get no more than the session; a repository can only tighten. | `SH-1`, `PERM-4`, `TRUST-1`, `TRUST-5` |
 | AC-6(9) Log Use of Privileged Functions | Every permission decision is recorded with its source; a policy refusal names the key. | `AUD-8` |
 | AU-2 Event Logging | Model requests, tool calls, decisions, results, file changes, plan answers and policy refusals are recorded. | `AUD-7`, `AUD-8`, `AUD-9` |
-| AU-3 Content of Audit Records | Each record carries time, session, agent, user, host, version, binary hash, policy hash and the event. | `AUD-1`, `AUD-7` |
+| AU-3 Content of Audit Records | Each record carries its sequence number, a UTC time, the session, the agent, the operating system user and host, the version, commit, binary hash, policy hash and the event. | `AUD-11`, `AUD-1`, `AUD-7` |
 | AU-5 Response to Audit Logging Process Failures | With `[audit] required`, a session whose log cannot be written does not start, and after a failed write nothing further runs. | `AUD-5`, `AUD-6` |
-| AU-8 Time Stamps | Each record has a UTC `ts` from the workstation clock. | `AUD-1` |
+| AU-8 Time Stamps | Each record has a UTC `ts` with millisecond precision from the workstation clock. | `AUD-11` |
 | AU-9 Protection of Audit Information | Hash chain over a canonical form; a tampered, cut-and-resealed or replaced file is detected (an end cut or full rewrite needs the mirror); `anvil audit verify`. | `AUD-1`, `AUD-2`, `AUD-3`, `AUD-6` |
-| AU-9(2) Store on Separate Physical Systems or Components | `[audit] mirror_dir` writes every record to a second location the organization collects. | `AUD-4` |
+| AU-9(2) Store on Separate Physical Systems or Components | `[audit] mirror_dir` writes every record to a second location; putting that location on a separate system, and collecting it, is the organization's part. | `AUD-4` |
 | AU-11 Audit Record Retention | `retention_days` and `anvil purge` delete session folders by age; the mirror is never deleted by Anvil. | `DATA-4` |
 | AU-12 Audit Record Generation | Every session and build opens its log before the first model request, under the policy by default. | `AUD-5`, `AUD-10` |
 | CM-2 Baseline Configuration | Two shipped example policies (`policies/restricted.toml`, `policies/standard.toml`) that parse in CI. | `POL-3` |
 | CM-5 Access Restrictions for Change | The policy must be owned and writable only by administrators; file tools never write the files that grant power. | `POL-2`, `FS-5` |
 | CM-6 Configuration Settings | The policy outranks every lower layer; a conflict is an error naming the key; `anvil policy show` prints every setting and its layer. | `POL-4`, `POL-7`, `POL-8` |
-| CM-7 Least Functionality | Removed features (self-update, webhooks, tickets, remote skill install); every optional feature off by default under a policy. | `SH-1`, `POL-5` |
+| CM-7 Least Functionality | Removed features (self-update, webhooks, tickets, remote skill install) are gone, and a configuration that still sets them fails to load; every optional feature off by default under a policy. | `NET-11`, `SUP-6`, `SH-1`, `POL-5` |
 | CM-7(2) Prevent Program Execution | Shell mode `off`; untrusted repositories start no hook or MCP server. | `SH-1`, `TRUST-2` |
-| CM-7(5) Authorized Software: Allow-by-exception | Allowlist mode starts only listed programs with plain arguments, without a shell; MCP servers allowlisted by name and program or URL. | `SH-2`, `SH-3`, `POL-5` |
+| CM-7(5) Authorized Software: Allow-by-exception | Allowlist mode starts only listed programs with plain arguments, without a shell; MCP servers allowlisted by name and program or URL. | `SH-2`, `SH-3`, `POL-5`, `NET-8` |
 | CM-8 System Component Inventory | Each release carries a CycloneDX SBOM of the binary's dependencies. | `SUP-4` |
 | CM-11 User-installed Software | Package installs (`pip`, `npm`, `cargo`, `gem`) are a built-in deny category. | `SH-4` |
 | IA-5 Authenticator Management | Keys come only from the environment or `~/.anvil/.env`, never from configuration or the repository; they go only to their host and are redacted from errors and logs. | `KEY-1`, `KEY-2`, `NET-4`, `RED-4` |
 | IA-5(7) No Embedded Unencrypted Static Authenticators | `anvil scan-keys` fails when a tracked file holds a key shape or a `.env` value. | `KEY-6` |
 | SC-7 Boundary Protection | One HTTP client checks every request against the allowed set; no redirects; proxy only when the policy names one. | `NET-1`, `NET-2`, `NET-5`, `NET-7` |
 | SC-7(5) Deny by Default: Allow by Exception | Under a policy only `[network] allowed_hosts` is reachable. | `NET-1`, `NET-8` |
-| SC-8 Transmission Confidentiality and Integrity | https except loopback, checked at load, session start and every request. | `NET-3` |
+| SC-8 Transmission Confidentiality and Integrity | https except loopback, or a host the user's `allow_http_hosts` (unmanaged) or the policy's `require_tls = false` (managed) allows; checked at load, session start and every request. | `NET-3` |
 | SC-8(1) Cryptographic Protection | TLS through rustls; the policy's CA bundle replaces the system store; mutual TLS. Not FIPS-validated (see below). | `NET-3`, `NET-6` |
 | SC-39 Process Isolation | The container executor runs commands without network, root, capabilities or host folders besides the workspace. | `SH-5`, `SH-6` |
 | SI-7 Software, Firmware, and Information Integrity | Release provenance attestations and checksums; audit records sealed by hash. | `SUP-4`, `AUD-1` |
-| SI-10 Information Input Validation | The policy, configuration and repository files are validated with unknown keys refused; paths are resolved and checked before use; shell commands are parsed conservatively in allowlist mode. | `POL-3`, `TRUST-1`, `FS-1`, `FS-2`, `SH-2` |
+| SI-10 Information Input Validation | The policy is validated with unknown keys refused; a repository configuration that sets a loosening key is refused; paths are resolved and checked before use; shell commands are parsed conservatively in allowlist mode. | `POL-3`, `TRUST-1`, `FS-1`, `FS-2`, `SH-2` |
 | SI-12 Information Management and Retention | `[data] transcript` decides what is kept; retention by age; redaction before anything is stored. | `DATA-1`, `DATA-4`, `RED-1` |
-| SR-3 Supply Chain Controls and Processes | `cargo deny` gate (advisories, licenses, banned crates, crates.io only); pinned actions; least-privilege workflows; locked builds. | `SUP-1`, `SUP-2`, `SUP-3` |
+| SR-3 Supply Chain Controls and Processes | `cargo deny` gate (advisories, licenses, banned crates, crates.io only; a CI check, not a test); pinned actions; least-privilege workflows; locked builds. | `SUP-1`, `SUP-2`, `SUP-3` |
 | SR-4 Provenance | SLSA build provenance attestation for every released file. | `SUP-4` |
 | SR-11 Component Authenticity | `SHA256SUMS` and `gh attestation verify` let IT check a binary came from the tagged release workflow. | `SUP-4` |
 
@@ -70,15 +70,15 @@ The source controls in brackets are the ones Revision 3 itself names for each re
 | 03.01.03 Information Flow Enforcement [AC-04] | Egress allowlist, key binding, redaction, cleared child environment. | `NET-1`, `NET-4`, `RED-1`, `KEY-4` |
 | 03.01.05 Least Privilege [AC-06, AC-06(01), AC-06(07), AU-09(04)] | Restrictive policy defaults; subagents confined like the session; tightening-only repository rules. | `SH-1`, `PERM-4`, `TRUST-1` |
 | 03.03.01 Event Logging [AU-02] | The audit log's event types. | `AUD-7`, `AUD-8` |
-| 03.03.02 Audit Record Content [AU-03, AU-03(01)] | The fields of each record. | `AUD-1` |
+| 03.03.02 Audit Record Content [AU-03, AU-03(01)] | The fields of each record. | `AUD-11` |
 | 03.03.03 Audit Record Generation [AU-11, AU-12] | A log per session and build, opened before the first request; retention by age. | `AUD-10`, `DATA-4` |
 | 03.03.04 Response to Audit Logging Process Failures [AU-05] | Fail closed under `[audit] required`. | `AUD-5`, `AUD-6` |
-| 03.03.07 Time Stamps [AU-08] | UTC time stamp per record. | `AUD-1` |
+| 03.03.07 Time Stamps [AU-08] | UTC time stamp per record. | `AUD-11` |
 | 03.03.08 Protection of Audit Information [AU-09, AU-09(04)] | Hash chain, verifier, mirror. | `AUD-1`, `AUD-2`, `AUD-4` |
 | 03.04.01 Baseline Configuration [CM-02] | Shipped example policies. | `POL-3` |
 | 03.04.02 Configuration Settings [CM-06] | The policy outranks every lower layer. | `POL-4`, `POL-7` |
 | 03.04.05 Access Restrictions for Change [CM-05] | Administrator-owned policy; protected configuration files. | `POL-2`, `FS-5` |
-| 03.04.06 Least Functionality [CM-07, CM-07(01)] | Features off by default under a policy; removed features. | `SH-1`, `POL-5` |
+| 03.04.06 Least Functionality [CM-07, CM-07(01)] | Features off by default under a policy; removed features. | `SH-1`, `POL-5`, `NET-11`, `SUP-6` |
 | 03.04.08 Authorized Software: Allow by Exception [CM-07(05)] | Allowlist shell mode; MCP allowlist. | `SH-2`, `SH-3`, `POL-5` |
 | 03.04.10 System Component Inventory [CM-08, CM-08(01)] | Release SBOM. | `SUP-4` |
 | 03.05.12 Authenticator Management [IA-05] | Key handling and scanning. | `KEY-1`, `KEY-2`, `KEY-6`, `NET-4` |

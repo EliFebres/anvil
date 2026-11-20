@@ -14,7 +14,7 @@ Anvil is one binary on the machine where it runs, usually a developer workstatio
 
 | party | responsible for |
 |---|---|
-| **Anvil** | What the agent may read, run, send and store on the machine where Anvil runs; enforcing the limits an administrator sets; the record it leaves. Everything in "Boundaries" below is enforced in-process, the same way on Windows, macOS and Linux. |
+| **Anvil** | What the agent may read, run, send and store on the machine where Anvil runs; enforcing the limits an administrator sets; the record it leaves. Everything in "Boundaries" below is enforced in-process by the same code on Windows, macOS and Linux; CI runs the tests on Windows and Linux only, so the macOS build is released but not tested in CI. |
 | **The model host** (an internal model server, a private cloud GPU, or an API vendor) | That machine and the model on it: patching, network exposure, authentication, logging and retention of prompts, and who can read what it receives. Anvil sends it the task, the instruction files, the files and command output the tools read, and the conversation so far. Treat everything a session reads as sent to the host. |
 | **The organization's IT** | Who may run Anvil, on which machines and repositories, with which policy; the network around it (firewall, proxy, internal CA); the operating system account it runs under and any sandbox or endpoint monitoring around it; collecting the audit mirror; review of every change through pull requests. |
 

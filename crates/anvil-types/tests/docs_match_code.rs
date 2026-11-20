@@ -258,6 +258,117 @@ fn guide_keys(document: &str) -> BTreeSet<String> {
     keys
 }
 
+/// The guide's `default` cell for each key its key table lists.
+fn guide_defaults(document: &str) -> std::collections::BTreeMap<String, String> {
+    let mut defaults = std::collections::BTreeMap::new();
+    for (key_cell, default_cell) in column(document, "key")
+        .into_iter()
+        .zip(column(document, "default"))
+    {
+        let mut table = String::new();
+        for span in backticked(&key_cell) {
+            let key = match span
+                .strip_prefix('[')
+                .and_then(|rest| rest.split_once("] "))
+            {
+                Some((name, key)) => {
+                    table = name.to_owned();
+                    format!("[{table}] {key}")
+                }
+                None if table.is_empty() => span,
+                None => format!("[{table}] {span}"),
+            };
+            defaults.insert(key, default_cell.clone());
+        }
+    }
+    defaults
+}
+
+/// Each key's default as the guide must spell it: a scalar as its TOML
+/// literal in backticks, an empty list as `none` or `any`. Keys a default
+/// leaves unset are not in the serialized value and are left to the reader.
+fn spelled_defaults(
+    value: &toml::Value,
+    table: &str,
+    into: &mut std::collections::BTreeMap<String, Vec<String>>,
+) {
+    let Some(entries) = value.as_table() else {
+        return;
+    };
+    for (key, child) in entries {
+        let name = if table.is_empty() {
+            key.clone()
+        } else {
+            format!("[{table}] {key}")
+        };
+        let spellings = match child {
+            toml::Value::Table(_) => {
+                let nested = if table.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{table}.{key}")
+                };
+                spelled_defaults(child, &nested, into);
+                continue;
+            }
+            toml::Value::Array(items) if items.is_empty() => {
+                vec!["none".to_owned(), "any".to_owned()]
+            }
+            toml::Value::Array(_) => continue,
+            scalar => vec![format!("`{scalar}`")],
+        };
+        into.insert(name, spellings);
+    }
+}
+
+#[test]
+fn the_admin_guide_states_each_policy_default_the_schema_applies() {
+    // The smallest policies the schema accepts: every other key takes the
+    // default the code applies, so nothing here restates a default by hand.
+    let minimal = "version = 1\n[network]\nallowed_hosts = [\"h.example:443\"]\n";
+    let container = format!(
+        "{minimal}[shell]\nexecutor = \"container\"\n[shell.container]\nimage = \"build@sha256:{}\"\n",
+        "0".repeat(64)
+    );
+    let mut expected = std::collections::BTreeMap::new();
+    for text in [minimal.to_owned(), container] {
+        let policy: Policy = toml::from_str(&text).expect("a minimal policy is valid");
+        let value = toml::Value::try_from(&policy).expect("a policy serializes");
+        spelled_defaults(&value, "", &mut expected);
+    }
+    for given in [
+        "version",
+        "[network] allowed_hosts",
+        "[shell] executor",
+        "[shell.container] image",
+    ] {
+        expected.remove(given);
+    }
+    assert!(
+        expected.len() >= 20,
+        "only {} defaults were derived from the schema",
+        expected.len()
+    );
+    let listed = guide_defaults(&read_doc("docs/ADMIN_GUIDE.md"));
+    let wrong: Vec<String> = expected
+        .iter()
+        .filter_map(|(key, spellings)| {
+            let cell = listed.get(key).map_or("(no row)", String::as_str);
+            let words: Vec<&str> = cell.split([',', ' ']).collect();
+            let stated = spellings.iter().any(|spelling| {
+                cell.contains(spelling.as_str()) || words.contains(&spelling.as_str())
+            });
+            (!stated)
+                .then(|| format!("{key}: the guide says {cell}, the schema applies {spellings:?}"))
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "docs/ADMIN_GUIDE.md states defaults the schema does not apply:\n{}",
+        wrong.join("\n")
+    );
+}
+
 #[test]
 fn the_admin_guide_lists_every_policy_key_and_no_other() {
     let policy: Policy = toml::from_str(EVERY_KEY).expect("the fixture is a valid policy");
