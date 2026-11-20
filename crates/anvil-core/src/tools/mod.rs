@@ -53,11 +53,11 @@ use crate::guard::{self, DataGuard};
 use crate::provider::lock_or_recover;
 use crate::provider::types::{StopReason, ToolCall, ToolResult, ToolSpec, Usage};
 
-pub use output::{OutputStats, digest};
+pub use output::{OutputStats, digest, sha256_hex};
 pub use permissions::{
-    Decision, DecisionScope, PermissionDecision, PermissionError, PermissionObserver,
-    PermissionPrompt, PermissionRequest, Permissions, PromptAnswer, ScriptedPrompt,
-    SessionApprovals, StaticPrompt,
+    Decision, DecisionScope, DecisionSource, PermissionDecision, PermissionError,
+    PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer, RuleOrigin,
+    ScriptedPrompt, SessionApprovals, StaticPrompt,
 };
 pub use shell::{Container, Runner, Shell};
 pub use workspace::Workspace;
@@ -91,6 +91,23 @@ pub struct ToolOutput {
     pub is_error: bool,
     /// Completions the tool made itself; empty for every tool but `delegate`.
     pub model_turns: Vec<ModelTurn>,
+    /// The exit code of the program the tool ran, for `shell`.
+    pub exit_code: Option<i32>,
+    /// Files the tool wrote, for `write_file` and `edit_file`.
+    pub changes: Vec<FileChange>,
+}
+
+/// One file a tool wrote, by SHA-256 before and after. A command run by
+/// `shell` can change files too; those changes are not observed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChange {
+    /// The file, as the tool showed it to the model.
+    pub path: String,
+    /// SHA-256 (lowercase hex) of the file before the call, or `None` when
+    /// it did not exist.
+    pub before: Option<String>,
+    /// SHA-256 (lowercase hex) of the file after the call.
+    pub after: String,
 }
 
 impl ToolOutput {
@@ -108,7 +125,23 @@ impl ToolOutput {
             content: content.into(),
             is_error: false,
             model_turns: Vec::new(),
+            exit_code: None,
+            changes: Vec::new(),
         }
+    }
+
+    /// The output with one written file added.
+    ///
+    /// # Arguments
+    ///
+    /// * `change` - The file and its digests.
+    ///
+    /// # Returns
+    ///
+    /// The output.
+    pub fn with_change(mut self, change: FileChange) -> Self {
+        self.changes.push(change);
+        self
     }
 
     /// A failed output.
@@ -125,6 +158,8 @@ impl ToolOutput {
             content: message.into(),
             is_error: true,
             model_turns: Vec::new(),
+            exit_code: None,
+            changes: Vec::new(),
         }
     }
 }
@@ -517,6 +552,8 @@ pub struct Execution {
     /// How many secrets of each kind were redacted from the output and
     /// hook text. Never holds a value.
     pub redactions: BTreeMap<String, usize>,
+    /// Files the call wrote.
+    pub changes: Vec<FileChange>,
 }
 
 /// A boxed future returned by a [`ToolHook`].
@@ -594,9 +631,22 @@ pub struct ToolRegistry {
     observer: Option<Arc<dyn PermissionObserver>>,
     /// Runs around every allowed call.
     hook: Option<Arc<dyn ToolHook>>,
+    /// Refuses every call once it says so.
+    gate: Option<Arc<dyn CallGate>>,
     /// Whether an `always` answer may save a rule; a managed policy can
     /// turn it off, and the answer then counts for the session only.
     always_allowed: bool,
+}
+
+/// Refuses every tool call and command once it gives a reason, such as
+/// when a session's required audit log can no longer be written.
+pub trait CallGate: Send + Sync {
+    /// Why nothing may run any more.
+    ///
+    /// # Returns
+    ///
+    /// The reason, or `None` while calls may run.
+    fn refusal(&self) -> Option<String>;
 }
 
 impl ToolRegistry {
@@ -618,6 +668,7 @@ impl ToolRegistry {
             approvals: Arc::new(Mutex::new(SessionApprovals::default())),
             always_allowed: true,
             observer: None,
+            gate: None,
             hook: None,
         }
     }
@@ -683,6 +734,25 @@ impl ToolRegistry {
     /// * `hook` - The hook.
     pub fn set_hook(&mut self, hook: Arc<dyn ToolHook>) {
         self.hook = Some(hook);
+    }
+
+    /// Installs a gate that refuses every call once it gives a reason.
+    ///
+    /// # Arguments
+    ///
+    /// * `gate` - The gate.
+    pub fn set_gate(&mut self, gate: Arc<dyn CallGate>) {
+        self.gate = Some(gate);
+    }
+
+    /// The gate's reason to refuse everything, if it has one; the loop
+    /// asks before it runs a check command itself.
+    ///
+    /// # Returns
+    ///
+    /// The reason, or `None` while calls may run.
+    pub fn gate_refusal(&self) -> Option<String> {
+        self.gate.as_ref().and_then(|gate| gate.refusal())
     }
 
     /// A registry with every built-in tool.
@@ -788,6 +858,9 @@ impl ToolRegistry {
     ///
     /// The execution record.
     pub async fn execute(&self, call: &ToolCall, ctx: &ToolContext) -> Execution {
+        if let Some(reason) = self.gate_refusal() {
+            return Execution::finished(call, ToolOutput::error(reason), ToolOutcome::Blocked);
+        }
         let Some(tool) = self.get(&call.name) else {
             tracing::warn!(tool = %call.name, "model called an unknown tool");
             return Execution::finished(
@@ -881,9 +954,10 @@ impl ToolRegistry {
                     },
                     outcome,
                     full_output,
-                    stats: OutputStats::of(&output.content, true),
+                    stats: OutputStats::of(&output.content, true).exited(output.exit_code),
                     model_turns: output.model_turns,
                     redactions: BTreeMap::new(),
+                    changes: output.changes,
                 }
             }
         };
@@ -956,6 +1030,9 @@ impl ToolRegistry {
     ///
     /// The reason, when the tool is unknown or the call may not run.
     pub fn permit(&self, name: &str, args: &Value, root: &Path) -> Result<(), String> {
+        if let Some(reason) = self.gate_refusal() {
+            return Err(reason);
+        }
         let tool = self
             .get(name)
             .ok_or_else(|| format!("unknown tool `{name}`"))?;
@@ -979,10 +1056,16 @@ impl ToolRegistry {
         let name = tool.name();
         let mut permissions = lock_or_recover(&self.permissions);
         if name == shell::SHELL_TOOL_NAME
-            && let Some(reason) = target.and_then(|command| permissions.shell_refusal(command))
+            && let Some((reason, origin)) =
+                target.and_then(|command| permissions.shell_refusal_by(command))
         {
             tracing::info!(tool = name, ?target, reason, "refused by shell_programs");
-            self.observe(name, DecisionScope::Blocked, false);
+            self.observe(
+                name,
+                DecisionScope::Blocked,
+                false,
+                DecisionSource::ShellAllowlist(origin),
+            );
             return Some((ToolOutput::error(reason), ToolOutcome::Blocked));
         }
         if name == shell::SHELL_TOOL_NAME
@@ -997,7 +1080,12 @@ impl ToolRegistry {
                 reason,
                 "refused by the allowlist's argument checks"
             );
-            self.observe(name, DecisionScope::Blocked, false);
+            self.observe(
+                name,
+                DecisionScope::Blocked,
+                false,
+                DecisionSource::BlockedList,
+            );
             return Some((ToolOutput::error(reason), ToolOutcome::Blocked));
         }
         if let Some(blocked) = tool.blocked_reason(args)
@@ -1009,7 +1097,12 @@ impl ToolRegistry {
                 reason = blocked.reason,
                 "blocked tool call"
             );
-            self.observe(name, DecisionScope::Blocked, false);
+            self.observe(
+                name,
+                DecisionScope::Blocked,
+                false,
+                DecisionSource::BlockedList,
+            );
             return Some((
                 ToolOutput::error(format!(
                     "{}; blocked unless an `allow` rule in your own permission rules names `{}`",
@@ -1018,17 +1111,23 @@ impl ToolRegistry {
                 ToolOutcome::Blocked,
             ));
         }
-        let by_rule = permissions.rule_decision(name, target);
-        match by_rule.unwrap_or(tool.access().default_decision()) {
+        let by_rule = permissions.ruling(name, target);
+        let rule_source = by_rule.map(|(_, origin)| DecisionSource::Rule(origin));
+        match by_rule.map_or(tool.access().default_decision(), |(decision, _)| decision) {
             Decision::Allow => {
-                if by_rule.is_some() {
-                    self.observe(name, DecisionScope::Rule, true);
+                if let Some(source) = rule_source {
+                    self.observe(name, DecisionScope::Rule, true, source);
                 }
                 None
             }
             Decision::Deny => {
                 tracing::info!(tool = name, ?target, "denied by permission rule");
-                self.observe(name, DecisionScope::Deny, false);
+                self.observe(
+                    name,
+                    DecisionScope::Deny,
+                    false,
+                    rule_source.unwrap_or(DecisionSource::Rule(RuleOrigin::User)),
+                );
                 Some((
                     ToolOutput::error("denied by a permission rule".to_owned()),
                     ToolOutcome::DeniedByRule,
@@ -1039,9 +1138,15 @@ impl ToolRegistry {
                 // waits for this answer and then rechecks, instead of prompting too.
                 let mut approvals = lock_or_recover(&self.approvals);
                 if approvals.covers(name, target, root, tool.target_is_path()) {
-                    self.observe(name, DecisionScope::Session, true);
+                    self.observe(
+                        name,
+                        DecisionScope::Session,
+                        true,
+                        DecisionSource::SessionApproval,
+                    );
                     return None;
                 }
+                let answered_by = self.prompt.answer_source();
                 let request = PermissionRequest {
                     tool: name.to_owned(),
                     target: target.map(str::to_owned),
@@ -1050,11 +1155,11 @@ impl ToolRegistry {
                 };
                 match self.prompt.ask(&request) {
                     PromptAnswer::Yes => {
-                        self.observe(name, DecisionScope::Once, false);
+                        self.observe(name, DecisionScope::Once, false, answered_by);
                         None
                     }
                     PromptAnswer::No => {
-                        self.observe(name, DecisionScope::Deny, false);
+                        self.observe(name, DecisionScope::Deny, false, answered_by);
                         tracing::info!(tool = name, ?target, "declined by user");
                         Some((
                             ToolOutput::error("the user declined this call".to_owned()),
@@ -1065,14 +1170,14 @@ impl ToolRegistry {
                         if let Err(error) = approvals.approve(name, root) {
                             tracing::warn!(%error, tool = name, "could not keep the session approval");
                         }
-                        self.observe(name, DecisionScope::Session, false);
+                        self.observe(name, DecisionScope::Session, false, answered_by);
                         None
                     }
                     PromptAnswer::Session => {
                         if let Err(error) = approvals.approve(name, root) {
                             tracing::warn!(%error, tool = name, "could not keep the session approval");
                         }
-                        self.observe(name, DecisionScope::Session, false);
+                        self.observe(name, DecisionScope::Session, false, answered_by);
                         None
                     }
                     PromptAnswer::Always => {
@@ -1080,7 +1185,7 @@ impl ToolRegistry {
                         if let Err(error) = permissions.add_allow(&rule) {
                             tracing::warn!(%error, rule, "could not save the permission rule");
                         }
-                        self.observe(name, DecisionScope::Session, false);
+                        self.observe(name, DecisionScope::Session, false, answered_by);
                         None
                     }
                 }
@@ -1089,12 +1194,13 @@ impl ToolRegistry {
     }
 
     /// Tells the observer, if any, about one decision.
-    fn observe(&self, tool: &str, scope: DecisionScope, covered: bool) {
+    fn observe(&self, tool: &str, scope: DecisionScope, covered: bool, source: DecisionSource) {
         if let Some(observer) = &self.observer {
             observer.decided(&PermissionDecision {
                 tool: tool.to_owned(),
                 scope,
                 covered,
+                source,
             });
         }
     }
@@ -1120,7 +1226,8 @@ impl Execution {
     /// Wraps an untruncated output.
     fn finished(call: &ToolCall, output: ToolOutput, outcome: ToolOutcome) -> Self {
         Self {
-            stats: OutputStats::of(&output.content, false),
+            stats: OutputStats::of(&output.content, false).exited(output.exit_code),
+            changes: output.changes,
             model_turns: output.model_turns,
             result: ToolResult {
                 call_id: call.id.clone(),
@@ -1550,6 +1657,11 @@ mod tests {
             tool: "edit_file".to_owned(),
             scope,
             covered,
+            source: if covered {
+                DecisionSource::SessionApproval
+            } else {
+                DecisionSource::Prompt
+            },
         }
     }
 
@@ -1824,7 +1936,41 @@ mod tests {
             tool: "echo".to_owned(),
             scope,
             covered,
+            source: if scope == DecisionScope::Blocked {
+                DecisionSource::BlockedList
+            } else {
+                DecisionSource::Rule(RuleOrigin::User)
+            },
         }
+    }
+
+    #[tokio::test]
+    async fn a_closed_gate_refuses_every_call_and_command() {
+        struct Closed;
+        impl CallGate for Closed {
+            fn refusal(&self) -> Option<String> {
+                Some("the audit log cannot be written".to_owned())
+            }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut registry = ToolRegistry::with_builtins(
+            Permissions::from_toml("allow = [\"write_file\", \"shell\"]", None).expect("rules"),
+            Box::new(StaticPrompt(PromptAnswer::Yes)),
+        );
+        registry.set_gate(Arc::new(Closed));
+        let write = ToolCall {
+            id: "w1".to_owned(),
+            name: "write_file".to_owned(),
+            arguments_json: serde_json::json!({"path": "a.txt", "content": "x"}).to_string(),
+        };
+        let execution = registry
+            .execute(&write, &ToolContext::new(dir.path()))
+            .await;
+        assert_eq!(execution.outcome, ToolOutcome::Blocked);
+        assert!(execution.result.content.contains("audit log"));
+        assert!(!dir.path().join("a.txt").exists());
+        let args = serde_json::json!({"command": "echo hi"});
+        assert!(registry.permit("shell", &args, dir.path()).is_err());
     }
 
     #[tokio::test]

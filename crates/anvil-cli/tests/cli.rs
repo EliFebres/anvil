@@ -640,3 +640,71 @@ fn purge_removes_session_folders_older_than_the_given_days() {
         "a folder that is not a session is left alone"
     );
 }
+
+#[test]
+fn audit_verify_exits_non_zero_at_the_first_break_and_show_prints_the_records() {
+    use anvil_audit::audit::chain::{GENESIS, RecordBody, seal};
+    use anvil_audit::audit::{AUDIT_FILE, AuditEvent};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session = "01JBBBBBBBBBBBBBBBBBBBBBBB";
+    let folder = dir.path().join(".anvil").join("sessions").join(session);
+    std::fs::create_dir_all(&folder).expect("mkdir");
+    let mut prev = GENESIS.to_owned();
+    let mut lines = Vec::new();
+    for (seq, outcome) in ["one", "two", "three"].iter().enumerate() {
+        let body = RecordBody {
+            seq: seq as u64,
+            ts: "2026-11-19T21:00:00.000Z".to_owned(),
+            session: session.to_owned(),
+            agent: "main".to_owned(),
+            user: "dev".to_owned(),
+            host: "box".to_owned(),
+            version: "0.0.0".to_owned(),
+            commit: "unknown".to_owned(),
+            binary_sha256: "unknown".to_owned(),
+            policy: "unmanaged".to_owned(),
+            event: AuditEvent::SessionEnd {
+                outcome: (*outcome).to_owned(),
+            },
+            prev: prev.clone(),
+        };
+        let (line, hash) = seal(&body).expect("seal");
+        prev = hash;
+        lines.push(line);
+    }
+    let file = folder.join(AUDIT_FILE);
+    std::fs::write(
+        &file,
+        lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+    )
+    .expect("write");
+
+    let intact = anvil(dir.path())
+        .args(["audit", "verify", session])
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&intact.stdout);
+    assert!(intact.status.success(), "{stdout}");
+    assert!(stdout.contains("chain intact, 3 records"), "{stdout}");
+
+    let shown = anvil(dir.path())
+        .args(["audit", "show", session])
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown.status.success(), "{stdout}");
+    assert!(stdout.contains("session end: two"), "{stdout}");
+
+    let swapped = format!("{}\n{}\n{}\n", lines[0], lines[2], lines[1]);
+    let copy = dir.path().join("copy.jsonl");
+    std::fs::write(&copy, swapped).expect("write");
+    let broken = anvil(dir.path())
+        .args(["audit", "verify"])
+        .arg(&copy)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&broken.stdout);
+    assert_eq!(broken.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("chain broken at line 2"), "{stdout}");
+}

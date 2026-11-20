@@ -2,7 +2,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Access, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for};
+use super::{
+    Access, FileChange, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for,
+    sha256_hex,
+};
 
 /// Arguments of the `edit_file` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -77,8 +80,14 @@ impl Tool for EditFile {
             } else {
                 text.replacen(&args.old, &args.new, 1)
             };
+            let change = FileChange {
+                path: shown.clone(),
+                before: Some(sha256_hex(text.as_bytes())),
+                after: sha256_hex(edited.as_bytes()),
+            };
             match std::fs::write(&path, edited) {
-                Ok(()) => ToolOutput::ok(format!("replaced {count} occurrence(s) in {shown}")),
+                Ok(()) => ToolOutput::ok(format!("replaced {count} occurrence(s) in {shown}"))
+                    .with_change(change),
                 Err(error) => ToolOutput::error(format!("cannot write {shown}: {error}")),
             }
         })

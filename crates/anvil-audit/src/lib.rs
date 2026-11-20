@@ -1,7 +1,9 @@
-//! Usage recording: content-free records of what each session did.
+//! Local records of what each session did: content-free usage records and
+//! the hash-chained audit log. Neither leaves the machine; anvil sends no
+//! usage data anywhere.
 //!
-//! The crate consumes usage values that the CLI derives from loop events
-//! and never calls into the agent loop, so it depends on `anvil-types` only.
+//! The crate consumes values that the CLI derives from loop events and
+//! never calls into the agent loop, so it depends on `anvil-types` only.
 //! It must never depend on `anvil-core`.
 //!
 //! [`Recorder`] appends content-free [`Record`]s as JSONL under
@@ -10,8 +12,11 @@
 //! is not recorded at all. [`Stats`] sums them up for `anvil stats`. Nothing
 //! here sends a record anywhere.
 //!
-//! Subagents run with a discarded event sink and are not recorded.
+//! The [`audit`] module keeps the audit log. Subagents report their turns
+//! and tool calls to it under the parent session; the usage records count
+//! a subagent's turns as worker spend of the parent's `delegate` call.
 
+pub mod audit;
 pub mod error;
 pub mod paths;
 pub mod record;

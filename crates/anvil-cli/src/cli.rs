@@ -136,6 +136,12 @@ pub enum Command {
         #[command(subcommand)]
         command: CompatCommand,
     },
+    /// Check or read a session's audit log.
+    Audit {
+        /// Which audit action to take.
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
     /// Approve what an MCP server offers.
     Mcp {
         /// Which MCP action to take.
@@ -265,6 +271,23 @@ pub enum RulesCommand {
     Check {
         /// Files to check; relative paths resolve against the current directory.
         paths: Vec<std::path::PathBuf>,
+    },
+}
+
+/// Subcommands under `anvil audit`.
+#[derive(Debug, Subcommand)]
+pub enum AuditCommand {
+    /// Walk a session's hash chain and exit non-zero at the first break.
+    Verify {
+        /// A session id of this repository, or the path of an audit file
+        /// such as a mirrored copy.
+        target: String,
+    },
+    /// Print a session's audit records one per line, then whether the
+    /// chain verifies.
+    Show {
+        /// A session id of this repository, or the path of an audit file.
+        target: String,
     },
 }
 

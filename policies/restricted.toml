@@ -79,6 +79,20 @@ redaction = true
 # text, file contents or command output. Sessions cannot be resumed.
 transcript = "metadata"
 
+[audit]
+# Every session writes a hash-chained audit.jsonl in its session folder.
+# required = true: a session does not start when its audit log cannot be
+# written, and stops when a write fails.
+required = true
+# Prompts and tool arguments are kept as size and SHA-256 only.
+record = "digest"
+# A second copy of every record outside the developer's reach. A chain on
+# the same disk shows edits and removals inside the file, but not a file
+# cut at the end or rewritten whole; this copy is how you find out. Use an
+# absolute path the user can append to but not rewrite, for example:
+# mirror_dir = "/var/log/anvil"
+# mirror_dir = 'C:\ProgramData\anvil\audit'
+
 [limits]
 # The most tokens one session may use.
 session_tokens = 2000000

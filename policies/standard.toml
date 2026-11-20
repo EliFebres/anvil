@@ -78,3 +78,11 @@ build_tokens = 20000000
 # ask by default. Matching command text on the workstation is a guard rail,
 # not a boundary: use mode = "allowlist" or executor = "container" for one.
 mode = "ask"
+
+[audit]
+# Every session writes a hash-chained audit.jsonl in its session folder.
+# Not required: a session keeps running when a record cannot be written.
+required = false
+# Prompts and tool arguments are kept as size and SHA-256 only; "full"
+# keeps the redacted text.
+record = "digest"

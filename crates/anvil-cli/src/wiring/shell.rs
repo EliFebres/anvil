@@ -14,6 +14,9 @@ use anvil_types::shell::{ContainerSettings, Executor, ShellConfig, ShellMode};
 /// The heading of the prompt section that tells the model the allowlist.
 const ALLOWLIST_HEADING: &str = "Shell allowlist";
 
+/// The name of the policy's allowlist layer, which also tells its origin.
+pub const POLICY_LAYER: &str = "the managed policy's [shell] allow";
+
 /// How the `shell` tool may run commands in this session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellSettings {
@@ -59,10 +62,7 @@ impl ShellSettings {
         };
         let mut layers = Vec::new();
         if policy.mode == ShellMode::Allowlist {
-            layers.push((
-                "the managed policy's [shell] allow".to_owned(),
-                policy.allow.clone(),
-            ));
+            layers.push((POLICY_LAYER.to_owned(), policy.allow.clone()));
         }
         layers.extend(user_layer);
         Self {

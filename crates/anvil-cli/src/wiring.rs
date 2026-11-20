@@ -10,7 +10,8 @@ use anvil_compat::{
     SkillSet, SkillTool, SubagentEnv,
 };
 use anvil_core::agent::{
-    ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders, PromptSection,
+    ChangeChecks, CheckCommand, EventSink, EventTap, Instruction, LoopConfig, LoopProviders,
+    PromptSection,
 };
 use anvil_core::context;
 use anvil_core::guard::DataGuard;
@@ -19,8 +20,8 @@ use anvil_core::provider::{self, Egress, Provider, SharedBudget, TokenBudget};
 use anvil_core::tools::shell::SHELL_TOOL_NAME;
 use anvil_core::tools::workspace::{DeniedPaths, deny_globs};
 use anvil_core::tools::{
-    PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
-    SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry, Workspace,
+    CallGate, PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
+    RuleOrigin, SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry, Workspace,
 };
 use anvil_types::policy::{LoadedPolicy, McpMode, SkillsMode, TranscriptMode};
 use anvil_types::redact::Redactor;
@@ -176,6 +177,58 @@ pub struct Wiring {
     /// The prompt the main registry was built with, shared by every clone so
     /// a sub-agent that inherits permissions asks the same person.
     prompt: Arc<Mutex<Option<Arc<dyn PermissionPrompt>>>>,
+    /// Builds the tap a delegated run reports its events to, shared by
+    /// every clone so subagents are audited under the session.
+    subagent_tap: Arc<Mutex<Option<SubagentTap>>>,
+    /// Refuses every model request, tool call and command once it gives a
+    /// reason, shared by every clone; set when the audit log is required.
+    call_gate: Arc<Mutex<Option<Arc<dyn CallGate>>>>,
+    /// What the managed policy refused while this wiring was loaded, for
+    /// the audit log's session start.
+    pub policy_refusals: Vec<PolicyRefusal>,
+}
+
+/// Builds the event tap of one delegated run from the agent's name.
+pub type SubagentTap = Arc<dyn Fn(&str) -> Arc<dyn EventTap> + Send + Sync>;
+
+/// Something the managed policy kept from loading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRefusal {
+    /// What was refused, such as ``the MCP server `docs` in <file>``.
+    pub what: String,
+    /// The policy key that refused it.
+    pub key: String,
+}
+
+/// Wraps a provider so it refuses every request once `gate` gives a reason.
+///
+/// # Arguments
+///
+/// * `inner` - The provider.
+/// * `gate` - The gate.
+///
+/// # Returns
+///
+/// The wrapped provider.
+pub(crate) fn gated(inner: Arc<dyn Provider>, gate: Arc<dyn CallGate>) -> Arc<dyn Provider> {
+    Arc::new(GatedProvider { inner, gate })
+}
+
+/// A provider that refuses every request once its gate gives a reason.
+struct GatedProvider {
+    inner: Arc<dyn Provider>,
+    gate: Arc<dyn CallGate>,
+}
+
+impl Provider for GatedProvider {
+    fn complete(&self, request: provider::CompletionRequest) -> provider::EventStream {
+        match self.gate.refusal() {
+            Some(detail) => Box::pin(futures_util::stream::once(async move {
+                Err(provider::ProviderError::Refused { detail })
+            })),
+            None => self.inner.complete(request),
+        }
+    }
 }
 
 /// The main session's prompt, lent to a sub-agent's registry.
@@ -184,6 +237,10 @@ struct ParentPrompt(Arc<dyn PermissionPrompt>);
 impl PermissionPrompt for ParentPrompt {
     fn ask(&self, request: &PermissionRequest) -> PromptAnswer {
         self.0.ask(request)
+    }
+
+    fn answer_source(&self) -> anvil_core::tools::DecisionSource {
+        self.0.answer_source()
     }
 }
 
@@ -309,6 +366,9 @@ impl Wiring {
             approvals,
             observer: Arc::new(Mutex::new(None)),
             prompt: Arc::new(Mutex::new(None)),
+            subagent_tap: Arc::new(Mutex::new(None)),
+            call_gate: Arc::new(Mutex::new(None)),
+            policy_refusals: Vec::new(),
             policy: None,
         })
     }
@@ -387,6 +447,10 @@ impl Wiring {
                     "note: the hooks in {} do not run: the managed policy's [features] hooks = false",
                     source.display()
                 );
+                self.policy_refusals.push(PolicyRefusal {
+                    what: format!("the hooks in {}", source.display()),
+                    key: "features.hooks".to_owned(),
+                });
             }
             self.hooks = Arc::new(HookConfig::default());
         }
@@ -425,6 +489,14 @@ impl Wiring {
                 server.name,
                 server.source.display()
             );
+            self.policy_refusals.push(PolicyRefusal {
+                what: format!(
+                    "the MCP server `{}` in {}",
+                    server.name,
+                    server.source.display()
+                ),
+                key: mcp_key.to_owned(),
+            });
         }
 
         let all = skill_roots(self.trusted_root(), self.home.as_deref());
@@ -458,6 +530,10 @@ impl Wiring {
                 skill.name(),
                 skill.dir.display()
             );
+            self.policy_refusals.push(PolicyRefusal {
+                what: format!("the skill `{}` in {}", skill.name(), skill.dir.display()),
+                key: "features.skills".to_owned(),
+            });
         }
         self.skills = Arc::new(allowed);
 
@@ -576,6 +652,44 @@ impl Wiring {
         if let Ok(mut slot) = self.observer.lock() {
             *slot = Some(observer);
         }
+    }
+
+    /// Sends every delegated run's turns and tool calls to the tap `make`
+    /// builds for it; clones share the setting.
+    ///
+    /// # Arguments
+    ///
+    /// * `make` - Builds a tap from the agent's name.
+    pub fn set_subagent_tap(&self, make: SubagentTap) {
+        if let Ok(mut slot) = self.subagent_tap.lock() {
+            *slot = Some(make);
+        }
+    }
+
+    /// Makes every provider and registry this wiring builds from now on,
+    /// and every clone's, refuse to work once `gate` gives a reason.
+    ///
+    /// # Arguments
+    ///
+    /// * `gate` - The gate, such as a required audit log.
+    pub fn set_call_gate(&self, gate: Arc<dyn CallGate>) {
+        if let Ok(mut slot) = self.call_gate.lock() {
+            *slot = Some(gate);
+        }
+    }
+
+    /// The call gate, if one is set.
+    fn call_gate(&self) -> Option<Arc<dyn CallGate>> {
+        self.call_gate.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// The session folder, once [`Wiring::with_session`] set one.
+    ///
+    /// # Returns
+    ///
+    /// The folder.
+    pub fn session_dir(&self) -> Option<&Path> {
+        self.session.as_ref().map(|session| session.dir.as_path())
     }
 
     /// Checks every endpoint the configuration names against the egress
@@ -815,7 +929,11 @@ impl Wiring {
             &self.egress,
         )
         .with_context(|| format!("building provider `{name}`"))?;
-        Ok(Arc::from(provider))
+        let provider: Arc<dyn Provider> = Arc::from(provider);
+        Ok(match self.call_gate() {
+            Some(gate) => gated(provider, gate),
+            None => provider,
+        })
     }
 
     /// The coder, reviewer and summarizer named in `[roles]`.
@@ -948,13 +1066,18 @@ impl Wiring {
         if let Some(loaded) = &self.policy {
             let p = &loaded.policy.permissions;
             permissions
-                .tighten(&p.deny, &p.ask, &[])
+                .tighten_as(RuleOrigin::Policy, &p.deny, &p.ask, &[])
                 .context("the managed policy's [permissions]")?;
             always = p.allow_always;
         }
         for (source, patterns) in &self.shell.layers {
+            let origin = if source.starts_with(shell::POLICY_LAYER) {
+                RuleOrigin::Policy
+            } else {
+                RuleOrigin::User
+            };
             permissions
-                .limit_shell(patterns, source)
+                .limit_shell_as(patterns, source, origin)
                 .with_context(|| format!("the patterns of {source}"))?;
         }
         let mut registry = ToolRegistry::with_builtins(permissions, prompt)
@@ -971,6 +1094,9 @@ impl Wiring {
         self.mcp.register(&mut registry);
         if let Some(runner) = self.hook_runner() {
             registry.set_hook(runner);
+        }
+        if let Some(gate) = self.call_gate() {
+            registry.set_gate(gate);
         }
         Ok(registry)
     }
@@ -1193,6 +1319,14 @@ impl SubagentEnv for Wiring {
 
     fn context_window(&self) -> u32 {
         Wiring::context_window(self)
+    }
+
+    fn events(&self, agent: &str) -> EventSink {
+        let make = self.subagent_tap.lock().ok().and_then(|slot| slot.clone());
+        match make {
+            Some(make) => EventSink::discard().with_tap(make(agent)),
+            None => EventSink::discard(),
+        }
     }
 }
 

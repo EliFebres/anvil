@@ -706,6 +706,8 @@ impl CommandRun {
             content: text,
             is_error: failed,
             model_turns: Vec::new(),
+            exit_code: self.exit_code,
+            changes: Vec::new(),
         }
     }
 }

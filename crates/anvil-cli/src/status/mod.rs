@@ -332,6 +332,10 @@ impl PermissionPrompt for WatchedPrompt {
         self.status.answered();
         answer
     }
+
+    fn answer_source(&self) -> anvil_core::tools::DecisionSource {
+        self.inner.answer_source()
+    }
 }
 
 /// A plan gate that marks the session as waiting while the plan is read.

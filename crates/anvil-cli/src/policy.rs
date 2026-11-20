@@ -561,6 +561,11 @@ const UNSET_POLICY_KEYS: &[(&str, &str, &str)] = &[
         "none; no client certificate is presented",
     ),
     ("network", "client_key", "none"),
+    (
+        "audit",
+        "mirror_dir",
+        "none; records stay in the session folder",
+    ),
 ];
 
 /// Every effective policy setting, one `key = value  (layer)` line each,
@@ -1101,6 +1106,9 @@ image = \"build:1\"
             "[network] ca_bundle = (default: the system's trust store)  (default)",
             "[network] client_cert = (default: none; no client certificate is presented)  (default)",
             "[network] proxy = \"none\"  (default)",
+            "[audit] required = true  (default)",
+            "[audit] record = \"digest\"  (default)",
+            "[audit] mirror_dir = (default: none; records stay in the session folder)  (default)",
         ] {
             assert!(
                 text.contains(unset),

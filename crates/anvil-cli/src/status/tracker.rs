@@ -112,6 +112,7 @@ impl Tracker {
             | LoopEvent::ReasoningDelta(_)
             | LoopEvent::ToolFinished { .. }
             | LoopEvent::PlanUpdated { .. }
+            | LoopEvent::FileChanged { .. }
             | LoopEvent::ReviewVerdict { .. }
             | LoopEvent::CheckFinished { .. }
             | LoopEvent::Warning(_)

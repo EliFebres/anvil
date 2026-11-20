@@ -7,13 +7,16 @@
 //! permission rules apply with nobody at the keyboard (an `ask` decision is
 //! a `no`, unless the agent says `permissions: inherit`). The parent
 //! conversation sees one tool result, nothing else; the model turns the run
-//! made travel with it so the loop can count them as worker spend.
+//! made travel with it so the loop can count them as worker spend. Each
+//! turn and tool call of the run is also reported to the sink
+//! [`SubagentEnv::events`] returns, which the CLI writes to the parent
+//! session's audit log.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use anvil_core::agent::EventSink;
 use anvil_core::agent::turn::complete_turn;
+use anvil_core::agent::{EventSink, LoopEvent, Role, State, finished_events};
 use anvil_core::context::Conversation;
 use anvil_core::provider::{
     CompletionRequest, Message, Provider, StopReason, ToolResult, ToolSpec,
@@ -83,6 +86,20 @@ pub trait SubagentEnv: Send + Sync {
     ///
     /// Tokens.
     fn context_window(&self) -> u32;
+
+    /// Where one delegated run reports its turns and tool calls.
+    ///
+    /// # Arguments
+    ///
+    /// * `agent` - The agent's name, so the records can say which ran.
+    ///
+    /// # Returns
+    ///
+    /// The sink; the default drops everything.
+    fn events(&self, agent: &str) -> EventSink {
+        let _ = agent;
+        EventSink::discard()
+    }
 }
 
 /// Arguments of the `delegate` tool.
@@ -248,7 +265,7 @@ async fn run_turns(
         .collect();
     let allowed: BTreeSet<&str> = tools.iter().map(|spec| spec.name.as_str()).collect();
     let system = system_prompt(agent, &tools);
-    let events = EventSink::discard();
+    let events = env.events(&agent.name);
     let mut conversation = Conversation::new();
     conversation.push(Message::user(task));
     let session_dir = ctx.session_dir.clone().unwrap_or_else(std::env::temp_dir);
@@ -292,6 +309,14 @@ async fn run_turns(
             latency_ms: turn.latency_ms,
             retries: turn.retries,
         });
+        events.emit(LoopEvent::TurnFinished {
+            state: State::Build,
+            role: Role::Worker,
+            stop_reason: turn.stop_reason.clone(),
+            usage: turn.usage,
+            latency_ms: turn.latency_ms,
+            retries: turn.retries,
+        });
         if let Some(usage) = turn.usage {
             conversation.record_usage(request_len, usage);
         }
@@ -302,8 +327,13 @@ async fn run_turns(
         let mut results = Vec::with_capacity(turn.tool_calls.len());
         for call in &turn.tool_calls {
             tracing::info!(agent = agent.name, tool = %call.name, "subagent tool call");
+            events.emit(LoopEvent::ToolStarted { call: call.clone() });
             if allowed.contains(call.name.as_str()) {
-                results.push(registry.execute(call, &ctx).await.result);
+                let execution = registry.execute(call, &ctx).await;
+                for event in finished_events(call, &execution) {
+                    events.emit(event);
+                }
+                results.push(execution.result);
             } else {
                 results.push(ToolResult {
                     call_id: call.id.clone(),

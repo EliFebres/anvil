@@ -336,6 +336,7 @@ mod tests {
                 bytes: 0,
                 truncated: false,
                 digest: 0,
+                ..Default::default()
             },
         };
         assert!(watch.observe(&finished("e2")).is_none());
@@ -374,6 +375,7 @@ mod tests {
                 bytes: 0,
                 truncated: false,
                 digest: 0,
+                ..Default::default()
             },
         };
         match watch.observe(&finished) {

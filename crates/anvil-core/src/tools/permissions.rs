@@ -99,6 +99,67 @@ impl From<Unmatched> for Decision {
     }
 }
 
+/// Who wrote a permission rule or a `shell` allowlist layer, strictest
+/// first, so the smallest origin among matching rules is the one named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuleOrigin {
+    /// The managed policy.
+    Policy,
+    /// The repository's `.anvil/` files.
+    Project,
+    /// The user: their configuration, profile or per-repository file.
+    User,
+    /// anvil itself, such as the rule that lets the loop write its own
+    /// session folder.
+    Builtin,
+}
+
+/// Where a permission decision came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionSource {
+    /// A permission rule, or the rules' own `default`.
+    Rule(RuleOrigin),
+    /// A `shell` allowlist layer (`shell_programs` or `[shell] allow`).
+    ShellAllowlist(RuleOrigin),
+    /// The built-in blocked-command list, or the argument checks an
+    /// allowlist adds.
+    BlockedList,
+    /// An approval given earlier in the session, or `--allow-tool`.
+    SessionApproval,
+    /// A person answered a prompt.
+    Prompt,
+    /// `--yes` answered the prompt.
+    YesFlag,
+    /// Nobody could be asked, so the prompt answered `no`, as for a
+    /// subagent without `permissions: inherit`.
+    Unattended,
+}
+
+impl DecisionSource {
+    /// The name audit records use.
+    ///
+    /// # Returns
+    ///
+    /// Such as `policy_rule`, `user_shell_allowlist`, `prompt` or `yes_flag`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rule(RuleOrigin::Policy) => "policy_rule",
+            Self::Rule(RuleOrigin::Project) => "project_rule",
+            Self::Rule(RuleOrigin::User) => "user_rule",
+            Self::Rule(RuleOrigin::Builtin) => "builtin_rule",
+            Self::ShellAllowlist(RuleOrigin::Policy) => "policy_shell_allowlist",
+            Self::ShellAllowlist(RuleOrigin::Project) => "project_shell_allowlist",
+            Self::ShellAllowlist(RuleOrigin::User) => "user_shell_allowlist",
+            Self::ShellAllowlist(RuleOrigin::Builtin) => "builtin_shell_allowlist",
+            Self::BlockedList => "blocked_list",
+            Self::SessionApproval => "session_approval",
+            Self::Prompt => "prompt",
+            Self::YesFlag => "yes_flag",
+            Self::Unattended => "unattended",
+        }
+    }
+}
+
 /// One parsed rule.
 #[derive(Debug, Clone)]
 struct Rule {
@@ -106,11 +167,13 @@ struct Rule {
     tool: String,
     /// The target glob, if the rule has one.
     pattern: Option<GlobMatcher>,
+    /// Who wrote it.
+    origin: RuleOrigin,
 }
 
 impl Rule {
     /// Parses `tool` or `tool:glob`.
-    fn parse(text: &str) -> Result<Self, PermissionError> {
+    fn parse(text: &str, origin: RuleOrigin) -> Result<Self, PermissionError> {
         let (tool, glob) = match text.split_once(':') {
             Some((tool, glob)) => (tool.trim(), Some(glob.trim())),
             None => (text.trim(), None),
@@ -135,6 +198,7 @@ impl Rule {
         Ok(Self {
             tool: tool.to_owned(),
             pattern,
+            origin,
         })
     }
 
@@ -195,22 +259,32 @@ pub struct Permissions {
 struct AllowLayer {
     /// Where the layer came from, for messages.
     source: String,
+    /// Who wrote it.
+    origin: RuleOrigin,
     /// The patterns; a command must match one of them.
     patterns: Vec<CommandPattern>,
 }
 
 impl AllowLayer {
     /// A layer from `shell_programs`: each program with any arguments.
-    fn from_programs(programs: &[String], source: &str) -> Result<Self, PermissionError> {
+    fn from_programs(
+        programs: &[String],
+        source: &str,
+        origin: RuleOrigin,
+    ) -> Result<Self, PermissionError> {
         let patterns: Vec<String> = programs
             .iter()
             .map(|program| format!("{} *", program.trim()))
             .collect();
-        Self::from_patterns(&patterns, source)
+        Self::from_patterns(&patterns, source, origin)
     }
 
     /// A layer from argument-prefix patterns such as `cargo test *`.
-    fn from_patterns(patterns: &[String], source: &str) -> Result<Self, PermissionError> {
+    fn from_patterns(
+        patterns: &[String],
+        source: &str,
+        origin: RuleOrigin,
+    ) -> Result<Self, PermissionError> {
         let patterns = patterns
             .iter()
             .map(|text| {
@@ -222,6 +296,7 @@ impl AllowLayer {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             source: source.to_owned(),
+            origin,
             patterns,
         })
     }
@@ -266,7 +341,10 @@ impl Permissions {
     /// a `shell_programs` entry that is not a program name.
     pub fn from_rules(rules: &PermissionRules) -> Result<Self, PermissionError> {
         let parse_all = |rules: &[String]| -> Result<Vec<Rule>, PermissionError> {
-            rules.iter().map(|rule| Rule::parse(rule)).collect()
+            rules
+                .iter()
+                .map(|rule| Rule::parse(rule, RuleOrigin::User))
+                .collect()
         };
         let shell_allow = if rules.shell_programs.is_empty() {
             Vec::new()
@@ -274,6 +352,7 @@ impl Permissions {
             vec![AllowLayer::from_programs(
                 &rules.shell_programs,
                 "your shell_programs",
+                RuleOrigin::User,
             )?]
         };
         Ok(Self {
@@ -367,16 +446,42 @@ impl Permissions {
         ask: &[String],
         shell_programs: &[String],
     ) -> Result<(), PermissionError> {
+        self.tighten_as(RuleOrigin::Project, deny, ask, shell_programs)
+    }
+
+    /// [`Permissions::tighten`] with rules whose author is `origin`, such
+    /// as the managed policy, so decisions name where they came from.
+    ///
+    /// # Arguments
+    ///
+    /// * `origin` - Who wrote the rules.
+    /// * `deny` - Rules for calls to refuse.
+    /// * `ask` - Rules for calls to ask about.
+    /// * `shell_programs` - Programs `shell` is limited to; empty adds no
+    ///   limit.
+    ///
+    /// # Errors
+    ///
+    /// [`PermissionError::InvalidRule`] for a glob that does not compile or
+    /// a program that is not a plain name.
+    pub fn tighten_as(
+        &mut self,
+        origin: RuleOrigin,
+        deny: &[String],
+        ask: &[String],
+        shell_programs: &[String],
+    ) -> Result<(), PermissionError> {
         for rule in deny {
-            self.deny.push(Rule::parse(rule)?);
+            self.deny.push(Rule::parse(rule, origin)?);
         }
         for rule in ask {
-            self.forced_ask.push(Rule::parse(rule)?);
+            self.forced_ask.push(Rule::parse(rule, origin)?);
         }
         if !shell_programs.is_empty() {
             self.shell_allow.push(AllowLayer::from_programs(
                 shell_programs,
                 "the repository's shell_programs",
+                origin,
             )?);
         }
         Ok(())
@@ -399,8 +504,28 @@ impl Permissions {
         patterns: &[String],
         source: &str,
     ) -> Result<(), PermissionError> {
+        self.limit_shell_as(patterns, source, RuleOrigin::User)
+    }
+
+    /// [`Permissions::limit_shell`] with a layer whose author is `origin`.
+    ///
+    /// # Arguments
+    ///
+    /// * `patterns` - Patterns such as `cargo test *`.
+    /// * `source` - Where they are set, for messages.
+    /// * `origin` - Who wrote them.
+    ///
+    /// # Errors
+    ///
+    /// [`PermissionError::InvalidRule`] for a pattern that does not parse.
+    pub fn limit_shell_as(
+        &mut self,
+        patterns: &[String],
+        source: &str,
+        origin: RuleOrigin,
+    ) -> Result<(), PermissionError> {
         self.shell_allow
-            .push(AllowLayer::from_patterns(patterns, source)?);
+            .push(AllowLayer::from_patterns(patterns, source, origin)?);
         Ok(())
     }
 
@@ -430,7 +555,8 @@ impl Permissions {
     /// [`PermissionError::InvalidRule`] for a glob that does not compile.
     pub fn allow_from_project(&mut self, allow: &[String]) -> Result<(), PermissionError> {
         for rule in allow {
-            self.project_allow.push(Rule::parse(rule)?);
+            self.project_allow
+                .push(Rule::parse(rule, RuleOrigin::Project)?);
         }
         Ok(())
     }
@@ -453,23 +579,44 @@ impl Permissions {
     ///
     /// The reason, or `None` when there is no allowlist or the command fits.
     pub fn shell_refusal(&self, command: &str) -> Option<String> {
-        if self.shell_allow.is_empty() {
-            return None;
-        }
+        self.shell_refusal_by(command).map(|(reason, _)| reason)
+    }
+
+    /// [`Permissions::shell_refusal`] with who wrote the layer that
+    /// refused. A command the allowlist mode refuses as a whole (an
+    /// operator, a path, a line that does not split) is attributed to the
+    /// strictest author among the layers.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command line.
+    ///
+    /// # Returns
+    ///
+    /// The reason and the origin, or `None` when there is no allowlist or
+    /// the command fits.
+    pub fn shell_refusal_by(&self, command: &str) -> Option<(String, RuleOrigin)> {
+        let strictest = self.shell_allow.iter().map(|layer| layer.origin).min()?;
         if let Some(operator) = SHELL_OPERATORS.iter().find(|op| command.contains(**op)) {
-            return Some(format!(
-                "`{}` is not allowed: under a shell allowlist a command is one program with plain arguments",
-                operator.escape_debug()
+            return Some((
+                format!(
+                    "`{}` is not allowed: under a shell allowlist a command is one program with plain arguments",
+                    operator.escape_debug()
+                ),
+                strictest,
             ));
         }
         let argv = match split_command(command) {
             Ok(argv) => argv,
-            Err(reason) => return Some(reason),
+            Err(reason) => return Some((reason, strictest)),
         };
         let program = &argv[0];
         if program.contains(['/', '\\']) {
-            return Some(format!(
-                "`{program}` is a path; under a shell allowlist name a program found on PATH"
+            return Some((
+                format!(
+                    "`{program}` is a path; under a shell allowlist name a program found on PATH"
+                ),
+                strictest,
             ));
         }
         let refused = self
@@ -477,10 +624,13 @@ impl Permissions {
             .iter()
             .find(|layer| !layer.patterns.iter().any(|pattern| pattern.matches(&argv)))?;
         let patterns: Vec<String> = refused.patterns.iter().map(CommandPattern::text).collect();
-        Some(format!(
-            "`{command}` is not one of the allowed commands of {} ({})",
-            refused.source,
-            patterns.join(", ")
+        Some((
+            format!(
+                "`{command}` is not one of the allowed commands of {} ({})",
+                refused.source,
+                patterns.join(", ")
+            ),
+            refused.origin,
         ))
     }
 
@@ -508,7 +658,9 @@ impl Permissions {
         if by_rule {
             return true;
         }
-        if self.shell_allow.is_empty() || self.matched(tool, target) == Some(Decision::Deny) {
+        if self.shell_allow.is_empty()
+            || self.matched(tool, target).map(|(decision, _)| decision) == Some(Decision::Deny)
+        {
             return false;
         }
         let Some(argv) = target.and_then(|command| split_command(command).ok()) else {
@@ -551,27 +703,49 @@ impl Permissions {
     ///
     /// The rules' decision, if they make one.
     pub fn rule_decision(&self, tool: &str, target: Option<&str>) -> Option<Decision> {
-        self.matched(tool, target).or(self.unmatched).or_else(|| {
-            self.project_allow
-                .iter()
-                .any(|rule| rule.matches(tool, target))
-                .then_some(Decision::Allow)
-        })
+        self.ruling(tool, target).map(|(decision, _)| decision)
     }
 
-    /// The decision of the matching rules alone, if any rule matches.
-    fn matched(&self, tool: &str, target: Option<&str>) -> Option<Decision> {
-        let any = |rules: &[Rule]| rules.iter().any(|rule| rule.matches(tool, target));
-        if any(&self.deny) {
-            Some(Decision::Deny)
-        } else if any(&self.forced_ask) {
-            Some(Decision::Ask)
-        } else if any(&self.allow) {
-            Some(Decision::Allow)
-        } else if any(&self.ask) {
-            Some(Decision::Ask)
+    /// [`Permissions::rule_decision`] with who wrote the rule that decided.
+    /// The rules' own `default` is the user's.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool name.
+    /// * `target` - The path or command, if the tool has one.
+    ///
+    /// # Returns
+    ///
+    /// The decision and its origin, if the rules make one.
+    pub fn ruling(&self, tool: &str, target: Option<&str>) -> Option<(Decision, RuleOrigin)> {
+        self.matched(tool, target)
+            .or(self.unmatched.map(|decision| (decision, RuleOrigin::User)))
+            .or_else(|| {
+                self.project_allow
+                    .iter()
+                    .find(|rule| rule.matches(tool, target))
+                    .map(|rule| (Decision::Allow, rule.origin))
+            })
+    }
+
+    /// The decision of the matching rules alone, if any rule matches, with
+    /// the strictest author among the rules that decided.
+    fn matched(&self, tool: &str, target: Option<&str>) -> Option<(Decision, RuleOrigin)> {
+        let first = |rules: &[Rule]| {
+            rules
+                .iter()
+                .filter(|rule| rule.matches(tool, target))
+                .map(|rule| rule.origin)
+                .min()
+        };
+        if let Some(origin) = first(&self.deny) {
+            Some((Decision::Deny, origin))
+        } else if let Some(origin) = first(&self.forced_ask) {
+            Some((Decision::Ask, origin))
+        } else if let Some(origin) = first(&self.allow) {
+            Some((Decision::Allow, origin))
         } else {
-            None
+            first(&self.ask).map(|origin| (Decision::Ask, origin))
         }
     }
 
@@ -589,7 +763,7 @@ impl Permissions {
     ///
     /// `true` only for an explicit allow.
     pub fn explicitly_allowed(&self, tool: &str, target: Option<&str>) -> bool {
-        self.matched(tool, target) == Some(Decision::Allow)
+        self.matched(tool, target).map(|(decision, _)| decision) == Some(Decision::Allow)
     }
 
     /// Adds an `allow` rule and writes the file when one is configured.
@@ -604,7 +778,7 @@ impl Permissions {
     /// [`PermissionError::Write`] when the file cannot be written. The rule
     /// is kept in memory in the latter case.
     pub fn add_allow(&mut self, rule: &str) -> Result<(), PermissionError> {
-        let parsed = Rule::parse(rule)?;
+        let parsed = Rule::parse(rule, RuleOrigin::User)?;
         if !self.file.allow.iter().any(|existing| existing == rule) {
             self.file.allow.push(rule.to_owned());
             self.allow.push(parsed);
@@ -642,7 +816,7 @@ impl Permissions {
     ///
     /// [`PermissionError::InvalidRule`] when the glob does not compile.
     pub fn allow_unsaved(&mut self, rule: &str) -> Result<(), PermissionError> {
-        self.allow.push(Rule::parse(rule)?);
+        self.allow.push(Rule::parse(rule, RuleOrigin::Builtin)?);
         Ok(())
     }
 
@@ -962,6 +1136,8 @@ pub struct PermissionDecision {
     pub scope: DecisionScope,
     /// Whether an existing approval covered the call.
     pub covered: bool,
+    /// Where the decision came from.
+    pub source: DecisionSource,
 }
 
 /// Hears every permission decision. The CLI records them in the usage records.
@@ -986,6 +1162,16 @@ pub trait PermissionPrompt: Send + Sync {
     ///
     /// The answer.
     fn ask(&self, request: &PermissionRequest) -> PromptAnswer;
+
+    /// Who answers, for the audit record of each answer. A wrapper
+    /// forwards the inner prompt's source.
+    ///
+    /// # Returns
+    ///
+    /// [`DecisionSource::Prompt`] unless a prompt answers by itself.
+    fn answer_source(&self) -> DecisionSource {
+        DecisionSource::Prompt
+    }
 }
 
 /// A prompt that always gives the same answer, as `--yes` does.
@@ -995,6 +1181,15 @@ pub struct StaticPrompt(pub PromptAnswer);
 impl PermissionPrompt for StaticPrompt {
     fn ask(&self, _request: &PermissionRequest) -> PromptAnswer {
         self.0
+    }
+
+    fn answer_source(&self) -> DecisionSource {
+        match self.0 {
+            PromptAnswer::No => DecisionSource::Unattended,
+            PromptAnswer::Yes | PromptAnswer::Session | PromptAnswer::Always => {
+                DecisionSource::YesFlag
+            }
+        }
     }
 }
 

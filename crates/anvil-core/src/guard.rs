@@ -10,6 +10,7 @@
 //! follow text it was told to treat as data.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use anvil_types::redact::{Redacted, Redactor};
@@ -31,6 +32,8 @@ pub struct DataGuard {
     redactor: Arc<Redactor>,
     /// The session's delimiter id.
     nonce: String,
+    /// Secrets replaced so far by this guard and its clones.
+    replaced: Arc<AtomicU64>,
 }
 
 impl Default for DataGuard {
@@ -72,7 +75,11 @@ impl DataGuard {
             !nonce.is_empty() && nonce.chars().all(|c| c.is_ascii_alphanumeric()),
             "a delimiter nonce is letters and digits"
         );
-        Self { redactor, nonce }
+        Self {
+            redactor,
+            nonce,
+            replaced: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// The delimiter id of this session.
@@ -82,6 +89,16 @@ impl DataGuard {
     /// The nonce.
     pub fn nonce(&self) -> &str {
         &self.nonce
+    }
+
+    /// How many secrets this guard and its clones have replaced so far,
+    /// so an audit record can count those sent in one model request.
+    ///
+    /// # Returns
+    ///
+    /// The running total.
+    pub fn redaction_count(&self) -> u64 {
+        self.replaced.load(Ordering::Relaxed)
     }
 
     /// Whether redaction is on.
@@ -105,6 +122,10 @@ impl DataGuard {
     /// The redacted text and what was replaced.
     pub fn redact(&self, source: &str, text: &str) -> Redacted {
         let out = self.redactor.redact(text);
+        self.replaced.fetch_add(
+            u64::try_from(out.total()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
         if out.total() > 0 {
             tracing::info!(
                 source,
@@ -114,6 +135,21 @@ impl DataGuard {
             );
         }
         out
+    }
+
+    /// Replaces secrets in `text` without counting or logging them, for a
+    /// record about text that is not entering the conversation, such as
+    /// the arguments of a tool call kept in the audit log.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The text.
+    ///
+    /// # Returns
+    ///
+    /// The redacted text.
+    pub fn scrub(&self, text: &str) -> String {
+        self.redactor.redact(text).text
     }
 
     /// Wraps text in the session's delimiters without redacting it.

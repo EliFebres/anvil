@@ -1042,6 +1042,7 @@ mod tests {
                 bytes: 38,
                 truncated: false,
                 digest: 0,
+                ..Default::default()
             },
         }));
         app.handle(UiMsg::Loop(LoopEvent::TextDelta(
@@ -1310,6 +1311,7 @@ mod tests {
                 bytes: 80,
                 truncated: false,
                 digest: 0,
+                ..Default::default()
             },
         }));
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).expect("terminal");

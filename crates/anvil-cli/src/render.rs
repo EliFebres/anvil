@@ -115,6 +115,7 @@ impl<O: Write, E: Write> Renderer<O, E> {
             LoopEvent::Transition { .. }
             | LoopEvent::TurnFinished { .. }
             | LoopEvent::PlanUpdated { .. }
+            | LoopEvent::FileChanged { .. }
             | LoopEvent::ProposedEdit { .. } => {}
             LoopEvent::ToolStarted { call } => {
                 self.end_line();
@@ -369,6 +370,7 @@ mod tests {
                     bytes: 15,
                     truncated: false,
                     digest: 0,
+                    ..Default::default()
                 },
             },
             LoopEvent::ReasoningDelta("hidden".to_owned()),

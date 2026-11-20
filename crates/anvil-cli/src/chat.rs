@@ -14,7 +14,7 @@ use std::sync::Arc;
 use anvil_audit::{SessionMode, SessionOutcome};
 use anvil_core::agent::prompts::{self, PromptInputs};
 use anvil_core::agent::turn::complete_turn;
-use anvil_core::agent::{EventSink, LoopEvent, Role, State};
+use anvil_core::agent::{EventSink, LoopEvent, Role, State, file_change_events};
 use anvil_core::context::{Conversation, discover_instructions};
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
@@ -81,7 +81,8 @@ async fn chat_session(
     ui: UiKind,
     status: &StatusReporter,
 ) -> anyhow::Result<i32> {
-    let usage = SessionUsage::start(wiring, &id, SessionMode::Chat).with_status(status.clone());
+    let usage =
+        SessionUsage::start(wiring, &id, SessionMode::Chat, yes)?.with_status(status.clone());
     memory::prompt_sections(wiring.home.as_deref(), &wiring.cwd, wiring.memory_allowed())?;
     let hooks = wiring.hook_runner();
     let mut session_context = Vec::new();
@@ -165,10 +166,17 @@ async fn chat_session(
         if let Some(text) = session.turn(line).await {
             session.after_turn(text).await;
         }
+        if usage.audit_failure().is_some() {
+            break;
+        }
     }
     let messages = session.conversation.messages().to_vec();
     drop(session);
     let _ = tee.await;
+    if let Err(error) = crate::commands::unaudited(&usage) {
+        frontend.shutdown(false).await?;
+        return Err(error);
+    }
     memory::finish_session(
         wiring,
         &id,
@@ -214,6 +222,8 @@ enum TurnEnd {
     Finished(String),
     /// The user cancelled it.
     Cancelled,
+    /// A required audit log could not be written; the chat ends.
+    AuditStopped(String),
 }
 
 impl ChatSession<'_> {
@@ -360,12 +370,14 @@ impl ChatSession<'_> {
         if let Some(cancel) = &mut cancel {
             cancel.mark_unchanged();
         }
+        let usage = self.usage.clone();
         let end = {
             let turn = self.run_turn(line);
             tokio::pin!(turn);
             tokio::select! {
                 text = &mut turn => TurnEnd::Finished(text),
                 () = wait_cancel(cancel.as_mut()) => TurnEnd::Cancelled,
+                reason = usage.audit_stopped() => TurnEnd::AuditStopped(reason),
             }
         };
         self.cancel = cancel;
@@ -377,11 +389,18 @@ impl ChatSession<'_> {
                 self.console.warn("turn cancelled");
                 None
             }
+            TurnEnd::AuditStopped(reason) => {
+                self.console.error(format!(
+                    "stopped: the audit log cannot be written: {reason}"
+                ));
+                None
+            }
         }
     }
 
     /// The model and tool loop of one turn.
     async fn run_turn(&mut self, line: &str) -> String {
+        self.usage.prompt(line);
         let line = self.ctx.guard.redact("user", line).text;
         self.conversation.push(Message::user(line));
         let tools = self.tools();
@@ -446,6 +465,9 @@ impl ChatSession<'_> {
                         .to_owned(),
                     stats: execution.stats,
                 });
+                for event in file_change_events(call, &execution) {
+                    self.events.emit(event);
+                }
                 results.push(execution.result);
             }
             self.conversation.push(Message::ToolResults { results });

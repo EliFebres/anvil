@@ -406,6 +406,79 @@ pub fn transcript_mode(policy: Option<&LoadedPolicy>) -> TranscriptMode {
     policy.map_or(TranscriptMode::Full, |loaded| loaded.policy.data.transcript)
 }
 
+/// How audit records keep prompts and tool arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordMode {
+    /// The text itself, after redaction, with its size and SHA-256.
+    Full,
+    /// Only the size and the SHA-256 of the text after redaction. The
+    /// default, managed or not.
+    #[default]
+    Digest,
+}
+
+impl RecordMode {
+    /// The name the policy and the records use.
+    ///
+    /// # Returns
+    ///
+    /// `full` or `digest`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Digest => "digest",
+        }
+    }
+}
+
+/// `[audit]`: the per-session audit log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AuditPolicy {
+    /// Whether a session may run only while its audit log can be written:
+    /// a log that cannot be opened stops the session before the first
+    /// model call, and a failed write stops a running one. Default `true`
+    /// under a policy; unmanaged sessions are not required.
+    pub required: bool,
+    /// An absolute folder every session's records are also written to, as
+    /// `<mirror_dir>/<session id>.audit.jsonl`. Default: none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_dir: Option<PathBuf>,
+    /// How prompts and tool arguments are kept. Default `digest`.
+    pub record: RecordMode,
+}
+
+impl Default for AuditPolicy {
+    fn default() -> Self {
+        Self {
+            required: true,
+            mirror_dir: None,
+            record: RecordMode::Digest,
+        }
+    }
+}
+
+/// The `[audit]` settings in force: the policy's, or the unmanaged
+/// default (written, not required, `digest`, no mirror).
+///
+/// # Arguments
+///
+/// * `policy` - The policy, if any.
+///
+/// # Returns
+///
+/// The settings.
+pub fn audit_settings(policy: Option<&LoadedPolicy>) -> AuditPolicy {
+    policy.map_or_else(
+        || AuditPolicy {
+            required: false,
+            ..AuditPolicy::default()
+        },
+        |loaded| loaded.policy.audit.clone(),
+    )
+}
+
 /// `[limits]`: ceilings on spending.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -482,6 +555,9 @@ pub struct Policy {
     /// How the `shell` tool may run commands.
     #[serde(default)]
     pub shell: ShellPolicy,
+    /// The audit log.
+    #[serde(default)]
+    pub audit: AuditPolicy,
 }
 
 /// The serde default for `true` fields.
@@ -747,6 +823,14 @@ pub fn parse(text: &str, path: &Path) -> Result<Policy, PolicyError> {
         return Err(invalid(
             "[limits] build_usd must be a positive number".to_owned(),
         ));
+    }
+    if let Some(dir) = &policy.audit.mirror_dir
+        && !dir.is_absolute()
+    {
+        return Err(invalid(format!(
+            "[audit] mirror_dir `{}` must be an absolute path",
+            dir.display()
+        )));
     }
     Ok(policy)
 }
@@ -1189,6 +1273,42 @@ patterns = [{{ kind = \"ticket\", regex = 'TCK-[0-9]+' }}]
         } else {
             assert_eq!(path, PathBuf::from("/etc/anvil/policy.toml"));
         }
+    }
+
+    #[test]
+    fn audit_is_required_under_a_policy_not_unmanaged_and_a_mirror_must_be_absolute() {
+        let base = "version = 1\n[network]\nallowed_hosts = [\"m.example:443\"]\n";
+        let policy = parse(base, Path::new("p.toml")).expect("parses");
+        assert_eq!(policy.audit, AuditPolicy::default());
+        assert!(
+            policy.audit.required,
+            "a policy requires the log unless it says not"
+        );
+        assert_eq!(policy.audit.record, RecordMode::Digest);
+        let unmanaged = audit_settings(None);
+        assert!(!unmanaged.required);
+        assert_eq!(unmanaged.record, RecordMode::Digest);
+        assert_eq!(unmanaged.mirror_dir, None);
+        let full = format!("{base}[audit]\nrequired = false\nrecord = \"full\"\n");
+        let policy = parse(&full, Path::new("p.toml")).expect("parses");
+        assert!(!policy.audit.required);
+        assert_eq!(policy.audit.record, RecordMode::Full);
+        let relative = format!("{base}[audit]\nmirror_dir = \"logs\"\n");
+        let error = parse(&relative, Path::new("p.toml")).expect_err("relative");
+        assert!(error.to_string().contains("[audit] mirror_dir"), "{error}");
+        let unknown = format!("{base}[audit]\nsyslog = true\n");
+        assert!(parse(&unknown, Path::new("p.toml")).is_err());
+    }
+
+    #[test]
+    fn the_restricted_example_requires_the_audit_log() {
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../policies/restricted.toml"
+        ));
+        let policy = load(&path).expect("loads").expect("present").policy;
+        assert!(policy.audit.required);
+        assert_eq!(policy.audit.record, RecordMode::Digest);
     }
 
     #[test]

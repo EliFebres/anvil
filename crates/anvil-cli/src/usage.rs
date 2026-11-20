@@ -1,5 +1,7 @@
 //! Usage wiring: loop events become content-free records and
-//! permission answers are recorded as they happen.
+//! permission answers are recorded as they happen. The same handle feeds
+//! the session's audit log (`crate::audit`), so every event, decision,
+//! prompt and plan answer reaches both from one place.
 //!
 //! Everything here translates; the rules that keep content out of the
 //! files live in `anvil_audit::record`.
@@ -14,7 +16,8 @@ use anvil_audit::{
     SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass,
 };
 use anvil_core::agent::{
-    CheckSource, EventSink, IncompleteReason, LoopEvent, ReviewVerdict, Status,
+    CheckSource, EventSink, EventTap, IncompleteReason, LoopEvent, PlanDecision, PlanGate,
+    ReviewVerdict, Status,
 };
 use anvil_core::provider::{
     CompletionRequest, Event, EventStream, Provider, ProviderError, StopReason,
@@ -27,6 +30,7 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use crate::audit::{MAIN_AGENT, SessionAudit};
 use crate::status::StatusReporter;
 use crate::wiring::Wiring;
 
@@ -52,22 +56,47 @@ pub struct SessionUsage {
     models: Arc<BTreeMap<String, String>>,
     /// Told of every loop event, so the session's `status.json` follows the loop.
     status: Option<StatusReporter>,
+    /// The session's audit log; `None` only in tests that do not need one.
+    audit: Option<Arc<SessionAudit>>,
 }
 
 impl SessionUsage {
-    /// Opens the recorder for a session and records its start.
+    /// Opens the recorder and the audit log for a session and records its
+    /// start in both.
     ///
     /// # Arguments
     ///
-    /// * `wiring` - Config and paths.
+    /// * `wiring` - Config and paths, bound to the session.
     /// * `session` - The session id.
     /// * `mode` - How the session was started.
+    /// * `yes` - Whether `--yes` is in effect, for the audit record.
     ///
     /// # Returns
     ///
     /// The usage handle.
-    pub fn start(wiring: &Wiring, session: &str, mode: SessionMode) -> Self {
-        let this = Self::new(
+    ///
+    /// # Errors
+    ///
+    /// When the policy requires the audit log and it cannot be opened; the
+    /// session must not start.
+    pub fn start(
+        wiring: &Wiring,
+        session: &str,
+        mode: SessionMode,
+        yes: bool,
+    ) -> anyhow::Result<Self> {
+        let session_dir = wiring
+            .session_dir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| wiring.sessions_root().join(session));
+        let audit = SessionAudit::open(wiring, session, &session_dir)?;
+        let mode_name = match mode {
+            SessionMode::Run => "run",
+            SessionMode::Chat => "chat",
+            SessionMode::Resume => "resume",
+        };
+        audit.start(wiring, mode_name, yes);
+        let mut this = Self::new(
             &wiring.cwd,
             wiring.home.as_deref(),
             session,
@@ -81,10 +110,74 @@ impl SessionUsage {
                 .map(|(name, provider)| (name.clone(), provider.model.clone()))
                 .collect(),
         );
+        this.audit = Some(Arc::new(audit));
         this.set_planner(wiring.config.roles.planner.as_deref());
         this.set_worker(wiring.config.roles.worker.as_deref());
         this.record(RecordKind::SessionStarted { mode });
-        this
+        Ok(this)
+    }
+
+    /// The handle with an audit log, for tests that build one by hand.
+    #[cfg(test)]
+    fn with_audit(self, audit: SessionAudit) -> Self {
+        self.with_shared_audit(Arc::new(audit))
+    }
+
+    /// The handle with an audit log the test keeps a handle to.
+    #[cfg(test)]
+    fn with_shared_audit(mut self, audit: Arc<SessionAudit>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Records a prompt the user submitted, in the audit log.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The prompt as typed.
+    pub fn prompt(&self, text: &str) {
+        if let Some(audit) = &self.audit {
+            audit.prompt(text);
+        }
+    }
+
+    /// Wraps a plan gate so every answer is audited.
+    ///
+    /// # Arguments
+    ///
+    /// * `answered_by` - `user`, `yes_flag` or `build`.
+    /// * `inner` - Who actually answers.
+    ///
+    /// # Returns
+    ///
+    /// The gate.
+    pub fn gate(&self, answered_by: &'static str, inner: Box<dyn PlanGate>) -> Box<dyn PlanGate> {
+        Box::new(AuditedGate {
+            inner,
+            usage: self.clone(),
+            answered_by,
+        })
+    }
+
+    /// Why the audit log stopped the session, once it has.
+    ///
+    /// # Returns
+    ///
+    /// The first failed write of a required log, or `None`.
+    pub fn audit_failure(&self) -> Option<String> {
+        self.audit.as_ref().and_then(|audit| audit.failure())
+    }
+
+    /// Resolves once a required audit log fails; never otherwise.
+    ///
+    /// # Returns
+    ///
+    /// The reason.
+    pub async fn audit_stopped(&self) -> String {
+        match &self.audit {
+            Some(audit) => audit.stopped().await,
+            None => std::future::pending().await,
+        }
     }
 
     /// Builds the handle without touching a [`Wiring`], for tests.
@@ -109,6 +202,7 @@ impl SessionUsage {
             })),
             models: Arc::new(models),
             status: None,
+            audit: None,
         }
     }
 
@@ -220,6 +314,16 @@ impl SessionUsage {
     /// * `wiring` - The session's wiring; every registry it builds reports here.
     pub fn observe_permissions(&self, wiring: &Wiring) {
         wiring.set_permission_observer(Arc::new(self.clone()));
+        if let Some(audit) = self.audit.as_ref().filter(|audit| audit.required()) {
+            wiring.set_call_gate(Arc::clone(audit) as Arc<dyn anvil_core::tools::CallGate>);
+        }
+        let this = self.clone();
+        wiring.set_subagent_tap(Arc::new(move |agent: &str| {
+            Arc::new(AuditTap {
+                usage: this.clone(),
+                agent: agent.to_owned(),
+            }) as Arc<dyn EventTap>
+        }));
     }
 
     /// A sink that records every event and forwards it downstream.
@@ -253,7 +357,11 @@ impl SessionUsage {
                 }
             }
         });
-        (EventSink::new(tx), task)
+        let sink = EventSink::new(tx).with_tap(Arc::new(AuditTap {
+            usage: self.clone(),
+            agent: MAIN_AGENT.to_owned(),
+        }));
+        (sink, task)
     }
 
     /// Wraps a provider so its completions are recorded as turns of `state`.
@@ -304,6 +412,9 @@ impl SessionUsage {
     ///
     /// * `outcome` - How the session ended.
     pub fn finish(&self, outcome: SessionOutcome) {
+        if let Some(audit) = &self.audit {
+            audit.end(&outcome_text(&outcome));
+        }
         self.record(RecordKind::SessionEnded { outcome });
     }
 
@@ -412,6 +523,7 @@ impl SessionUsage {
             | LoopEvent::ReasoningDelta(_)
             | LoopEvent::PlanWritten { .. }
             | LoopEvent::PlanUpdated { .. }
+            | LoopEvent::FileChanged { .. }
             | LoopEvent::CheckStarted { .. }
             | LoopEvent::ProposedEdit { .. }
             | LoopEvent::Escalated { .. }
@@ -440,10 +552,67 @@ impl PermissionPrompt for RecordingPrompt {
             .record(RecordKind::permission(&request.tool, &rule, recorded));
         answer
     }
+
+    fn answer_source(&self) -> anvil_core::tools::DecisionSource {
+        self.inner.answer_source()
+    }
+}
+
+/// Hands each loop event to the audit log the moment it is emitted, so
+/// audit records keep the order things happened in.
+struct AuditTap {
+    usage: SessionUsage,
+    /// `main`, or the subagent whose run this tap serves.
+    agent: String,
+}
+
+impl EventTap for AuditTap {
+    fn seen(&self, event: &LoopEvent) {
+        let Some(audit) = &self.usage.audit else {
+            return;
+        };
+        let role = match event {
+            LoopEvent::TurnFinished { role, .. } => role.name(),
+            _ => "summarizer",
+        };
+        let (provider, _) = self.usage.provider_for(role);
+        audit.event(&self.agent, event, &provider);
+    }
+}
+
+/// Audits each plan answer before handing it back to the loop.
+struct AuditedGate {
+    inner: Box<dyn PlanGate>,
+    usage: SessionUsage,
+    answered_by: &'static str,
+}
+
+impl PlanGate for AuditedGate {
+    fn review(&self, plan: &str) -> PlanDecision {
+        let decision = self.inner.review(plan);
+        if let Some(audit) = &self.usage.audit {
+            audit.plan(&decision, self.answered_by);
+        }
+        decision
+    }
+}
+
+/// How a session ended, in the words of the audit record.
+fn outcome_text(outcome: &SessionOutcome) -> String {
+    match outcome {
+        SessionOutcome::Done => "done".to_owned(),
+        SessionOutcome::Incomplete { reason } => format!("incomplete: {reason}"),
+        SessionOutcome::Denied { reason } => format!("denied: {reason}"),
+        SessionOutcome::ProviderError { kind } => format!("provider_error: {kind}"),
+        SessionOutcome::Chat => "chat".to_owned(),
+    }
 }
 
 impl PermissionObserver for SessionUsage {
     fn decided(&self, decision: &PermissionDecision) {
+        if let Some(audit) = &self.audit {
+            audit.decision(decision);
+        }
         let scope = match decision.scope {
             DecisionScope::Once => PermissionScope::Once,
             DecisionScope::Session => PermissionScope::Session,
@@ -482,17 +651,33 @@ impl Provider for RecordedProvider {
                 .inspect(move |item| match item {
                     Ok(Event::Usage(reported)) => usage = tokens(*reported),
                     Ok(Event::Retried { retries: count }) => retries = *count,
-                    Ok(Event::Done { stop_reason }) => session.record(RecordKind::Turn {
-                        state: state.to_owned(),
-                        role: Some("summarizer".to_owned()),
-                        provider: provider.clone(),
-                        model: model.clone(),
-                        tokens: usage,
-                        latency_ms: u64::try_from(started.elapsed().as_millis())
-                            .unwrap_or(u64::MAX),
-                        retries,
-                        stop_reason: stop_kind(stop_reason),
-                    }),
+                    Ok(Event::Done { stop_reason }) => {
+                        if let Some(audit) = &session.audit {
+                            let reported = anvil_core::provider::Usage {
+                                input: usage.input,
+                                output: usage.output,
+                                cached: usage.cached,
+                            };
+                            let event = audit.model_request(
+                                "summarizer",
+                                &provider,
+                                Some(reported),
+                                stop_reason,
+                            );
+                            audit.record_event(MAIN_AGENT, event);
+                        }
+                        session.record(RecordKind::Turn {
+                            state: state.to_owned(),
+                            role: Some("summarizer".to_owned()),
+                            provider: provider.clone(),
+                            model: model.clone(),
+                            tokens: usage,
+                            latency_ms: u64::try_from(started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                            retries,
+                            stop_reason: stop_kind(stop_reason),
+                        });
+                    }
                     Err(error) => session.record_provider_error(&provider, error),
                     Ok(_) => {}
                 }),
@@ -579,6 +764,9 @@ fn outcome_kind(outcome: ToolOutcome) -> ToolOutcomeKind {
         ToolOutcome::InvalidArguments => ToolOutcomeKind::InvalidArguments,
     }
 }
+
+#[cfg(test)]
+mod audit_tests;
 
 #[cfg(test)]
 mod tests {

@@ -313,7 +313,8 @@ impl Transcript {
             LoopEvent::ReasoningDelta(_)
             | LoopEvent::Transition { .. }
             | LoopEvent::PlanWritten { .. }
-            | LoopEvent::PlanUpdated { .. } => {}
+            | LoopEvent::PlanUpdated { .. }
+            | LoopEvent::FileChanged { .. } => {}
             LoopEvent::Escalated { reason, round } => {
                 self.close_model();
                 self.notice(
@@ -1520,6 +1521,7 @@ mod tests {
                 bytes: 0,
                 truncated: false,
                 digest: 0,
+                ..Default::default()
             },
         }
     }

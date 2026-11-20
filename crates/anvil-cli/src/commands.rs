@@ -126,7 +126,8 @@ pub(crate) async fn run_session_in(
 ) -> anyhow::Result<LoopResult> {
     let SessionOptions { yes, ui, in_build } = options;
     let plan_yes = (yes && !wiring.plans_need_a_person()) || in_build;
-    let usage = SessionUsage::start(wiring, id, SessionMode::Run).with_status(status.clone());
+    let usage = SessionUsage::start(wiring, id, SessionMode::Run, yes)?.with_status(status.clone());
+    usage.prompt(&task);
     let (frontend, events) =
         Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
     usage.observe_permissions(wiring);
@@ -147,18 +148,37 @@ pub(crate) async fn run_session_in(
             .extend(wiring.session_start_instruction(hooks.session_start().await));
     }
     let (sink, tee) = usage.sink(Some(events));
+    let answered_by = if in_build {
+        "build"
+    } else if plan_yes {
+        "yes_flag"
+    } else {
+        "user"
+    };
     let mut agent = AgentLoop::new(
         config,
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
-        status.gate(plan_yes, frontend.gate(plan_yes)),
+        status.gate(plan_yes, usage.gate(answered_by, frontend.gate(plan_yes))),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
+    let result = finish_run(
+        agent,
+        tee,
+        &session_dir,
+        &frontend,
+        hooks.as_deref(),
+        &usage,
+    )
+    .await;
+    if let Err(error) = unaudited(&usage) {
+        frontend.shutdown(true).await?;
+        return Err(error);
+    }
     if !in_build {
         remember(wiring, id, &frontend, yes, &usage, status, &result).await;
     }
@@ -168,30 +188,52 @@ pub(crate) async fn run_session_in(
     Ok(result)
 }
 
-/// Runs the loop to its end or the user's cancel, waits for every event
-/// to be recorded and shown, then runs the Stop hooks.
+/// Runs the loop to its end, the user's cancel or a failed required audit
+/// write, waits for every event to be recorded and shown, then runs the
+/// Stop hooks unless the audit log stopped the session.
 async fn finish_run(
     agent: AgentLoop,
     tee: JoinHandle<()>,
     session_dir: &Path,
     frontend: &Frontend,
     hooks: Option<&anvil_compat::HookRunner>,
+    usage: &SessionUsage,
 ) -> LoopResult {
     let console = frontend.console();
-    let result = drive(agent, frontend.cancel_watch(), session_dir, &console).await;
+    let result = drive(agent, frontend.cancel_watch(), session_dir, &console, usage).await;
     let _ = tee.await;
-    run_stop_hooks(hooks, &result, &console).await;
+    if usage.audit_failure().is_none() {
+        run_stop_hooks(hooks, &result, &console).await;
+    }
     result
 }
 
-/// Runs the loop until it ends or the user cancels it. Dropping the loop
-/// mid-flight ends the provider stream and kills any shell child; the
-/// session log already holds the progress, so `anvil resume` continues it.
-async fn drive(
+/// The error that ends the command when a required audit log stopped the
+/// session, so nothing more (memory, summaries) runs unaudited. The caller
+/// gives the terminal back first.
+///
+/// # Errors
+///
+/// When the audit log failed under `[audit] required = true`.
+pub(crate) fn unaudited(usage: &SessionUsage) -> anyhow::Result<()> {
+    match usage.audit_failure() {
+        None => Ok(()),
+        Some(detail) => bail!(
+            "the session stopped: the managed policy's [audit] required = true and the audit log cannot be written: {detail}"
+        ),
+    }
+}
+
+/// Runs the loop until it ends, the user cancels it or a required audit
+/// log fails. Dropping the loop mid-flight ends the provider stream and
+/// kills any shell child; the session log already holds the progress, so
+/// `anvil resume` continues it.
+pub(crate) async fn drive(
     agent: AgentLoop,
     mut cancel: Option<tokio::sync::watch::Receiver<u64>>,
     session_dir: &Path,
     console: &Console,
+    usage: &SessionUsage,
 ) -> LoopResult {
     if let Some(cancel) = &mut cancel {
         cancel.mark_unchanged();
@@ -200,6 +242,24 @@ async fn drive(
     tokio::pin!(run);
     tokio::select! {
         result = &mut run => result,
+        reason = usage.audit_stopped() => {
+            if let Some(ui) = console.ui() {
+                ui.send(UiMsg::Busy(false));
+            }
+            console.error(format!("stopped: the audit log cannot be written: {reason}"));
+            LoopResult {
+                status: Status::Incomplete {
+                    reason: IncompleteReason::Unexpected {
+                        detail: format!("the audit log cannot be written: {reason}"),
+                    },
+                },
+                summary: String::new(),
+                summary_path: session_dir.join(SUMMARY_FILE),
+                rounds: Default::default(),
+                spend: Default::default(),
+                role_spend: Default::default(),
+            }
+        }
         () = wait_cancel(cancel.as_mut()) => {
             if let Some(ui) = console.ui() {
                 ui.send(UiMsg::Busy(false));
@@ -383,7 +443,8 @@ async fn resume_session(
     ui: UiKind,
     status: &StatusReporter,
 ) -> anyhow::Result<i32> {
-    let usage = SessionUsage::start(wiring, id, SessionMode::Resume).with_status(status.clone());
+    let usage =
+        SessionUsage::start(wiring, id, SessionMode::Resume, yes)?.with_status(status.clone());
     let (frontend, events) =
         Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
     usage.observe_permissions(wiring);
@@ -414,14 +475,33 @@ async fn resume_session(
         wiring.tool_context(),
         status.gate(
             yes && !wiring.plans_need_a_person(),
-            frontend.gate(yes && !wiring.plans_need_a_person()),
+            usage.gate(
+                if yes && !wiring.plans_need_a_person() {
+                    "yes_flag"
+                } else {
+                    "user"
+                },
+                frontend.gate(yes && !wiring.plans_need_a_person()),
+            ),
         ),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
+    let result = finish_run(
+        agent,
+        tee,
+        &session_dir,
+        &frontend,
+        hooks.as_deref(),
+        &usage,
+    )
+    .await;
+    if let Err(error) = unaudited(&usage) {
+        frontend.shutdown(true).await?;
+        return Err(error);
+    }
     remember(wiring, id, &frontend, yes, &usage, status, &result).await;
     status.finish_run(&result.status);
     frontend.shutdown(true).await?;

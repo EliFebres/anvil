@@ -28,7 +28,7 @@ use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 pub use checks::{ChangeCheckFailure, ChangeChecks, CheckCommand, CheckSource};
-pub use events::{EventSink, LoopEvent};
+pub use events::{EventSink, EventTap, LoopEvent, file_change_events, finished_events};
 pub use gate::{AutoApprove, PlanDecision, PlanGate, ScriptedGate};
 pub use prompts::{Instruction, PromptSection};
 pub use role::{
@@ -957,12 +957,18 @@ impl AgentLoop {
         self.events.emit(LoopEvent::CheckStarted {
             command: command.to_owned(),
         });
-        let (passed, tail) = match shell::run_command(&self.ctx, command, CHECK_TIMEOUT).await {
+        let run = match self.registry.gate_refusal() {
+            Some(reason) => Err(reason),
+            None => shell::run_command(&self.ctx, command, CHECK_TIMEOUT)
+                .await
+                .map_err(|error| format!("could not run `{command}`: {error}")),
+        };
+        let (passed, tail) = match run {
             Ok(run) => (
                 run.succeeded(),
                 tail_lines(&run.into_output().content, CHECK_TAIL_LINES),
             ),
-            Err(error) => (false, format!("could not run `{command}`: {error}")),
+            Err(reason) => (false, reason),
         };
         self.events.emit(LoopEvent::CheckFinished {
             command: command.to_owned(),
@@ -981,6 +987,9 @@ impl AgentLoop {
     /// Returns the failing outcome, or `None` when there are no checks or
     /// they all passed.
     async fn run_change_checks(&mut self) -> Option<StateOutcome> {
+        if self.registry.gate_refusal().is_some() {
+            return None;
+        }
         let checks = Arc::clone(self.change_checks.as_ref()?);
         let changed = self.changed_files().await;
         let label = "standing rule checks".to_owned();
@@ -1193,14 +1202,10 @@ impl AgentLoop {
         for turn in &execution.model_turns {
             self.record_completion(state, Role::Worker, turn);
         }
+        for event in finished_events(call, &execution) {
+            self.events.emit(event);
+        }
         self.note_redactions(&call.name, execution.redactions);
-        self.events.emit(LoopEvent::ToolFinished {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            outcome: execution.outcome,
-            preview: preview(&execution.result.content),
-            stats: execution.stats,
-        });
         execution.result
     }
 
@@ -1988,6 +1993,34 @@ mod tests {
         assert_eq!(result.spend[&State::Review].turns, 1);
         assert_eq!(h.coder.calls(), 2);
         assert_eq!(h.reviewer.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_closed_gate_keeps_the_loop_from_running_its_own_checks() {
+        struct Closed;
+        impl crate::tools::CallGate for Closed {
+            fn refusal(&self) -> Option<String> {
+                Some("refused: the audit log cannot be written".to_owned())
+            }
+        }
+        let mut coder = vec![FakeProvider::text_turn(PLAN)];
+        coder.extend((0..12).map(|_| FakeProvider::text_turn("built")));
+        let mut h = Harness::new(coder, (0..12).map(|_| approve()).collect());
+        let check = CheckCommand::Command("echo ran > ran.txt".to_owned());
+        let mut agent = h.default_agent(check, "");
+        agent.registry.set_gate(Arc::new(Closed));
+        let result = agent.run().await;
+        assert_ne!(result.status, Status::Done);
+        assert!(
+            !h.dir.path().join("ran.txt").exists(),
+            "the check command must not start"
+        );
+        let events = h.drain();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LoopEvent::CheckFinished { passed: false, output_tail, .. }
+                if output_tail.contains("audit log")
+        )));
     }
 
     #[tokio::test]

@@ -4,6 +4,9 @@ expression: text
 ---
 policy: managed ([dir]/policy.toml, sha256:33c3e571f4c732db2e3ef97aeb461906fdb5ba93358ba1adf457defb63d8a743)
 version = 1  (policy)
+[audit] mirror_dir = (default: none; records stay in the session folder)  (default)
+[audit] record = "digest"  (default)
+[audit] required = true  (default)
 [data] patterns = []  (default)
 [data] redaction = true  (default)
 [data] retention_days = (default: kept until deleted)  (default)

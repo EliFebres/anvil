@@ -1,5 +1,6 @@
 //! `anvil`: the CLI coding agent. Argument parsing and wiring only.
 
+mod audit;
 mod build;
 mod chat;
 mod cli;
@@ -310,6 +311,13 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             let (text, code) = policy::check_file(&file, ownership);
             print!("{text}");
             Ok(code)
+        }
+        Some(Command::Audit { command }) => {
+            let root = policy::sessions_root(cwd, env.policy.as_deref());
+            match command {
+                cli::AuditCommand::Verify { target } => audit::verify_command(&root, &target),
+                cli::AuditCommand::Show { target } => audit::show_command(&root, &target),
+            }
         }
         Some(Command::Purge { older_than }) => {
             let root = policy::sessions_root(cwd, env.policy.as_deref());

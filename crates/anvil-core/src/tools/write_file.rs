@@ -2,7 +2,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{Access, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for};
+use super::{
+    Access, FileChange, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for,
+    sha256_hex,
+};
 
 /// Arguments of the `write_file` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -54,8 +57,14 @@ impl Tool for WriteFile {
             {
                 return ToolOutput::error(format!("cannot create directory for {shown}: {error}"));
             }
+            let before = std::fs::read(&path).ok().map(|old| sha256_hex(&old));
             match std::fs::write(&path, &args.content) {
-                Ok(()) => ToolOutput::ok(format!("wrote {} bytes to {shown}", args.content.len())),
+                Ok(()) => ToolOutput::ok(format!("wrote {} bytes to {shown}", args.content.len()))
+                    .with_change(FileChange {
+                        path: shown,
+                        before,
+                        after: sha256_hex(args.content.as_bytes()),
+                    }),
                 Err(error) => ToolOutput::error(format!("cannot write {shown}: {error}")),
             }
         })
