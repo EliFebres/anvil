@@ -795,3 +795,20 @@ fn audit_verify_fails_on_an_empty_log_and_on_one_that_does_not_open_the_session(
     );
     assert!(stdout.contains("session_start"), "{stdout}");
 }
+
+#[test]
+fn help_opens_with_the_one_line_description() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = anvil(dir.path())
+        .arg("--help")
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().next(),
+        Some(
+            "Anvil is a coding agent harness for open-weight models in regulated, restricted-network environments."
+        ),
+        "{stdout}"
+    );
+}

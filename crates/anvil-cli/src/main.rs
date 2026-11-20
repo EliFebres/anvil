@@ -1,4 +1,5 @@
-//! `anvil`: the CLI coding agent. Argument parsing and wiring only.
+//! `anvil`: a coding agent harness for open-weight models in regulated,
+//! restricted-network environments. Argument parsing and wiring only.
 
 mod audit;
 mod build;

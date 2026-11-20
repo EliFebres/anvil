@@ -15,7 +15,7 @@ use anvil_tui::{Shade, Theme};
 pub use anvil_tui::LOGO;
 
 /// The tagline under the version.
-const TAGLINE: &str = "Eli's personal coding agent that constantly improves itself";
+const TAGLINE: &str = "A coding agent harness for open-weight models";
 
 /// How long after the previous row the next logo row appears.
 const ROW_DELAY: Duration = Duration::from_millis(80);
@@ -329,7 +329,11 @@ mod tests {
             "{:?}",
             text[0]
         );
-        assert!(text[1].ends_with(TAGLINE));
+        assert!(
+            text[1].ends_with("A coding agent harness for open-weight models"),
+            "{:?}",
+            text[1]
+        );
         assert!(
             text[3].contains("project  /work/anvil") || text[3].contains("project  \\work\\anvil"),
             "{:?}",

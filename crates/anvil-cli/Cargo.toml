@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "The anvil binary: a CLI coding agent. Argument parsing and wiring only."
+description = "Anvil is a coding agent harness for open-weight models in regulated, restricted-network environments."
 
 [[bin]]
 name = "anvil"

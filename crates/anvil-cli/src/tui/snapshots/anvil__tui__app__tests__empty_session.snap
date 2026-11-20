@@ -3,7 +3,7 @@ source: crates/anvil-cli/src/tui/app.rs
 expression: terminal.backend()
 ---
 "                                  anvil 0.1.0                                                       "
-"                                  Eli's personal coding agent that constantly improves itself       "
+"                                  A coding agent harness for open-weight models                     "
 "    ___    _   ___    ________                                                                      "
 "   /   |  / | / / |  / /  _/ /    project                                                           "
 "  / /| | /  |/ /| | / // // /     coder    main (test-model)                                        "

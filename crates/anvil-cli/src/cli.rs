@@ -21,7 +21,8 @@ fn version_line(version: &str, commit: Option<&str>) -> String {
     }
 }
 
-/// A CLI coding agent.
+/// A coding agent harness for open-weight models in regulated,
+/// restricted-network environments.
 #[derive(Debug, Parser)]
 #[command(name = "anvil", version = VERSION.as_str(), about, arg_required_else_help = true)]
 pub struct Cli {

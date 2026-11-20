@@ -52,4 +52,3 @@ What Anvil does not do yet, stated plainly so a reviewer does not assume it. Eac
 ## Documentation
 
 - **Screenshots of the current UI.** `docs/ui-startup.png` predates the startup screen's `policy` row and shows hosted model names; the other three screenshots show a hosted model name in the status line. They should be retaken against a self-hosted endpoint.
-- **The startup tagline.** The full-screen startup screen still reads "Eli's personal coding agent that constantly improves itself" (`TAGLINE` in `crates/anvil-cli/src/tui/welcome.rs`), which predates the one-line description; changing it is a code change with snapshot updates, left out of the documentation phase.
