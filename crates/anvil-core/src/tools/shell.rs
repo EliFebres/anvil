@@ -189,7 +189,8 @@ const WORD_BREAKS: &str = ";&|<>()`{}\"'$";
 /// Which built-in deny category a command falls in, if any.
 ///
 /// The categories apply in every shell mode: network clients, `git push`,
-/// `git remote add` and `set-url`, `git clone`, a git alias defined on the
+/// `git fetch`, `git pull`, `git ls-remote`, `git submodule`, `git remote
+/// add` and `set-url`, `git clone`, a git alias defined on the
 /// command line (`git -c alias.p=push p`), package installs (`pip
 /// install`, `npm install`, `cargo install`, `gem install`), privilege
 /// tools (`sudo`, `runas`, `doas`) and the destructive substrings of
@@ -272,7 +273,9 @@ fn git_denied(rest: &[String]) -> Option<(String, &'static str)> {
         }
     };
     match subcommand.as_str() {
-        "push" | "clone" => Some((format!("git {subcommand}"), REMOTES)),
+        "push" | "clone" | "fetch" | "pull" | "ls-remote" | "submodule" => {
+            Some((format!("git {subcommand}"), REMOTES))
+        }
         "remote" => {
             let action = words.find(|word| !word.starts_with('-'))?;
             matches!(action.as_str(), "add" | "set-url")
@@ -1338,6 +1341,25 @@ mod tests {
             "cat .ssh-notes",
         ] {
             assert_eq!(deny_category(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn git_fetch_pull_ls_remote_and_submodule_reach_remotes() {
+        for (command, phrase) in [
+            ("git fetch http://127.0.0.1:18432/exfil-git", "git fetch"),
+            ("git pull origin main", "git pull"),
+            ("git ls-remote https://example.com/r", "git ls-remote"),
+            ("git submodule update --init", "git submodule"),
+            ("git --no-pager fetch", "git fetch"),
+            ("x && git fetch --all", "git fetch"),
+        ] {
+            let (found, category) = deny_category(command).unwrap_or_else(|| panic!("{command}"));
+            assert_eq!(found, phrase, "{command}");
+            assert_eq!(
+                category, "git commands that reach or change remotes",
+                "{command}"
+            );
         }
     }
 

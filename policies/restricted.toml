@@ -103,9 +103,11 @@ session_tokens = 2000000
 # Commands are one program with plain arguments, started without a shell
 # interpreter, and must match one of these patterns (`*` at the end allows
 # any further arguments). `;`, `&`, `|`, `<`, `>`, backticks, `$(`,
-# parentheses, braces and line breaks are refused. Network clients, git
-# push, clone and remote changes, package installs, sudo and runas stay
-# refused unless a pattern names them. Edit the list to the toolchain.
+# parentheses, braces and line breaks are refused. Network clients,
+# package installs, sudo and runas stay refused unless a pattern names
+# them; git push, clone, fetch, pull and the other subcommands outside the
+# list below never run, whatever the pattern. Edit the list to the
+# toolchain.
 #
 # What this guarantees: only these programs start, with these leading
 # words, without a shell; no argument may name a path outside the project
