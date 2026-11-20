@@ -33,6 +33,8 @@ pub mod workspace;
 pub mod write_file;
 
 #[cfg(test)]
+mod allowlist_tests;
+#[cfg(test)]
 mod boundary_tests;
 
 use std::collections::BTreeMap;
@@ -949,6 +951,21 @@ impl ToolRegistry {
             && let Some(reason) = target.and_then(|command| permissions.shell_refusal(command))
         {
             tracing::info!(tool = name, ?target, reason, "refused by shell_programs");
+            self.observe(name, DecisionScope::Blocked, false);
+            return Some((ToolOutput::error(reason), ToolOutcome::Blocked));
+        }
+        if name == shell::SHELL_TOOL_NAME
+            && permissions.has_shell_allowlist()
+            && let Some(reason) = target
+                .and_then(|command| anvil_types::shell::split_command(command).ok())
+                .and_then(|argv| shell::argument_refusal(&workspace::canonical(root), &argv))
+        {
+            tracing::info!(
+                tool = name,
+                ?target,
+                reason,
+                "refused by the allowlist's argument checks"
+            );
             self.observe(name, DecisionScope::Blocked, false);
             return Some((ToolOutput::error(reason), ToolOutcome::Blocked));
         }

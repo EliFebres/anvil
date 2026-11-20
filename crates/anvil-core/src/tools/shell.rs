@@ -77,8 +77,44 @@ const PACKAGE_INSTALLS: [(&str, &[&str]); 5] = [
     ("gem", &["install"]),
 ];
 
-/// git options that take the next word as their value.
-const GIT_OPTIONS_WITH_VALUE: [&str; 5] = ["-c", "-C", "--git-dir", "--work-tree", "--namespace"];
+/// git options before the subcommand that take the next word as their
+/// value, besides `-c` and `--config-env`, which are read for aliases.
+const GIT_OPTIONS_WITH_VALUE: [&str; 5] = [
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--super-prefix",
+    "--attr-source",
+];
+
+/// git options an allowlisted git may take before its subcommand; every
+/// other one (`-c`, `-C`, `--git-dir`, `--exec-path` and the rest) can
+/// change git's config, repository or programs.
+const GIT_SAFE_GLOBALS: [&str; 7] = [
+    "--no-pager",
+    "-P",
+    "--no-optional-locks",
+    "--literal-pathspecs",
+    "--no-replace-objects",
+    "--version",
+    "--help",
+];
+
+/// Long git options an allowlisted git refuses after its subcommand: they
+/// write a file (`--output`), read outside the repository (`--no-index`)
+/// or run another program. An abbreviation of three letters or more is
+/// refused too, because git accepts unambiguous abbreviations.
+const GIT_REFUSED_OPTIONS: [&str; 5] = [
+    "output",
+    "no-index",
+    "ext-diff",
+    "textconv",
+    "open-files-in-pager",
+];
+
+/// Real git options that are also abbreviations of a refused one, so the
+/// exact word means the real option.
+const GIT_OPTIONS_NOT_ABBREVIATIONS: [&str; 1] = ["text"];
 
 /// Characters that end a word when looking for denied programs: whitespace
 /// and every shell metacharacter, so `x;curl y` and `$(curl y)` are found.
@@ -87,7 +123,8 @@ const WORD_BREAKS: &str = ";&|<>()`{}\"'$";
 /// Which built-in deny category a command falls in, if any.
 ///
 /// The categories apply in every shell mode: network clients, `git push`,
-/// `git remote add` and `set-url`, `git clone`, package installs (`pip
+/// `git remote add` and `set-url`, `git clone`, a git alias defined on the
+/// command line (`git -c alias.p=push p`), package installs (`pip
 /// install`, `npm install`, `cargo install`, `gem install`), privilege
 /// tools (`sudo`, `runas`, `doas`) and the destructive substrings of
 /// [`BLOCKED_COMMANDS`]. The command is split into words at whitespace and
@@ -125,9 +162,9 @@ pub fn deny_category(command: &str) -> Option<(String, &'static str)> {
         }
         let rest = &words[index + 1..];
         if word == "git"
-            && let Some(phrase) = git_denied(rest)
+            && let Some(found) = git_denied(rest)
         {
-            return Some((phrase, "git commands that reach or change remotes"));
+            return Some(found);
         }
         if let Some((manager, verbs)) = PACKAGE_INSTALLS.iter().find(|(name, _)| name == word)
             && rest
@@ -141,25 +178,158 @@ pub fn deny_category(command: &str) -> Option<(String, &'static str)> {
     None
 }
 
-/// The denied git subcommand among the words after `git`, if any.
-fn git_denied(rest: &[String]) -> Option<String> {
+/// The denied phrase and category among the lowercased words after
+/// `git`, if any: an alias defined with `-c` or `--config-env` (it can
+/// name any subcommand or program), or a subcommand that reaches or
+/// changes remotes.
+fn git_denied(rest: &[String]) -> Option<(String, &'static str)> {
+    const REMOTES: &str = "git commands that reach or change remotes";
     let mut words = rest.iter();
     let subcommand = loop {
         let word = words.next()?;
-        if GIT_OPTIONS_WITH_VALUE.contains(&word.as_str()) {
+        // `-C` arrives lowercased as `-c`; reading its folder as a config
+        // value only errs towards refusing.
+        let config = match word.as_str() {
+            "-c" | "--config-env" => Some(words.next()?.as_str()),
+            other => other
+                .strip_prefix("--config-env=")
+                .or_else(|| other.strip_prefix("-c").filter(|value| !value.is_empty())),
+        };
+        if let Some(value) = config {
+            if value.starts_with("alias.") {
+                return Some(("git -c alias".to_owned(), "git alias definition"));
+            }
+        } else if GIT_OPTIONS_WITH_VALUE.contains(&word.as_str()) {
             words.next();
         } else if !word.starts_with('-') {
             break word;
         }
     };
     match subcommand.as_str() {
-        "push" | "clone" => Some(format!("git {subcommand}")),
+        "push" | "clone" => Some((format!("git {subcommand}"), REMOTES)),
         "remote" => {
             let action = words.find(|word| !word.starts_with('-'))?;
-            matches!(action.as_str(), "add" | "set-url").then(|| format!("git remote {action}"))
+            matches!(action.as_str(), "add" | "set-url")
+                .then(|| (format!("git remote {action}"), REMOTES))
         }
         _ => None,
     }
+}
+
+/// Why an allowlisted command's arguments are refused, if they are.
+///
+/// Allowlist patterns end in `*`, so the arguments after the matched words
+/// are the model's choice; these checks keep an allowed program from being
+/// steered:
+///
+/// - No argument, value after `=` in an argument, or attached value of a
+///   short option (`-I/usr/include`) may name a path outside `root`: one
+///   that starts with `~`, or that is absolute, rooted, a drive or UNC
+///   path or climbs with `..` and resolves outside it.
+/// - For git, no option may come before the subcommand except those in
+///   [`GIT_SAFE_GLOBALS`], and none of [`GIT_REFUSED_OPTIONS`] (or an
+///   abbreviation) nor `-o` or `-O` may follow it.
+///
+/// # Arguments
+///
+/// * `root` - The project root, canonical.
+/// * `argv` - The split command, program first.
+///
+/// # Returns
+///
+/// The reason, or `None` when the arguments may run.
+pub fn argument_refusal(root: &Path, argv: &[String]) -> Option<String> {
+    let (program, args) = argv.split_first()?;
+    if program_name(program) == "git"
+        && let Some(reason) = git_argument_refusal(args)
+    {
+        return Some(reason);
+    }
+    args.iter().find_map(|arg| {
+        outside_path(root, arg).map(|path| {
+            format!(
+                "`{arg}` names `{path}`, outside the workspace; under a shell allowlist an argument may not name a path outside it"
+            )
+        })
+    })
+}
+
+/// Why git's arguments (after `git`) are refused under an allowlist.
+fn git_argument_refusal(args: &[String]) -> Option<String> {
+    let mut words = args.iter();
+    for word in words.by_ref() {
+        if !word.starts_with('-') {
+            break;
+        }
+        if !GIT_SAFE_GLOBALS.contains(&word.as_str()) {
+            return Some(format!(
+                "git option `{word}` before the subcommand is refused under a shell allowlist: it can change git's config, repository or programs"
+            ));
+        }
+    }
+    for word in words {
+        let refused = match word.strip_prefix("--") {
+            Some(option) => {
+                let name = option.split('=').next().unwrap_or_default();
+                GIT_REFUSED_OPTIONS.iter().any(|refused| {
+                    *refused == name
+                        || (name.len() >= 3
+                            && refused.starts_with(name)
+                            && !GIT_OPTIONS_NOT_ABBREVIATIONS.contains(&name))
+                })
+            }
+            None => word.starts_with("-o") || word.starts_with("-O"),
+        };
+        if refused {
+            return Some(format!(
+                "git option `{word}` is refused under a shell allowlist: it writes a file, reads outside the repository or runs another program"
+            ));
+        }
+    }
+    None
+}
+
+/// The part of `arg` that names a path outside `root`, if any: the whole
+/// word, the value after its first `=`, or, for a short option, any text
+/// after its first letter.
+fn outside_path(root: &Path, arg: &str) -> Option<String> {
+    let mut candidates = vec![arg];
+    if let Some((_, value)) = arg.split_once('=') {
+        candidates.push(value);
+    }
+    if arg.starts_with('-') && !arg.starts_with("--") {
+        candidates.extend(
+            (2..arg.len())
+                .filter(|index| arg.is_char_boundary(*index))
+                .map(|index| &arg[index..]),
+        );
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| !stays_inside(root, candidate))
+        .map(str::to_owned)
+}
+
+/// Whether `candidate`, read as a path, stays inside `root`. A word that
+/// is neither rooted nor climbs with `..` is relative to the project and
+/// stays inside; one that starts with `~` names the home folder, which a
+/// program may expand itself.
+fn stays_inside(root: &Path, candidate: &str) -> bool {
+    if candidate.starts_with('~') {
+        return false;
+    }
+    let path = Path::new(candidate);
+    let bytes = candidate.as_bytes();
+    let drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let rooted = drive || path.has_root() || candidate.starts_with(['/', '\\']);
+    let climbs = path
+        .components()
+        .any(|component| component == std::path::Component::ParentDir);
+    if !rooted && !climbs {
+        return true;
+    }
+    super::permissions::resolve_path(root, candidate)
+        .is_some_and(|resolved| super::workspace::is_within(root, &resolved))
 }
 
 /// How commands start: through the shell or directly, on the host or in a
@@ -535,24 +705,42 @@ fn prepare(
     } else {
         None
     };
+    if let Some(argv) = &argv {
+        let root = super::workspace::canonical(&ctx.cwd);
+        if let Some(reason) = argument_refusal(&root, argv) {
+            return Err(invalid(reason));
+        }
+    }
+    let git = |argv: &[String]| program_name(&argv[0]) == "git";
     let mut command = match (&ctx.runner.container, argv) {
         (Some(container), argv) => {
-            let inside =
-                argv.unwrap_or_else(|| vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()]);
+            let inside = match argv {
+                Some(argv) if git(&argv) => std::iter::once("git".to_owned())
+                    .chain(crate::git::SAFE_ARGS.iter().map(|arg| (*arg).to_owned()))
+                    .chain(crate::git::allowlisted_args(&argv[1..]))
+                    .collect(),
+                Some(argv) => argv,
+                None => vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+            };
             let args = container_args(&container.settings, container_name, &ctx.cwd, &inside)
                 .map_err(invalid)?;
             let mut command = tokio::process::Command::new(host_program(&container.program));
-            command.args(args);
+            command.args(args).env_clear().envs(child_env::vars());
             command
         }
+        // Allowlisted git gets the safe settings and checks of anvil's own
+        // git calls, with the identity variables they pass.
+        (None, Some(argv)) if git(&argv) => tokio::process::Command::from(
+            crate::git::allowlisted(&ctx.cwd, &argv[1..])
+                .map_err(|error| invalid(error.to_string()))?,
+        ),
         (None, Some(argv)) => {
             let mut command = tokio::process::Command::new(host_program(&argv[0]));
-            command.args(&argv[1..]);
+            command.args(&argv[1..]).env_clear().envs(child_env::vars());
             command
         }
         (None, None) => ctx.shell.command(script),
     };
-    command.env_clear().envs(child_env::vars());
     // Bytecode caches written by a test run would land in the session's diff,
     // where the reviewer reads them as unrelated changes.
     command.env(NO_BYTECODE, "1");
@@ -1011,6 +1199,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_git_alias_defined_on_the_command_line_is_a_deny_category() {
+        for command in [
+            "git -c alias.p=push p origin main",
+            "git -c alias.x=!curl x https://example.com",
+            "git -c ALIAS.x=!sh x",
+            "git --config-env=alias.x=E x",
+            "git --config-env alias.x=E x",
+            "git -C repo -c alias.p=push p",
+        ] {
+            let (_, category) = deny_category(command).unwrap_or_else(|| panic!("{command}"));
+            assert_eq!(category, "git alias definition", "{command}");
+        }
+        for (command, phrase) in [
+            ("git --exec-path=x --namespace ns push", "git push"),
+            (
+                "git --super-prefix p/ --attr-source HEAD clone x",
+                "git clone",
+            ),
+        ] {
+            let (found, _) = deny_category(command).unwrap_or_else(|| panic!("{command}"));
+            assert_eq!(found, phrase, "{command}");
+        }
+        assert_eq!(deny_category("git -c user.name=x commit -m y"), None);
+    }
+
     #[tokio::test]
     async fn each_deny_category_is_refused_under_yes_and_a_broad_allow() {
         let dir = tempfile::tempdir().expect("dir");
@@ -1106,12 +1320,7 @@ mod tests {
             .expect("patterns");
         let dir = tempfile::tempdir().expect("dir");
         let ctx = ToolContext::new(dir.path());
-        let run = shell_outcome(
-            &registry,
-            &ctx,
-            "git -c anvil.probe=$HOME config --get anvil.probe",
-        )
-        .await;
+        let run = shell_outcome(&registry, &ctx, "git rev-parse --sq-quote $HOME").await;
         assert_eq!(
             run.outcome,
             ToolOutcome::Completed,
@@ -1119,7 +1328,7 @@ mod tests {
             run.result.content
         );
         assert!(
-            run.result.content.starts_with("$HOME"),
+            run.result.content.contains("'$HOME'"),
             "no shell expanded the variable: {}",
             run.result.content
         );

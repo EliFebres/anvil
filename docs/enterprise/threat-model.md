@@ -36,7 +36,7 @@ Source code, secrets or customer data reach a server the firm did not approve.
 
 **Not stopped**
 - Everything a session reads is sent to the model endpoint by design. Choose the endpoint and its host accordingly.
-- An approved shell command on the host can reach the network directly when it gets past the deny categories, which match text only. `allowlist` mode or the container executor (`--network none`) closes this.
+- An approved shell command on the host can reach the network directly when it gets past the deny categories, which match text only. `allowlist` mode narrows this to what the allowed programs themselves do (a build script or test the model wrote can still open a connection); the container executor (`--network none`) closes it.
 - Secrets inside ordinary files are sent and stored in transcripts like any other text.
 
 **Roadmap:** secret redaction in prompts and transcripts; operating-system sandboxing of shell commands with network control; an append-only, hash-chained audit log with export.
@@ -62,7 +62,7 @@ The model misunderstands the task, deletes or breaks files, runs a harmful comma
 
 **Stopped today**
 - Writes and shell commands ask first unless the developer's own rules allow them; a policy can force a strict profile and require a person to approve plans (in `anvil build`, only the top-level plan).
-- `[shell] mode = "allowlist"` (and `shell_programs`) limits commands to listed programs started without a shell, refusing chaining, redirection and substitution; `"off"` removes the tool; no answer or `--yes` lifts either.
+- `[shell] mode = "allowlist"` (and `shell_programs`) limits commands to listed programs started without a shell, refusing chaining, redirection and substitution, arguments that name a path outside the project, and git options that change config, write files or run programs (`shell::argument_refusal`, `git::allowlisted`); an allowed program's own behaviour is not limited; `"off"` removes the tool; no answer or `--yes` lifts either.
 - File tools cannot write outside the workspace, and never write inside `.git`, so a session cannot plant a git hook or change the repository's git config. A tool write to a file that grants power (a settings file that defines hooks or MCP servers, `.mcp.json`, the repository's permission rules) is refused, even under `--yes`.
 - The loop plans before it builds, runs the project's checks, and has the change reviewed before it finishes. Every change is an ordinary diff in the working tree.
 

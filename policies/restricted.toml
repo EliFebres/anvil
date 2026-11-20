@@ -70,14 +70,34 @@ session_tokens = 2000000
 # parentheses, braces and line breaks are refused. Network clients, git
 # push, clone and remote changes, package installs, sudo and runas stay
 # refused unless a pattern names them. Edit the list to the toolchain.
+#
+# What this guarantees: only these programs start, with these leading
+# words, without a shell; no argument may name a path outside the project
+# (absolute, `~`, a drive or UNC path, or `..` that climbs out); git takes
+# no option before its subcommand, never `--output`, `-o`, `--no-index`,
+# `--ext-diff`, `--textconv` or `-O`, runs with hooks, the file system
+# monitor, pagers, editors, external diff and text conversion programs and
+# remotes off, and refuses a repository whose own config defines aliases or
+# programs. What it does not guarantee: an allowed program still does what
+# it does with the project's files. Run executor = "container" (below) to
+# put a boundary around that.
 mode = "allowlist"
 allow = [
+    # Residual risk: build scripts and procedural macros run, and they are
+    # code the model can write. That is the point of building; the
+    # container executor is the boundary for it.
     "cargo build *",
     "cargo check *",
+    # Residual risk: runs tests the model wrote, as above.
     "cargo test *",
     "cargo clippy *",
+    # Residual risk: rewrites Rust files in the project, which is its job.
     "cargo fmt *",
+    # Residual risk: none beyond reading the repository; status refreshes
+    # the index inside .git.
     "git status *",
+    # Residual risk: reads the repository and the work tree only, since
+    # --no-index, --output and diff programs are refused.
     "git diff *",
     "git log *",
 ]

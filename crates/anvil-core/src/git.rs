@@ -74,6 +74,31 @@ pub const NO_DIFF_PROGRAMS: &[&str] = &["--no-ext-diff", "--no-textconv"];
 /// git lowercases section and key names before matching.
 const PROGRAM_KEYS: &str = r"^(filter\..+\.(clean|smudge|process)|gpg\.(.+\.)?program)$";
 
+/// Config keys an allowlisted git command refuses when the repository's
+/// own config sets them: [`PROGRAM_KEYS`], aliases, the diff, merge and
+/// credential programs, and the settings that move git's work tree. A
+/// model that may run `git config` could set any of them, and the next
+/// allowlisted git call would run the program or write outside the
+/// workspace.
+const ALLOWLIST_KEYS: &str = r"^(filter\..+\.(clean|smudge|process)|gpg\.(.+\.)?program|alias\..+|diff\.external|diff\..+\.(textconv|command)|merge\..+\.driver|(diff|merge)tool\..+\.(cmd|path)|credential\..+|core\.(askpass|alternaterefscommand|worktree|gitproxy|sshcommand)|interactive\.difffilter|submodule\..+\.update)$";
+
+/// Subcommands that show diffs; an allowlisted call gets
+/// [`NO_DIFF_PROGRAMS`] right after the subcommand.
+const DIFF_SUBCOMMANDS: [&str; 8] = [
+    "diff",
+    "log",
+    "show",
+    "whatchanged",
+    "format-patch",
+    "diff-tree",
+    "diff-index",
+    "diff-files",
+];
+
+/// Subcommands that convert text by default but take no external diff
+/// option; an allowlisted call gets `--no-textconv`.
+const TEXTCONV_SUBCOMMANDS: [&str; 2] = ["blame", "annotate"];
+
 /// Why anvil did not run git.
 #[derive(Debug, Error)]
 pub enum GitError {
@@ -91,6 +116,14 @@ pub enum GitError {
     RepositoryProgram {
         /// The config keys, as git names them.
         keys: Vec<String>,
+    },
+    /// An allowlisted command names an alias, which can run any program.
+    #[error(
+        "`git {name}` runs an alias from git's config; under a shell allowlist git runs built-in commands only"
+    )]
+    Alias {
+        /// The alias name, as git stores it.
+        name: String,
     },
 }
 
@@ -111,13 +144,98 @@ pub enum GitError {
 /// filter or signing program; [`GitError::Spawn`] or [`GitError::Config`]
 /// when git cannot be asked.
 pub fn command(cwd: &Path) -> Result<Command, GitError> {
+    let keys = repository_keys_matching(cwd, PROGRAM_KEYS)?;
+    if !keys.is_empty() {
+        return Err(GitError::RepositoryProgram { keys });
+    }
+    Ok(safe_git(cwd))
+}
+
+/// The git command a shell allowlist lets the model run, with the same
+/// safe settings as [`command`] and more checks, because the model chose
+/// the arguments: the repository's own config may not set any key of
+/// [`ALLOWLIST_KEYS`], the subcommand may not be an alias from any config
+/// file, and diff subcommands get [`NO_DIFF_PROGRAMS`].
+///
+/// The caller has already refused options before the subcommand and the
+/// options that write files or run programs
+/// (`crate::tools::shell::argument_refusal`).
+///
+/// # Arguments
+///
+/// * `cwd` - The folder git runs in, the project root.
+/// * `args` - The model's arguments after `git`.
+///
+/// # Returns
+///
+/// The command, ready to run.
+///
+/// # Errors
+///
+/// [`GitError::RepositoryProgram`] when the repository's own config sets
+/// a refused key, [`GitError::Alias`] when the subcommand is an alias,
+/// [`GitError::Spawn`] or [`GitError::Config`] when git cannot be asked.
+pub fn allowlisted(cwd: &Path, args: &[String]) -> Result<Command, GitError> {
+    let keys = repository_keys_matching(cwd, ALLOWLIST_KEYS)?;
+    if !keys.is_empty() {
+        return Err(GitError::RepositoryProgram { keys });
+    }
+    if let Some(subcommand) = args.iter().find(|arg| !arg.starts_with('-')) {
+        let output = safe_git(cwd)
+            .args(["config", "--name-only", "--get-regexp", r"^alias\."])
+            .output()?;
+        if !matches!(output.status.code(), Some(0 | 1)) {
+            return Err(GitError::Config(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            ));
+        }
+        if let Some(name) = alias_named(&String::from_utf8_lossy(&output.stdout), subcommand) {
+            return Err(GitError::Alias { name });
+        }
+    }
+    let mut git = safe_git(cwd);
+    git.args(allowlisted_args(args));
+    Ok(git)
+}
+
+/// The model's git arguments with the diff programs turned off: after a
+/// subcommand of [`DIFF_SUBCOMMANDS`] come [`NO_DIFF_PROGRAMS`], after one
+/// of [`TEXTCONV_SUBCOMMANDS`] comes `--no-textconv`.
+///
+/// # Arguments
+///
+/// * `args` - The arguments after `git`.
+///
+/// # Returns
+///
+/// The arguments to pass after [`SAFE_ARGS`].
+pub fn allowlisted_args(args: &[String]) -> Vec<String> {
+    let mut out = args.to_vec();
+    if let Some(index) = args.iter().position(|arg| !arg.starts_with('-')) {
+        let subcommand = args[index].as_str();
+        let extra: &[&str] = if DIFF_SUBCOMMANDS.contains(&subcommand) {
+            NO_DIFF_PROGRAMS
+        } else if TEXTCONV_SUBCOMMANDS.contains(&subcommand) {
+            &["--no-textconv"]
+        } else {
+            &[]
+        };
+        for (offset, option) in extra.iter().enumerate() {
+            out.insert(index + 1 + offset, (*option).to_owned());
+        }
+    }
+    out
+}
+
+/// The repository-scope keys in `cwd`'s git config that match `regex`.
+fn repository_keys_matching(cwd: &Path, regex: &str) -> Result<Vec<String>, GitError> {
     let output = safe_git(cwd)
         .args([
             "config",
             "--show-scope",
             "--name-only",
             "--get-regexp",
-            PROGRAM_KEYS,
+            regex,
         ])
         .output()?;
     // git config exits with 1 when no key matches.
@@ -126,11 +244,17 @@ pub fn command(cwd: &Path) -> Result<Command, GitError> {
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ));
     }
-    let keys = repository_keys(&String::from_utf8_lossy(&output.stdout));
-    if !keys.is_empty() {
-        return Err(GitError::RepositoryProgram { keys });
-    }
-    Ok(safe_git(cwd))
+    Ok(repository_keys(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The alias in a `git config --name-only` listing of `alias.*` keys that
+/// `subcommand` would run; git compares alias names without regard to case.
+fn alias_named(listing: &str, subcommand: &str) -> Option<String> {
+    listing
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("alias."))
+        .find(|name| name.eq_ignore_ascii_case(subcommand))
+        .map(str::to_owned)
 }
 
 /// A git command that reads no repository, such as `git --version`, with
@@ -288,6 +412,76 @@ mod tests {
         git.args(args)
             .output()
             .is_ok_and(|output| output.status.success())
+    }
+
+    #[test]
+    fn allowlisted_args_turn_off_diff_programs_after_the_subcommand() {
+        let args = |words: &[&str]| {
+            allowlisted_args(&words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            args(&["diff", "HEAD"]),
+            ["diff", "--no-ext-diff", "--no-textconv", "HEAD"]
+        );
+        assert_eq!(
+            args(&["--no-pager", "log", "-p"]),
+            ["--no-pager", "log", "--no-ext-diff", "--no-textconv", "-p"]
+        );
+        assert_eq!(
+            args(&["blame", "a.txt"]),
+            ["blame", "--no-textconv", "a.txt"]
+        );
+        assert_eq!(args(&["status", "-s"]), ["status", "-s"]);
+        assert_eq!(args(&["--version"]), ["--version"]);
+    }
+
+    #[test]
+    fn an_alias_from_any_scope_is_found_by_name() {
+        let listing = "alias.co
+alias.lg
+";
+        assert_eq!(alias_named(listing, "co"), Some("co".to_owned()));
+        assert_eq!(alias_named(listing, "CO"), Some("co".to_owned()));
+        assert_eq!(alias_named(listing, "commit"), None);
+        assert_eq!(alias_named("", "co"), None);
+    }
+
+    #[test]
+    fn allowlisted_git_refuses_repository_aliases_and_programs() {
+        let Some(dir) = repository() else { return };
+        let words = |list: &[&str]| list.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        assert!(allowlisted(dir.path(), &words(&["status"])).is_ok());
+        for (key, value) in [
+            ("alias.x", "!echo ALIAS-RAN"),
+            ("alias.st", "status"),
+            ("diff.external", "evil"),
+            ("diff.foo.textconv", "evil"),
+            ("diff.foo.command", "evil"),
+            ("merge.foo.driver", "evil"),
+            ("credential.helper", "evil"),
+            ("core.worktree", ".."),
+            ("core.askPass", "evil"),
+            ("submodule.x.update", "!evil"),
+            ("interactive.diffFilter", "evil"),
+            ("filter.x.clean", "evil"),
+        ] {
+            set_local(dir.path(), key, value);
+            let refused = allowlisted(dir.path(), &words(&["status"]));
+            assert!(
+                matches!(refused, Err(GitError::RepositoryProgram { .. })),
+                "{key}: {:?}",
+                refused.map(|_| ())
+            );
+            assert!(
+                setup(dir.path(), &["config", "--local", "--unset", key]),
+                "{key}"
+            );
+        }
+        let marker = dir.path().join("alias-ran");
+        let alias = format!("!{}", touch(&marker));
+        assert!(setup(dir.path(), &["config", "--local", "alias.x", &alias]));
+        assert!(allowlisted(dir.path(), &words(&["x"])).is_err());
+        assert!(!marker.exists(), "the alias ran");
     }
 
     /// Writes an executable hook script that creates `marker`.

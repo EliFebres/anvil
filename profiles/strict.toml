@@ -16,9 +16,20 @@
 #   `git remote add` and `set-url`, package installs, `sudo` and `runas`,
 #   `rm -rf` and the like) stay on in every mode.
 #
-# An allowed program can still run code it is given: `cargo build` runs
-# build scripts, `cargo test` runs tests, `just` runs recipes. Keep the list
-# to the programs the work needs.
+# Allowlist mode guarantees which programs start, with which leading
+# words, without a shell; that no argument names a path outside the
+# project; and that git takes no option before its subcommand, never
+# `--output`, `-o`, `--no-index`, `--ext-diff`, `--textconv` or `-O`, and
+# runs with hooks, pagers, editors, diff programs and remotes off. It does
+# not limit what an allowed program does with the project: `cargo build`
+# runs build scripts and `cargo test` runs tests, which the model can
+# write. Use the container executor when that matters.
+#
+# The list is narrow on purpose. `cargo *` would allow `cargo publish` and
+# `--config` settings that name any program, `git *` would allow `git
+# config` (which plants aliases and programs; anvil then refuses the
+# repository), `just *` runs any recipe, and `rustc *` takes
+# `-C linker=<any program>`.
 
 [permissions]
 default = "ask"
@@ -27,4 +38,25 @@ deny = ["shell:git push*", "shell:git remote*", "shell:git config*"]
 
 [shell]
 mode = "allowlist"
-allow = ["cargo *", "git *", "just *", "rustc *"]
+allow = [
+    # Residual risk: build scripts, procedural macros and tests run; they
+    # are code the model can write.
+    "cargo build *",
+    "cargo check *",
+    "cargo test *",
+    "cargo clippy *",
+    # Residual risk: rewrites Rust files in the project, which is its job.
+    "cargo fmt *",
+    # Residual risk: reads the repository and the work tree.
+    "git status *",
+    "git diff *",
+    "git log *",
+    "git show *",
+    # Residual risk: changes the index and history of the project's own
+    # repository; a signing program in the user's own git config runs.
+    "git add *",
+    "git commit *",
+    # Residual risk: runs the project's `check` recipe, which the model
+    # can edit; it is the project's own check.
+    "just check",
+]

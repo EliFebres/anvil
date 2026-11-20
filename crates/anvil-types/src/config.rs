@@ -963,7 +963,13 @@ mod tests {
         let loaded = load_profile(Some(home.path()), Some("strict")).expect("loads");
         let shell = &loaded.config.shell;
         assert_eq!(shell.mode, Some(crate::shell::ShellMode::Allowlist));
-        assert!(shell.allow.contains(&"cargo *".to_owned()));
+        assert!(shell.allow.contains(&"cargo test *".to_owned()));
+        for broad in ["cargo *", "git *", "just *", "rustc *"] {
+            assert!(
+                !shell.allow.contains(&broad.to_owned()),
+                "{broad} lets an allowed program run any program"
+            );
+        }
         let rules = loaded.config.permissions.expect("a [permissions] table");
         assert_eq!(rules.unmatched, Some(Unmatched::Ask));
         assert!(rules.shell_programs.is_empty(), "folded into [shell] allow");
