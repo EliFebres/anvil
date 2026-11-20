@@ -62,7 +62,7 @@ Better, point setup at your model server (vLLM, llama.cpp, an internal gateway).
 anvil setup --endpoint https://gpu.example/v1 [--model <id>] [--key-env NAME]
 ```
 
-The key is read from `ANVIL_ENDPOINT_KEY` (or `--key-env`); set it to any value if the server needs none. Non-loopback endpoints must use https unless `[network] allow_http_hosts` names the host.
+The key is read from `ANVIL_ENDPOINT_KEY` (or `--key-env`); set it to any value if the server needs none. Non-loopback endpoints must use https unless `[network] allow_http_hosts` names the host. Under a managed policy that key is an error naming `[network] require_tls`: the policy alone decides plain http.
 
 Every provider is a `[providers.<name>]` table naming its protocol, base URL, the environment variable that holds its key, the model and its context window; `[roles]` maps `coder`, `summarizer`, `reviewer` and the optional `planner` and `worker` onto those names. An open-weight model behind an OpenAI-compatible server looks like this:
 
@@ -126,7 +126,7 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 - An administrator can install a managed policy (`/etc/anvil/policy.toml` on Linux and macOS, `C:\ProgramData\anvil\policy.toml` on Windows, owned by an administrator) that limits hosts, models, permissions, files, features, transcripts and spending, and that nothing below it can loosen: a conflicting setting is an error naming the policy key. `policies/` holds two examples, `docs/ADMIN_GUIDE.md` lists every key, `anvil policy show` and `anvil policy check <file>` inspect it, and `anvil doctor` shows it.
 - anvil does not trust the repository it runs in. Its hooks, MCP servers, skills, commands, agents and instruction files load only after you answer the trust prompt, which lists each of them, and the answer is tied to a SHA-256 digest of that content, so any change asks again; `anvil trust` asks again and `anvil trust --revoke` withdraws it. Without a terminal, an undecided repository is untrusted.
 
-[SECURITY.md](SECURITY.md) has the details, with file references and the test behind each control: what is enforced and what is not, every network destination and what triggers it, what is stored where, where keys come from, the permission defaults, the managed policy, and how releases are built. For a firm's reviewers, `docs/enterprise/` holds the data flow, the threat model, a pilot scope template and an example policy; `docs/ROADMAP.md` lists what is deliberately not done yet; `docs/CODE_TOUR.md` walks one request through the code.
+[SECURITY.md](SECURITY.md) has the details, with file references and the test behind each control: what is enforced and what is not, every network destination and what triggers it, what is stored where, where keys come from, the permission defaults, the managed policy, and how releases are built. For a firm's reviewers, `docs/enterprise/` holds the data flow, the threat model and a pilot scope template; `policies/` holds the example policies (`restricted.toml`, `standard.toml`) and `docs/ADMIN_GUIDE.md` explains how to install and write one; `docs/ROADMAP.md` lists what is deliberately not done yet; `docs/CODE_TOUR.md` walks one request through the code.
 
 ## What it does
 
@@ -248,7 +248,8 @@ Other commands: `anvil skill add|list|show|remove` (install Claude Code skills f
 | `crates/anvil-cli` | The `anvil` binary: argument parsing, wiring, the line renderer and the full-screen UI. |
 | `skills/` | Claude Code-format skills that ship with anvil. |
 | `SECURITY.md` | What is enforced and what is not, network destinations, stored files, keys, permissions, the managed policy and the release build, for a reviewer. |
-| `docs/` | `enterprise/` (data flow, threat model, pilot scope, example policy), `ROADMAP.md`, `CODE_TOUR.md`, `DECISIONS.md`. |
+| `docs/` | `enterprise/` (data flow, threat model, pilot scope), `ADMIN_GUIDE.md`, `ROADMAP.md`, `CODE_TOUR.md`, `DECISIONS.md`. |
+| `policies/` | Example managed policies, `restricted.toml` and `standard.toml`, each parsed by a test. |
 | `profiles/` | Profiles that ship with anvil, such as `strict.toml`. |
 
 `CLAUDE.md` is the contract: conventions, which crate may depend on which, and what every check enforces.
