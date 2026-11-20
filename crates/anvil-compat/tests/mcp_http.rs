@@ -177,3 +177,37 @@ async fn a_redirecting_http_server_does_not_pass_its_headers_on() {
         "the redirect target received nothing"
     );
 }
+
+#[tokio::test]
+async fn a_server_that_echoes_its_bearer_token_in_an_error_body_leaks_nothing() {
+    let token = "Bearer t0k3n";
+    let server = MockServer::start().await;
+    mount_server(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/bad"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(format!(
+            "invalid credentials: got '{token}' (token t0k3n) and sk-{}",
+            "x".repeat(24)
+        )))
+        .mount(&server)
+        .await;
+    let good = format!("{}/mcp", server.uri());
+    let bad = format!("{}/bad", server.uri());
+    let http = client(&[good.clone(), bad.clone()]);
+    let project = tempfile::tempdir().expect("tempdir");
+
+    let error = McpClient::connect(&http_server(&bad), project.path(), &http)
+        .await
+        .err()
+        .expect("401 is an error")
+        .to_string();
+    assert!(error.contains("401"), "{error}");
+    assert!(!error.contains("t0k3n"), "the header value leaked: {error}");
+    assert!(!error.contains("sk-xxxx"), "a key shape leaked: {error}");
+    assert!(error.contains("[REDACTED:header]"), "{error}");
+
+    let set = ServerSet::from_servers(vec![http_server(&bad)]);
+    let tools = McpTools::load(&set, project.path(), &http, true).await;
+    let report = tools.reports()[0].tools.clone().expect_err("refused");
+    assert!(!report.to_string().contains("t0k3n"), "{report}");
+}

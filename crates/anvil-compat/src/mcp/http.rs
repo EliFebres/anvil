@@ -28,6 +28,26 @@ const SESSION_HEADER: &str = "mcp-session-id";
 /// The most response bytes read for one message.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+/// Removes from an error body every header value this transport sends,
+/// and each word of one (`t0k3n` of `Bearer t0k3n`) long enough to be a
+/// secret, then the built-in secret shapes, so a server that echoes its
+/// credentials puts none of them into an error, a tool result or a log.
+fn scrub(body: &str, headers: &BTreeMap<String, String>) -> String {
+    let mut values: Vec<&str> = headers
+        .values()
+        .flat_map(|value| {
+            std::iter::once(value.trim()).chain(value.split_whitespace().filter(|w| w.len() >= 4))
+        })
+        .filter(|value| !value.is_empty())
+        .collect();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    let mut text = body.to_owned();
+    for value in values {
+        text = text.replace(value, &anvil_types::redact::marker("header"));
+    }
+    anvil_types::redact::Redactor::builtin().redact(&text).text
+}
+
 /// A remote server reached over HTTP.
 pub struct HttpTransport {
     /// The server name, for errors.
@@ -128,7 +148,7 @@ impl HttpTransport {
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
             let body = self.read_body(&mut response).await.unwrap_or_default();
-            let detail: String = String::from_utf8_lossy(&body)
+            let detail: String = scrub(&String::from_utf8_lossy(&body), &self.headers)
                 .trim()
                 .chars()
                 .take(500)
