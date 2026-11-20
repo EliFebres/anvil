@@ -100,17 +100,83 @@ const GIT_SAFE_GLOBALS: [&str; 7] = [
     "--help",
 ];
 
+/// The only subcommands an allowlisted git runs, whatever the pattern
+/// (`git *` included): they read the repository or change the work tree,
+/// the index and local refs. Every other subcommand is refused, among them
+/// those that start a program (`rebase --exec`, `bisect run`, `submodule
+/// foreach`, `difftool`, `filter-branch`), reach a remote (`fetch`,
+/// `ls-remote`, `push`) or change git's configuration (`config`).
+const GIT_SUBCOMMANDS: [&str; 20] = [
+    "status",
+    "diff",
+    "log",
+    "show",
+    "rev-parse",
+    "ls-files",
+    "blame",
+    "branch",
+    "add",
+    "commit",
+    "restore",
+    "switch",
+    "checkout",
+    "stash",
+    "merge-base",
+    "describe",
+    "shortlog",
+    "cat-file",
+    "grep",
+    "tag",
+];
+
 /// Long git options an allowlisted git refuses after its subcommand: they
 /// write a file (`--output`), read outside the repository (`--no-index`)
-/// or run another program. An abbreviation of three letters or more is
-/// refused too, because git accepts unambiguous abbreviations.
-const GIT_REFUSED_OPTIONS: [&str; 5] = [
+/// or run another program (an external diff, a text conversion or filter,
+/// a pager, `--exec`, a remote's pack program, a signing program, an
+/// editor). An abbreviation of three letters or more is refused too,
+/// because git accepts unambiguous abbreviations.
+const GIT_REFUSED_OPTIONS: [&str; 13] = [
     "output",
     "no-index",
     "ext-diff",
     "textconv",
     "open-files-in-pager",
+    "exec",
+    "upload-pack",
+    "receive-pack",
+    "extcmd",
+    "gpg-sign",
+    "edit-description",
+    "filters",
+    "edit",
 ];
+
+/// Per subcommand, the short options (alone or in a cluster such as
+/// `-pv`) and long options that open an editor, an interactive patch
+/// session (which runs `interactive.diffFilter`) or a signing program.
+const GIT_REFUSED_PER_SUBCOMMAND: [(&str, &str, &[&str]); 5] = [
+    ("commit", "Sep", &["patch", "interactive"]),
+    ("add", "pie", &["patch", "interactive"]),
+    ("checkout", "p", &["patch"]),
+    ("restore", "p", &["patch"]),
+    ("stash", "p", &["patch"]),
+];
+
+/// Short and long options that make `git tag` create, sign, move or
+/// delete a tag; an allowlisted `git tag` only lists.
+const GIT_TAG_CHANGES: (&str, &[&str]) = (
+    "asufdmFe",
+    &[
+        "annotate",
+        "sign",
+        "local-user",
+        "force",
+        "delete",
+        "message",
+        "file",
+        "create-reflog",
+    ],
+);
 
 /// Real git options that are also abbreviations of a refused one, so the
 /// exact word means the real option.
@@ -227,8 +293,11 @@ fn git_denied(rest: &[String]) -> Option<(String, &'static str)> {
 ///   that starts with `~`, or that is absolute, rooted, a drive or UNC
 ///   path or climbs with `..` and resolves outside it.
 /// - For git, no option may come before the subcommand except those in
-///   [`GIT_SAFE_GLOBALS`], and none of [`GIT_REFUSED_OPTIONS`] (or an
-///   abbreviation) nor `-o` or `-O` may follow it.
+///   [`GIT_SAFE_GLOBALS`]; the subcommand must be one of
+///   [`GIT_SUBCOMMANDS`]; none of [`GIT_REFUSED_OPTIONS`] (or an
+///   abbreviation), `-o`, `-O` or the subcommand's entries in
+///   [`GIT_REFUSED_PER_SUBCOMMAND`] may follow it; and `git tag` only
+///   lists.
 ///
 /// # Arguments
 ///
@@ -255,38 +324,84 @@ pub fn argument_refusal(root: &Path, argv: &[String]) -> Option<String> {
 }
 
 /// Why git's arguments (after `git`) are refused under an allowlist.
+///
+/// The options are checked before the subcommand, so a refused option is
+/// named even when the subcommand is refused too.
 fn git_argument_refusal(args: &[String]) -> Option<String> {
-    let mut words = args.iter();
-    for word in words.by_ref() {
-        if !word.starts_with('-') {
-            break;
-        }
-        if !GIT_SAFE_GLOBALS.contains(&word.as_str()) {
-            return Some(format!(
-                "git option `{word}` before the subcommand is refused under a shell allowlist: it can change git's config, repository or programs"
-            ));
-        }
+    let globals = args.iter().take_while(|word| word.starts_with('-'));
+    if let Some(word) = globals
+        .clone()
+        .find(|word| !GIT_SAFE_GLOBALS.contains(&word.as_str()))
+    {
+        return Some(format!(
+            "git option `{word}` before the subcommand is refused under a shell allowlist: it can change git's config, repository or programs"
+        ));
     }
-    for word in words {
-        let refused = match word.strip_prefix("--") {
-            Some(option) => {
-                let name = option.split('=').next().unwrap_or_default();
-                GIT_REFUSED_OPTIONS.iter().any(|refused| {
-                    *refused == name
-                        || (name.len() >= 3
-                            && refused.starts_with(name)
-                            && !GIT_OPTIONS_NOT_ABBREVIATIONS.contains(&name))
-                })
-            }
-            None => word.starts_with("-o") || word.starts_with("-O"),
-        };
-        if refused {
-            return Some(format!(
-                "git option `{word}` is refused under a shell allowlist: it writes a file, reads outside the repository or runs another program"
-            ));
+    let mut rest = args.iter().skip(globals.count());
+    let subcommand = rest.next()?;
+    let rest: Vec<&String> = rest.collect();
+    if let Some(word) = rest
+        .iter()
+        .find(|word| git_option_is_refused(subcommand, word))
+    {
+        return Some(format!(
+            "git option `{word}` is refused under a shell allowlist: it writes a file, reads outside the repository or runs another program"
+        ));
+    }
+    if !GIT_SUBCOMMANDS.contains(&subcommand.as_str()) {
+        return Some(format!(
+            "git subcommand `{subcommand}` is refused under a shell allowlist, which lets git run only {}",
+            GIT_SUBCOMMANDS.join(", ")
+        ));
+    }
+    if subcommand == "tag" {
+        let lists = rest.is_empty() || rest.iter().any(|word| *word == "-l" || *word == "--list");
+        let changes = rest
+            .iter()
+            .any(|word| option_matches(word, GIT_TAG_CHANGES.0, GIT_TAG_CHANGES.1));
+        if !lists || changes {
+            return Some(
+                "git tag may only list tags under a shell allowlist (`git tag`, `git tag -l`); creating, signing or deleting one is refused".to_owned(),
+            );
         }
     }
     None
+}
+
+/// Whether one word after git's subcommand is an option an allowlisted git
+/// refuses: one of [`GIT_REFUSED_OPTIONS`] or an abbreviation of it, `-o`
+/// or `-O` with or without a value, or one of the subcommand's entries in
+/// [`GIT_REFUSED_PER_SUBCOMMAND`].
+fn git_option_is_refused(subcommand: &str, word: &str) -> bool {
+    let refused = match word.strip_prefix("--") {
+        Some(option) => {
+            let name = option.split('=').next().unwrap_or_default();
+            GIT_REFUSED_OPTIONS.iter().any(|refused| {
+                *refused == name
+                    || (name.len() >= 3
+                        && refused.starts_with(name)
+                        && !GIT_OPTIONS_NOT_ABBREVIATIONS.contains(&name))
+            })
+        }
+        None => word.starts_with("-o") || word.starts_with("-O"),
+    };
+    refused
+        || GIT_REFUSED_PER_SUBCOMMAND
+            .iter()
+            .filter(|(name, _, _)| *name == subcommand)
+            .any(|(_, short, long)| option_matches(word, short, long))
+}
+
+/// Whether `word` is a short option cluster holding one of the letters in
+/// `short` (`-pv` holds `p`), or a long option named in `long` (with or
+/// without `=value`).
+fn option_matches(word: &str, short: &str, long: &[&str]) -> bool {
+    match word.strip_prefix("--") {
+        Some(option) => long.contains(&option.split('=').next().unwrap_or_default()),
+        None => word
+            .strip_prefix('-')
+            .is_some_and(|letters| letters.chars().any(|letter| short.contains(letter))),
+    }
 }
 
 /// The part of `arg` that names a path outside `root`, if any: the whole

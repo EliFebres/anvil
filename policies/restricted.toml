@@ -110,10 +110,14 @@ session_tokens = 2000000
 # What this guarantees: only these programs start, with these leading
 # words, without a shell; no argument may name a path outside the project
 # (absolute, `~`, a drive or UNC path, or `..` that climbs out); git takes
-# no option before its subcommand, never `--output`, `-o`, `--no-index`,
-# `--ext-diff`, `--textconv` or `-O`, runs with hooks, the file system
-# monitor, pagers, editors, external diff and text conversion programs and
-# remotes off, and refuses a repository whose own config defines aliases or
+# no option before its subcommand, runs only status, diff, log, show,
+# rev-parse, ls-files, blame, branch, add, commit, restore, switch,
+# checkout, stash, merge-base, describe, shortlog, cat-file, grep and tag
+# (list only) even under a `git *` pattern, never takes `--output`, `-o`,
+# `--no-index`, `--ext-diff`, `--textconv`, `-O`, `--exec`,
+# `--upload-pack`, `--extcmd`, `--gpg-sign`, `--edit` or `--filters`,
+# runs with hooks, the file system monitor, pagers, editors, external diff
+# and text conversion programs and remotes off, and refuses a repository whose own config defines aliases or
 # programs. What it does not guarantee: an allowed program still does what
 # it does with the project's files. Run executor = "container" (below) to
 # put a boundary around that.

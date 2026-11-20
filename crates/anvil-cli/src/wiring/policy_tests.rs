@@ -997,14 +997,15 @@ async fn a_policy_allowlist_refuses_metacharacters_and_starts_programs_directly(
         let run = registry.execute(&shell_call(command), &ctx).await;
         assert_eq!(run.outcome, ToolOutcome::Blocked, "{command:?}");
     }
-    assert_eq!(
-        managed.permit_shell(
-            "git push origin main",
-            Box::new(StaticPrompt(PromptAnswer::Yes)),
-            None
-        ),
-        Ok(()),
-        "a pattern that names `git push` lifts its deny category"
+    let push = managed.permit_shell(
+        "git push origin main",
+        Box::new(StaticPrompt(PromptAnswer::Yes)),
+        None,
+    );
+    assert!(
+        push.as_ref()
+            .is_err_and(|reason| reason.contains("git subcommand `push`")),
+        "allowlisted git runs only the listed subcommands, even one a pattern names: {push:?}"
     );
     let section = managed.shell.prompt_section().expect("the model is told");
     assert!(section.text.contains("`git status`"), "{}", section.text);
