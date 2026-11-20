@@ -182,6 +182,13 @@ async fn the_session_holds_its_lock_until_it_is_dropped() {
     let session = dir.path().join("session");
     assert!(!file::lock_is_free(&session));
     drop(status);
+    // Other tests in this binary start child processes. On Linux a child forked
+    // at this moment holds a copy of the lock until it calls exec, so the release
+    // is checked within a short window instead of at one instant.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !file::lock_is_free(&session) && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     assert!(file::lock_is_free(&session));
 }
 
