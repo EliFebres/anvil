@@ -50,7 +50,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             asset: anvil-x86_64-pc-windows-msvc.exe
             binary: anvil.exe
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             asset: anvil-aarch64-apple-darwin
             binary: anvil
