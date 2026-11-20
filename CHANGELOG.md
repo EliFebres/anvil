@@ -5,7 +5,7 @@ All notable changes to anvil are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The release
 workflow publishes the section of the tagged version as the release notes.
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-11-20
 
 Anvil is a coding agent harness for open-weight models in regulated,
 restricted-network environments. This release reworks it for review by an IT
@@ -59,6 +59,23 @@ machine, who controls those limits, and what record is left behind.
 - MCP tool listings are approved together with the server's definition, and
   the digest covers every tool annotation, so earlier approvals no longer
   match and the next listing is recorded again. The MCP tool cache is gone.
+
+### Fixed
+
+- `edit_file` matches across line endings: an `old` text copied from
+  `read_file` now edits a CRLF file, and the file keeps its own endings and
+  byte order mark. Only line endings are ignored; indentation must still
+  match. A miss now shows the closest region of the file or names a white
+  space difference, within a fixed size limit.
+- `write_file` keeps CRLF when it replaces an all-CRLF file with LF-only
+  content, so a rewrite no longer becomes a whole-file diff.
+- File tool argument errors name the argument, what was wrong and what is
+  accepted.
+- The system prompt and the shell tool's description state the operating
+  system, the path separator and how the shell tool starts commands, taken
+  from the configuration and the shell mode.
+- The full-screen UI no longer shows nameless `cancelled tool` rows when a
+  tool's result arrives before its start event.
 
 ### Release and supply chain
 
