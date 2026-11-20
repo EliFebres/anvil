@@ -283,7 +283,13 @@ async fn scripts_that_trusted_hooks_and_servers_run_are_never_written_by_file_to
         std::fs::read_to_string(repo.path().join("scripts/fmt.sh")).expect("read"),
         "cargo fmt"
     );
-    let other = registry.execute(&call("scripts/other.sh"), &ctx).await;
+    let neighbour = registry.execute(&call("scripts/other.sh"), &ctx).await;
+    assert!(
+        neighbour.result.is_error,
+        "a file next to a hook script is closed too: {}",
+        neighbour.result.content
+    );
+    let other = registry.execute(&call("src/other.sh"), &ctx).await;
     assert_eq!(
         other.outcome,
         ToolOutcome::Completed,
@@ -361,5 +367,71 @@ async fn file_tools_never_write_anvils_own_records() {
         ToolOutcome::Completed,
         "the session's own plan stays writable: {}",
         plan.result.content
+    );
+}
+
+#[tokio::test]
+async fn files_next_to_a_hook_script_are_never_written_and_join_the_trust_digest() {
+    let repo = tempfile::tempdir().expect("repo");
+    let home = tempfile::tempdir().expect("home");
+    write(
+        repo.path(),
+        ".claude/settings.json",
+        r#"{"hooks": {"PostToolUse": [{"matcher": "write_file", "hooks": [{"type": "command", "command": "powershell -NoProfile -File scripts/check.ps1"}]}]}}"#,
+    );
+    write(
+        repo.path(),
+        "scripts/check.ps1",
+        ". \"$PSScriptRoot/lib.ps1\"",
+    );
+    write(repo.path(), "scripts/lib.ps1", "Write-Output ok");
+    write(repo.path(), "scripts/helpers/more.ps1", "Write-Output ok");
+    let wiring = wiring(
+        repo.path(),
+        home.path(),
+        true,
+        "[permissions]\nallow = [\"write_file\", \"edit_file\"]\n",
+    );
+    let registry = wiring
+        .registry(Box::new(StaticPrompt(PromptAnswer::Yes)))
+        .expect("registry");
+    let ctx = wiring.tool_context();
+    let call = |path: &str| ToolCall {
+        id: "c1".to_owned(),
+        name: "write_file".to_owned(),
+        arguments_json: serde_json::json!({"path": path, "content": "New-Item pwned"}).to_string(),
+    };
+    for path in [
+        "scripts/lib.ps1",
+        "SCRIPTS/Lib.ps1",
+        "scripts/helpers/more.ps1",
+        "scripts/new.ps1",
+    ] {
+        let run = registry.execute(&call(path), &ctx).await;
+        assert!(run.result.is_error, "{path}: {}", run.result.content);
+        assert!(
+            run.result.content.contains("a hook or MCP server runs"),
+            "{path}: {}",
+            run.result.content
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("scripts/lib.ps1")).expect("read"),
+        "Write-Output ok"
+    );
+    let elsewhere = registry.execute(&call("src/main.ps1"), &ctx).await;
+    assert_eq!(
+        elsewhere.outcome,
+        ToolOutcome::Completed,
+        "{}",
+        elsewhere.result.content
+    );
+
+    let before = crate::trust::fingerprint(repo.path());
+    write(repo.path(), "scripts/lib.ps1", "New-Item pwned");
+    assert_ne!(
+        before,
+        crate::trust::fingerprint(repo.path()),
+        "a changed file next to a hook script asks again"
     );
 }

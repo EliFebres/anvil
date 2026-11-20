@@ -431,9 +431,14 @@ impl ToolContext {
                 crate::agent::PLAN_FILE
             ));
         }
-        if write && self.workspace.protected_files.contains(&resolved) {
+        if write
+            && self.workspace.protected_files.iter().any(|file| {
+                file.parent()
+                    .is_some_and(|dir| workspace::is_within_any_case(dir, &resolved))
+            })
+        {
             return Err(format!(
-                "`{path}` is a script or program a hook or MCP server runs; anvil's file tools never write it, so a model cannot plant code that runs without a prompt"
+                "`{path}` is a script or program a hook or MCP server runs, or lies in such a script's folder; anvil's file tools never write there, so a model cannot plant code that runs without a prompt"
             ));
         }
         let mut allowed: Vec<&Path> = vec![&self.cwd];

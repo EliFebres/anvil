@@ -224,8 +224,9 @@ pub fn commands_run(hooks: &HookConfig, servers: &ServerSet) -> Vec<String> {
 /// The SHA-256 digest, in hex, of everything a trust decision covers.
 ///
 /// It covers the content of [`DIGEST_FILES`], every file under
-/// [`DIGEST_DIRS`], every file inside the repository that one of its hooks
-/// or MCP servers names ([`commands_run`]), every `CLAUDE.md` in a
+/// [`DIGEST_DIRS`], every file in the folder (recursively, skipping
+/// ignored files and `.git`) of each file inside the repository that one
+/// of its hooks or MCP servers names ([`commands_run`]), every `CLAUDE.md` in a
 /// subfolder (honoring `.gitignore`), and the instruction text as loaded,
 /// imports included.
 /// Each file enters with its path, so adding, removing or renaming one
@@ -263,14 +264,30 @@ pub fn fingerprint(root: &Path) -> String {
         &ServerSet::load(Some(root), None),
     );
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    files.extend(
+    let script_dirs: BTreeSet<std::path::PathBuf> =
         command_files(root, lines.iter().map(String::as_str))
             .into_iter()
-            .map(|path| match path.strip_prefix(&canonical_root) {
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .map(|dir| match dir.strip_prefix(&canonical_root) {
                 Ok(relative) => root.join(relative),
-                Err(_) => path,
-            }),
-    );
+                Err(_) => dir,
+            })
+            .collect();
+    // A script loads its neighbours, so its whole folder is what runs.
+    // Ignored files (build output) are skipped and `.git` is never read.
+    for dir in &script_dirs {
+        let walk = ignore::WalkBuilder::new(dir)
+            .standard_filters(false)
+            .git_ignore(true)
+            .follow_links(false)
+            .filter_entry(|entry| entry.file_name() != ".git")
+            .build();
+        files.extend(
+            walk.flatten()
+                .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+                .map(ignore::DirEntry::into_path),
+        );
+    }
     let nested = ignore::WalkBuilder::new(root).follow_links(false).build();
     files.extend(
         nested

@@ -40,10 +40,13 @@ pub struct Workspace {
     /// `.anvil/usage` and the audit mirror. The one exception is the
     /// current session's plan file, which Build may correct.
     pub records_dirs: Vec<PathBuf>,
-    /// Files the tools never write, in canonical form: the scripts and
-    /// programs inside the workspace that a loaded hook or MCP server
-    /// runs, found with [`command_files`]. A model that could rewrite one
-    /// would run code later without a prompt.
+    /// Scripts and programs inside the workspace that a loaded hook or MCP
+    /// server runs, in canonical form, found with [`command_files`]. The
+    /// tools never write one, nor anything in its folder, recursively, in
+    /// any letter case: a script loads its neighbours (`. ./lib.ps1`,
+    /// `require('./lib')`), and a model that could rewrite one would run
+    /// code later without a prompt. A script in the project root therefore
+    /// closes the whole project to the file tools.
     pub protected_files: Vec<PathBuf>,
 }
 
