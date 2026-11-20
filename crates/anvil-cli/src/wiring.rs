@@ -571,7 +571,7 @@ impl Wiring {
     ///
     /// # Arguments
     ///
-    /// * `observer` - The observer, such as the session telemetry.
+    /// * `observer` - The observer, such as the session usage records.
     pub fn set_permission_observer(&self, observer: Arc<dyn PermissionObserver>) {
         if let Ok(mut slot) = self.observer.lock() {
             *slot = Some(observer);

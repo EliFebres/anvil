@@ -158,7 +158,7 @@ impl Frontend {
     ///
     /// # Returns
     ///
-    /// The prompt, not yet recorded by telemetry.
+    /// The prompt, not yet in the usage records.
     pub fn prompt(&self, yes: bool) -> Box<dyn PermissionPrompt> {
         if yes {
             return Box::new(StaticPrompt(PromptAnswer::Yes));

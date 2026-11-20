@@ -24,7 +24,7 @@ rustc-ice-*.txt
 #.idea/
 
 # anvil
-.anvil/telemetry/
+.anvil/usage/
 .anvil/sessions/
 .anvil/logs/
 

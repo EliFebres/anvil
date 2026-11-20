@@ -36,7 +36,7 @@ Under a managed policy: nothing. The other destinations in SECURITY.md are each 
 - the proxy, when the policy's `[network] proxy` names one or is `system` (the default is none);
 - the model list during `anvil setup --endpoint`, which goes to the same allowed endpoint.
 
-anvil has no telemetry upload, update check, analytics, web search or web fetch. HTTP clients can only be built in `net.rs`, which a test and a lint enforce. `anvil doctor --egress` lists every destination the installed configuration can reach.
+anvil sends no usage data anywhere and has no update check, analytics, web search or web fetch. HTTP clients can only be built in `net.rs`, which a test and a lint enforce. `anvil doctor --egress` lists every destination the installed configuration can reach.
 
 ## What anvil does not control
 

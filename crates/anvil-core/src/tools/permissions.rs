@@ -964,7 +964,7 @@ pub struct PermissionDecision {
     pub covered: bool,
 }
 
-/// Hears every permission decision. The CLI records them as telemetry.
+/// Hears every permission decision. The CLI records them in the usage records.
 pub trait PermissionObserver: Send + Sync {
     /// Called once per decision.
     ///

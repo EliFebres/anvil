@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anvil_audit::MemorySkipReason;
 use anvil_core::agent::diff::SMALL_DIFF_LINES;
 use anvil_core::agent::{ChangeCheckFailure, ChangeChecks, LoopResult, PromptSection, Status};
 use anvil_core::context::{collect_text, render_transcript};
@@ -19,14 +20,13 @@ use anvil_memory::rules::{ensure_check_scripts, strip_rule_prefix};
 use anvil_memory::{
     Decision, FactStore, MEMORY_TOKEN_CAP, Proposal, Rule, RuleSet, load_memory, paths, run_checks,
 };
-use anvil_telemetry::MemorySkipReason;
 use anyhow::Context;
 use tokio::sync::oneshot;
 
 use crate::console::Console;
-use crate::telemetry::SessionTelemetry;
 use crate::terminal::read_line;
 use crate::tui::{MemoryAnswer, UiHandle, UiMsg, UiRequest, block_on_reply};
+use crate::usage::SessionUsage;
 use crate::wiring::Wiring;
 
 /// Heading of the rules section in every system prompt.
@@ -415,14 +415,14 @@ pub fn skip_text(reason: MemorySkipReason) -> String {
 /// * `messages` - The session's conversation.
 /// * `decide` - Called once per proposed fact.
 /// * `console` - Where progress lines go.
-/// * `telemetry` - Where the summarizer's completions are recorded, if anywhere.
+/// * `usage` - Where the summarizer's completions are recorded, if anywhere.
 pub async fn finish_session(
     wiring: &Wiring,
     session_id: &str,
     messages: &[Message],
     mut decide: Box<dyn FnMut(&Proposal) -> Decision>,
     console: &Console,
-    telemetry: Option<&SessionTelemetry>,
+    usage: Option<&SessionUsage>,
 ) {
     if !wiring.memory_allowed() {
         console.notice("memory: skipped (the managed policy's [features] memory = false)");
@@ -431,8 +431,8 @@ pub async fn finish_session(
     let outcome = async {
         let name = &wiring.config.roles.summarizer;
         let mut summarizer = wiring.provider(name)?;
-        if let Some(telemetry) = telemetry {
-            summarizer = telemetry.recorded(name, summarizer, "memory");
+        if let Some(usage) = usage {
+            summarizer = usage.recorded(name, summarizer, "memory");
         }
         extract_after_session(
             &*summarizer,

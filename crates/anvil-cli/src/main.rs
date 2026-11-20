@@ -18,11 +18,11 @@ mod setup;
 mod skills;
 mod stats;
 mod status;
-mod telemetry;
 mod templates;
 mod terminal;
 mod trust;
 mod tui;
+mod usage;
 mod wiring;
 
 use std::path::{Path, PathBuf};

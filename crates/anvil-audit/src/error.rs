@@ -4,12 +4,12 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-/// Why a telemetry operation could not finish.
+/// Why a usage operation could not finish.
 ///
 /// Every variant names the file or value concerned, so the message
 /// stands on its own in a log line or a CLI error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum TelemetryError {
+pub enum UsageError {
     /// A file or directory could not be read or written.
     #[error("cannot access {}: {detail}", path.display())]
     Io {
@@ -38,7 +38,7 @@ pub enum TelemetryError {
     },
 }
 
-impl TelemetryError {
+impl UsageError {
     /// Wraps an I/O error with the path it concerned.
     ///
     /// # Arguments

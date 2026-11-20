@@ -1,14 +1,18 @@
-//! Telemetry wiring: loop events become content-free records and
+//! Usage wiring: loop events become content-free records and
 //! permission answers are recorded as they happen.
 //!
 //! Everything here translates; the rules that keep content out of the
-//! files live in `anvil_telemetry::record`.
+//! files live in `anvil_audit::record`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use anvil_audit::{
+    CheckOrigin, PermissionAnswer, PermissionScope, RecordKind, Recorder, SessionMode,
+    SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass,
+};
 use anvil_core::agent::{
     CheckSource, EventSink, IncompleteReason, LoopEvent, ReviewVerdict, Status,
 };
@@ -18,10 +22,6 @@ use anvil_core::provider::{
 use anvil_core::tools::{
     DecisionScope, PermissionDecision, PermissionObserver, PermissionPrompt, PermissionRequest,
     PromptAnswer, ToolOutcome, ToolRegistry, permissions,
-};
-use anvil_telemetry::{
-    CheckOrigin, PermissionAnswer, PermissionScope, RecordKind, Recorder, SessionMode,
-    SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass,
 };
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
@@ -40,12 +40,12 @@ struct Roles {
     summarizer: String,
 }
 
-/// The telemetry of one session.
+/// The usage records of one session.
 ///
 /// Cloning shares the recorder and the role names, so the event tee, the
 /// permission prompt and the chat loop all see the same state.
 #[derive(Clone)]
-pub struct SessionTelemetry {
+pub struct SessionUsage {
     recorder: Arc<Recorder>,
     roles: Arc<Mutex<Roles>>,
     /// Provider name to model name, from config.
@@ -54,7 +54,7 @@ pub struct SessionTelemetry {
     status: Option<StatusReporter>,
 }
 
-impl SessionTelemetry {
+impl SessionUsage {
     /// Opens the recorder for a session and records its start.
     ///
     /// # Arguments
@@ -65,7 +65,7 @@ impl SessionTelemetry {
     ///
     /// # Returns
     ///
-    /// The telemetry handle.
+    /// The usage handle.
     pub fn start(wiring: &Wiring, session: &str, mode: SessionMode) -> Self {
         let this = Self::new(
             &wiring.cwd,
@@ -120,7 +120,7 @@ impl SessionTelemetry {
     ///
     /// # Returns
     ///
-    /// The handle, to be used before [`SessionTelemetry::sink`].
+    /// The handle, to be used before [`SessionUsage::sink`].
     pub fn with_status(mut self, status: StatusReporter) -> Self {
         self.status = Some(status);
         self
@@ -207,7 +207,7 @@ impl SessionTelemetry {
     pub fn recording(&self, inner: Box<dyn PermissionPrompt>) -> Box<dyn PermissionPrompt> {
         Box::new(RecordingPrompt {
             inner,
-            telemetry: self.clone(),
+            usage: self.clone(),
         })
     }
 
@@ -275,7 +275,7 @@ impl SessionTelemetry {
     ) -> Arc<dyn Provider> {
         Arc::new(RecordedProvider {
             inner: provider,
-            telemetry: self.clone(),
+            usage: self.clone(),
             provider: name.to_owned(),
             state,
         })
@@ -307,7 +307,7 @@ impl SessionTelemetry {
         self.record(RecordKind::SessionEnded { outcome });
     }
 
-    /// The project-local telemetry folder.
+    /// The project-local usage folder.
     #[cfg(test)]
     fn project_dir(&self) -> std::path::PathBuf {
         self.recorder.project_dir().to_path_buf()
@@ -423,7 +423,7 @@ impl SessionTelemetry {
 /// Records each answer before handing it back to the registry.
 struct RecordingPrompt {
     inner: Box<dyn PermissionPrompt>,
-    telemetry: SessionTelemetry,
+    usage: SessionUsage,
 }
 
 impl PermissionPrompt for RecordingPrompt {
@@ -436,13 +436,13 @@ impl PermissionPrompt for RecordingPrompt {
             PromptAnswer::Session => PermissionAnswer::Session,
             PromptAnswer::Always => PermissionAnswer::Always,
         };
-        self.telemetry
+        self.usage
             .record(RecordKind::permission(&request.tool, &rule, recorded));
         answer
     }
 }
 
-impl PermissionObserver for SessionTelemetry {
+impl PermissionObserver for SessionUsage {
     fn decided(&self, decision: &PermissionDecision) {
         let scope = match decision.scope {
             DecisionScope::Once => PermissionScope::Once,
@@ -462,16 +462,16 @@ impl PermissionObserver for SessionTelemetry {
 /// A provider whose completions outside the loop are recorded as turns.
 struct RecordedProvider {
     inner: Arc<dyn Provider>,
-    telemetry: SessionTelemetry,
+    usage: SessionUsage,
     provider: String,
     state: &'static str,
 }
 
 impl Provider for RecordedProvider {
     fn complete(&self, request: CompletionRequest) -> EventStream {
-        let telemetry = self.telemetry.clone();
+        let session = self.usage.clone();
         let provider = self.provider.clone();
-        let model = telemetry.models.get(&provider).cloned().unwrap_or_default();
+        let model = session.models.get(&provider).cloned().unwrap_or_default();
         let state = self.state;
         let started = Instant::now();
         let mut usage = Tokens::default();
@@ -482,7 +482,7 @@ impl Provider for RecordedProvider {
                 .inspect(move |item| match item {
                     Ok(Event::Usage(reported)) => usage = tokens(*reported),
                     Ok(Event::Retried { retries: count }) => retries = *count,
-                    Ok(Event::Done { stop_reason }) => telemetry.record(RecordKind::Turn {
+                    Ok(Event::Done { stop_reason }) => session.record(RecordKind::Turn {
                         state: state.to_owned(),
                         role: Some("summarizer".to_owned()),
                         provider: provider.clone(),
@@ -493,7 +493,7 @@ impl Provider for RecordedProvider {
                         retries,
                         stop_reason: stop_kind(stop_reason),
                     }),
-                    Err(error) => telemetry.record_provider_error(&provider, error),
+                    Err(error) => session.record_provider_error(&provider, error),
                     Ok(_) => {}
                 }),
         )
@@ -582,18 +582,18 @@ fn outcome_kind(outcome: ToolOutcome) -> ToolOutcomeKind {
 
 #[cfg(test)]
 mod tests {
+    use anvil_audit::load_records;
     use anvil_core::agent::{
         AgentLoop, AutoApprove, CheckCommand, LoopConfig, LoopProviders, State,
     };
     use anvil_core::provider::{FakeProvider, ToolCall};
     use anvil_core::tools::{Permissions, PromptAnswer, StaticPrompt, ToolContext};
-    use anvil_telemetry::load_records;
     use anvil_types::LimitsConfig;
 
     use super::*;
 
     /// Appears in tool arguments and tool results and must never be written
-    /// anywhere under the telemetry folders.
+    /// anywhere under the usage folder.
     const MARKER: &str = "MARKER_7f3e_project_secret";
 
     fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
@@ -625,7 +625,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
         let session = ulid::Ulid::generate().to_string();
-        let telemetry = SessionTelemetry::new(
+        let usage = SessionUsage::new(
             cwd.path(),
             Some(home.path()),
             &session,
@@ -640,9 +640,9 @@ mod tests {
             arguments: serde_json::json!({"path": "notes.txt"}),
             may_save: true,
         };
-        let prompt = telemetry.recording(Box::new(StaticPrompt(PromptAnswer::Yes)));
+        let prompt = usage.recording(Box::new(StaticPrompt(PromptAnswer::Yes)));
         assert_eq!(prompt.ask(&request), PromptAnswer::Yes);
-        let records = load_records(&telemetry.project_dir(), None).expect("records");
+        let records = load_records(&usage.project_dir(), None).expect("records");
         assert!(records.iter().any(|r| matches!(
             &r.kind,
             RecordKind::Permission { tool, answer: PermissionAnswer::Yes, .. } if tool == "write_file"
@@ -654,7 +654,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
         let session = ulid::Ulid::generate().to_string();
-        let telemetry = SessionTelemetry::new(
+        let usage = SessionUsage::new(
             cwd.path(),
             Some(home.path()),
             &session,
@@ -666,9 +666,9 @@ mod tests {
         let secret_name = format!("{MARKER}-file.txt");
         let secret_text = format!("{MARKER} contents\n");
         std::fs::write(cwd.path().join(&secret_name), &secret_text).expect("write");
-        let prompt = telemetry.recording(Box::new(StaticPrompt(PromptAnswer::Session)));
+        let prompt = usage.recording(Box::new(StaticPrompt(PromptAnswer::Session)));
         let mut registry = ToolRegistry::with_builtins(Permissions::empty(), prompt);
-        registry.set_observer(Arc::new(telemetry.clone()));
+        registry.set_observer(Arc::new(usage.clone()));
         let ctx = ToolContext::new(cwd.path());
         for (id, new) in [("e1", "first"), ("e2", "second")] {
             let old = if id == "e1" { MARKER } else { "first" };
@@ -681,7 +681,7 @@ mod tests {
             assert_eq!(execution.outcome, ToolOutcome::Completed);
         }
 
-        let records = load_records(&telemetry.project_dir(), None).expect("records");
+        let records = load_records(&usage.project_dir(), None).expect("records");
         let decisions: Vec<(String, PermissionScope, bool)> = records
             .iter()
             .filter_map(|r| match &r.kind {
@@ -700,21 +700,21 @@ mod tests {
                 ("edit_file".to_owned(), PermissionScope::Session, true),
             ]
         );
-        for file in files_under(&telemetry.project_dir()) {
-            let text = std::fs::read_to_string(&file).expect("telemetry file");
+        for file in files_under(&usage.project_dir()) {
+            let text = std::fs::read_to_string(&file).expect("usage file");
             assert!(!text.contains(MARKER), "{}: {text}", file.display());
             assert!(!text.contains("file.txt"), "{}: {text}", file.display());
         }
     }
 
     #[tokio::test]
-    async fn a_subagent_decision_with_a_shared_approval_reaches_session_telemetry() {
+    async fn a_subagent_decision_with_a_shared_approval_reaches_session_usage() {
         use anvil_compat::SubagentEnv;
 
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
         let session = ulid::Ulid::generate().to_string();
-        let telemetry = SessionTelemetry::new(
+        let usage = SessionUsage::new(
             cwd.path(),
             Some(home.path()),
             &session,
@@ -726,7 +726,7 @@ mod tests {
         let config: anvil_types::AnvilConfig =
             toml::from_str(anvil_types::config::CONFIG_TEMPLATE).expect("config parses");
         let wiring = Wiring::new(config, crate::wiring::ProjectAccess::default()).expect("wiring");
-        telemetry.observe_permissions(&wiring);
+        usage.observe_permissions(&wiring);
         let main = wiring
             .registry(Box::new(StaticPrompt(PromptAnswer::No)))
             .expect("registry");
@@ -747,14 +747,14 @@ mod tests {
         let execution = subagent.execute(&call, &ToolContext::new(cwd.path())).await;
         assert_eq!(execution.outcome, ToolOutcome::Completed);
 
-        let records = load_records(&telemetry.project_dir(), None).expect("records");
+        let records = load_records(&usage.project_dir(), None).expect("records");
         assert!(records.iter().any(|r| matches!(
             &r.kind,
             RecordKind::PermissionDecision { tool, scope: PermissionScope::Session, covered: true }
                 if tool == "edit_file"
         )));
-        for file in files_under(&telemetry.project_dir()) {
-            let text = std::fs::read_to_string(&file).expect("telemetry file");
+        for file in files_under(&usage.project_dir()) {
+            let text = std::fs::read_to_string(&file).expect("usage file");
             assert!(!text.contains(MARKER), "{}: {text}", file.display());
             assert!(!text.contains("file.txt"), "{}: {text}", file.display());
         }
@@ -765,7 +765,7 @@ mod tests {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
         let session = ulid::Ulid::generate().to_string();
-        let telemetry = SessionTelemetry::new(
+        let usage = SessionUsage::new(
             cwd.path(),
             Some(home.path()),
             &session,
@@ -778,7 +778,7 @@ mod tests {
                 ("judge".to_owned(), "judge-model".to_owned()),
             ]),
         );
-        telemetry.set_planner(Some("dear"));
+        usage.set_planner(Some("dear"));
         let planner = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
             "# Plan\n\n1. [ ] x\n",
         )]));
@@ -800,7 +800,7 @@ mod tests {
             review_sections: Vec::new(),
             delegate_guidance: false,
         };
-        let (sink, task) = telemetry.sink(None);
+        let (sink, task) = usage.sink(None);
         let agent = AgentLoop::new(
             config,
             LoopProviders {
@@ -820,7 +820,7 @@ mod tests {
         agent.run().await;
         task.await.expect("tee ends");
 
-        let records = load_records(&telemetry.project_dir(), None).expect("records");
+        let records = load_records(&usage.project_dir(), None).expect("records");
         let turns: Vec<(String, String, String)> = records
             .iter()
             .filter_map(|record| match &record.kind {
@@ -847,11 +847,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn marker_in_tool_results_never_reaches_telemetry() {
+    async fn marker_in_tool_results_never_reaches_usage_records() {
         let home = tempfile::tempdir().expect("home");
         let cwd = tempfile::tempdir().expect("cwd");
         let session = ulid::Ulid::generate().to_string();
-        let telemetry = SessionTelemetry::new(
+        let usage = SessionUsage::new(
             cwd.path(),
             Some(home.path()),
             &session,
@@ -860,7 +860,7 @@ mod tests {
             "fast",
             BTreeMap::from([("fast".to_owned(), "m1".to_owned())]),
         );
-        telemetry.record(RecordKind::SessionStarted {
+        usage.record(RecordKind::SessionStarted {
             mode: SessionMode::Run,
         });
 
@@ -902,9 +902,9 @@ mod tests {
         };
         let prompt = RecordingPrompt {
             inner: Box::new(StaticPrompt(PromptAnswer::Yes)),
-            telemetry: telemetry.clone(),
+            usage: usage.clone(),
         };
-        let (sink, task) = telemetry.sink(None);
+        let (sink, task) = usage.sink(None);
         let agent = AgentLoop::new(
             config,
             LoopProviders {
@@ -920,14 +920,14 @@ mod tests {
         );
         let result = agent.run().await;
         task.await.expect("tee ends");
-        telemetry.finish_run(&result.status);
+        usage.finish_run(&result.status);
         assert!(
             std::fs::read_to_string(cwd.path().join("notes.txt"))
                 .expect("the tool wrote the file")
                 .contains(MARKER)
         );
 
-        let project = load_records(&telemetry.project_dir(), None).expect("records");
+        let project = load_records(&usage.project_dir(), None).expect("records");
         assert!(project.iter().any(|r| matches!(&r.kind, RecordKind::ToolResult { name, outcome: ToolOutcomeKind::UnknownTool, .. } if name == "browser")));
         assert!(project.iter().any(|r| matches!(&r.kind, RecordKind::Permission { tool, answer: PermissionAnswer::Yes, .. } if tool == "write_file")));
         assert!(project.iter().any(|r| matches!(&r.kind, RecordKind::Turn { provider, model, .. } if provider == "fast" && model == "m1")));
@@ -947,8 +947,8 @@ mod tests {
 
         let mut checked = 0;
         for root in [
-            cwd.path().join(".anvil").join("telemetry"),
-            home.path().join(".anvil").join("telemetry"),
+            cwd.path().join(".anvil").join("usage"),
+            home.path().join(".anvil").join("usage"),
         ] {
             for file in files_under(&root) {
                 let text = std::fs::read_to_string(&file).expect("text file");

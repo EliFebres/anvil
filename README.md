@@ -119,7 +119,7 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
 
 ## Security model
 
-- anvil never runs a model. It sends prompts, and the files and command output its tools read, over HTTPS to the endpoints you configure, through one HTTP client that does not follow redirects. It has no telemetry upload, no self-update and no update check.
+- anvil never runs a model. It sends prompts, and the files and command output its tools read, over HTTPS to the endpoints you configure, through one HTTP client that does not follow redirects. It sends no usage data anywhere, and has no self-update and no update check.
 - File writes, edits and shell commands ask first. Your own rules (in `~/.anvil/config.toml`, a `--profile`, or what `always` saved under `~/.anvil/permissions/`) change that; a repository can only add `deny` and `ask` rules. Network clients (`curl`, `wget`, `ssh` and the like), `git push`, `git clone`, `git remote add` and `set-url`, package installs, `sudo` and `runas`, and a few destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `Remove-Item -Recurse`) are refused even under `--yes` unless a rule names them. That check reads the command text, so it is a guard rail, not a boundary.
 - Keys are read from the environment and `~/.anvil/.env`, never from configuration, and are not passed to the programs anvil starts, git included: those get a short list of variables plus `[tools] pass_env`. An MCP server definition's `${VAR}` references may only name variables from that list.
 - Secrets in what the tools return (known key shapes, private keys, JWTs, the values of secret-looking environment variables) are replaced with `[REDACTED:<kind>]` before they are sent or stored, and tool output reaches the model inside delimiters that mark it as data. Both are mitigations: an unknown secret format is still sent, and a model can still follow injected text. An MCP server whose tool listing changes stops until `anvil mcp approve <name>`. `anvil purge --older-than <days>` deletes old session folders.
@@ -177,7 +177,7 @@ Three kinds of state live under `~/.anvil/`, all plain files you can edit:
 
 - **Rules** (`rules.toml`): standing coding rules. They enter the system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
 - **Memory** (`memory/`): one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`, loaded under a token cap. At the end of a session the summarizer proposes new facts and you keep or drop each one. A run that finished with no reviewer rejection, no failed check and a diff under 50 lines has nothing new to teach, so it skips that turn and says so; `[memory] always_summarize = true` runs it every time.
-- **Telemetry** (`telemetry/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates, and with a planner configured adds a per-role table, each role priced by its own provider. They never leave the machine.
+- **Usage records** (`usage/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates, and with a planner configured adds a per-role table, each role priced by its own provider. They never leave the machine.
 
 #### Workers
 
@@ -246,7 +246,7 @@ Other commands: `anvil skill add|list|show|remove` (install Claude Code skills f
 | `crates/anvil-core` | The agent loop, tool registry, provider adapters (OpenAI and Anthropic protocols) and context management. |
 | `crates/anvil-compat` | Claude Code compatibility: skills, `CLAUDE.md`, commands, agents, hooks, the MCP client. |
 | `crates/anvil-memory` | Cross-project memory and coding rules. |
-| `crates/anvil-telemetry` | Content-free usage records and `anvil stats`. |
+| `crates/anvil-audit` | Content-free usage records and `anvil stats`. |
 | `crates/anvil-tui` | The palette and pure layout helpers the full-screen UI draws with. |
 | `crates/anvil-cli` | The `anvil` binary: argument parsing, wiring, the line renderer and the full-screen UI. |
 | `skills/` | Claude Code-format skills that ship with anvil. |

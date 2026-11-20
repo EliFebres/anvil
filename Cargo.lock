@@ -88,13 +88,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "anvil-audit"
+version = "0.2.0"
+dependencies = [
+ "anvil-types",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
 name = "anvil-cli"
 version = "0.2.0"
 dependencies = [
+ "anvil-audit",
  "anvil-compat",
  "anvil-core",
  "anvil-memory",
- "anvil-telemetry",
  "anvil-tui",
  "anvil-types",
  "anyhow",
@@ -192,19 +205,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "toml",
- "tracing",
-]
-
-[[package]]
-name = "anvil-telemetry"
-version = "0.2.0"
-dependencies = [
- "anvil-types",
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
  "tracing",
 ]
 

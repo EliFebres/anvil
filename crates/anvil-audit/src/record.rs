@@ -1,4 +1,4 @@
-//! One telemetry record and the rules that keep content out of it.
+//! One usage record and the rules that keep content out of it.
 //!
 //! The CLI builds a [`RecordKind`] from each loop event. Everything that
 //! could carry project or model text goes through a constructor here that
@@ -579,7 +579,7 @@ fn program_name(command: &str) -> String {
     first.rsplit(['/', '\\']).next().unwrap_or(first).to_owned()
 }
 
-/// One line of a telemetry file.
+/// One line of a usage file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     /// When it happened.

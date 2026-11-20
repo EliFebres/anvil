@@ -161,7 +161,7 @@ pub enum Command {
         #[command(subcommand)]
         command: TemplateCommand,
     },
-    /// Summarize this project's telemetry: sessions, completion rate, tokens and cost.
+    /// Summarize this project's usage: sessions, completion rate, tokens and cost.
     Stats {
         /// How far back to look: a number followed by m, h, d or w.
         #[arg(long, default_value = "7d")]

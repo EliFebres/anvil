@@ -510,7 +510,7 @@ pub struct Execution {
     pub outcome: ToolOutcome,
     /// Where the untruncated output was written, if it was truncated.
     pub full_output: Option<PathBuf>,
-    /// Size and digest of the full output, for telemetry.
+    /// Size and digest of the full output, for the usage records.
     pub stats: OutputStats,
     /// Completions the tool made itself, to count against the session.
     pub model_turns: Vec<ModelTurn>,

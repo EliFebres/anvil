@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 /// Folder under the session directory that holds full tool outputs.
 const OUTPUT_DIR: &str = "tool-output";
 
-/// Size and shape of a tool's full output, for telemetry that must never
+/// Size and shape of a tool's full output, for usage records that must never
 /// see the content itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OutputStats {
@@ -37,7 +37,7 @@ impl OutputStats {
     }
 }
 
-/// A stable 64-bit FNV-1a digest, for telemetry keys that must not reveal
+/// A stable 64-bit FNV-1a digest, for usage record keys that must not reveal
 /// the text they stand for.
 ///
 /// # Arguments

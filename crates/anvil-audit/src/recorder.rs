@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, Utc};
 
-use crate::error::TelemetryError;
-use crate::paths::{day_file, home_telemetry_dir, project_telemetry_dir};
+use crate::error::UsageError;
+use crate::paths::{day_file, home_usage_dir, project_usage_dir};
 use crate::record::{Record, RecordKind, digest, hex};
 
-/// Writes one session's records to the project's telemetry folder and, when
+/// Writes one session's records to the project's usage folder and, when
 /// a home is known, the same lines to the cross-project copy.
 ///
 /// Recording never fails the session: a file that cannot be written is
@@ -42,8 +42,8 @@ impl Recorder {
         let canonical = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
-        let mut dirs = vec![project_telemetry_dir(project_root)];
-        dirs.extend(home.map(home_telemetry_dir));
+        let mut dirs = vec![project_usage_dir(project_root)];
+        dirs.extend(home.map(home_usage_dir));
         Self {
             session: session.to_owned(),
             project: hex(digest(canonical.to_string_lossy().as_bytes())),
@@ -60,7 +60,7 @@ impl Recorder {
         &self.session
     }
 
-    /// The project-local telemetry folder.
+    /// The project-local usage folder.
     ///
     /// # Returns
     ///
@@ -69,7 +69,7 @@ impl Recorder {
         &self.dirs[0]
     }
 
-    /// The cross-project telemetry folder, when a home is known.
+    /// The cross-project usage folder, when a home is known.
     ///
     /// # Returns
     ///
@@ -86,38 +86,34 @@ impl Recorder {
     pub fn record(&self, kind: RecordKind) {
         let record = Record::now(&self.session, &self.project, kind);
         let Ok(mut line) = serde_json::to_string(&record) else {
-            tracing::warn!(
-                event = record.kind.tag(),
-                "cannot serialize a telemetry record"
-            );
+            tracing::warn!(event = record.kind.tag(), "cannot serialize a usage record");
             return;
         };
         line.push('\n');
         for dir in &self.dirs {
             let path = day_file(dir, record.ts.date_naive());
             if let Err(error) = append_line(&path, &line) {
-                tracing::warn!(%error, "telemetry record dropped");
+                tracing::warn!(%error, "usage record dropped");
             }
         }
     }
 }
 
 /// Appends one line, creating the folder and file as needed.
-fn append_line(path: &Path, line: &str) -> Result<(), TelemetryError> {
+fn append_line(path: &Path, line: &str) -> Result<(), UsageError> {
     if let Some(parent) = path.parent() {
-        anvil_types::private_fs::create_dir_all(parent)
-            .map_err(|e| TelemetryError::io(parent, &e))?;
+        anvil_types::private_fs::create_dir_all(parent).map_err(|e| UsageError::io(parent, &e))?;
     }
     let mut file = anvil_types::private_fs::owner_only()
         .create(true)
         .append(true)
         .open(path)
-        .map_err(|e| TelemetryError::io(path, &e))?;
+        .map_err(|e| UsageError::io(path, &e))?;
     file.write_all(line.as_bytes())
-        .map_err(|e| TelemetryError::io(path, &e))
+        .map_err(|e| UsageError::io(path, &e))
 }
 
-/// Reads every record in a telemetry folder, oldest first.
+/// Reads every record in a usage folder, oldest first.
 ///
 /// Day files whose date is before `since` are skipped without being opened;
 /// records inside a kept file are still filtered by their own timestamp.
@@ -126,7 +122,7 @@ fn append_line(path: &Path, line: &str) -> Result<(), TelemetryError> {
 ///
 /// # Arguments
 ///
-/// * `dir` - The telemetry folder.
+/// * `dir` - The usage folder.
 /// * `since` - Ignore records before this time.
 ///
 /// # Returns
@@ -136,25 +132,22 @@ fn append_line(path: &Path, line: &str) -> Result<(), TelemetryError> {
 /// # Errors
 ///
 /// When the folder exists but cannot be listed, or a file cannot be read.
-pub fn load_records(
-    dir: &Path,
-    since: Option<DateTime<Utc>>,
-) -> Result<Vec<Record>, TelemetryError> {
+pub fn load_records(dir: &Path, since: Option<DateTime<Utc>>) -> Result<Vec<Record>, UsageError> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(TelemetryError::io(dir, &error)),
+        Err(error) => return Err(UsageError::io(dir, &error)),
     };
     let mut records = Vec::new();
     for entry in entries {
-        let path = entry.map_err(|e| TelemetryError::io(dir, &e))?.path();
+        let path = entry.map_err(|e| UsageError::io(dir, &e))?.path();
         let Some(date) = day_file_date(&path) else {
             continue;
         };
         if since.is_some_and(|since| date < since.date_naive()) {
             continue;
         }
-        let text = std::fs::read_to_string(&path).map_err(|e| TelemetryError::io(&path, &e))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| UsageError::io(&path, &e))?;
         for (index, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
@@ -165,7 +158,7 @@ pub fn load_records(
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    tracing::warn!(path = %path.display(), line = index + 1, %error, "skipping a bad telemetry line");
+                    tracing::warn!(path = %path.display(), line = index + 1, %error, "skipping a bad usage line");
                 }
             }
         }

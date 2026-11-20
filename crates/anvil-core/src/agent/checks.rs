@@ -43,7 +43,7 @@ pub enum CheckSource {
 }
 
 impl CheckSource {
-    /// The lowercase name used in logs and telemetry.
+    /// The lowercase name used in logs and usage records.
     ///
     /// # Returns
     ///

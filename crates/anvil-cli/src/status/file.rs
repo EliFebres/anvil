@@ -171,7 +171,7 @@ pub fn session_dirs(sessions_root: &Path) -> Vec<PathBuf> {
 }
 
 /// Remembers that a project ran a session, so `anvil status --all` can
-/// find it. Telemetry records only a digest of the project path, so it
+/// find it. Usage records hold only a digest of the project path, so it
 /// cannot be used to walk projects.
 ///
 /// # Arguments

@@ -6,12 +6,12 @@ use std::time::Instant;
 
 use std::sync::Arc;
 
+use anvil_audit::{RecordKind, SessionMode};
 use anvil_core::agent::{
     AgentLoop, IncompleteReason, LoopResult, SUMMARY_FILE, State, Status, diff,
 };
 use anvil_core::context;
 use anvil_core::tools::ToolHook;
-use anvil_telemetry::{RecordKind, SessionMode};
 use anyhow::{Context, bail};
 use tokio::task::JoinHandle;
 
@@ -19,8 +19,8 @@ use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, session_info};
 use crate::memory;
 use crate::status::{Setup, StatusReporter};
-use crate::telemetry::SessionTelemetry;
 use crate::tui::{SessionKind, UiMsg, wait_cancel};
+use crate::usage::SessionUsage;
 use crate::wiring::{Wiring, home_dir};
 use anvil_types::LoadedConfig;
 use anvil_types::policy::TranscriptMode;
@@ -126,20 +126,19 @@ pub(crate) async fn run_session_in(
 ) -> anyhow::Result<LoopResult> {
     let SessionOptions { yes, ui, in_build } = options;
     let plan_yes = (yes && !wiring.plans_need_a_person()) || in_build;
-    let telemetry =
-        SessionTelemetry::start(wiring, id, SessionMode::Run).with_status(status.clone());
+    let usage = SessionUsage::start(wiring, id, SessionMode::Run).with_status(status.clone());
     let (frontend, events) =
         Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
-    telemetry.observe_permissions(wiring);
+    usage.observe_permissions(wiring);
     let mut registry =
-        wiring.registry(telemetry.recording(status.prompt(yes, frontend.prompt(yes))))?;
+        wiring.registry(usage.recording(status.prompt(yes, frontend.prompt(yes))))?;
     frontend.install_tool_hook(
         &mut registry,
         wiring
             .hook_runner()
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
-    telemetry.record_skill_requires(wiring, &registry);
+    usage.record_skill_requires(wiring, &registry);
     let mut config = wiring.loop_config(task, session_dir.clone(), &registry)?;
     let hooks = wiring.hook_runner();
     if let Some(hooks) = &hooks {
@@ -147,7 +146,7 @@ pub(crate) async fn run_session_in(
             .extra_instructions
             .extend(wiring.session_start_instruction(hooks.session_start().await));
     }
-    let (sink, tee) = telemetry.sink(Some(events));
+    let (sink, tee) = usage.sink(Some(events));
     let mut agent = AgentLoop::new(
         config,
         wiring.loop_providers()?,
@@ -161,11 +160,11 @@ pub(crate) async fn run_session_in(
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
     if !in_build {
-        remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
+        remember(wiring, id, &frontend, yes, &usage, status, &result).await;
     }
     status.finish_run(&result.status);
     frontend.shutdown(true).await?;
-    telemetry.finish_run(&result.status);
+    usage.finish_run(&result.status);
     Ok(result)
 }
 
@@ -233,7 +232,7 @@ async fn remember(
     id: &str,
     frontend: &Frontend,
     yes: bool,
-    telemetry: &SessionTelemetry,
+    usage: &SessionUsage,
     status: &StatusReporter,
     result: &LoopResult,
 ) {
@@ -256,7 +255,7 @@ async fn remember(
             let always = wiring.config.memory.always_summarize;
             if let Some(reason) = memory::skip_reason(result, diff_lines, always) {
                 console.notice(format!("memory: skipped ({})", memory::skip_text(reason)));
-                telemetry.record(RecordKind::MemorySkipped { reason });
+                usage.record(RecordKind::MemorySkipped { reason });
                 return;
             }
             memory::finish_session(
@@ -265,7 +264,7 @@ async fn remember(
                 &snapshot.messages,
                 status.decider(yes, frontend.decider(yes)),
                 &console,
-                Some(telemetry),
+                Some(usage),
             )
             .await;
         }
@@ -384,20 +383,19 @@ async fn resume_session(
     ui: UiKind,
     status: &StatusReporter,
 ) -> anyhow::Result<i32> {
-    let telemetry =
-        SessionTelemetry::start(wiring, id, SessionMode::Resume).with_status(status.clone());
+    let usage = SessionUsage::start(wiring, id, SessionMode::Resume).with_status(status.clone());
     let (frontend, events) =
         Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
-    telemetry.observe_permissions(wiring);
+    usage.observe_permissions(wiring);
     let mut registry =
-        wiring.registry(telemetry.recording(status.prompt(yes, frontend.prompt(yes))))?;
+        wiring.registry(usage.recording(status.prompt(yes, frontend.prompt(yes))))?;
     frontend.install_tool_hook(
         &mut registry,
         wiring
             .hook_runner()
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
-    telemetry.record_skill_requires(wiring, &registry);
+    usage.record_skill_requires(wiring, &registry);
     let session_dir = snapshot.dir.clone();
     let mut config =
         wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry)?;
@@ -407,7 +405,7 @@ async fn resume_session(
             .extra_instructions
             .extend(wiring.session_start_instruction(hooks.session_start().await));
     }
-    let (sink, tee) = telemetry.sink(Some(events));
+    let (sink, tee) = usage.sink(Some(events));
     let mut agent = AgentLoop::resume(
         snapshot,
         config,
@@ -424,10 +422,10 @@ async fn resume_session(
         agent = agent.with_change_checks(checks);
     }
     let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
-    remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
+    remember(wiring, id, &frontend, yes, &usage, status, &result).await;
     status.finish_run(&result.status);
     frontend.shutdown(true).await?;
-    telemetry.finish_run(&result.status);
+    usage.finish_run(&result.status);
     Ok(result.status.exit_code())
 }
 

@@ -17,7 +17,7 @@ anvil-types = { path = "crates/anvil-types" }
 anvil-core = { path = "crates/anvil-core" }
 anvil-compat = { path = "crates/anvil-compat" }
 anvil-memory = { path = "crates/anvil-memory" }
-anvil-telemetry = { path = "crates/anvil-telemetry" }
+anvil-audit = { path = "crates/anvil-audit" }
 anvil-tui = { path = "crates/anvil-tui" }
 
 # Serialization

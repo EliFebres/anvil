@@ -6,7 +6,7 @@ use std::fmt;
 use anvil_types::Price;
 use chrono::Duration;
 
-use crate::error::TelemetryError;
+use crate::error::UsageError;
 use crate::record::{Record, RecordKind, SessionOutcome, Tokens, ToolOutcomeKind};
 
 /// How many tools and failure classes the summary lists.
@@ -24,10 +24,10 @@ const TOP_N: usize = 10;
 ///
 /// # Errors
 ///
-/// [`TelemetryError::BadDuration`] when the text is not a positive number
+/// [`UsageError::BadDuration`] when the text is not a positive number
 /// followed by `m`, `h`, `d` or `w`.
-pub fn parse_since(text: &str) -> Result<Duration, TelemetryError> {
-    let bad = || TelemetryError::BadDuration {
+pub fn parse_since(text: &str) -> Result<Duration, UsageError> {
+    let bad = || UsageError::BadDuration {
         text: text.to_owned(),
     };
     let trimmed = text.trim();

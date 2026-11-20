@@ -11,13 +11,13 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use anvil_audit::{SessionMode, SessionOutcome};
 use anvil_core::agent::prompts::{self, PromptInputs};
 use anvil_core::agent::turn::complete_turn;
 use anvil_core::agent::{EventSink, LoopEvent, Role, State};
 use anvil_core::context::{Conversation, discover_instructions};
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
-use anvil_telemetry::{SessionMode, SessionOutcome};
 use anvil_types::policy::TranscriptMode;
 use anyhow::Context;
 use tokio::sync::watch;
@@ -27,8 +27,8 @@ use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, model_id, session_info};
 use crate::memory;
 use crate::status::{Setup, StatusReporter};
-use crate::telemetry::SessionTelemetry;
 use crate::tui::{Input, PermissionMode, SessionKind, UiMsg, wait_cancel};
+use crate::usage::SessionUsage;
 use crate::wiring::Wiring;
 
 /// Lines of help printed by `/help`.
@@ -81,8 +81,7 @@ async fn chat_session(
     ui: UiKind,
     status: &StatusReporter,
 ) -> anyhow::Result<i32> {
-    let telemetry =
-        SessionTelemetry::start(wiring, &id, SessionMode::Chat).with_status(status.clone());
+    let usage = SessionUsage::start(wiring, &id, SessionMode::Chat).with_status(status.clone());
     memory::prompt_sections(wiring.home.as_deref(), &wiring.cwd, wiring.memory_allowed())?;
     let hooks = wiring.hook_runner();
     let mut session_context = Vec::new();
@@ -91,17 +90,17 @@ async fn chat_session(
     }
     let info = session_info(wiring, SessionKind::Chat, false, State::Build);
     let (mut frontend, events_tx) = Frontend::start(ui, info);
-    let (events, tee) = telemetry.sink(Some(events_tx));
-    telemetry.observe_permissions(wiring);
+    let (events, tee) = usage.sink(Some(events_tx));
+    usage.observe_permissions(wiring);
     let mut registry =
-        wiring.registry(telemetry.recording(status.prompt(false, frontend.prompt(false))))?;
+        wiring.registry(usage.recording(status.prompt(false, frontend.prompt(false))))?;
     frontend.install_tool_hook(
         &mut registry,
         wiring
             .hook_runner()
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
-    telemetry.record_skill_requires(wiring, &registry);
+    usage.record_skill_requires(wiring, &registry);
     let mut session = ChatSession {
         wiring,
         mode: State::Build,
@@ -119,7 +118,7 @@ async fn chat_session(
         events,
         hooks,
         session_context,
-        telemetry: telemetry.clone(),
+        usage: usage.clone(),
         console: frontend.console(),
         cancel: frontend.cancel_watch(),
         permission_mode: if yes {
@@ -176,12 +175,12 @@ async fn chat_session(
         &messages,
         status.decider(yes, frontend.decider(yes)),
         &frontend.console(),
-        Some(&telemetry),
+        Some(&usage),
     )
     .await;
     status.finish_done("chat ended");
     frontend.shutdown(false).await?;
-    telemetry.finish(SessionOutcome::Chat);
+    usage.finish(SessionOutcome::Chat);
     Ok(0)
 }
 
@@ -200,7 +199,7 @@ struct ChatSession<'a> {
     events: EventSink,
     hooks: Option<Arc<anvil_compat::HookRunner>>,
     session_context: Vec<anvil_core::agent::Instruction>,
-    telemetry: SessionTelemetry,
+    usage: SessionUsage,
     console: Console,
     /// Bumped by the UI when the user cancels a turn; `None` in plain mode.
     cancel: Option<watch::Receiver<u64>>,
@@ -230,7 +229,7 @@ impl ChatSession<'_> {
                 Ok(provider) => {
                     self.coder = provider;
                     self.coder_name = name.to_owned();
-                    self.telemetry.set_coder(name);
+                    self.usage.set_coder(name);
                     self.console.notice(format!("coder is now `{name}`"));
                     self.send_ui(UiMsg::Model(model_id(self.wiring, name)));
                 }
@@ -398,8 +397,7 @@ impl ChatSession<'_> {
             let turn = match complete_turn(&*self.coder, request, &self.events).await {
                 Ok(turn) => turn,
                 Err(error) => {
-                    self.telemetry
-                        .record_provider_error(&self.coder_name, &error);
+                    self.usage.record_provider_error(&self.coder_name, &error);
                     self.console.error(format!("\nerror: {error}"));
                     return String::new();
                 }

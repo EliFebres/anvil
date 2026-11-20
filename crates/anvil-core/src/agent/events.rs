@@ -1,4 +1,4 @@
-//! Events the loop emits. The CLI renders them; telemetry records them.
+//! Events the loop emits. The CLI renders them; the usage records hold them.
 
 use std::path::PathBuf;
 

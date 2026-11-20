@@ -5,7 +5,7 @@
 //! [`App`] consumes [`UiMsg`]s and draws into a frame, so tests drive it
 //! with messages and a `TestBackend`. The module knows the core's events
 //! and prompt types and nothing about how a session is wired: it never
-//! imports `Wiring`, the memory crate, the compat crate or telemetry.
+//! imports `Wiring`, the memory crate, the compat crate or the usage records.
 
 pub mod app;
 pub mod bridge;
