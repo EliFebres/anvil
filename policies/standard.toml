@@ -17,6 +17,15 @@ version = 1
 # The model servers anvil may call, as host:port. Edit these.
 allowed_hosts = ["models.internal.example:443"]
 require_tls = true
+# Requests go through no proxy (the default); HTTPS_PROXY and the other
+# proxy variables are ignored. "system" uses them or the system settings;
+# a URL such as "http://proxy.internal.example:3128" names one proxy.
+proxy = "none"
+# To trust only your own certificate authorities instead of the system's
+# store, and to present a client certificate, uncomment (absolute paths):
+# ca_bundle = "/etc/anvil/pki/ca.pem"
+# client_cert = "/etc/anvil/pki/client.pem"
+# client_key = "/etc/anvil/pki/client.key"
 
 [models]
 # Empty means any provider name and any model the servers offer.
@@ -41,6 +50,10 @@ extra_roots = []
 deny = []
 
 [features]
+# MCP servers stay off. To allow one HTTP server, add its host:port to
+# allowed_hosts and use:
+# mcp = "allowlist"
+# mcp_servers = [{ name = "docs", url = "https://mcp.internal.example/mcp" }]
 mcp = "off"
 hooks = false
 skills = "local"

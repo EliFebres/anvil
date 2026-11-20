@@ -99,17 +99,86 @@ pub enum PolicyError {
     },
 }
 
-/// `[network]`: where model requests may go.
+/// `[network]`: where requests may go and how the connection is made.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkPolicy {
-    /// The only `host:port` pairs a provider's `base_url` may name, compared
-    /// exactly (host without regard to case). Required, at least one.
+    /// The only `host:port` pairs a provider's `base_url` or an HTTP MCP
+    /// server's `url` may name, compared exactly (host without regard to
+    /// case). Required, at least one.
     pub allowed_hosts: Vec<String>,
     /// Whether every request must use https. Default `true`; plain http is
     /// then accepted only to a loopback address that is also allowed.
     #[serde(default = "yes")]
     pub require_tls: bool,
+    /// A PEM file of certificate authorities. When set, server certificates
+    /// are verified against these alone instead of the system's store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_bundle: Option<PathBuf>,
+    /// A PEM client certificate chain for mutual TLS; needs `client_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_cert: Option<PathBuf>,
+    /// The PEM private key of `client_cert`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key: Option<PathBuf>,
+    /// Which proxy requests go through. Default `none`.
+    #[serde(default)]
+    pub proxy: ProxyMode,
+}
+
+/// Which proxy anvil's HTTP requests go through.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum ProxyMode {
+    /// No proxy; proxy variables such as `HTTPS_PROXY` are ignored.
+    #[default]
+    None,
+    /// The proxy the environment variables (`HTTPS_PROXY`, `HTTP_PROXY`,
+    /// `ALL_PROXY`, `NO_PROXY`) or the system settings name.
+    System,
+    /// This proxy, as an `http://` or `https://` URL without credentials.
+    Url(String),
+}
+
+impl TryFrom<String> for ProxyMode {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        match text.as_str() {
+            "none" => Ok(Self::None),
+            "system" => Ok(Self::System),
+            _ => {
+                let rest = text
+                    .strip_prefix("http://")
+                    .or_else(|| text.strip_prefix("https://"))
+                    .ok_or_else(|| {
+                        format!(
+                            "proxy `{text}` is not \"none\", \"system\" or an http:// or https:// URL"
+                        )
+                    })?;
+                let authority = rest.split('/').next().unwrap_or_default();
+                if authority.is_empty() {
+                    return Err(format!("proxy `{text}` has no host"));
+                }
+                if authority.contains('@') {
+                    return Err(format!(
+                        "proxy `{text}` carries credentials, and the policy file is readable by every user"
+                    ));
+                }
+                Ok(Self::Url(text))
+            }
+        }
+    }
+}
+
+impl From<ProxyMode> for String {
+    fn from(mode: ProxyMode) -> Self {
+        match mode {
+            ProxyMode::None => "none".to_owned(),
+            ProxyMode::System => "system".to_owned(),
+            ProxyMode::Url(url) => url,
+        }
+    }
 }
 
 /// `[models]`: which providers and models the configuration may name.
@@ -167,14 +236,20 @@ pub enum McpMode {
     On,
 }
 
-/// One MCP server a policy allows: its name and its program must both match.
+/// One MCP server a policy allows: its name and either its program (a
+/// local server) or its URL (an HTTP server) must match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerRule {
     /// The server name in the definition file.
     pub name: String,
-    /// The `command` of the definition, compared without regard to case.
-    pub command: String,
+    /// The `command` of a local definition, compared without regard to case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// The `url` of an HTTP definition, compared exactly apart from a
+    /// trailing `/`. Its `host:port` must also be in `[network] allowed_hosts`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Where skills may load from.
@@ -384,10 +459,42 @@ impl LoadedPolicy {
         match features.mcp {
             McpMode::Off => false,
             McpMode::On => true,
-            McpMode::Allowlist => features
-                .mcp_servers
-                .iter()
-                .any(|rule| rule.name == name && rule.command.eq_ignore_ascii_case(command)),
+            McpMode::Allowlist => features.mcp_servers.iter().any(|rule| {
+                rule.name == name
+                    && rule
+                        .command
+                        .as_deref()
+                        .is_some_and(|c| c.eq_ignore_ascii_case(command))
+            }),
+        }
+    }
+
+    /// Whether an HTTP MCP server may be contacted under `[features] mcp`.
+    ///
+    /// Its `host:port` must also pass `[network] allowed_hosts`, which the
+    /// egress check enforces on every request.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The server name.
+    /// * `url` - The `url` of its definition.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the mode is `on`, or `allowlist` with a rule naming both
+    /// the server and its URL.
+    pub fn allows_mcp_url(&self, name: &str, url: &str) -> bool {
+        let features = &self.policy.features;
+        match features.mcp {
+            McpMode::Off => false,
+            McpMode::On => true,
+            McpMode::Allowlist => features.mcp_servers.iter().any(|rule| {
+                rule.name == name
+                    && rule
+                        .url
+                        .as_deref()
+                        .is_some_and(|u| u.trim_end_matches('/') == url.trim_end_matches('/'))
+            }),
         }
     }
 }
@@ -486,7 +593,20 @@ pub fn parse(text: &str, path: &Path) -> Result<Policy, PolicyError> {
             )));
         }
     }
+    validate_network(&policy.network).map_err(invalid)?;
     let features = &policy.features;
+    for rule in &features.mcp_servers {
+        let url_ok = rule
+            .url
+            .as_deref()
+            .is_none_or(|url| url.starts_with("https://") || url.starts_with("http://"));
+        if rule.command.is_some() == rule.url.is_some() || !url_ok {
+            return Err(invalid(format!(
+                "[features] mcp_servers entry `{}` needs exactly one of `command` and an http(s) `url`",
+                rule.name
+            )));
+        }
+    }
     if features.mcp == McpMode::Allowlist && features.mcp_servers.is_empty() {
         return Err(invalid(
             "[features] mcp = \"allowlist\" needs at least one entry in mcp_servers".to_owned(),
@@ -530,6 +650,29 @@ pub fn parse(text: &str, path: &Path) -> Result<Policy, PolicyError> {
         ));
     }
     Ok(policy)
+}
+
+/// Checks the `[network]` files: absolute paths, and a client certificate
+/// only together with its key.
+fn validate_network(network: &NetworkPolicy) -> Result<(), String> {
+    for (key, path) in [
+        ("ca_bundle", &network.ca_bundle),
+        ("client_cert", &network.client_cert),
+        ("client_key", &network.client_key),
+    ] {
+        if let Some(path) = path
+            && !path.is_absolute()
+        {
+            return Err(format!(
+                "[network] {key} = {} must be an absolute path",
+                path.display()
+            ));
+        }
+    }
+    if network.client_cert.is_some() != network.client_key.is_some() {
+        return Err("[network] client_cert and client_key must be set together".to_owned());
+    }
+    Ok(())
 }
 
 /// Reads and checks the policy at `path`, without the ownership check.
@@ -792,6 +935,90 @@ mod tests {
         assert!(loaded.allows_mcp_server("git", "MCP-GIT"));
         assert!(!loaded.allows_mcp_server("git", "node"));
         assert!(!loaded.allows_mcp_server("other", "mcp-git"));
+        assert!(
+            !loaded.allows_mcp_url("git", "https://mcp-git"),
+            "a command rule allows no URL"
+        );
+    }
+
+    #[test]
+    fn an_mcp_allowlist_names_an_http_server_by_its_url() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = write(
+            dir.path(),
+            POLICY_FILE,
+            &format!(
+                "{MINIMAL}[features]\nmcp = \"allowlist\"\nmcp_servers = [{{ name = \"docs\", url = \"https://mcp.corp.example/mcp\" }}]\n"
+            ),
+        );
+        let loaded = load(&path).expect("loads").expect("present");
+        assert!(loaded.allows_mcp_url("docs", "https://mcp.corp.example/mcp/"));
+        assert!(!loaded.allows_mcp_url("docs", "https://mcp.corp.example/other"));
+        assert!(!loaded.allows_mcp_url("other", "https://mcp.corp.example/mcp"));
+        assert!(
+            !loaded.allows_mcp_server("docs", "https://mcp.corp.example/mcp"),
+            "a URL rule allows no program"
+        );
+        for bad in [
+            "{ name = \"x\" }",
+            "{ name = \"x\", command = \"a\", url = \"https://b\" }",
+            "{ name = \"x\", url = \"ftp://b\" }",
+        ] {
+            let text = format!("{MINIMAL}[features]\nmcp = \"allowlist\"\nmcp_servers = [{bad}]\n");
+            assert!(
+                matches!(parse(&text, &path), Err(PolicyError::Invalid { .. })),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_network_table_takes_tls_files_and_a_proxy_mode() {
+        let path = Path::new(POLICY_FILE);
+        let root = if cfg!(windows) { r"C:\pki" } else { "/pki" };
+        let files = format!(
+            "ca_bundle = '{root}/ca.pem'\nclient_cert = '{root}/me.pem'\nclient_key = '{root}/me.key'\n"
+        );
+        let base = "version = 1\n[network]\nallowed_hosts = [\"m.example:443\"]\n";
+        let policy = parse(&format!("{base}{files}proxy = \"system\"\n"), path).expect("parses");
+        assert_eq!(policy.network.proxy, ProxyMode::System);
+        assert!(policy.network.ca_bundle.is_some() && policy.network.client_key.is_some());
+        let defaults = parse(base, path).expect("parses");
+        assert_eq!(
+            defaults.network.proxy,
+            ProxyMode::None,
+            "no proxy by default"
+        );
+        let url =
+            parse(&format!("{base}proxy = \"http://proxy.corp:3128\"\n"), path).expect("parses");
+        assert_eq!(
+            url.network.proxy,
+            ProxyMode::Url("http://proxy.corp:3128".to_owned())
+        );
+        for proxy in [
+            "env",
+            "socks5://p:1",
+            "http://",
+            "http://user:pw@proxy.corp:3128",
+        ] {
+            assert!(
+                matches!(
+                    parse(&format!("{base}proxy = \"{proxy}\"\n"), path),
+                    Err(PolicyError::Parse { .. })
+                ),
+                "{proxy}"
+            );
+        }
+        for invalid in [
+            format!("{base}ca_bundle = 'relative/ca.pem'\n"),
+            format!("{base}client_cert = '{root}/me.pem'\n"),
+            format!("{base}client_key = '{root}/me.key'\n"),
+        ] {
+            assert!(
+                matches!(parse(&invalid, path), Err(PolicyError::Invalid { .. })),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

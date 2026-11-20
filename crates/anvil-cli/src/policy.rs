@@ -554,6 +554,13 @@ const UNSET_POLICY_KEYS: &[(&str, &str, &str)] = &[
     ("limits", "build_tokens", "no ceiling"),
     ("limits", "build_usd", "no ceiling"),
     ("shell", "container", "none; commands run on the host"),
+    ("network", "ca_bundle", "the system's trust store"),
+    (
+        "network",
+        "client_cert",
+        "none; no client certificate is presented",
+    ),
+    ("network", "client_key", "none"),
 ];
 
 /// Every effective policy setting, one `key = value  (layer)` line each,
@@ -1051,9 +1058,18 @@ mod tests {
     #[test]
     fn policy_lines_name_every_key_of_the_schema_set_or_not() {
         let dir = tempfile::tempdir().expect("dir");
+        let pki = if cfg!(windows) { r"C:\pki" } else { "/pki" };
+        let network = format!(
+            "ca_bundle = '{pki}/ca.pem'
+client_cert = '{pki}/me.pem'
+client_key = '{pki}/me.key'
+proxy = \"system\"
+"
+        );
         let everything = policy(
             dir.path(),
-            "[data]
+            &(network
+                + "[data]
 transcript_dir = '/srv/t'
 retention_days = 3
 [limits]
@@ -1065,7 +1081,7 @@ mode = \"ask\"
 executor = \"container\"
 [shell.container]
 image = \"build:1\"
-",
+"),
         );
         let every_key = keys_of(&policy_lines(&everything));
         let minimal = policy(dir.path(), "");
@@ -1082,6 +1098,9 @@ image = \"build:1\"
             "[limits] build_tokens = (default: no ceiling)  (default)",
             "[limits] build_usd = (default: no ceiling)  (default)",
             "[shell] container = (default: none; commands run on the host)  (default)",
+            "[network] ca_bundle = (default: the system's trust store)  (default)",
+            "[network] client_cert = (default: none; no client certificate is presented)  (default)",
+            "[network] proxy = \"none\"  (default)",
         ] {
             assert!(
                 text.contains(unset),
