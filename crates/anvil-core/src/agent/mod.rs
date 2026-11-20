@@ -1493,6 +1493,8 @@ mod tests {
         /// The planner the next agent gets; `None` leaves the coder planning.
         planner: Option<Arc<FakeProvider>>,
         events: mpsc::UnboundedReceiver<LoopEvent>,
+        /// The transcript mode the next agent's context gets.
+        transcript: TranscriptMode,
     }
 
     impl Harness {
@@ -1515,6 +1517,7 @@ mod tests {
                 summarizer: Arc::new(FakeProvider::new(summarizer)),
                 planner: None,
                 events: rx,
+                transcript: TranscriptMode::Full,
             }
         }
 
@@ -1582,6 +1585,7 @@ mod tests {
                     Arc::new(anvil_types::redact::Redactor::builtin()),
                     "testnonce",
                 ),
+                transcript: self.transcript,
                 ..ToolContext::new(self.dir.path())
             }
         }
@@ -2606,6 +2610,56 @@ mod tests {
             matches!(&snapshot.messages[0], Message::User { text } if text.contains("compacted"))
         );
         assert_eq!(snapshot.status, Some(Status::Done));
+    }
+
+    #[tokio::test]
+    async fn below_full_no_tool_output_or_compaction_file_and_off_keeps_no_log() {
+        for mode in [
+            TranscriptMode::Full,
+            TranscriptMode::Metadata,
+            TranscriptMode::Off,
+        ] {
+            let mut h = Harness::with_summarizer(
+                vec![
+                    FakeProvider::text_turn(PLAN),
+                    FakeProvider::tool_turn(vec![ToolCall {
+                        id: "big".to_owned(),
+                        name: "read_file".to_owned(),
+                        arguments_json: r#"{"path": "big.txt"}"#.to_owned(),
+                    }]),
+                    heavy_tool_turn("t1", 100),
+                    heavy_tool_turn("t2", 100),
+                    heavy_tool_turn("t3", 100),
+                    heavy_tool_turn("t4", 900),
+                    FakeProvider::text_turn("built"),
+                ],
+                vec![approve()],
+                vec![FakeProvider::text_turn("## Task\nsummary of earlier work")],
+            );
+            h.transcript = mode;
+            let line = "x".repeat(99);
+            let big: String = (0..1500).map(|_| format!("{line}\n")).collect();
+            std::fs::write(h.dir.path().join("big.txt"), big).expect("write");
+            let mut config = h.config(CheckCommand::Command("exit 0".to_owned()));
+            config.context_window = 1000;
+            let coder = Arc::clone(&h.coder) as Arc<dyn Provider>;
+            let agent = h.agent(config, coder, "", Box::new(AutoApprove));
+            assert_eq!(agent.run().await.status, Status::Done, "{mode:?}");
+            assert_eq!(
+                h.summarizer.calls(),
+                1,
+                "{mode:?}: the conversation was compacted"
+            );
+            let dir = h.session_dir();
+            let full = mode == TranscriptMode::Full;
+            assert_eq!(dir.join("tool-output").is_dir(), full, "{mode:?}");
+            assert_eq!(dir.join("compaction-1.md").exists(), full, "{mode:?}");
+            assert_eq!(
+                dir.join(crate::context::session::LOG_FILE).exists(),
+                mode != TranscriptMode::Off,
+                "{mode:?}"
+            );
+        }
     }
 
     /// Lets a test keep a handle on the prompt the registry owns.

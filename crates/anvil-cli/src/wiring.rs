@@ -61,6 +61,11 @@ fn endpoint_urls(config: &AnvilConfig, servers: &ServerSet) -> Vec<String> {
     providers.chain(mcp).collect()
 }
 
+/// The note every session prints on stderr when the policy turns
+/// redaction off.
+pub(crate) const REDACTION_OFF_NOTE: &str =
+    "note: secrets are not redacted: the managed policy's [data] redaction = false";
+
 /// The redactor for a session: the built-in shapes, `extra` patterns and
 /// the values of secret-looking variables in anvil's environment, which
 /// includes `~/.anvil/.env` and each provider's `api_key_env`.
@@ -422,9 +427,7 @@ impl Wiring {
                 .context("the managed policy's [data] patterns")?
         } else {
             tracing::warn!("redaction is off: the managed policy sets [data] redaction = false");
-            eprintln!(
-                "note: secrets are not redacted: the managed policy's [data] redaction = false"
-            );
+            eprintln!("{REDACTION_OFF_NOTE}");
             Redactor::disabled()
         };
         crate::logging::use_redactor(&redactor);

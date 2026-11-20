@@ -1174,3 +1174,72 @@ async fn chat_ends_without_the_summarizer_below_full() {
     );
     assert!(!s.home.join(".anvil").join("memory").exists());
 }
+
+#[tokio::test]
+async fn resume_refuses_below_a_full_transcript() {
+    for mode in ["metadata", "off"] {
+        let s = setup();
+        let policy = load_policy(&s.policy_dir, &format!("[data]\ntranscript = \"{mode}\"\n"));
+        let managed = wiring(&s, "", Some(policy));
+        let error = crate::commands::resume(
+            &managed,
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            true,
+            crate::frontend::UiKind::Plain,
+        )
+        .await
+        .expect_err("refused");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("needs the full transcript") && message.contains(mode),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn retention_runs_when_a_session_starts() {
+    let s = setup();
+    let policy = load_policy(
+        &s.policy_dir,
+        "[data]
+retention_days = 0
+",
+    );
+    let managed = wiring(&s, "", Some(policy));
+    let root = managed.sessions_root();
+    let old = root.join("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    let live = root.join("01ARZ3NDEKTSV4RRFFQ69G5FAW");
+    for dir in [&old, &live] {
+        std::fs::create_dir_all(dir).expect("mkdir");
+        std::fs::write(
+            dir.join("session.jsonl"),
+            "{}
+",
+        )
+        .expect("write");
+    }
+    let lock = std::fs::File::create(live.join(anvil_types::status::LOCK_FILE)).expect("lock");
+    lock.lock().expect("locks");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    crate::before_session(&managed, crate::frontend::UiKind::Plain);
+    assert!(
+        !old.exists(),
+        "a session past retention_days is removed at session start"
+    );
+    assert!(live.is_dir(), "a running session stays");
+}
+
+#[test]
+fn the_redaction_off_note_is_printed_and_redaction_is_off() {
+    let s = setup();
+    let policy = load_policy(&s.policy_dir, "[data]\nredaction = false\n");
+    let managed = wiring(&s, "", Some(policy));
+    assert!(!managed.guard.redacts());
+    assert!(REDACTION_OFF_NOTE.contains("[data] redaction = false"));
+    let source = include_str!("../wiring.rs");
+    assert!(
+        source.contains("eprintln!(\"{REDACTION_OFF_NOTE}\")"),
+        "with_policy prints the note"
+    );
+}
