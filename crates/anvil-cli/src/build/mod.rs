@@ -13,7 +13,7 @@ mod env;
 mod git;
 mod plan;
 mod run;
-mod state;
+pub(crate) mod state;
 
 #[cfg(test)]
 mod tests;

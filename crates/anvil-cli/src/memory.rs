@@ -405,6 +405,31 @@ pub fn skip_text(reason: MemorySkipReason) -> String {
     }
 }
 
+/// Why the end-of-session extraction must not run, if it must not: the
+/// policy turns memory off, or its transcript mode keeps no conversation.
+/// Below `full` the summarizer would send the conversation to a provider
+/// once more and keep facts drawn from text the transcript does not keep.
+///
+/// # Arguments
+///
+/// * `wiring` - The session's wiring.
+///
+/// # Returns
+///
+/// The reason, for a `memory: skipped (...)` note.
+pub(crate) fn policy_skip_reason(wiring: &Wiring) -> Option<String> {
+    if !wiring.memory_allowed() {
+        return Some("the managed policy's [features] memory = false".to_owned());
+    }
+    if wiring.transcript != anvil_types::policy::TranscriptMode::Full {
+        return Some(format!(
+            "the managed policy's [data] transcript = \"{}\" keeps no conversation to learn from",
+            wiring.transcript.as_str()
+        ));
+    }
+    None
+}
+
 /// Runs the end-of-session extraction for a finished run or chat and
 /// reports, rather than fails, when it cannot.
 ///
@@ -424,8 +449,8 @@ pub async fn finish_session(
     console: &Console,
     usage: Option<&SessionUsage>,
 ) {
-    if !wiring.memory_allowed() {
-        console.notice("memory: skipped (the managed policy's [features] memory = false)");
+    if let Some(reason) = policy_skip_reason(wiring) {
+        console.notice(format!("memory: skipped ({reason})"));
         return;
     }
     let outcome = async {

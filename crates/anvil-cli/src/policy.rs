@@ -487,14 +487,17 @@ pub fn sessions_root(project: &Path, policy: Option<&LoadedPolicy>) -> PathBuf {
         .unwrap_or_else(|| project_sessions_root(project))
 }
 
-/// Deletes session folders older than the policy's `retention_days`.
+/// Deletes session (or build) folders older than `days`.
 ///
 /// Only folders whose name is a session id (26 letters and digits) are
-/// touched, so nothing else in the folder can be removed by mistake.
+/// touched, so nothing else in the folder can be removed by mistake. A
+/// folder whose status lock a running process holds is skipped, and a
+/// folder's age is that of the newest file anywhere in it, because
+/// appending to a log does not change the folder's own time.
 ///
 /// # Arguments
 ///
-/// * `root` - The sessions folder.
+/// * `root` - The sessions folder, or `.anvil/builds`.
 /// * `days` - The retention.
 /// * `now` - The current time.
 ///
@@ -510,20 +513,72 @@ pub fn prune_sessions(root: &Path, days: u32, now: SystemTime) -> usize {
     for entry in entries.filter_map(Result::ok) {
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_session = name.len() == 26 && name.chars().all(|c| c.is_ascii_alphanumeric());
-        let old = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
+        let path = entry.path();
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if !is_session || !is_dir {
+            continue;
+        }
+        let old = newest_change(&path)
             .and_then(|modified| now.duration_since(modified).ok())
             .is_some_and(|age| age > keep);
-        if is_session && old && entry.path().is_dir() {
-            match std::fs::remove_dir_all(entry.path()) {
-                Ok(()) => removed += 1,
-                Err(error) => tracing::warn!(%error, session = name, "cannot prune session"),
-            }
+        if !old {
+            continue;
+        }
+        if !crate::status::lock_is_free(&path) {
+            tracing::info!(
+                session = name,
+                "not pruning a session that is still running"
+            );
+            continue;
+        }
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => removed += 1,
+            Err(error) => tracing::warn!(%error, session = name, "cannot prune session"),
         }
     }
     removed
+}
+
+/// The newest modification time of a folder or anything under it, links
+/// not followed.
+fn newest_change(path: &Path) -> Option<SystemTime> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    let mut newest = meta.modified().ok();
+    if meta.is_dir()
+        && let Ok(entries) = std::fs::read_dir(path)
+    {
+        for entry in entries.filter_map(Result::ok) {
+            if let Some(time) = newest_change(&entry.path()) {
+                newest = Some(newest.map_or(time, |current| current.max(time)));
+            }
+        }
+    }
+    newest
+}
+
+/// Deletes session folders, and the project's build folders, older than
+/// `days`, with the rules of [`prune_sessions`].
+///
+/// # Arguments
+///
+/// * `sessions_root` - The sessions folder.
+/// * `project` - The project root, whose `.anvil/builds` is pruned too.
+/// * `days` - The retention.
+/// * `now` - The current time.
+///
+/// # Returns
+///
+/// How many session folders and how many build folders were removed.
+pub fn prune_all(
+    sessions_root: &Path,
+    project: &Path,
+    days: u32,
+    now: SystemTime,
+) -> (usize, usize) {
+    (
+        prune_sessions(sessions_root, days, now),
+        prune_sessions(&crate::build::state::builds_root(project), days, now),
+    )
 }
 
 /// The one line every session prints at startup about the policy.
@@ -1024,6 +1079,60 @@ mod tests {
         assert_eq!(prune_sessions(dir.path(), 30, later), 1);
         assert!(!old.exists());
         assert!(other.exists(), "a folder that is not a session stays");
+    }
+
+    #[test]
+    fn pruning_skips_a_session_whose_lock_is_held() {
+        let dir = tempfile::tempdir().expect("dir");
+        let live = dir.path().join("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        std::fs::create_dir_all(&live).expect("mkdir");
+        let lock = std::fs::File::create(live.join(anvil_types::status::LOCK_FILE)).expect("lock");
+        lock.lock().expect("locks");
+        let later = SystemTime::now() + Duration::from_secs(40 * 24 * 60 * 60);
+        assert_eq!(prune_sessions(dir.path(), 30, later), 0);
+        assert!(live.is_dir(), "a running session is never pruned");
+        drop(lock);
+        assert_eq!(prune_sessions(dir.path(), 30, later), 1);
+    }
+
+    #[test]
+    fn a_session_is_as_old_as_its_newest_file() {
+        let dir = tempfile::tempdir().expect("dir");
+        let session = dir.path().join("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        std::fs::create_dir_all(session.join("tool-output")).expect("mkdir");
+        let old = SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60);
+        let set_time = |path: &Path, time: SystemTime| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(time))
+                .expect("set time");
+        };
+        std::fs::write(session.join("session.jsonl"), "{}\n").expect("write");
+        std::fs::write(session.join("tool-output").join("c1.txt"), "x").expect("write");
+        set_time(&session.join("session.jsonl"), old);
+        assert_eq!(
+            prune_sessions(dir.path(), 30, SystemTime::now()),
+            0,
+            "a recent file deep inside keeps the session"
+        );
+        set_time(&session.join("tool-output").join("c1.txt"), old);
+        let later = SystemTime::now() + Duration::from_secs(40 * 24 * 60 * 60);
+        assert_eq!(prune_sessions(dir.path(), 30, later), 1);
+    }
+
+    #[test]
+    fn pruning_covers_the_projects_build_folders() {
+        let dir = tempfile::tempdir().expect("dir");
+        let sessions = dir.path().join(".anvil").join("sessions");
+        let session = sessions.join("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        let build = crate::build::state::builds_root(dir.path()).join("01ARZ3NDEKTSV4RRFFQ69G5FAW");
+        std::fs::create_dir_all(&session).expect("mkdir");
+        std::fs::create_dir_all(&build).expect("mkdir");
+        std::fs::write(build.join("state.json"), "{}").expect("write");
+        let later = SystemTime::now() + Duration::from_secs(40 * 24 * 60 * 60);
+        assert_eq!(prune_all(&sessions, dir.path(), 30, later), (1, 1));
+        assert!(!build.exists());
     }
 
     #[test]

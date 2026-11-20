@@ -25,7 +25,7 @@ use anvil_types::{SessionState, SessionStatus};
 use chrono::{DateTime, Utc};
 
 use self::file::StatusFile;
-pub(crate) use self::file::write_atomic;
+pub(crate) use self::file::{lock_is_free, write_atomic};
 use self::tracker::{Prices, Snapshot, Tracker};
 use crate::wiring::Wiring;
 

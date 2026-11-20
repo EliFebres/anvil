@@ -227,10 +227,16 @@ fn before_session(wiring: &Wiring, ui: UiKind) {
     else {
         return;
     };
-    let removed =
-        policy::prune_sessions(&wiring.sessions_root(), days, std::time::SystemTime::now());
-    if removed > 0 {
-        eprintln!("note: removed {removed} session folder(s) older than {days} day(s)");
+    let (removed, builds) = policy::prune_all(
+        &wiring.sessions_root(),
+        &wiring.cwd,
+        days,
+        std::time::SystemTime::now(),
+    );
+    if removed + builds > 0 {
+        eprintln!(
+            "note: removed {removed} session folder(s) and {builds} build folder(s) older than {days} day(s)"
+        );
     }
 }
 
@@ -321,10 +327,15 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         }
         Some(Command::Purge { older_than }) => {
             let root = policy::sessions_root(cwd, env.policy.as_deref());
-            let removed = policy::prune_sessions(&root, older_than, std::time::SystemTime::now());
+            let (removed, builds) =
+                policy::prune_all(&root, cwd, older_than, std::time::SystemTime::now());
             println!(
                 "purge: removed {removed} session folder(s) older than {older_than} day(s) from {}",
                 root.display()
+            );
+            println!(
+                "purge: removed {builds} build folder(s) older than {older_than} day(s) from {}",
+                crate::build::state::builds_root(cwd).display()
             );
             Ok(0)
         }

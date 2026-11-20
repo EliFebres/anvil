@@ -72,7 +72,7 @@ For each call, `check_permission` asks in this order:
 1. **`Permissions::shell_refusal`** (shell only). If any layer set an allowlist (`[shell] allow` in allowlist mode, or `shell_programs`), the command is split by `anvil_types::shell::split_command`, which refuses `;`, `&`, `|`, `<`, `>`, backticks, `$(`, parentheses, braces and line breaks, and its words must match a pattern of every layer. Then `shell::argument_refusal` checks the words a pattern's `*` left to the model: no argument may name a path outside the project, and git may take no option before its subcommand and none of the options that write a file, read outside the repository or run a program (`crates/anvil-core/src/tools/allowlist_tests.rs`). Nothing below can lift this.
 2. **The deny categories** (`Tool::blocked_reason`, `deny_category` in `shell.rs`): network clients, git commands that reach or change remotes, package installs, privilege tools, `rm -rf` and friends. Only `Permissions::allows_by_name`, a rule or allowlist pattern whose text names the command, lifts one. This matches text, so it is a guard rail.
 3. **The rules**: a `deny` from anywhere, then a tightening `ask`, then the user's `allow` and `ask`, then the default, then the tool's own default (reads run, writes ask).
-4. **Session approvals and the prompt**, for calls that ask. An `always` answer is saved to the user's `~/.anvil/permissions/<repository>.toml`, never into the repository.
+4. **Session approvals and the prompt**, for calls that ask. An `always` answer is saved to the user's `~/.anvil/permissions/<repository id>.toml` (see `trust::repo_id`), never into the repository.
 
 *Safe because the order is fixed, every layer below the user can only tighten, and the strongest refusals come first.*
 

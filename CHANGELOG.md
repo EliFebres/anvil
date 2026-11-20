@@ -46,6 +46,20 @@ machine, who controls those limits, and what record is left behind.
   allowlist.
 - `anvil setup --endpoint <url>` for a single self-hosted model server.
 
+### Changed
+
+- Repositories are now named in anvil's records by `<slug>-<12 hex digits>`,
+  the hex being the start of the SHA-256 of the repository's canonical path,
+  so `/w/my-app`, `/w/my_app` and `/w/my/app` no longer share one name. This
+  names the folder under a policy's `transcript_dir`, the file under
+  `~/.anvil/permissions/` and the key in `~/.anvil/trust.toml`. Trust
+  decisions and saved `always` rules recorded under the old names stop
+  applying: anvil asks again, and sessions already under `transcript_dir`
+  stay in their old folders.
+- MCP tool listings are approved together with the server's definition, and
+  the digest covers every tool annotation, so earlier approvals no longer
+  match and the next listing is recorded again. The MCP tool cache is gone.
+
 ### Release and supply chain
 
 - Releases are cut from a version tag (`v*`) only, no longer from every push

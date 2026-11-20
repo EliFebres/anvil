@@ -4,7 +4,7 @@
 //! and instruction files. Hooks and MCP servers run programs; the others
 //! steer the model. anvil loads them only from a repository the user has
 //! trusted. The decision is stored in the user's own `~/.anvil/trust.toml`,
-//! keyed by the repository's full path, and never in the repository.
+//! keyed by the repository's [`repo_id`], and never in the repository.
 //!
 //! A decision to trust is pinned to a digest of what the repository ships
 //! (computed by the CLI). When the digest changes, the decision no longer
@@ -57,7 +57,7 @@ pub enum TrustRecord {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustStore {
-    /// Records keyed by [`repo_key`].
+    /// Records keyed by [`repo_id`].
     #[serde(default)]
     pub repositories: BTreeMap<String, TrustRecord>,
 }
@@ -103,7 +103,7 @@ impl TrustStore {
     /// trusted exactly this content, and `None` when the user was never
     /// asked or trusted content that has since changed.
     pub fn decision(&self, repo: &Path, digest: &str) -> Option<TrustDecision> {
-        match self.repositories.get(&repo_key(repo))? {
+        match self.repositories.get(&repo_id(repo))? {
             TrustRecord::Pinned {
                 decision: TrustDecision::Trusted,
                 digest: pinned,
@@ -129,7 +129,7 @@ impl TrustStore {
     ///
     /// `true` for a trusted record whose digest differs or is missing.
     pub fn changed_since_trusted(&self, repo: &Path, digest: &str) -> bool {
-        match self.repositories.get(&repo_key(repo)) {
+        match self.repositories.get(&repo_id(repo)) {
             Some(TrustRecord::Pinned {
                 decision: TrustDecision::Trusted,
                 digest: pinned,
@@ -148,7 +148,7 @@ impl TrustStore {
     /// * `digest` - The digest of what the repository ships, as shown to the user.
     pub fn set(&mut self, repo: &Path, decision: TrustDecision, digest: &str) {
         self.repositories.insert(
-            repo_key(repo),
+            repo_id(repo),
             TrustRecord::Pinned {
                 decision,
                 digest: digest.to_owned(),
@@ -194,6 +194,48 @@ pub fn repo_key(repo: &Path) -> String {
     text.strip_prefix(r"\\?\").unwrap_or(&text).to_owned()
 }
 
+/// The short id a repository's files and records are named by: the
+/// canonical path with every character other than a letter or digit
+/// turned into `-` (at most the last 64 of them), then `-` and the first
+/// 12 hex digits of the SHA-256 of the canonical path. The digest keeps
+/// `/w/my-app`, `/w/my_app` and `/w/my/app` apart, which the slug alone
+/// does not.
+///
+/// # Arguments
+///
+/// * `repo` - The repository root.
+///
+/// # Returns
+///
+/// The id, letters, digits and `-` only.
+pub fn repo_id(repo: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let key = repo_key(repo);
+    let slug: String = key
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-');
+    let tail: String = slug
+        .chars()
+        .rev()
+        .take(MAX_SLUG_LEN)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let digest = Sha256::digest(key.as_bytes());
+    let hex: String = digest
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{}-{hex}", tail.trim_matches('-'))
+}
+
+/// The longest slug part of a [`repo_id`].
+const MAX_SLUG_LEN: usize = 64;
+
 /// Where the user's own permission rules for one repository live.
 ///
 /// The `always` answer to a prompt writes here rather than into the
@@ -206,15 +248,10 @@ pub fn repo_key(repo: &Path) -> String {
 ///
 /// # Returns
 ///
-/// `<home>/.anvil/permissions/<key>.toml`, where `<key>` is [`repo_key`]
-/// with every character other than a letter or digit replaced by `-`.
+/// `<home>/.anvil/permissions/<id>.toml`, where `<id>` is [`repo_id`].
 pub fn user_permissions_path(home: &Path, repo: &Path) -> PathBuf {
-    let name: String = repo_key(repo)
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    home.join(USER_PERMISSIONS_DIR)
-        .join(format!("{}.toml", name.trim_matches('-')))
+    let name = repo_id(repo);
+    home.join(USER_PERMISSIONS_DIR).join(format!("{name}.toml"))
 }
 
 #[cfg(test)]
@@ -256,7 +293,7 @@ mod tests {
     fn trust_recorded_without_a_digest_no_longer_counts() {
         let home = tempfile::tempdir().expect("home");
         let repo = tempfile::tempdir().expect("repo");
-        let key = repo_key(repo.path()).replace('\\', "\\\\");
+        let key = repo_id(repo.path());
         std::fs::create_dir_all(home.path().join(CONFIG_DIR)).expect("mkdir");
         std::fs::write(
             home.path().join(TRUST_FILE),
@@ -269,11 +306,44 @@ mod tests {
     }
 
     #[test]
+    fn repositories_whose_slugs_match_get_different_ids() {
+        let ids: std::collections::BTreeSet<String> = ["/w/my-app", "/w/my_app", "/w/my/app"]
+            .iter()
+            .map(|path| repo_id(Path::new(path)))
+            .collect();
+        assert_eq!(ids.len(), 3, "{ids:?}");
+        for id in &ids {
+            assert!(id.contains("w-my-app-"), "{id}");
+            assert!(
+                id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "{id}"
+            );
+        }
+        let long = format!("/{}", "deep/".repeat(40));
+        assert!(repo_id(Path::new(&long)).len() <= 64 + 13);
+    }
+
+    #[test]
+    fn trust_recorded_under_the_old_path_key_no_longer_counts() {
+        let repo = tempfile::tempdir().expect("repo");
+        let mut store = TrustStore::default();
+        store.repositories.insert(
+            repo_key(repo.path()),
+            TrustRecord::Pinned {
+                decision: TrustDecision::Trusted,
+                digest: "d".to_owned(),
+            },
+        );
+        assert_eq!(store.decision(repo.path(), "d"), None);
+    }
+
+    #[test]
     fn two_spellings_of_one_folder_share_a_decision() {
         let repo = tempfile::tempdir().expect("repo");
         std::fs::create_dir(repo.path().join("sub")).expect("mkdir");
         let dotted = repo.path().join("sub").join("..");
         assert_eq!(repo_key(&dotted), repo_key(repo.path()));
+        assert_eq!(repo_id(&dotted), repo_id(repo.path()));
     }
 
     #[test]
@@ -297,6 +367,8 @@ mod tests {
             .expect("name")
             .to_string_lossy()
             .into_owned();
-        assert!(name.ends_with("work-my-repo.toml"), "{name}");
+        let id = name.strip_suffix(".toml").expect("toml");
+        assert!(id.contains("work-my-repo-"), "{name}");
+        assert_eq!(id.len() - id.rfind('-').expect("dash") - 1, 12, "{name}");
     }
 }

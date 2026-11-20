@@ -27,6 +27,7 @@ rustc-ice-*.txt
 .anvil/usage/
 .anvil/sessions/
 .anvil/logs/
+.anvil/builds/
 
 # secrets: keys live in .env files, never in the repository
 .env

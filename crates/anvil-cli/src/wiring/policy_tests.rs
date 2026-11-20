@@ -1118,3 +1118,59 @@ fn doctor_checks_the_policys_transcript_and_mirror_folders_too() {
     let unmanaged = wiring(&s, "", None);
     assert_eq!(crate::doctor::private_dirs(&unmanaged).len(), 2);
 }
+
+#[test]
+fn the_memory_summarizer_runs_only_with_a_full_transcript() {
+    for (transcript, runs) in [("full", true), ("metadata", false), ("off", false)] {
+        let s = setup();
+        let policy = load_policy(
+            &s.policy_dir,
+            &format!("[features]\nmemory = true\n[data]\ntranscript = \"{transcript}\"\n"),
+        );
+        let managed = wiring(&s, "", Some(policy));
+        let reason = crate::memory::policy_skip_reason(&managed);
+        assert_eq!(reason.is_none(), runs, "{transcript}: {reason:?}");
+        if let Some(reason) = reason {
+            assert!(reason.contains("[data] transcript"), "{reason}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn chat_ends_without_the_summarizer_below_full() {
+    let s = setup();
+    let policy = load_policy(
+        &s.policy_dir,
+        "[features]\nmemory = true\n[data]\ntranscript = \"metadata\"\n",
+    );
+    let managed = wiring(&s, "", Some(policy));
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = std::sync::Arc::clone(&asked);
+    let messages = [
+        anvil_core::provider::Message::user("task"),
+        anvil_core::provider::Message::Assistant {
+            text: "done; the build uses just".to_owned(),
+            reasoning: Vec::new(),
+            tool_calls: Vec::new(),
+        },
+    ];
+    let started = std::time::Instant::now();
+    crate::memory::finish_session(
+        &managed,
+        "t1",
+        &messages,
+        Box::new(move |_: &anvil_memory::Proposal| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            anvil_memory::Decision::Keep
+        }),
+        &crate::console::Console::Stderr,
+        None,
+    )
+    .await;
+    assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "no provider was contacted"
+    );
+    assert!(!s.home.join(".anvil").join("memory").exists());
+}

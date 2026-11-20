@@ -297,11 +297,8 @@ async fn remember(
     result: &LoopResult,
 ) {
     let console = frontend.console();
-    if wiring.transcript != TranscriptMode::Full {
-        console.notice(format!(
-            "memory: skipped (the managed policy's [data] transcript = \"{}\" keeps no conversation to learn from)",
-            wiring.transcript.as_str()
-        ));
+    if let Some(reason) = memory::policy_skip_reason(wiring) {
+        console.notice(format!("memory: skipped ({reason})"));
         return;
     }
     match context::load_session(&wiring.sessions_root(), id) {

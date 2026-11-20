@@ -89,7 +89,7 @@ Two policies ship as starting points: `policies/restricted.toml` (one model serv
 | `[shell.container] user` | `"65534:65534"` | The user inside the container, never root. Commands can write the workspace only if this user may write its files on the host. |
 | `[shell.container] memory`, `pids_limit` | `"2g"`, `256` | The container's memory and process limits. |
 | `[projects] allow_trust` | `false` | Whether a repository can be trusted, so its hooks, MCP servers, skills, commands, agents, instruction files and `.anvil/permissions.toml` `allow` rules take effect. Its `deny` and `ask` rules apply either way. |
-| `[data] transcript_dir` | the repository's `.anvil/sessions` | Where session folders go, one subfolder per repository. |
+| `[data] transcript_dir` | the repository's `.anvil/sessions` | Where session folders go, one subfolder per repository, named `<slug>-<12 hex digits of the SHA-256 of its path>`. |
 | `[data] retention_days` | kept | Session folders older than this are deleted when a session starts. A developer can also run `anvil purge --older-than <days>`. |
 | `[data] redaction` | `true` | Whether secrets are redacted from tool results, file contents, MCP results, hook output and prompts before they are sent or stored. Only the policy can turn it off; anvil then prints a note at startup. |
 | `[data] patterns` | none | Extra patterns to redact, as `[{ kind = "employee_id", regex = '\bEMP-[0-9]{6}\b' }]` (Rust `regex` syntax; the kind is lowercase letters, digits and `_`). A match becomes `[REDACTED:employee_id]`. |

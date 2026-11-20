@@ -591,15 +591,11 @@ impl LoadedPolicy {
     ///
     /// # Returns
     ///
-    /// `<transcript_dir>/<repository key>` when the policy moves
-    /// transcripts, otherwise `None`.
+    /// `<transcript_dir>/<repository id>` (see [`crate::trust::repo_id`])
+    /// when the policy moves transcripts, otherwise `None`.
     pub fn sessions_root(&self, project: &Path) -> Option<PathBuf> {
         let dir = self.policy.data.transcript_dir.as_ref()?;
-        let name: String = crate::trust::repo_key(project)
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        Some(dir.join(name.trim_matches('-')))
+        Some(dir.join(crate::trust::repo_id(project)))
     }
 
     /// Whether `host_port` (`host:port`, host in lowercase) is allowed.
