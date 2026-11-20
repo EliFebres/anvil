@@ -26,8 +26,8 @@ const CUT_NOTE: &str = "\n[message cut]";
 /// `file` is the file's text with LF line breaks, no byte order mark, and
 /// already redacted; `old` is the old text with LF line breaks.
 pub(crate) fn not_found(shown: &str, file: &str, old: &str) -> String {
-    let file_lines: Vec<&str> = file.lines().collect();
-    let old_lines: Vec<&str> = old.lines().collect();
+    let file_lines = split_lines(file);
+    let old_lines = split_lines(old);
     let message = match old_lines.iter().position(|line| !line.trim().is_empty()) {
         None => format!(
             "old text not found in {shown}. It holds only white space and line breaks, which \
@@ -39,6 +39,16 @@ pub(crate) fn not_found(shown: &str, file: &str, old: &str) -> String {
             .unwrap_or_else(|| nothing_similar(shown, old_lines[first])),
     };
     cap(message)
+}
+
+/// Splits text at LF breaks only, so a `\r` that ends a line stays in it and
+/// can be shown; a final break does not start another line.
+fn split_lines(text: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if text.is_empty() || text.ends_with('\n') {
+        lines.pop();
+    }
+    lines
 }
 
 /// The message when the old text matches once leading and trailing white

@@ -53,9 +53,12 @@ pub(crate) enum Refusal {
 /// `old` matches regardless of line endings: LF in `old` matches CRLF in the
 /// file and the other way round. Only the matched spans change; each
 /// replacement takes the line ending of the first line it replaces. A byte
-/// order mark at the start of the file is kept. When no span matches that
-/// way, an exact byte match is tried, so text that splits a CRLF pair on
-/// purpose still applies, with `new` inserted as given.
+/// order mark at the start of the file is kept, and an `old` that starts
+/// with one matches only there. When no span matches that way, a CRLF in
+/// `old` is read as a line's own `\r` before an LF break, and then an exact
+/// byte match is tried, so text that splits a CRLF pair on purpose still
+/// applies, with `new` inserted as given. Overlapping matches count when
+/// deciding whether `old` is unique.
 ///
 /// # Arguments
 ///
@@ -82,40 +85,40 @@ pub(crate) fn apply(
         Some(body) => (true, body),
         None => (false, text),
     };
-    let (old, new) = match old.strip_prefix(BOM) {
-        Some(old) => (old, new.strip_prefix(BOM).unwrap_or(new)),
-        None => (old, new),
+    let (old, new, at_start) = match old.strip_prefix(BOM) {
+        Some(old) => (old, new.strip_prefix(BOM).unwrap_or(new), true),
+        None => (old, new, false),
     };
     if old.is_empty() {
         return Err(Refusal::EmptyOld);
     }
-    let normalized = Normalized::new(body);
-    let old_lf = to_lf(old);
-    let mut spans: Vec<(usize, usize)> = normalized
-        .text
-        .match_indices(&old_lf)
-        .map(|(at, _)| {
-            (
-                normalized.to_original(at),
-                normalized.to_original(at + old_lf.len()),
-            )
-        })
-        .collect();
-    let adapt_endings = !spans.is_empty();
-    if spans.is_empty() {
-        spans = body
-            .match_indices(old)
-            .map(|(at, found)| (at, at + found.len()))
-            .collect();
+    if at_start && !bom {
+        return Err(Refusal::NotFound);
     }
-    let count = spans.len();
+    let normalized = Normalized::new(body);
+    let mut found = Matches::of(&normalized.text, &to_lf(old), at_start);
+    if found.count == 0 && old.contains("\r\n") {
+        found = Matches::of(&normalized.text, old, at_start);
+    }
+    let adapt_endings = found.count > 0;
+    if adapt_endings {
+        for span in &mut found.spans {
+            *span = (
+                normalized.to_original(span.0),
+                normalized.to_original(span.1),
+            );
+        }
+    } else {
+        found = Matches::of(body, old, at_start);
+    }
+    let Matches { spans, count } = found;
     if count == 0 {
         return Err(Refusal::NotFound);
     }
     if count > 1 && !replace_all {
         return Err(Refusal::Ambiguous(count));
     }
-    let used = if replace_all { count } else { 1 };
+    let used = if replace_all { spans.len() } else { 1 };
     let mut out = String::with_capacity(text.len() + new.len() * used);
     if bom {
         out.push(BOM);
@@ -135,6 +138,45 @@ pub(crate) fn apply(
         text: out,
         count: used,
     })
+}
+
+/// Where an old text occurs in a text.
+#[derive(Debug)]
+struct Matches {
+    /// Byte spans of the matches that do not overlap, from the left.
+    spans: Vec<(usize, usize)>,
+    /// How many times the old text occurs, counting matches that overlap.
+    count: usize,
+}
+
+impl Matches {
+    /// Finds `old` in `text`, or only at its start when `at_start` is set.
+    fn of(text: &str, old: &str, at_start: bool) -> Self {
+        debug_assert!(!old.is_empty(), "an empty old text matches everywhere");
+        if at_start {
+            let hit = text.starts_with(old);
+            return Self {
+                spans: if hit {
+                    vec![(0, old.len())]
+                } else {
+                    Vec::new()
+                },
+                count: usize::from(hit),
+            };
+        }
+        let spans: Vec<(usize, usize)> = text
+            .match_indices(old)
+            .map(|(at, found)| (at, at + found.len()))
+            .collect();
+        let mut count = 0;
+        let mut from = 0;
+        while let Some(at) = text[from..].find(old) {
+            count += 1;
+            let start = from + at;
+            from = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        }
+        Self { spans, count }
+    }
 }
 
 impl Tool for EditFile {
@@ -427,6 +469,160 @@ mod tests {
         .await;
         assert!(!output.is_error, "{}", output.content);
         assert_eq!(bytes, b"short\r\nend\r\n");
+    }
+
+    #[tokio::test]
+    async fn an_overlapping_second_match_is_ambiguous() {
+        let (output, bytes) =
+            edit_bytes("a\r\n\r\n\r\nb\r\n", json!({"old": "\n\n", "new": "\n"})).await;
+        assert!(output.is_error, "{}", output.content);
+        assert!(output.content.contains("occurs"), "{}", output.content);
+        assert_eq!(bytes, b"a\r\n\r\n\r\nb\r\n", "file untouched");
+
+        let (output, bytes) = edit_bytes("aaa\n", json!({"old": "aa", "new": "b"})).await;
+        assert!(output.is_error, "{}", output.content);
+        assert_eq!(bytes, b"aaa\n", "file untouched");
+    }
+
+    #[tokio::test]
+    async fn a_line_ending_in_a_carriage_return_matches_an_old_text_with_an_lf_break() {
+        // read_file shows the first line as `x\r`; the model copies it with an LF break.
+        let (output, bytes) = edit_bytes(
+            "x\r\r\ny\r\nz\r\n",
+            json!({"old": "x\r\ny", "new": "x\ny2"}),
+        )
+        .await;
+        assert!(!output.is_error, "{}", output.content);
+        assert_eq!(bytes, b"x\r\ny2\r\nz\r\n");
+    }
+
+    #[tokio::test]
+    async fn an_old_text_with_a_byte_order_mark_matches_only_at_the_start() {
+        let (output, bytes) =
+            edit_bytes("\u{feff}a\nb\n", json!({"old": "\u{feff}b", "new": "z"})).await;
+        assert!(output.is_error, "{}", output.content);
+        assert_eq!(bytes, "\u{feff}a\nb\n".as_bytes(), "file untouched");
+
+        let (output, bytes) = edit_bytes("a\nb\n", json!({"old": "\u{feff}a", "new": "z"})).await;
+        assert!(output.is_error, "{}", output.content);
+        assert_eq!(bytes, b"a\nb\n", "file untouched");
+    }
+
+    #[tokio::test]
+    async fn not_found_shows_a_carriage_return_at_the_end_of_a_line() {
+        let file = "x\r\r\ny\r\n";
+        let (output, bytes) = edit_bytes(file, json!({"old": "x\ny", "new": "z"})).await;
+        assert!(output.is_error);
+        let message = &output.content;
+        assert!(message.contains("file: |x␍|"), "{message}");
+        assert!(message.contains("old:  |x|"), "{message}");
+        assert_eq!(bytes, file.as_bytes(), "file untouched");
+    }
+
+    #[tokio::test]
+    async fn line_endings_hold_for_the_listed_awkward_inputs() {
+        let cases: Vec<(&str, Value, Option<&[u8]>)> = vec![
+            ("a\rb\n", json!({"old": "a\rb", "new": "z"}), Some(b"z\n")),
+            (
+                "a\r\nb",
+                json!({"old": "b", "new": "c\nd"}),
+                Some(b"a\r\nc\r\nd"),
+            ),
+            (
+                "ab\r\ncd\r\n",
+                json!({"old": "b\nc", "new": ""}),
+                Some(b"ad\r\n"),
+            ),
+            (
+                "a\nb\nc\n",
+                json!({"old": "a\r\nb\r\n", "new": "x\r\ny\r\n"}),
+                Some(b"x\ny\nc\n"),
+            ),
+            (
+                "a\r\nb\r\n",
+                json!({"old": "b\n", "new": "x\ny\r\nz\n"}),
+                Some(b"a\r\nx\r\ny\r\nz\r\n"),
+            ),
+            (
+                "a\r\nb\r\n",
+                json!({"old": "a\n", "new": ""}),
+                Some(b"b\r\n"),
+            ),
+            (
+                "ab\r\nab\r\n",
+                json!({"old": "b\na", "new": "X\nY", "replace_all": true}),
+                Some(b"aX\r\nYb\r\n"),
+            ),
+            (
+                "x\r\nx\r\nx\r\n",
+                json!({"old": "x\n", "new": "y\n", "replace_all": true}),
+                Some(b"y\r\ny\r\ny\r\n"),
+            ),
+            (
+                "\u{feff}ab\r\n",
+                json!({"old": "\u{feff}ab\n", "new": "c\n"}),
+                Some(b"\xef\xbb\xbfc\r\n"),
+            ),
+            (
+                "\u{feff}ab\r\n",
+                json!({"old": "ab", "new": "c"}),
+                Some(b"\xef\xbb\xbfc\r\n"),
+            ),
+            (
+                "é\r\nü\r\nß",
+                json!({"old": "\nü\n", "new": "\nö\n"}),
+                Some("é\r\nö\r\nß".as_bytes()),
+            ),
+            (
+                "日本\r\n語\r\n",
+                json!({"old": "本\n語", "new": "x\ny"}),
+                Some("日x\r\ny\r\n".as_bytes()),
+            ),
+            (
+                "\r\n\r\n",
+                json!({"old": "\n\n", "new": "\n"}),
+                Some(b"\r\n"),
+            ),
+            ("\n", json!({"old": "\r\n", "new": "x\n"}), Some(b"x\n")),
+            (
+                "a\r\nb\r\n",
+                json!({"old": "a\nb\n", "new": "z"}),
+                Some(b"z"),
+            ),
+            ("a\tb\r\n", json!({"old": "a    b\n", "new": "z"}), None),
+            ("a b\r\n", json!({"old": "a  b", "new": "z"}), None),
+            (
+                "x\r\r\ny\r\n",
+                json!({"old": "x\r\r\ny", "new": "z"}),
+                Some(b"z\r\n"),
+            ),
+            (
+                "x\r\r\ny\r\n",
+                json!({"old": "x\r", "new": "z"}),
+                Some(b"z\r\ny\r\n"),
+            ),
+            (
+                "l1\nl2\r\nl3\n",
+                json!({"old": "l1\nl2\nl3\n", "new": "a\nb\nc\n"}),
+                Some(b"a\nb\nc\n"),
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (file, args, want) in cases {
+            let (output, bytes) = edit_bytes(file, args.clone()).await;
+            let ok = match want {
+                Some(want) => !output.is_error && bytes == want,
+                None => output.is_error && bytes == file.as_bytes(),
+            };
+            if !ok {
+                failures.push(format!(
+                    "{file:?} {args} -> {:?} {:?}",
+                    output.content,
+                    String::from_utf8_lossy(&bytes)
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[tokio::test]
