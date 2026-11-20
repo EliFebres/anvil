@@ -78,17 +78,172 @@ fn rust_files(dir: &Path, into: &mut Vec<PathBuf>) {
     }
 }
 
-/// The names of every function defined in the workspace's sources.
-fn defined_functions() -> BTreeSet<String> {
+/// `code` with comments, string literals and character literals replaced
+/// by spaces of the same byte length, line breaks kept, so a name inside
+/// them is never read as code and offsets still match the original.
+fn strip(code: &str) -> String {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<(usize, char)> = code.char_indices().collect();
+    let byte = |index: usize| chars.get(index).map_or(code.len(), |(at, _)| *at);
+    let ch = |index: usize| chars.get(index).map(|(_, c)| *c);
+    let mut blanked: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i].1;
+        let end = if c == '/' && ch(i + 1) == Some('/') {
+            (i..chars.len())
+                .find(|&k| chars[k].1 == '\n')
+                .unwrap_or(chars.len())
+        } else if c == '/' && ch(i + 1) == Some('*') {
+            let mut depth = 0usize;
+            let mut k = i;
+            while k < chars.len() {
+                if ch(k) == Some('/') && ch(k + 1) == Some('*') {
+                    depth += 1;
+                    k += 2;
+                } else if ch(k) == Some('*') && ch(k + 1) == Some('/') {
+                    depth -= 1;
+                    k += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    k += 1;
+                }
+            }
+            k.min(chars.len())
+        } else if c == 'r'
+            && matches!(ch(i + 1), Some('"' | '#'))
+            && (i == 0 || !is_ident(chars[i - 1].1) || chars[i - 1].1 == 'b')
+        {
+            let hashes = (i + 1..chars.len())
+                .take_while(|&k| chars[k].1 == '#')
+                .count();
+            if ch(i + 1 + hashes) == Some('"') {
+                let mut k = i + 2 + hashes;
+                while k < chars.len()
+                    && !(chars[k].1 == '"' && (0..hashes).all(|h| ch(k + 1 + h) == Some('#')))
+                {
+                    k += 1;
+                }
+                (k + 1 + hashes).min(chars.len())
+            } else {
+                i + 1
+            }
+        } else if c == '"' {
+            let mut k = i + 1;
+            while k < chars.len() && chars[k].1 != '"' {
+                k += if chars[k].1 == '\\' { 2 } else { 1 };
+            }
+            (k + 1).min(chars.len())
+        } else if c == '\'' && ch(i + 1) == Some('\\') {
+            (i + 3..chars.len())
+                .find(|&k| chars[k].1 == '\'')
+                .map_or(i + 1, |k| k + 1)
+        } else if c == '\'' && ch(i + 2) == Some('\'') {
+            i + 3
+        } else {
+            i += 1;
+            continue;
+        };
+        blanked.push((byte(i), byte(end)));
+        i = end.max(i + 1);
+    }
+    let mut out = String::with_capacity(code.len());
+    let mut copied = 0;
+    for (from, to) in blanked {
+        out.push_str(&code[copied..from]);
+        out.extend(
+            code[from..to].chars().flat_map(|c| {
+                std::iter::repeat_n(if c == '\n' { '\n' } else { ' ' }, c.len_utf8())
+            }),
+        );
+        copied = to;
+    }
+    out.push_str(&code[copied..]);
+    out
+}
+
+/// The test functions in one source file, by name, with the platform
+/// marker the documents must give them: `Unix` for `#[cfg(unix)]`,
+/// `Windows` for `#[cfg(windows)]`, `Linux CI` for a Linux-only test, and
+/// an empty marker for a test that runs everywhere.
+///
+/// A function counts as a test only when its own attributes (others may
+/// stand between) include `#[test]` or `#[tokio::test]`. Comments and
+/// string literals are blanked first, so a name inside them never counts.
+fn test_functions(text: &str) -> std::collections::BTreeMap<String, &'static str> {
+    let code = strip(text);
     let pattern = regex::Regex::new(r"\bfn\s+([a-z_][a-z0-9_]*)").expect("pattern compiles");
+    let mut found = std::collections::BTreeMap::new();
+    for capture in pattern.captures_iter(&code) {
+        let Some(whole) = capture.get(0) else {
+            continue;
+        };
+        let mut head = code[..whole.start()].trim_end();
+        for keyword in ["async", "unsafe", "const", "pub(crate)", "pub"] {
+            head = head.strip_suffix(keyword).unwrap_or(head).trim_end();
+        }
+        let mut attributes = Vec::new();
+        while head.ends_with(']') {
+            let mut depth = 0usize;
+            let Some(open) = head.char_indices().rev().find_map(|(at, c)| {
+                match c {
+                    ']' => depth += 1,
+                    '[' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(at);
+                        }
+                    }
+                    _ => {}
+                }
+                None
+            }) else {
+                break;
+            };
+            let Some(hash) = head[..open].strip_suffix('#') else {
+                break;
+            };
+            // The attribute's text from the original, where strings are kept.
+            attributes.push(flat(&text[open..head.len()]));
+            head = hash.trim_end();
+        }
+        let is_test = attributes
+            .iter()
+            .any(|attribute| attribute == "[test]" || attribute.starts_with("[tokio::test"));
+        if !is_test {
+            continue;
+        }
+        let marker = if attributes.iter().any(|a| a == "[cfg(unix)]") {
+            "Unix"
+        } else if attributes.iter().any(|a| a == "[cfg(windows)]") {
+            "Windows"
+        } else if attributes.iter().any(|a| a.contains("target_os=\"linux\"")) {
+            "Linux CI"
+        } else {
+            ""
+        };
+        found.insert(capture[1].to_owned(), marker);
+    }
+    found
+}
+
+/// `text` without white space.
+fn flat(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// The test functions of every source file in the workspace.
+fn defined_tests() -> std::collections::BTreeMap<String, &'static str> {
     let mut files = Vec::new();
     rust_files(&repo_root().join("crates"), &mut files);
-    let mut names = BTreeSet::new();
+    let mut tests = std::collections::BTreeMap::new();
     for file in files {
         let text = std::fs::read_to_string(&file).expect("read source");
-        names.extend(pattern.captures_iter(&text).map(|c| c[1].to_owned()));
+        tests.extend(test_functions(&text));
     }
-    names
+    tests
 }
 
 #[test]
@@ -107,35 +262,87 @@ fn every_test_named_in_security_tests_exists() {
         "docs/SECURITY_TESTS.md names only {} tests in its `test` columns; is the table header still `test`?",
         named.len()
     );
-    let defined = defined_functions();
+    let defined = defined_tests();
     let missing: Vec<&String> = named
         .iter()
-        .filter(|name| !defined.contains(*name))
+        .filter(|name| !defined.contains_key(*name))
         .collect();
     assert!(
         missing.is_empty(),
-        "docs/SECURITY_TESTS.md names tests that do not exist: {missing:?}"
+        "docs/SECURITY_TESTS.md names tests that do not exist as #[test] or #[tokio::test] functions: {missing:?}"
     );
 
     let tests = column(&document, "test");
     let wheres = column(&document, "where");
     assert_eq!(tests.len(), wheres.len(), "every row has a `where` cell");
     let mut misplaced = Vec::new();
+    let mut unmarked = Vec::new();
     for (test_cell, where_cell) in tests.iter().zip(&wheres) {
-        let sources: Vec<String> = backticked(where_cell)
-            .iter()
-            .filter_map(|file| std::fs::read_to_string(repo_root().join(file)).ok())
-            .collect();
+        let mut in_row = std::collections::BTreeMap::new();
+        for file in backticked(where_cell) {
+            if let Ok(text) = std::fs::read_to_string(repo_root().join(&file)) {
+                in_row.extend(test_functions(&text));
+            }
+        }
         for name in backticked(test_cell) {
-            let definition = regex::Regex::new(&format!(r"\bfn\s+{name}\b")).expect("name pattern");
-            if !sources.iter().any(|text| definition.is_match(text)) {
+            let Some(marker) = in_row.get(&name) else {
                 misplaced.push(name);
+                continue;
+            };
+            let marked = |label: &str| test_cell.contains(&format!("`{name}` ({label})"));
+            let right = if marker.is_empty() {
+                !["Unix", "Windows", "Linux CI"]
+                    .iter()
+                    .any(|label| marked(label))
+            } else {
+                marked(marker)
+            };
+            if !right {
+                unmarked.push(format!("{name}: {marker:?}"));
             }
         }
     }
     assert!(
         misplaced.is_empty(),
-        "docs/SECURITY_TESTS.md names tests that are not in the files of their `where` column: {misplaced:?}"
+        "docs/SECURITY_TESTS.md names tests that are not test functions in the files of their `where` column: {misplaced:?}"
+    );
+    assert!(
+        unmarked.is_empty(),
+        "docs/SECURITY_TESTS.md must follow each platform-only test with its marker, such as `name` (Unix), and no other test with one: {unmarked:?}"
+    );
+}
+
+#[test]
+fn a_name_in_a_comment_or_a_string_or_on_a_helper_is_not_a_test() {
+    let source = r##"
+// fn commented_out_test() {}
+/* #[test]
+fn in_a_block_comment() {} */
+const S: &str = "#[test] fn in_a_string() {}";
+const R: &str = r#"#[test] fn in_a_raw_string() {}"#;
+fn a_helper() {}
+#[test]
+fn a_real_test() {}
+#[cfg(unix)]
+#[tokio::test]
+async fn a_unix_test() {}
+#[cfg(windows)]
+#[test]
+#[ignore = "slow"]
+fn a_windows_test() {}
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+pub async fn a_linux_test() {}
+"##;
+    let tests = test_functions(source);
+    assert_eq!(
+        tests.into_iter().collect::<Vec<_>>(),
+        vec![
+            ("a_linux_test".to_owned(), "Linux CI"),
+            ("a_real_test".to_owned(), ""),
+            ("a_unix_test".to_owned(), "Unix"),
+            ("a_windows_test".to_owned(), "Windows"),
+        ]
     );
 }
 
