@@ -14,6 +14,10 @@ use super::*;
 
 const ENDPOINT: &str = "https://models.corp.example/v1";
 
+/// A policy table that turns the shell on in `ask` mode; a policy without
+/// `[shell]` leaves the tool out.
+const SHELL_ASK: &str = "[shell]\nmode = \"ask\"\n";
+
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
     std::fs::write(path, text).expect("write");
@@ -494,7 +498,7 @@ async fn saved_always_rules_and_the_always_answer_follow_allow_always() {
     );
     std::fs::remove_file(&saved).expect("remove");
 
-    let managed = wiring(&s, "", Some(load_policy(&s.policy_dir, "")));
+    let managed = wiring(&s, "", Some(load_policy(&s.policy_dir, SHELL_ASK)));
     let command = serde_json::json!({"command": "echo hi"});
     outcome_with(&managed, PromptAnswer::Always, "shell", command.clone()).await;
     assert!(!saved.exists(), "an always answer saves nothing");
@@ -504,7 +508,7 @@ async fn saved_always_rules_and_the_always_answer_follow_allow_always() {
         "",
         Some(load_policy(
             &s.policy_dir,
-            "[permissions]\nallow_always = true\n",
+            &format!("[permissions]\nallow_always = true\n{SHELL_ASK}"),
         )),
     );
     outcome_with(&open, PromptAnswer::Always, "shell", command).await;
@@ -663,7 +667,9 @@ async fn a_subagent_gets_the_same_policy_rules_and_file_limits() {
         "",
         Some(load_policy(
             &s.policy_dir,
-            "[permissions]\ndeny = [\"shell\"]\n[files]\ndeny = [\"**/*.kdbx\"]\n[features]\ndelegation = true\n",
+            &format!(
+                "[permissions]\ndeny = [\"shell\"]\n[files]\ndeny = [\"**/*.kdbx\"]\n[features]\ndelegation = true\n{SHELL_ASK}"
+            ),
         )),
     );
     let env: &dyn SubagentEnv = &managed;
@@ -688,4 +694,236 @@ async fn a_subagent_gets_the_same_policy_rules_and_file_limits() {
         )
         .await;
     assert_ne!(read.outcome, ToolOutcome::Completed);
+}
+
+fn shell_call(command: &str) -> ToolCall {
+    ToolCall {
+        id: "sh".to_owned(),
+        name: "shell".to_owned(),
+        arguments_json: serde_json::json!({ "command": command }).to_string(),
+    }
+}
+
+#[test]
+fn the_shell_is_off_under_a_policy_unless_the_policy_turns_it_on() {
+    let s = setup();
+    let unmanaged = wiring(&s, "", None);
+    let registry = unmanaged
+        .registry(Box::new(StaticPrompt(PromptAnswer::No)))
+        .expect("registry");
+    assert!(
+        registry.names().contains(&"shell"),
+        "unmanaged default: ask"
+    );
+
+    let managed = wiring(
+        &s,
+        "",
+        Some(load_policy(
+            &s.policy_dir,
+            "[features]\ndelegation = true\n",
+        )),
+    );
+    assert_eq!(managed.shell.mode, anvil_types::shell::ShellMode::Off);
+    let registry = managed
+        .registry(Box::new(StaticPrompt(PromptAnswer::Yes)))
+        .expect("registry");
+    assert!(!registry.names().contains(&"shell"), "policy default: off");
+    let env: &dyn SubagentEnv = &managed;
+    let sub = env.registry(true).expect("subagent registry");
+    assert!(
+        !sub.names().contains(&"shell"),
+        "a subagent has no shell either"
+    );
+    let error = crate::policy::check_build_shell(managed.policy.as_deref(), &managed.shell)
+        .expect_err("anvil build needs the shell");
+    assert!(
+        error.to_string().contains("[shell] mode = \"off\""),
+        "{error}"
+    );
+
+    let on = wiring(&s, "", Some(load_policy(&s.policy_dir, SHELL_ASK)));
+    let registry = on
+        .registry(Box::new(StaticPrompt(PromptAnswer::No)))
+        .expect("registry");
+    assert!(registry.names().contains(&"shell"));
+    assert!(crate::policy::check_build_shell(on.policy.as_deref(), &on.shell).is_ok());
+
+    let own = wiring(
+        &s,
+        "[shell]
+mode = \"off\"
+",
+        None,
+    );
+    let registry = own
+        .registry(Box::new(StaticPrompt(PromptAnswer::No)))
+        .expect("registry");
+    assert!(!registry.names().contains(&"shell"), "the user's own off");
+    let error = crate::policy::check_build_shell(None, &own.shell).expect_err("refused");
+    assert!(error.to_string().contains("your configuration"), "{error}");
+}
+
+#[test]
+fn user_shell_settings_that_loosen_the_policy_are_errors_naming_the_key() {
+    let s = setup();
+    let allowlist = "[shell]\nmode = \"allowlist\"\nallow = [\"cargo test *\", \"just check\"]\n";
+    let cases = [
+        ("", "[shell]\nmode = \"ask\"\n", "[shell] mode = \"off\""),
+        (
+            allowlist,
+            "[shell]\nmode = \"ask\"\n",
+            "[shell] mode = \"allowlist\"",
+        ),
+        (
+            SHELL_ASK,
+            "[shell]\nexecutor = \"container\"\n[shell.container]\nimage = \"x:1\"\n",
+            "[shell] executor = \"host\"",
+        ),
+        (
+            "",
+            "[tools]\ncheck = \"just check\"\n",
+            "[shell] mode = \"off\"",
+        ),
+        (
+            allowlist,
+            "[tools]\ncheck = \"npm test\"\n",
+            "[shell] allow",
+        ),
+        (
+            allowlist,
+            "[tools]\ncheck = \"just check; curl x\"\n",
+            "[shell] allow",
+        ),
+    ];
+    for (policy_text, config, key) in cases {
+        let text = refused(&s, config, load_policy(&s.policy_dir, policy_text));
+        assert!(text.contains(key), "{config}: {text}");
+    }
+    let fits = wiring(
+        &s,
+        "[tools]\ncheck = \"just check\"\n[shell]\nmode = \"allowlist\"\nallow = [\"just *\"]\n",
+        Some(load_policy(&s.policy_dir, allowlist)),
+    );
+    assert_eq!(
+        fits.shell.layers.len(),
+        2,
+        "the user's list narrows the policy's"
+    );
+    let stricter = wiring(
+        &s,
+        "[shell]\nmode = \"off\"\n",
+        Some(load_policy(&s.policy_dir, SHELL_ASK)),
+    );
+    assert_eq!(stricter.shell.mode, anvil_types::shell::ShellMode::Off);
+}
+
+#[tokio::test]
+async fn a_policy_allowlist_refuses_metacharacters_and_starts_programs_directly() {
+    let s = setup();
+    let managed = wiring(
+        &s,
+        "[permissions]\nallow = [\"shell\"]\n",
+        Some(load_policy(
+            &s.policy_dir,
+            "[shell]\nmode = \"allowlist\"\nallow = [\"git status\", \"git push origin *\"]\n",
+        )),
+    );
+    let registry = managed
+        .registry(Box::new(StaticPrompt(PromptAnswer::Yes)))
+        .expect("registry");
+    let ctx = managed.tool_context();
+    assert!(
+        ctx.runner.direct,
+        "allowlist mode starts programs without a shell"
+    );
+    for command in [
+        "git status; echo pwned",
+        "git status && echo pwned",
+        "git status | echo pwned",
+        "git status > out.txt",
+        "git status `id`",
+        "git status $(id)",
+        "git status\necho pwned",
+        "cargo build",
+        "git status -s",
+    ] {
+        let run = registry.execute(&shell_call(command), &ctx).await;
+        assert_eq!(run.outcome, ToolOutcome::Blocked, "{command:?}");
+    }
+    assert_eq!(
+        managed.permit_shell(
+            "git push origin main",
+            Box::new(StaticPrompt(PromptAnswer::Yes))
+        ),
+        Ok(()),
+        "a pattern that names `git push` lifts its deny category"
+    );
+    let section = managed.shell.prompt_section().expect("the model is told");
+    assert!(section.text.contains("`git status`"), "{}", section.text);
+}
+
+#[test]
+fn the_policys_container_executor_reaches_every_tool_context() {
+    let s = setup();
+    let managed = wiring(
+        &s,
+        "",
+        Some(load_policy(
+            &s.policy_dir,
+            "[shell]\nmode = \"ask\"\nexecutor = \"container\"\n[shell.container]\nruntime = \"podman\"\nimage = \"registry.corp.example/build@sha256:0123\"\n[features]\ndelegation = true\n",
+        )),
+    );
+    for ctx in [managed.tool_context(), SubagentEnv::tool_context(&managed)] {
+        let container = ctx.runner.container.expect("container executor");
+        assert_eq!(container.program, "podman");
+        assert_eq!(
+            container.settings.image,
+            "registry.corp.example/build@sha256:0123"
+        );
+    }
+}
+
+#[tokio::test]
+async fn subagents_are_confined_like_the_session() {
+    let s = setup();
+    let outside = tempfile::tempdir().expect("outside");
+    write(&outside.path().join("notes.md"), "outside");
+    write(&s.project.join(".env"), "API_KEY=x");
+    write(&s.project.join("id_ed25519"), "key");
+    write(&s.project.join("db.kdbx"), "vault");
+    let managed = wiring(
+        &s,
+        "",
+        Some(load_policy(
+            &s.policy_dir,
+            "[files]\ndeny = [\"**/*.kdbx\"]\n[features]\ndelegation = true\n[shell]\nmode = \"allowlist\"\nallow = [\"git status\"]\n",
+        )),
+    );
+    let main_ctx = managed.tool_context();
+    let env: &dyn SubagentEnv = &managed;
+    let registry = env.registry(true).expect("subagent registry");
+    let ctx = env.tool_context();
+    assert_eq!(ctx.cwd, main_ctx.cwd);
+    assert_eq!(ctx.runner.direct, main_ctx.runner.direct);
+    assert!(ctx.runner.direct);
+    let read = |path: String| ToolCall {
+        id: "r".to_owned(),
+        name: "read_file".to_owned(),
+        arguments_json: serde_json::json!({ "path": path }).to_string(),
+    };
+    for path in [
+        outside.path().join("notes.md").display().to_string(),
+        "../outside.md".to_owned(),
+        ".env".to_owned(),
+        "id_ed25519".to_owned(),
+        "db.kdbx".to_owned(),
+    ] {
+        let run = registry.execute(&read(path.clone()), &ctx).await;
+        assert!(run.result.is_error, "{path}: {}", run.result.content);
+    }
+    for command in ["git status; id", "cargo build", "curl https://example.com"] {
+        let run = registry.execute(&shell_call(command), &ctx).await;
+        assert_eq!(run.outcome, ToolOutcome::Blocked, "{command}");
+    }
 }

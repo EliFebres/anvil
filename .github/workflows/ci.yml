@@ -39,6 +39,14 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: test
         run: cargo test --locked --all
+      # The container executor against a real docker: no network, not root,
+      # a read-only root file system. The test is ignored by default and
+      # returns early without ANVIL_CONTAINER_TEST.
+      - name: container executor (docker)
+        if: runner.os == 'Linux'
+        env:
+          ANVIL_CONTAINER_TEST: "1"
+        run: cargo test --locked -p anvil-core --lib -- --ignored real_container
       - name: scan-keys
         run: cargo run --locked -q -p anvil-cli -- scan-keys
       - name: no-old-name

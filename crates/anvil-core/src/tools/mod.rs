@@ -54,7 +54,7 @@ pub use permissions::{
     PermissionPrompt, PermissionRequest, Permissions, PromptAnswer, ScriptedPrompt,
     SessionApprovals, StaticPrompt,
 };
-pub use shell::Shell;
+pub use shell::{Container, Runner, Shell};
 pub use workspace::Workspace;
 
 /// Byte cap applied to a tool's output unless the tool overrides it.
@@ -197,8 +197,10 @@ pub trait Tool: Send + Sync {
 
     /// Why this call must not run even if a prompt would allow it.
     ///
-    /// Only an explicit `allow` rule can override a blocked call.
-    fn blocked_reason(&self, _args: &Value) -> Option<String> {
+    /// Only a rule that names the blocked phrase can override a blocked
+    /// call (see [`Permissions::allows_by_name`]); a prompt, `--yes` or a
+    /// broad `allow` rule cannot.
+    fn blocked_reason(&self, _args: &Value) -> Option<Blocked> {
         None
     }
 
@@ -240,6 +242,16 @@ pub trait Tool: Send + Sync {
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> ToolFuture<'a>;
 }
 
+/// A call a tool refuses to run unless a rule names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocked {
+    /// What matched, such as `git push` or `curl`. A rule allows the call
+    /// only when its pattern contains this text.
+    pub phrase: String,
+    /// The explanation for the model.
+    pub reason: String,
+}
+
 /// Where and how tools run.
 #[derive(Debug, Clone)]
 pub struct ToolContext {
@@ -249,6 +261,9 @@ pub struct ToolContext {
     pub session_dir: Option<PathBuf>,
     /// The shell behind the `shell` tool.
     pub shell: Shell,
+    /// How commands are started: through the shell or directly, on the
+    /// host or in a container.
+    pub runner: Runner,
     /// Folders outside `cwd` the file tools may also open.
     pub workspace: Workspace,
 }
@@ -268,6 +283,7 @@ impl ToolContext {
             cwd: cwd.into(),
             session_dir: None,
             shell: Shell::for_platform(),
+            runner: Runner::default(),
             workspace: Workspace::default(),
         }
     }
@@ -684,6 +700,16 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_owned(), tool);
     }
 
+    /// Removes a tool, so the model is not offered it and a call to it is
+    /// an unknown tool. `[shell] mode = "off"` removes `shell` this way.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The tool name.
+    pub fn unregister(&mut self, name: &str) {
+        self.tools.remove(name);
+    }
+
     /// Looks a tool up by name.
     ///
     /// # Arguments
@@ -783,6 +809,24 @@ impl ToolRegistry {
             );
         }
 
+        // Under an allowlist a command runs without a shell interpreter,
+        // whatever the context says, so what was matched is what runs.
+        let direct;
+        let ctx = if tool.name() == shell::SHELL_TOOL_NAME
+            && !ctx.runner.direct
+            && self.permissions().has_shell_allowlist()
+        {
+            direct = ToolContext {
+                runner: Runner {
+                    direct: true,
+                    ..ctx.runner.clone()
+                },
+                ..ctx.clone()
+            };
+            &direct
+        } else {
+            ctx
+        };
         let output = tool.run(args.clone(), ctx).await;
         let outcome = if output.is_error {
             ToolOutcome::Failed
@@ -907,14 +951,20 @@ impl ToolRegistry {
             self.observe(name, DecisionScope::Blocked, false);
             return Some((ToolOutput::error(reason), ToolOutcome::Blocked));
         }
-        if let Some(reason) = tool.blocked_reason(args)
-            && !permissions.explicitly_allowed(name, target)
+        if let Some(blocked) = tool.blocked_reason(args)
+            && !permissions.allows_by_name(name, target, &blocked.phrase)
         {
-            tracing::info!(tool = name, ?target, reason, "blocked tool call");
+            tracing::info!(
+                tool = name,
+                ?target,
+                reason = blocked.reason,
+                "blocked tool call"
+            );
             self.observe(name, DecisionScope::Blocked, false);
             return Some((
                 ToolOutput::error(format!(
-                    "{reason}; blocked unless an `allow` rule in your own permission rules covers it"
+                    "{}; blocked unless an `allow` rule in your own permission rules names `{}`",
+                    blocked.reason, blocked.phrase
                 )),
                 ToolOutcome::Blocked,
             ));
@@ -1086,11 +1136,14 @@ mod tests {
         fn target(&self, args: &Value) -> Option<String> {
             args.get("text").and_then(Value::as_str).map(str::to_owned)
         }
-        fn blocked_reason(&self, args: &Value) -> Option<String> {
+        fn blocked_reason(&self, args: &Value) -> Option<Blocked> {
             args.get("text")
                 .and_then(Value::as_str)
                 .filter(|text| text.contains("nuke"))
-                .map(|_| "text contains `nuke`".to_owned())
+                .map(|_| Blocked {
+                    phrase: "nuke".to_owned(),
+                    reason: "text contains `nuke`".to_owned(),
+                })
         }
         fn run<'a>(&'a self, args: Value, _ctx: &'a ToolContext) -> ToolFuture<'a> {
             Box::pin(async move {

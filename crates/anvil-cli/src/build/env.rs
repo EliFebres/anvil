@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anvil_core::agent::Status;
 use anvil_core::provider::{Provider, TokenBudget};
+use anvil_core::tools::{PermissionPrompt, PromptAnswer, StaticPrompt};
 
 use super::run::{Env, SessionReport, SessionRequest};
 use crate::commands::{SessionOptions, end_status, run_session_in};
@@ -82,6 +83,15 @@ impl Env for WiringEnv {
         };
         end_status(&status, &result.map(|result| result.status.exit_code()));
         report
+    }
+
+    fn permit_command(&self, command: &str) -> Result<(), String> {
+        let prompt: Box<dyn PermissionPrompt> = if self.yes {
+            Box::new(StaticPrompt(PromptAnswer::Yes))
+        } else {
+            Wiring::prompt()
+        };
+        self.wiring.permit_shell(command, prompt)
     }
 
     fn build_status(&self, id: &str, dir: &Path, spec: &str) -> Option<StatusReporter> {

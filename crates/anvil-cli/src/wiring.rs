@@ -13,12 +13,14 @@ use anvil_core::agent::{
 };
 use anvil_core::context;
 use anvil_core::provider::{self, Egress, Provider, SharedBudget, TokenBudget};
+use anvil_core::tools::shell::SHELL_TOOL_NAME;
 use anvil_core::tools::workspace::{DeniedPaths, deny_globs};
 use anvil_core::tools::{
     PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
     SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry, Workspace,
 };
 use anvil_types::policy::{LoadedPolicy, McpMode, SkillsMode};
+use anvil_types::shell::ShellMode;
 use anvil_types::trust::user_permissions_path;
 use anvil_types::{AnvilConfig, ProjectRules, PromptConfig};
 use anyhow::Context;
@@ -27,6 +29,10 @@ use crate::memory::{self, RuleChecks};
 use crate::policy::{check_allow_rules, check_unmatched, conflict};
 use crate::templates;
 use crate::terminal::TerminalPrompt;
+
+mod shell;
+
+pub use shell::ShellSettings;
 
 /// The name of a skills mode as the policy file spells it.
 fn skills_mode(mode: SkillsMode) -> &'static str {
@@ -106,6 +112,9 @@ pub struct Wiring {
     pub mcp_servers: ServerSet,
     /// MCP tools, resolved by [`Wiring::load_mcp`]; empty until then.
     pub mcp: Arc<McpTools>,
+    /// How the `shell` tool may run commands: the user's `[shell]` table,
+    /// bounded by the policy's.
+    pub shell: ShellSettings,
     /// Path globs the file tools refuse, from the policy's `[files] deny`.
     denied_paths: Option<DeniedPaths>,
     /// The session this wiring serves, once one exists.
@@ -224,6 +233,7 @@ impl Wiring {
                 .context("permissions.allow_tools in the configuration")?,
         ));
         let egress = Egress::personal(config.network.allow_http_hosts.clone());
+        let shell = ShellSettings::resolve(&config.shell, None);
         Ok(Self {
             cwd,
             home,
@@ -237,6 +247,7 @@ impl Wiring {
             hooks,
             mcp_servers,
             mcp: Arc::new(McpTools::default()),
+            shell,
             denied_paths: None,
             session: None,
             approvals,
@@ -258,7 +269,8 @@ impl Wiring {
     /// - saved `always` rules are an error unless `allow_always` is on, and
     ///   their allow rules may not cover a policy `deny` or `ask` rule;
     /// - `[limits] session_tokens` caps the session budget;
-    /// - `[files] deny` is compiled for the file tools.
+    /// - `[files] deny` is compiled for the file tools;
+    /// - `[shell]` sets the mode, the allowlist and the executor.
     ///
     /// The policy's `deny` and `ask` rules, `allow_always` and `[files]
     /// extra_roots` take effect in [`Wiring::registry`] and
@@ -404,6 +416,7 @@ impl Wiring {
         }
         self.denied_paths = deny_globs(&p.files.deny)
             .map_err(|error| anyhow::anyhow!("the managed policy's [files] deny: {error}"))?;
+        self.shell = ShellSettings::resolve(&self.config.shell, Some(&p.shell));
         self.policy = Some(policy);
         Ok(self)
     }
@@ -728,8 +741,37 @@ impl Wiring {
         Ok(registry)
     }
 
+    /// Decides whether a command anvil runs itself, such as an acceptance
+    /// command of `anvil build`, may run: the shell mode, the allowlist, the
+    /// deny categories and the permission rules apply as they would to the
+    /// model's own `shell` call, and an `ask` asks `prompt`.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command line.
+    /// * `prompt` - Who answers an `ask`.
+    ///
+    /// # Errors
+    ///
+    /// The reason, when the command may not run.
+    pub fn permit_shell(
+        &self,
+        command: &str,
+        prompt: Box<dyn PermissionPrompt>,
+    ) -> Result<(), String> {
+        let registry = self
+            .registry_without_delegate(prompt)
+            .map_err(|error| format!("{error:#}"))?;
+        registry.permit(
+            SHELL_TOOL_NAME,
+            &serde_json::json!({ "command": command }),
+            &self.cwd,
+        )
+    }
+
     /// The registry a subagent gets: everything but `delegate`, so
-    /// delegations do not nest.
+    /// delegations do not nest. The shell's allowlist layers and mode apply
+    /// here, so every registry of a session, a subagent's included, has them.
     fn registry_without_delegate(
         &self,
         prompt: Box<dyn PermissionPrompt>,
@@ -755,9 +797,17 @@ impl Wiring {
                 .context("the managed policy's [permissions]")?;
             always = p.allow_always;
         }
+        for (source, patterns) in &self.shell.layers {
+            permissions
+                .limit_shell(patterns, source)
+                .with_context(|| format!("the patterns of {source}"))?;
+        }
         let mut registry = ToolRegistry::with_builtins(permissions, prompt)
             .with_session_approvals(Arc::clone(&self.approvals))
             .with_always(always);
+        if self.shell.mode == ShellMode::Off {
+            registry.unregister(SHELL_TOOL_NAME);
+        }
         let observer = self.observer.lock().ok().and_then(|slot| slot.clone());
         if let Some(observer) = observer {
             registry.set_observer(observer);
@@ -828,15 +878,23 @@ impl Wiring {
     ///
     /// # Returns
     ///
-    /// The context, with the configured shell and the folders outside the
-    /// project the file tools may open: `[tools] extra_dirs`, and the
-    /// loaded skills' folders for reading their supporting files; the
-    /// user's `~/.anvil`, which they never write; and the files in the
-    /// project that a loaded hook or MCP server runs, which they never
-    /// write either.
+    /// The context, with the configured shell and how commands start
+    /// (directly under an allowlist, in a container when configured), and
+    /// the folders outside the project the file tools may open: `[tools]
+    /// extra_dirs`, and the loaded skills' folders for reading their
+    /// supporting files; the user's `~/.anvil`, which they never write; and
+    /// the files in the project that a loaded hook or MCP server runs,
+    /// which they never write either.
     pub fn tool_context(&self) -> ToolContext {
+        // A rules file that cannot be read counts as limiting, so commands
+        // never fall back to a shell when an allowlist might be in force.
+        let programs_limit = !self.project.rules.shell_programs.is_empty()
+            || self
+                .user_permissions()
+                .map_or(true, |rules| rules.has_shell_allowlist());
         ToolContext {
             shell: Shell::from_config(self.config.tools.shell.as_deref()),
+            runner: self.shell.runner(programs_limit),
             workspace: Workspace {
                 extra_dirs: self.config.tools.extra_dirs.clone(),
                 read_only_dirs: self
@@ -892,6 +950,7 @@ impl Wiring {
         let mut sections =
             memory::prompt_sections(self.home.as_deref(), &self.cwd, self.memory_allowed())?;
         sections.coder.extend(profile_section(&self.config.prompt));
+        sections.coder.extend(self.shell.prompt_section());
         sections
             .coder
             .extend(templates::plan_section(self.home.as_deref(), &self.cwd));

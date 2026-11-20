@@ -1,14 +1,28 @@
+//! The `shell` tool, the built-in deny categories, and the one function
+//! that starts every command anvil runs for the model or a check:
+//! [`run_command`], which clears the environment and starts the command
+//! through the shell, directly as an argument vector (allowlist mode), or
+//! in a container.
+//!
+//! Matching command text, as the deny categories do, is a guard rail and
+//! not a security boundary: a shell can hide a command from any text
+//! match. The boundaries are allowlist mode, where no shell interprets the
+//! command, and the container executor.
+
+use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anvil_types::child_env;
+use anvil_types::shell::{ContainerSettings, program_name, split_command};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 
-use super::{Access, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for};
+use super::{Access, Blocked, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for};
 
 /// Timeout when the model does not set one.
 pub const DEFAULT_TIMEOUT_S: u64 = 120;
@@ -22,13 +36,260 @@ pub const MAX_TIMEOUT_S: u64 = 600;
 /// Bytes of output kept in memory; the registry caps what the model sees.
 const MEMORY_CAP: usize = 1024 * 1024;
 
-/// Substrings that make a command refuse to run without an `allow` rule.
+/// Destructive substrings that make a command refuse to run unless a rule
+/// names them, matched without regard to case.
 pub const BLOCKED_COMMANDS: [&str; 4] = [
     "rm -rf",
     "Remove-Item -Recurse",
     "git push --force",
     "git reset --hard",
 ];
+
+/// Programs that reach the network: the network clients category.
+pub const NETWORK_CLIENTS: [&str; 15] = [
+    "curl",
+    "wget",
+    "invoke-webrequest",
+    "iwr",
+    "invoke-restmethod",
+    "irm",
+    "nc",
+    "ncat",
+    "netcat",
+    "ssh",
+    "scp",
+    "sftp",
+    "ftp",
+    "start-bitstransfer",
+    "bitsadmin",
+];
+
+/// Programs that raise privileges: the privilege tools category.
+pub const PRIVILEGE_TOOLS: [&str; 3] = ["sudo", "runas", "doas"];
+
+/// Package managers and the subcommands that install packages, which runs
+/// code from the network: the package installs category.
+const PACKAGE_INSTALLS: [(&str, &[&str]); 5] = [
+    ("pip", &["install"]),
+    ("pip3", &["install"]),
+    ("npm", &["install", "i", "add", "ci"]),
+    ("cargo", &["install"]),
+    ("gem", &["install"]),
+];
+
+/// git options that take the next word as their value.
+const GIT_OPTIONS_WITH_VALUE: [&str; 5] = ["-c", "-C", "--git-dir", "--work-tree", "--namespace"];
+
+/// Characters that end a word when looking for denied programs: whitespace
+/// and every shell metacharacter, so `x;curl y` and `$(curl y)` are found.
+const WORD_BREAKS: &str = ";&|<>()`{}\"'$";
+
+/// Which built-in deny category a command falls in, if any.
+///
+/// The categories apply in every shell mode: network clients, `git push`,
+/// `git remote add` and `set-url`, `git clone`, package installs (`pip
+/// install`, `npm install`, `cargo install`, `gem install`), privilege
+/// tools (`sudo`, `runas`, `doas`) and the destructive substrings of
+/// [`BLOCKED_COMMANDS`]. The command is split into words at whitespace and
+/// at every shell metacharacter; each word is compared by its program
+/// name, without folder or extension. This is a text match: a guard rail
+/// that a shell can get around, not a boundary.
+///
+/// # Arguments
+///
+/// * `command` - The command line.
+///
+/// # Returns
+///
+/// The matched phrase (such as `git push` or `curl`) and the category's
+/// name, or `None`.
+pub fn deny_category(command: &str) -> Option<(String, &'static str)> {
+    let lower = command.to_ascii_lowercase();
+    if let Some(blocked) = BLOCKED_COMMANDS
+        .iter()
+        .find(|blocked| lower.contains(&blocked.to_ascii_lowercase()))
+    {
+        return Some(((*blocked).to_owned(), "destructive commands"));
+    }
+    let words: Vec<String> = lower
+        .split(|c: char| c.is_whitespace() || WORD_BREAKS.contains(c))
+        .filter(|word| !word.is_empty())
+        .map(program_name)
+        .collect();
+    for (index, word) in words.iter().enumerate() {
+        if NETWORK_CLIENTS.contains(&word.as_str()) {
+            return Some((word.clone(), "network clients"));
+        }
+        if PRIVILEGE_TOOLS.contains(&word.as_str()) {
+            return Some((word.clone(), "privilege tools"));
+        }
+        let rest = &words[index + 1..];
+        if word == "git"
+            && let Some(phrase) = git_denied(rest)
+        {
+            return Some((phrase, "git commands that reach or change remotes"));
+        }
+        if let Some((manager, verbs)) = PACKAGE_INSTALLS.iter().find(|(name, _)| name == word)
+            && rest
+                .iter()
+                .find(|arg| !arg.starts_with('-'))
+                .is_some_and(|verb| verbs.contains(&verb.as_str()))
+        {
+            return Some((format!("{manager} install"), "package installs"));
+        }
+    }
+    None
+}
+
+/// The denied git subcommand among the words after `git`, if any.
+fn git_denied(rest: &[String]) -> Option<String> {
+    let mut words = rest.iter();
+    let subcommand = loop {
+        let word = words.next()?;
+        if GIT_OPTIONS_WITH_VALUE.contains(&word.as_str()) {
+            words.next();
+        } else if !word.starts_with('-') {
+            break word;
+        }
+    };
+    match subcommand.as_str() {
+        "push" | "clone" => Some(format!("git {subcommand}")),
+        "remote" => {
+            let action = words.find(|word| !word.starts_with('-'))?;
+            matches!(action.as_str(), "add" | "set-url").then(|| format!("git remote {action}"))
+        }
+        _ => None,
+    }
+}
+
+/// How commands start: through the shell or directly, on the host or in a
+/// container.
+#[derive(Debug, Clone, Default)]
+pub struct Runner {
+    /// Split the command with the conservative parser and start the program
+    /// directly, with no shell interpreter (allowlist mode).
+    pub direct: bool,
+    /// Run commands in a container instead of on the host.
+    pub container: Option<Container>,
+}
+
+/// The container executor: the runtime program and its settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Container {
+    /// The program that starts containers: `docker` or `podman`, or a
+    /// stand-in in tests.
+    pub program: String,
+    /// The image and limits.
+    pub settings: ContainerSettings,
+}
+
+impl Container {
+    /// The executor for `settings`, started through its runtime.
+    ///
+    /// # Arguments
+    ///
+    /// * `settings` - The `[shell.container]` table.
+    ///
+    /// # Returns
+    ///
+    /// The executor.
+    pub fn new(settings: ContainerSettings) -> Self {
+        Self {
+            program: settings.runtime.program().to_owned(),
+            settings,
+        }
+    }
+}
+
+/// Where the workspace is mounted inside a container.
+pub const CONTAINER_WORKSPACE: &str = "/workspace";
+
+/// The arguments that run `command` in a container: no network, the
+/// workspace as the only folder from the host (read-write, at
+/// [`CONTAINER_WORKSPACE`]), a read-only root file system with an
+/// in-memory `/tmp`, the configured non-root user, every capability
+/// dropped, no privilege gain, and the process and memory limits. No
+/// variable of the host reaches the container; it gets `HOME=/tmp` and
+/// `PYTHONDONTWRITEBYTECODE=1`.
+///
+/// # Arguments
+///
+/// * `settings` - The image and limits.
+/// * `name` - The container name, so a timed-out run can be killed.
+/// * `workspace` - The project root on the host.
+/// * `command` - What runs inside: the program and its arguments.
+///
+/// # Returns
+///
+/// The arguments for the runtime program, `run` first.
+///
+/// # Errors
+///
+/// When the workspace path holds a `,`, which would end the mount
+/// specification early.
+pub fn container_args(
+    settings: &ContainerSettings,
+    name: &str,
+    workspace: &Path,
+    command: &[String],
+) -> Result<Vec<String>, String> {
+    let shown = workspace.display().to_string();
+    let source = shown.strip_prefix(r"\\?\").unwrap_or(&shown).to_owned();
+    if source.contains(',') {
+        return Err(format!(
+            "the workspace path {source} holds a comma, which a container mount cannot name"
+        ));
+    }
+    let pids = settings.pids_limit.to_string();
+    let mount = format!("type=bind,source={source},target={CONTAINER_WORKSPACE}");
+    let bytecode = format!("{NO_BYTECODE}=1");
+    let mut args: Vec<String> = [
+        "run",
+        "--rm",
+        "--name",
+        name,
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--user",
+        &settings.user,
+        "--pids-limit",
+        &pids,
+        "--memory",
+        &settings.memory,
+        "--mount",
+        &mount,
+        "--workdir",
+        CONTAINER_WORKSPACE,
+        "--env",
+        "HOME=/tmp",
+        "--env",
+        &bytecode,
+        &settings.image,
+    ]
+    .iter()
+    .map(|arg| (*arg).to_owned())
+    .collect();
+    args.extend(command.iter().cloned());
+    Ok(args)
+}
+
+/// A name for one container run, unique within this process.
+fn container_name() -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "anvil-{}-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 /// The program that runs commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,15 +414,13 @@ impl Tool for ShellTool {
         Access::Write
     }
 
-    fn blocked_reason(&self, args: &Value) -> Option<String> {
-        let command = args
-            .get("command")
-            .and_then(Value::as_str)?
-            .to_ascii_lowercase();
-        BLOCKED_COMMANDS
-            .iter()
-            .find(|blocked| command.contains(&blocked.to_ascii_lowercase()))
-            .map(|blocked| format!("command contains `{blocked}`"))
+    fn blocked_reason(&self, args: &Value) -> Option<Blocked> {
+        let command = args.get("command").and_then(Value::as_str)?;
+        let (phrase, category) = deny_category(command)?;
+        Some(Blocked {
+            reason: format!("command contains `{phrase}` ({category})"),
+            phrase,
+        })
     }
 
     fn run<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> ToolFuture<'a> {
@@ -253,12 +512,97 @@ impl CommandRun {
     }
 }
 
-/// Spawns a command in the context's shell and streams its output until it
-/// exits or times out.
+/// The command that starts `script` as the context's runner says, with a
+/// cleared environment, before its working folder and streams are set.
+///
+/// # Errors
+///
+/// When the command does not split in direct mode, or the container
+/// cannot name the workspace.
+fn prepare(
+    ctx: &ToolContext,
+    script: &str,
+    container_name: &str,
+) -> std::io::Result<tokio::process::Command> {
+    let invalid = |reason: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, reason);
+    let argv = if ctx.runner.direct {
+        Some(split_command(script).map_err(invalid)?)
+    } else {
+        None
+    };
+    let mut command = match (&ctx.runner.container, argv) {
+        (Some(container), argv) => {
+            let inside =
+                argv.unwrap_or_else(|| vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()]);
+            let args = container_args(&container.settings, container_name, &ctx.cwd, &inside)
+                .map_err(invalid)?;
+            let mut command = tokio::process::Command::new(host_program(&container.program));
+            command.args(args);
+            command
+        }
+        (None, Some(argv)) => {
+            let mut command = tokio::process::Command::new(host_program(&argv[0]));
+            command.args(&argv[1..]);
+            command
+        }
+        (None, None) => ctx.shell.command(script),
+    };
+    command.env_clear().envs(child_env::vars());
+    // Bytecode caches written by a test run would land in the session's diff,
+    // where the reviewer reads them as unrelated changes.
+    command.env(NO_BYTECODE, "1");
+    Ok(command)
+}
+
+/// The program to start for `name`: on Windows the file found on the
+/// `PATH` children receive, trying each `PATHEXT` extension, because the
+/// system only adds `.exe` itself and tools such as `npm` are `.cmd`
+/// files; elsewhere, and for a path, the name as given, which the system
+/// looks up on that `PATH`.
+fn host_program(name: &str) -> std::ffi::OsString {
+    if cfg!(windows) && !name.contains(['/', '\\']) {
+        let vars = child_env::vars();
+        let value = |key: &str| {
+            vars.iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(key))
+                .map(|(_, value)| value.clone())
+        };
+        let extensions = value("PATHEXT")
+            .map(|text| text.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_else(|| ".com;.exe;.bat;.cmd".to_owned());
+        let has_extension = Path::new(name).extension().is_some();
+        let dirs: Vec<std::path::PathBuf> = value("PATH")
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default();
+        for dir in dirs {
+            if has_extension && dir.join(name).is_file() {
+                return dir.join(name).into_os_string();
+            }
+            for extension in extensions.split(';').filter(|ext| !ext.is_empty()) {
+                let candidate = dir.join(format!("{name}{extension}"));
+                if candidate.is_file() {
+                    return candidate.into_os_string();
+                }
+            }
+        }
+    }
+    name.into()
+}
+
+/// Starts a command as the context's runner says and streams its output
+/// until it exits or times out.
+///
+/// Every command anvil runs for the model, a check or an acceptance
+/// command goes through here. The environment is cleared and refilled from
+/// [`child_env::vars`]. With [`Runner::direct`] the command is split by the
+/// conservative parser and its program started with no shell; otherwise it
+/// runs in the context's shell. With [`Runner::container`] it runs inside a
+/// container built by [`container_args`] instead, and a timed-out container
+/// is killed by name.
 ///
 /// # Arguments
 ///
-/// * `ctx` - Supplies the shell and working directory.
+/// * `ctx` - Supplies the runner, the shell and the working directory.
 /// * `script` - The command line.
 /// * `timeout` - When to kill the process.
 ///
@@ -268,17 +612,15 @@ impl CommandRun {
 ///
 /// # Errors
 ///
-/// When the shell cannot be spawned.
+/// When the command cannot be prepared (it does not split in direct mode)
+/// or the program cannot be spawned.
 pub async fn run_command(
     ctx: &ToolContext,
     script: &str,
     timeout: Duration,
 ) -> std::io::Result<CommandRun> {
-    let mut command = ctx.shell.command(script);
-    command.env_clear().envs(child_env::vars());
-    // Bytecode caches written by a test run would land in the session's diff,
-    // where the reviewer reads them as unrelated changes.
-    command.env(NO_BYTECODE, "1");
+    let name = container_name();
+    let mut command = prepare(ctx, script, &name)?;
     let mut child = command
         .current_dir(&ctx.cwd)
         .stdin(Stdio::null())
@@ -320,19 +662,37 @@ pub async fn run_command(
             }
         }
     }
+    if !run.timed_out {
+        match tokio::time::timeout_at(deadline, child.wait()).await {
+            Ok(Ok(status)) => run.exit_code = status.code(),
+            Ok(Err(_)) => run.exit_code = None,
+            Err(_elapsed) => run.timed_out = true,
+        }
+    }
     if run.timed_out {
         let _ = child.kill().await;
-        return Ok(run);
-    }
-    match tokio::time::timeout_at(deadline, child.wait()).await {
-        Ok(Ok(status)) => run.exit_code = status.code(),
-        Ok(Err(_)) => run.exit_code = None,
-        Err(_elapsed) => {
-            run.timed_out = true;
-            let _ = child.kill().await;
+        if let Some(container) = &ctx.runner.container {
+            kill_container(container, &name).await;
         }
     }
     Ok(run)
+}
+
+/// Stops a container whose runtime client was killed, because the client
+/// going away does not stop the container itself.
+async fn kill_container(container: &Container, name: &str) {
+    let result = tokio::process::Command::new(host_program(&container.program))
+        .args(["kill", name])
+        .env_clear()
+        .envs(child_env::vars())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+    if let Err(error) = result {
+        tracing::warn!(%error, name, "could not kill the timed-out container");
+    }
 }
 
 /// Forwards chunks from a child pipe to the collector until EOF.
@@ -355,6 +715,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::tools::ToolOutcome;
 
     fn ctx() -> ToolContext {
         ToolContext::new(std::env::temp_dir())
@@ -552,6 +913,494 @@ mod tests {
             std::fs::read_to_string(full)
                 .expect("file")
                 .contains("line 3000 ")
+        );
+    }
+
+    /// A registry that allows every `shell` call and answers every prompt
+    /// with yes: everything a rule, `--yes` or a person could grant.
+    fn shell_registry(rules: &str) -> crate::tools::ToolRegistry {
+        use crate::tools::{Permissions, PromptAnswer, StaticPrompt, ToolRegistry};
+        ToolRegistry::with_builtins(
+            Permissions::from_toml(rules, None).expect("rules"),
+            Box::new(StaticPrompt(PromptAnswer::Yes)),
+        )
+    }
+
+    async fn shell_outcome(
+        registry: &crate::tools::ToolRegistry,
+        ctx: &ToolContext,
+        command: &str,
+    ) -> crate::tools::Execution {
+        let call = crate::provider::types::ToolCall {
+            id: "c1".to_owned(),
+            name: SHELL_TOOL_NAME.to_owned(),
+            arguments_json: json!({ "command": command }).to_string(),
+        };
+        registry.execute(&call, ctx).await
+    }
+
+    /// One command per deny category, with the phrase each one names.
+    const DENIED: [(&str, &str); 22] = [
+        ("curl https://example.com", "curl"),
+        ("wget -q https://example.com", "wget"),
+        ("Invoke-WebRequest https://example.com", "invoke-webrequest"),
+        ("iwr https://example.com", "iwr"),
+        ("Invoke-RestMethod https://example.com", "invoke-restmethod"),
+        ("irm https://example.com", "irm"),
+        ("nc -l 4444", "nc"),
+        ("ssh host", "ssh"),
+        ("scp a host:b", "scp"),
+        ("sftp host", "sftp"),
+        ("ftp host", "ftp"),
+        ("git push origin main", "git push"),
+        (
+            "git remote add evil https://example.com/r.git",
+            "git remote add",
+        ),
+        (
+            "git remote set-url origin https://example.com/r.git",
+            "git remote set-url",
+        ),
+        ("git clone https://example.com/r.git", "git clone"),
+        ("pip install requests", "pip install"),
+        ("npm install left-pad", "npm install"),
+        ("cargo install ripgrep", "cargo install"),
+        ("sudo ls", "sudo"),
+        ("runas /user:admin cmd", "runas"),
+        ("rm -rf build", "rm -rf"),
+        ("git reset --hard HEAD~1", "git reset --hard"),
+    ];
+
+    #[test]
+    fn each_deny_category_is_recognised_and_hidden_words_are_found() {
+        for (command, phrase) in DENIED {
+            let (found, _) = deny_category(command).unwrap_or_else(|| panic!("{command}"));
+            assert_eq!(found, phrase, "{command}");
+        }
+        for (command, phrase) in [
+            ("echo x;curl y", "curl"),
+            ("echo $(wget y)", "wget"),
+            ("x=`curl y`", "curl"),
+            (r"C:\tools\curl.exe -s y", "curl"),
+            ("/usr/bin/ssh host", "ssh"),
+            ("git -C repo push", "git push"),
+            ("git -c a.b=c push", "git push"),
+            ("python -m pip install x", "pip install"),
+            ("npm i x", "npm install"),
+            ("Remove-Item -Recurse x", "Remove-Item -Recurse"),
+            ("git push --force", "git push --force"),
+        ] {
+            let (found, _) = deny_category(command).unwrap_or_else(|| panic!("{command}"));
+            assert_eq!(found, phrase, "{command}");
+        }
+        for command in [
+            "git status",
+            "git remote -v",
+            "git log -- docs/ssh.md",
+            "cargo test -p anvil-core",
+            "npm test",
+            "pip list",
+            "cat .ssh-notes",
+        ] {
+            assert_eq!(deny_category(command), None, "{command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn each_deny_category_is_refused_under_yes_and_a_broad_allow() {
+        let dir = tempfile::tempdir().expect("dir");
+        let ctx = ToolContext::new(dir.path());
+        for rules in [
+            "allow = [\"shell\"]\n",
+            "allow = [\"shell:*\"]\n",
+            "default = \"allow\"\n",
+        ] {
+            let registry = shell_registry(rules);
+            for (command, phrase) in DENIED {
+                let run = shell_outcome(&registry, &ctx, command).await;
+                assert_eq!(run.outcome, ToolOutcome::Blocked, "{rules} {command}");
+                assert!(
+                    run.result.content.contains(phrase),
+                    "{command}: {}",
+                    run.result.content
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rule_that_names_the_command_lifts_its_deny_category() {
+        let registry = shell_registry("allow = [\"shell:git push origin *\"]\n");
+        let dir = tempfile::tempdir().expect("dir");
+        let ctx = ToolContext::new(dir.path());
+        let permit = |command: &str| {
+            registry.permit(SHELL_TOOL_NAME, &json!({ "command": command }), dir.path())
+        };
+        assert_eq!(permit("git push origin main"), Ok(()), "named by the rule");
+        let refused = permit("git push upstream main").expect_err("not named");
+        assert!(refused.contains("git push"), "{refused}");
+        let run = shell_outcome(&registry, &ctx, "curl https://example.com").await;
+        assert_eq!(run.outcome, ToolOutcome::Blocked);
+    }
+
+    #[tokio::test]
+    async fn allowlist_mode_refuses_shell_metacharacters() {
+        let mut registry = shell_registry("allow = [\"shell\"]\n");
+        registry
+            .permissions()
+            .limit_shell(&["git *".to_owned()], "the test's [shell] allow")
+            .expect("patterns");
+        let dir = tempfile::tempdir().expect("dir");
+        let ctx = ToolContext::new(dir.path());
+        for command in [
+            "git status; echo pwned",
+            "git status && echo pwned",
+            "git status || echo pwned",
+            "git status | echo pwned",
+            "git status & echo pwned",
+            "git status > pwned.txt",
+            "git status < input",
+            "git `echo status`",
+            "git $(echo status)",
+            "git ${X}",
+            "git {status}",
+            "git (status)",
+            "git status\necho pwned",
+            "git status\r\necho pwned",
+            "\"git status",
+        ] {
+            let run = shell_outcome(&registry, &ctx, command).await;
+            assert_eq!(run.outcome, ToolOutcome::Blocked, "{command:?}");
+            assert!(!run.result.content.contains("pwned\n"), "{command:?} ran");
+        }
+        assert!(!dir.path().join("pwned.txt").exists());
+        let run = shell_outcome(&registry, &ctx, "cargo build").await;
+        assert_eq!(run.outcome, ToolOutcome::Blocked, "not on the allowlist");
+        registry.unregister(SHELL_TOOL_NAME);
+        let run = shell_outcome(&registry, &ctx, "git status").await;
+        assert_eq!(run.outcome, ToolOutcome::UnknownTool, "mode off: no tool");
+    }
+
+    /// Whether `git` can be started, for the tests that need a real program.
+    fn has_git() -> bool {
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    #[tokio::test]
+    async fn allowlist_mode_starts_the_program_without_a_shell() {
+        if !has_git() {
+            return;
+        }
+        let registry = shell_registry("allow = [\"shell\"]\n");
+        registry
+            .permissions()
+            .limit_shell(&["git *".to_owned()], "the test's [shell] allow")
+            .expect("patterns");
+        let dir = tempfile::tempdir().expect("dir");
+        let ctx = ToolContext::new(dir.path());
+        let run = shell_outcome(
+            &registry,
+            &ctx,
+            "git -c anvil.probe=$HOME config --get anvil.probe",
+        )
+        .await;
+        assert_eq!(
+            run.outcome,
+            ToolOutcome::Completed,
+            "{}",
+            run.result.content
+        );
+        assert!(
+            run.result.content.starts_with("$HOME"),
+            "no shell expanded the variable: {}",
+            run.result.content
+        );
+        let direct = ToolContext {
+            runner: Runner {
+                direct: true,
+                container: None,
+            },
+            ..ToolContext::new(dir.path())
+        };
+        let error = run_command(&direct, "git status; id", Duration::from_secs(30))
+            .await
+            .expect_err("a direct run refuses metacharacters itself");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    /// The variable that makes a re-run of this test binary print what a
+    /// child process sees.
+    const ENV_PROBE: &str = "ANVIL_TEST_ENV_PROBE";
+
+    /// Variables the outer run sets, with the value each must not leak.
+    const PROBE_SECRETS: [(&str, &str); 6] = [
+        ("OPENAI_API_KEY", "probe-openai-value"),
+        ("ANVIL_ENDPOINT_KEY", "probe-endpoint-value"),
+        ("GITHUB_TOKEN", "probe-github-value"),
+        ("DB_PASSWORD", "probe-password-value"),
+        ("CLIENT_SECRET", "probe-secret-value"),
+        ("ANVIL_HOME", "probe-anvil-home-value"),
+    ];
+
+    #[tokio::test]
+    async fn a_child_process_that_prints_its_environment_shows_no_key() {
+        if std::env::var_os(ENV_PROBE).is_some() {
+            child_env::set_pass_env(vec!["LISTED_TOKEN".to_owned()]);
+            let command = if cfg!(windows) {
+                "Get-ChildItem env: | ForEach-Object { \"$($_.Name)=$($_.Value)\" }"
+            } else {
+                "env"
+            };
+            let run = run_command(&ctx(), command, Duration::from_secs(30))
+                .await
+                .expect("spawns");
+            let output = run.text();
+            for (name, value) in PROBE_SECRETS {
+                assert!(
+                    !output.contains(value),
+                    "{name} reached the child:\n{output}"
+                );
+            }
+            assert!(
+                output.contains("probe-listed-value"),
+                "a name listed in pass_env is passed:\n{output}"
+            );
+            return;
+        }
+        let exe = std::env::current_exe().expect("test binary");
+        let mut command = std::process::Command::new(exe);
+        command
+            .args([
+                "--exact",
+                "tools::shell::tests::a_child_process_that_prints_its_environment_shows_no_key",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(ENV_PROBE, "1")
+            .env("LISTED_TOKEN", "probe-listed-value");
+        for (name, value) in PROBE_SECRETS {
+            command.env(name, value);
+        }
+        let output = command.output().expect("re-runs the test binary");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{text}");
+        assert!(text.contains("1 passed"), "the probe ran: {text}");
+    }
+
+    fn container_settings() -> ContainerSettings {
+        toml::from_str("image = \"registry.example/build@sha256:0123\"\n").expect("settings")
+    }
+
+    #[test]
+    fn the_container_arguments_drop_network_root_capabilities_and_host_mounts() {
+        let workspace = std::path::PathBuf::from("/work/repo");
+        let command = vec!["cargo".to_owned(), "test".to_owned()];
+        let args = container_args(&container_settings(), "anvil-1", &workspace, &command)
+            .expect("arguments");
+        let pairs: Vec<(&str, &str)> = args
+            .windows(2)
+            .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+            .collect();
+        for expected in [
+            ("--network", "none"),
+            ("--cap-drop", "ALL"),
+            ("--security-opt", "no-new-privileges"),
+            ("--user", "65534:65534"),
+            ("--pids-limit", "256"),
+            ("--memory", "2g"),
+            ("--tmpfs", "/tmp"),
+            ("--workdir", CONTAINER_WORKSPACE),
+            ("--name", "anvil-1"),
+        ] {
+            assert!(pairs.contains(&expected), "{expected:?} in {args:?}");
+        }
+        assert_eq!(args[0], "run");
+        assert!(args.contains(&"--rm".to_owned()));
+        assert!(args.contains(&"--read-only".to_owned()));
+        let mounts: Vec<&String> = args
+            .iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| matches!(flag.as_str(), "--mount" | "-v" | "--volume"))
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(
+            mounts,
+            [&format!(
+                "type=bind,source={},target={CONTAINER_WORKSPACE}",
+                workspace.display()
+            )],
+            "the workspace is the only host folder"
+        );
+        assert!(!args.iter().any(|arg| arg.contains("privileged")));
+        let env: Vec<&String> = args
+            .iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| matches!(flag.as_str(), "--env" | "-e" | "--env-file"))
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(
+            env,
+            ["HOME=/tmp", "PYTHONDONTWRITEBYTECODE=1"],
+            "no host variable reaches the container"
+        );
+        let image_at = args
+            .iter()
+            .position(|arg| arg == "registry.example/build@sha256:0123")
+            .expect("image");
+        assert_eq!(
+            &args[image_at + 1..],
+            ["cargo", "test"],
+            "the command follows the image"
+        );
+        assert!(
+            container_args(&container_settings(), "n", Path::new("/work/a,b"), &command).is_err()
+        );
+        let windows = container_args(
+            &container_settings(),
+            "n",
+            Path::new(r"\\?\D:\work\repo"),
+            &command,
+        )
+        .expect("arguments");
+        assert!(
+            windows
+                .iter()
+                .any(|arg| arg.contains(r"source=D:\work\repo,")),
+            "{windows:?}"
+        );
+    }
+
+    /// A program that prints each argument on its own line, standing in for
+    /// `docker` or `podman`.
+    fn stand_in_runtime(dir: &Path) -> String {
+        if cfg!(windows) {
+            let path = dir.join("runtime.cmd");
+            std::fs::write(
+                &path,
+                "@echo off\r\n:next\r\nif \"%~1\"==\"\" goto :eof\r\necho(%~1\r\nshift\r\ngoto next\r\n",
+            )
+            .expect("write");
+            path.display().to_string()
+        } else {
+            let path = dir.join("runtime");
+            std::fs::write(
+                &path,
+                "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n",
+            )
+            .expect("write");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod");
+            }
+            path.display().to_string()
+        }
+    }
+
+    #[tokio::test]
+    async fn commands_run_through_a_stand_in_container_runtime() {
+        let tools = tempfile::tempdir().expect("tools");
+        let workspace = tempfile::tempdir().expect("workspace");
+        let container = Container {
+            program: stand_in_runtime(tools.path()),
+            settings: container_settings(),
+        };
+        let mut ctx = ToolContext::new(workspace.path());
+        ctx.runner.container = Some(container.clone());
+        let run = run_command(&ctx, "cargo test -p x", Duration::from_secs(30))
+            .await
+            .expect("spawns");
+        let text = run.text();
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        for expected in [
+            "run",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "no-new-privileges",
+            "65534:65534",
+            "registry.example/build@sha256:0123",
+            "sh",
+            "-c",
+            "cargo test -p x",
+        ] {
+            assert!(lines.contains(&expected), "{expected} in {lines:?}");
+        }
+        ctx.runner.direct = true;
+        let run = run_command(&ctx, "cargo test -p x", Duration::from_secs(30))
+            .await
+            .expect("spawns");
+        let text = run.text();
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        let image_at = lines
+            .iter()
+            .position(|line| *line == "registry.example/build@sha256:0123")
+            .expect("image");
+        assert_eq!(
+            &lines[image_at + 1..],
+            ["cargo", "test", "-p", "x"],
+            "allowlist mode passes the argument vector, no shell"
+        );
+    }
+
+    /// The image the real container test uses unless
+    /// `ANVIL_CONTAINER_IMAGE` names another.
+    #[cfg(target_os = "linux")]
+    const TEST_IMAGE: &str = "alpine:3.20";
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "needs docker; CI runs it with ANVIL_CONTAINER_TEST=1 and --ignored"]
+    async fn real_container_has_no_network_no_root_and_a_read_only_root() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("ANVIL_CONTAINER_TEST").is_none() {
+            eprintln!("skipped: set ANVIL_CONTAINER_TEST=1 to run against docker");
+            return;
+        }
+        let image =
+            std::env::var("ANVIL_CONTAINER_IMAGE").unwrap_or_else(|_| TEST_IMAGE.to_owned());
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::set_permissions(workspace.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        std::fs::write(workspace.path().join("hello.txt"), "hello from the host\n").expect("write");
+        let settings: ContainerSettings =
+            toml::from_str(&format!("image = \"{image}\"\n")).expect("settings");
+        let mut ctx = ToolContext::new(workspace.path());
+        ctx.runner.container = Some(Container::new(settings));
+        let run = |command: &'static str| {
+            let ctx = ctx.clone();
+            async move {
+                run_command(&ctx, command, Duration::from_secs(120))
+                    .await
+                    .expect("docker starts")
+            }
+        };
+        let id = run("id -u").await;
+        assert!(id.succeeded(), "{}", id.text());
+        assert_eq!(id.text().trim(), "65534", "not root");
+        let read = run("cat hello.txt").await;
+        assert!(
+            read.text().contains("hello from the host"),
+            "{}",
+            read.text()
+        );
+        let write = run("touch /etc/anvil-probe").await;
+        assert!(!write.succeeded(), "the root file system is read-only");
+        let network = run("wget -q -T 5 -O /dev/null http://1.1.1.1").await;
+        assert!(!network.succeeded(), "no network: {}", network.text());
+        let interfaces = run("ls /sys/class/net").await;
+        assert_eq!(interfaces.text().trim(), "lo", "only loopback");
+        let env = run("env").await;
+        assert!(
+            !env.text().contains("CARGO_HOME"),
+            "no host variable: {}",
+            env.text()
         );
     }
 }

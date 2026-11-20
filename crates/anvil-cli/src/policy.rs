@@ -13,8 +13,10 @@ use std::time::{Duration, SystemTime};
 
 use anvil_core::context::project_sessions_root;
 use anvil_core::net::host_port;
+use anvil_types::AnvilConfig;
 use anvil_types::config::{LoadedConfig, PermissionRules, Unmatched};
-use anvil_types::policy::{self, LoadedPolicy, Policy};
+use anvil_types::policy::{self, LoadedPolicy, Policy, ShellPolicy};
+use anvil_types::shell::{CommandPattern, ShellMode, split_command};
 
 /// Loads the policy from the one system path, after checking that only an
 /// administrator can change it. A file that exists but cannot be used
@@ -284,6 +286,7 @@ pub fn check_config(policy: &LoadedPolicy, loaded: &LoadedConfig) -> anyhow::Res
             ),
         ));
     }
+    check_shell(&p.shell, config, &source)?;
     if let Some(rules) = &config.permissions {
         if !rules.allow_tools.is_empty() && !p.permissions.allow_allow_tool {
             return Err(conflict(
@@ -313,6 +316,104 @@ pub fn check_config(policy: &LoadedPolicy, loaded: &LoadedConfig) -> anyhow::Res
         ));
     }
     Ok(())
+}
+
+/// Refuses user `[shell]` settings and a `[tools] check` command that the
+/// policy's `[shell]` table forbids: a looser mode, another executor, a
+/// container of the user's own, and a check command that the shell mode
+/// would not let run.
+///
+/// # Arguments
+///
+/// * `policy` - The policy's `[shell]` table.
+/// * `config` - The user's configuration.
+/// * `source` - Where the configuration was read from, for messages.
+///
+/// # Errors
+///
+/// Naming the policy key and the setting that conflicts with it.
+fn check_shell(policy: &ShellPolicy, config: &AnvilConfig, source: &str) -> anyhow::Result<()> {
+    let user = &config.shell;
+    let mode_key = format!("[shell] mode = \"{}\"", policy.mode.as_str());
+    if let Some(mode) = user.mode
+        && mode.strictness() < policy.mode.strictness()
+    {
+        return Err(conflict(
+            &mode_key,
+            &format!("[shell] mode = \"{}\" in {source}", mode.as_str()),
+        ));
+    }
+    if let Some(executor) = user.executor
+        && executor != policy.executor
+    {
+        return Err(conflict(
+            &format!("[shell] executor = \"{}\"", policy.executor.as_str()),
+            &format!(
+                "[shell] executor = \"{}\" in {source}; the policy alone decides where commands run",
+                executor.as_str()
+            ),
+        ));
+    }
+    if user.container.is_some() {
+        return Err(conflict(
+            &format!("[shell] executor = \"{}\"", policy.executor.as_str()),
+            &format!("[shell.container] in {source}; the policy alone names the container"),
+        ));
+    }
+    let Some(check) = &config.tools.check else {
+        return Ok(());
+    };
+    match policy.mode {
+        ShellMode::Off => Err(conflict(
+            &mode_key,
+            &format!("[tools] check = \"{check}\" in {source}, which runs a command"),
+        )),
+        ShellMode::Allowlist => {
+            let allowed = split_command(check).is_ok_and(|argv| {
+                policy.allow.iter().any(|pattern| {
+                    CommandPattern::parse(pattern).is_ok_and(|pattern| pattern.matches(&argv))
+                })
+            });
+            if allowed {
+                Ok(())
+            } else {
+                Err(conflict(
+                    "[shell] allow",
+                    &format!("[tools] check = \"{check}\" in {source}, which no pattern allows"),
+                ))
+            }
+        }
+        ShellMode::Ask => Ok(()),
+    }
+}
+
+/// Refuses `anvil build` when the shell is off: every work item is done
+/// only when its acceptance command has run.
+///
+/// # Arguments
+///
+/// * `policy` - The policy, if any.
+/// * `shell` - The shell settings in force.
+///
+/// # Errors
+///
+/// Naming the policy key, or the user's own setting when unmanaged.
+pub fn check_build_shell(
+    policy: Option<&LoadedPolicy>,
+    shell: &crate::wiring::ShellSettings,
+) -> anyhow::Result<()> {
+    if shell.mode != ShellMode::Off {
+        return Ok(());
+    }
+    if policy.is_some_and(|loaded| loaded.policy.shell.mode == ShellMode::Off) {
+        return Err(conflict(
+            "[shell] mode = \"off\"",
+            "anvil build, which runs each work item's acceptance command",
+        ));
+    }
+    Err(anyhow::anyhow!(
+        "anvil build runs each work item's acceptance command, and [shell] mode = \"off\" in your configuration turns the shell off"
+    ))
 }
 
 /// The token and dollar caps of an `anvil build`.

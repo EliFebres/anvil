@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, ValidationError};
+use crate::shell::ShellConfig;
 
 /// Directory that holds anvil configuration, in the home directory and in a repository.
 pub const CONFIG_DIR: &str = ".anvil";
@@ -68,6 +69,16 @@ summarizer = "endpoint"
 # Variables shell commands and hooks receive on top of the built-in list
 # (PATH, HOME, TEMP, the toolchain folders). Others, keys included, are not passed.
 # pass_env = ["JAVA_HOME"]
+
+# Optional. How the `shell` tool runs commands. "ask" (the default) runs
+# each command in the shell above after asking; matching command text there
+# is a guard rail, not a boundary. "allowlist" starts only commands that
+# match a pattern, as one program with plain arguments and no shell. "off"
+# removes the tool. executor = "container" runs commands in a container
+# without network access.
+# [shell]
+# mode = "allowlist"
+# allow = ["cargo test *", "cargo check *", "git diff *", "git status"]
 
 # Every key is optional; these are the defaults.
 # [limits]
@@ -173,6 +184,16 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # Variables shell commands and hooks receive on top of the built-in list
 # (PATH, HOME, TEMP, the toolchain folders). Others, keys included, are not passed.
 # pass_env = ["JAVA_HOME"]
+
+# Optional. How the `shell` tool runs commands. "ask" (the default) runs
+# each command in the shell above after asking; matching command text there
+# is a guard rail, not a boundary. "allowlist" starts only commands that
+# match a pattern, as one program with plain arguments and no shell. "off"
+# removes the tool. executor = "container" runs commands in a container
+# without network access.
+# [shell]
+# mode = "allowlist"
+# allow = ["cargo test *", "cargo check *", "git diff *", "git status"]
 
 # Every key is optional; these are the defaults.
 # [limits]
@@ -591,16 +612,20 @@ pub struct AnvilConfig {
     /// Rules for outbound requests.
     #[serde(default)]
     pub network: NetworkConfig,
+    /// How the `shell` tool runs commands: its mode, allowlist and executor.
+    #[serde(default)]
+    pub shell: ShellConfig,
 }
 
 impl AnvilConfig {
-    /// Checks every provider and that every role names a declared provider.
+    /// Checks every provider, that every role names a declared provider,
+    /// and that the `[shell]` table's keys fit together.
     ///
     /// # Returns
     ///
     /// `Ok(())` when all providers validate, `coder`, `summarizer` and
     /// (if set) `reviewer`, `planner` and `worker` each name a key in
-    /// `providers`.
+    /// `providers`, and `[shell]` is consistent.
     ///
     /// # Errors
     ///
@@ -620,7 +645,9 @@ impl AnvilConfig {
         if let Some(worker) = &self.roles.worker {
             self.check_role("worker", worker)?;
         }
-        Ok(())
+        self.shell
+            .validate()
+            .map_err(|reason| ValidationError::Shell { reason })
     }
 
     /// Fails unless `provider` is a key in `providers`.
@@ -934,9 +961,12 @@ mod tests {
         std::fs::create_dir_all(profile.parent().expect("parent")).expect("mkdir");
         std::fs::write(&profile, include_str!("../../../profiles/strict.toml")).expect("write");
         let loaded = load_profile(Some(home.path()), Some("strict")).expect("loads");
+        let shell = &loaded.config.shell;
+        assert_eq!(shell.mode, Some(crate::shell::ShellMode::Allowlist));
+        assert!(shell.allow.contains(&"cargo *".to_owned()));
         let rules = loaded.config.permissions.expect("a [permissions] table");
         assert_eq!(rules.unmatched, Some(Unmatched::Ask));
-        assert!(rules.shell_programs.contains(&"cargo".to_owned()));
+        assert!(rules.shell_programs.is_empty(), "folded into [shell] allow");
         assert!(!rules.allow.iter().any(|rule| rule.starts_with("shell")));
         assert!(rules.has_rules());
     }

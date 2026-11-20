@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
+use anvil_types::shell::{CommandPattern, split_command};
 use anvil_types::{PermissionRules, Unmatched};
 use globset::{Glob, GlobMatcher};
 use thiserror::Error;
@@ -137,6 +138,18 @@ impl Rule {
         })
     }
 
+    /// Whether this rule has a pattern whose text contains `phrase`, so it
+    /// names a blocked command rather than covering it by accident.
+    fn names(&self, phrase: &str) -> bool {
+        self.pattern.as_ref().is_some_and(|pattern| {
+            pattern
+                .glob()
+                .glob()
+                .to_ascii_lowercase()
+                .contains(&phrase.to_ascii_lowercase())
+        })
+    }
+
     /// Whether this rule covers the call.
     fn matches(&self, tool: &str, target: Option<&str>) -> bool {
         if self.tool != tool {
@@ -171,8 +184,47 @@ pub struct Permissions {
     /// [`Permissions::allow_from_project`]; they only decide a call no
     /// other rule decides.
     project_allow: Vec<Rule>,
-    /// The programs `shell` is limited to, or `None` for no limit.
-    shell_programs: Option<Vec<String>>,
+    /// The allowlists `shell` is limited to. A command must match a
+    /// pattern of every layer; no layer means no limit.
+    shell_allow: Vec<AllowLayer>,
+}
+
+/// One layer's `shell` allowlist: a `shell_programs` list or a `[shell]
+/// allow` list, from the user, a repository or a policy.
+#[derive(Debug, Clone)]
+struct AllowLayer {
+    /// Where the layer came from, for messages.
+    source: String,
+    /// The patterns; a command must match one of them.
+    patterns: Vec<CommandPattern>,
+}
+
+impl AllowLayer {
+    /// A layer from `shell_programs`: each program with any arguments.
+    fn from_programs(programs: &[String], source: &str) -> Result<Self, PermissionError> {
+        let patterns: Vec<String> = programs
+            .iter()
+            .map(|program| format!("{} *", program.trim()))
+            .collect();
+        Self::from_patterns(&patterns, source)
+    }
+
+    /// A layer from argument-prefix patterns such as `cargo test *`.
+    fn from_patterns(patterns: &[String], source: &str) -> Result<Self, PermissionError> {
+        let patterns = patterns
+            .iter()
+            .map(|text| {
+                CommandPattern::parse(text).map_err(|detail| PermissionError::InvalidRule {
+                    rule: text.clone(),
+                    detail,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            source: source.to_owned(),
+            patterns,
+        })
+    }
 }
 
 impl Permissions {
@@ -191,7 +243,7 @@ impl Permissions {
             deny: Vec::new(),
             forced_ask: Vec::new(),
             project_allow: Vec::new(),
-            shell_programs: None,
+            shell_allow: Vec::new(),
         }
     }
 
@@ -210,10 +262,19 @@ impl Permissions {
     ///
     /// # Errors
     ///
-    /// [`PermissionError::InvalidRule`] for a glob that does not compile.
+    /// [`PermissionError::InvalidRule`] for a glob that does not compile or
+    /// a `shell_programs` entry that is not a program name.
     pub fn from_rules(rules: &PermissionRules) -> Result<Self, PermissionError> {
         let parse_all = |rules: &[String]| -> Result<Vec<Rule>, PermissionError> {
             rules.iter().map(|rule| Rule::parse(rule)).collect()
+        };
+        let shell_allow = if rules.shell_programs.is_empty() {
+            Vec::new()
+        } else {
+            vec![AllowLayer::from_programs(
+                &rules.shell_programs,
+                "your shell_programs",
+            )?]
         };
         Ok(Self {
             path: None,
@@ -222,8 +283,7 @@ impl Permissions {
             deny: parse_all(&rules.deny)?,
             forced_ask: Vec::new(),
             project_allow: Vec::new(),
-            shell_programs: (!rules.shell_programs.is_empty())
-                .then(|| rules.shell_programs.clone()),
+            shell_allow,
             unmatched: rules.unmatched.map(Decision::from),
             file: rules.clone(),
         })
@@ -294,12 +354,13 @@ impl Permissions {
     /// * `deny` - Rules for calls to refuse.
     /// * `ask` - Rules for calls to ask about.
     /// * `shell_programs` - Programs `shell` is limited to; empty adds no
-    ///   limit. With a limit already in place, only programs on both lists
-    ///   stay allowed.
+    ///   limit. It is one more allowlist layer, so with a limit already in
+    ///   place only commands both allow stay allowed.
     ///
     /// # Errors
     ///
-    /// [`PermissionError::InvalidRule`] for a glob that does not compile.
+    /// [`PermissionError::InvalidRule`] for a glob that does not compile or
+    /// a program that is not a plain name.
     pub fn tighten(
         &mut self,
         deny: &[String],
@@ -313,19 +374,44 @@ impl Permissions {
             self.forced_ask.push(Rule::parse(rule)?);
         }
         if !shell_programs.is_empty() {
-            self.shell_programs = Some(match self.shell_programs.take() {
-                Some(current) => current
-                    .into_iter()
-                    .filter(|program| {
-                        shell_programs
-                            .iter()
-                            .any(|p| p.eq_ignore_ascii_case(program))
-                    })
-                    .collect(),
-                None => shell_programs.to_vec(),
-            });
+            self.shell_allow.push(AllowLayer::from_programs(
+                shell_programs,
+                "the repository's shell_programs",
+            )?);
         }
         Ok(())
+    }
+
+    /// Adds a `[shell] allow` list: a command must also match one of these
+    /// argument-prefix patterns. Each call adds a layer, so a later list can
+    /// only narrow what earlier ones allow.
+    ///
+    /// # Arguments
+    ///
+    /// * `patterns` - Patterns such as `cargo test *`.
+    /// * `source` - Where they are set, for messages.
+    ///
+    /// # Errors
+    ///
+    /// [`PermissionError::InvalidRule`] for a pattern that does not parse.
+    pub fn limit_shell(
+        &mut self,
+        patterns: &[String],
+        source: &str,
+    ) -> Result<(), PermissionError> {
+        self.shell_allow
+            .push(AllowLayer::from_patterns(patterns, source)?);
+        Ok(())
+    }
+
+    /// Whether any layer limits `shell` to an allowlist, so commands must be
+    /// started as an argument vector without a shell interpreter.
+    ///
+    /// # Returns
+    ///
+    /// `true` under `shell_programs` or `[shell] mode = "allowlist"`.
+    pub fn has_shell_allowlist(&self) -> bool {
+        !self.shell_allow.is_empty()
     }
 
     /// Adds the `allow` rules of a repository the user trusts. They are
@@ -349,12 +435,15 @@ impl Permissions {
         Ok(())
     }
 
-    /// Why a `shell` command is refused under a `shell_programs` limit.
+    /// Why a `shell` command is refused under an allowlist (`shell_programs`
+    /// or `[shell] mode = "allowlist"`).
     ///
-    /// The command must be one program from the list, named as found on
-    /// `PATH` (not by a path), followed by plain arguments. Anything that
-    /// chains, redirects or substitutes commands in sh, PowerShell or cmd
-    /// is refused, because it would run a second program.
+    /// The command is split by the conservative parser
+    /// ([`anvil_types::shell::split_command`]): anything that chains,
+    /// redirects, substitutes or groups commands in sh, PowerShell or cmd is
+    /// refused, because it would run a second program. The program must be
+    /// named as found on `PATH`, not by a path, and the words must match a
+    /// pattern of every layer.
     ///
     /// # Arguments
     ///
@@ -362,34 +451,75 @@ impl Permissions {
     ///
     /// # Returns
     ///
-    /// The reason, or `None` when there is no limit or the command fits it.
+    /// The reason, or `None` when there is no allowlist or the command fits.
     pub fn shell_refusal(&self, command: &str) -> Option<String> {
-        let programs = self.shell_programs.as_ref()?;
+        if self.shell_allow.is_empty() {
+            return None;
+        }
         if let Some(operator) = SHELL_OPERATORS.iter().find(|op| command.contains(**op)) {
             return Some(format!(
-                "`{}` is not allowed: under `shell_programs` a command is one program with plain arguments",
+                "`{}` is not allowed: under a shell allowlist a command is one program with plain arguments",
                 operator.escape_debug()
             ));
         }
-        let first = command.split_whitespace().next().unwrap_or_default();
-        let program = first.trim_matches(['"', '\'']);
+        let argv = match split_command(command) {
+            Ok(argv) => argv,
+            Err(reason) => return Some(reason),
+        };
+        let program = &argv[0];
         if program.contains(['/', '\\']) {
             return Some(format!(
-                "`{program}` is a path; under `shell_programs` name a program found on PATH"
+                "`{program}` is a path; under a shell allowlist name a program found on PATH"
             ));
         }
-        let name = program_name(program);
-        if programs
+        let refused = self
+            .shell_allow
             .iter()
-            .any(|allowed| allowed.eq_ignore_ascii_case(&name))
-        {
-            None
-        } else {
-            Some(format!(
-                "`{name}` is not one of the allowed programs ({})",
-                programs.join(", ")
-            ))
+            .find(|layer| !layer.patterns.iter().any(|pattern| pattern.matches(&argv)))?;
+        let patterns: Vec<String> = refused.patterns.iter().map(CommandPattern::text).collect();
+        Some(format!(
+            "`{command}` is not one of the allowed commands of {} ({})",
+            refused.source,
+            patterns.join(", ")
+        ))
+    }
+
+    /// Whether a blocked command is allowed by name: a user `allow` rule
+    /// with a pattern that matches the command and whose text names the
+    /// blocked phrase (`shell:curl *` names `curl`; a bare `shell` or
+    /// `shell:*` does not), or, under an allowlist, a matching pattern in
+    /// every layer that names it (`git push *` names `git push`).
+    ///
+    /// # Arguments
+    ///
+    /// * `tool` - The tool name.
+    /// * `target` - The command.
+    /// * `phrase` - What the blocked list matched, such as `git push`.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the block is lifted.
+    pub fn allows_by_name(&self, tool: &str, target: Option<&str>, phrase: &str) -> bool {
+        let by_rule = self.explicitly_allowed(tool, target)
+            && self
+                .allow
+                .iter()
+                .any(|rule| rule.matches(tool, target) && rule.names(phrase));
+        if by_rule {
+            return true;
         }
+        if self.shell_allow.is_empty() || self.matched(tool, target) == Some(Decision::Deny) {
+            return false;
+        }
+        let Some(argv) = target.and_then(|command| split_command(command).ok()) else {
+            return false;
+        };
+        let phrase = phrase.to_ascii_lowercase();
+        self.shell_allow.iter().all(|layer| {
+            layer.patterns.iter().any(|pattern| {
+                pattern.matches(&argv) && pattern.text().to_ascii_lowercase().contains(&phrase)
+            })
+        })
     }
 
     /// Decides one call: `deny` beats a tightening `ask`, which beats
@@ -528,21 +658,12 @@ impl Permissions {
 /// cmd: `&&`, `||`, `;`, `|`, `&` (also PowerShell's call operator), `>`,
 /// `<`, the backtick (sh substitution, PowerShell escape), `$(`, `${`,
 /// PowerShell's `@(` and `(`, which runs a command inside an argument, and
-/// line breaks.
+/// line breaks. Checked first so a refusal names the operator; the parser
+/// then refuses every other metacharacter
+/// ([`anvil_types::shell::METACHARACTERS`]).
 pub const SHELL_OPERATORS: [&str; 14] = [
     "&&", "||", ";", "|", "&", ">", "<", "`", "$(", "${", "@(", "(", "\n", "\r",
 ];
-
-/// A program's name without the extension Windows adds, in lower case.
-fn program_name(program: &str) -> String {
-    let lower = program.to_ascii_lowercase();
-    for extension in [".exe", ".cmd", ".bat", ".com", ".ps1"] {
-        if let Some(stem) = lower.strip_suffix(extension) {
-            return stem.to_owned();
-        }
-    }
-    lower
-}
 
 /// The rule an `always` answer records.
 ///
@@ -1204,6 +1325,58 @@ mod tests {
         open.tighten(&[], &[], &["cargo".to_owned()])
             .expect("tightens");
         assert!(open.shell_refusal("git status").is_some());
+    }
+
+    #[test]
+    fn allowlist_layers_must_all_match_and_only_a_naming_pattern_lifts_a_block() {
+        let mut perms = parse("shell_programs = [\"git\", \"cargo\"]\n");
+        assert!(perms.has_shell_allowlist());
+        perms
+            .limit_shell(
+                &["git status".to_owned(), "git push origin *".to_owned()],
+                "the managed policy's [shell] allow",
+            )
+            .expect("patterns");
+        assert_eq!(perms.shell_refusal("git status"), None);
+        assert_eq!(perms.shell_refusal("git push origin main"), None);
+        let reason = perms
+            .shell_refusal("cargo test")
+            .expect("the policy layer refuses it");
+        assert!(reason.contains("[shell] allow"), "{reason}");
+        assert!(
+            perms.shell_refusal("git status -s").is_some(),
+            "exact pattern"
+        );
+        assert!(
+            !perms.allows_by_name("shell", Some("git push origin main"), "git push"),
+            "every layer must name it, and `shell_programs = [\"git\"]` does not"
+        );
+        let mut named = parse("");
+        named
+            .limit_shell(&["git push origin *".to_owned()], "x")
+            .expect("patterns");
+        assert!(named.allows_by_name("shell", Some("git push origin main"), "git push"));
+        assert!(!named.allows_by_name("shell", Some("git status"), "curl"));
+        assert!(
+            perms.limit_shell(&["git *;".to_owned()], "x").is_err(),
+            "a pattern with a metacharacter is invalid"
+        );
+        let mut broad = parse("");
+        broad
+            .limit_shell(&["git *".to_owned()], "x")
+            .expect("patterns");
+        assert!(
+            !broad.allows_by_name("shell", Some("git push origin main"), "git push"),
+            "`git *` does not name `git push`"
+        );
+        let mut denied = parse("deny = [\"shell:git push*\"]\n");
+        denied
+            .limit_shell(&["git push *".to_owned()], "x")
+            .expect("patterns");
+        assert!(
+            !denied.allows_by_name("shell", Some("git push x"), "git push"),
+            "a deny rule still wins"
+        );
     }
 
     #[test]

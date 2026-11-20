@@ -2,7 +2,8 @@
 #
 # For a workstation with no internet access that talks to one model server
 # on the internal network. Nothing runs besides the built-in tools, every
-# write and command asks a person, and repositories cannot be trusted.
+# write and command asks a person, commands are limited to an allowlist and
+# started without a shell, and repositories cannot be trusted.
 #
 # Install as an administrator at /etc/anvil/policy.toml (Linux and macOS,
 # owned by root, not writable by group or others) or
@@ -61,3 +62,31 @@ retention_days = 30
 [limits]
 # The most tokens one session may use.
 session_tokens = 2000000
+
+[shell]
+# Commands are one program with plain arguments, started without a shell
+# interpreter, and must match one of these patterns (`*` at the end allows
+# any further arguments). `;`, `&`, `|`, `<`, `>`, backticks, `$(`,
+# parentheses, braces and line breaks are refused. Network clients, git
+# push, clone and remote changes, package installs, sudo and runas stay
+# refused unless a pattern names them. Edit the list to the toolchain.
+mode = "allowlist"
+allow = [
+    "cargo build *",
+    "cargo check *",
+    "cargo test *",
+    "cargo clippy *",
+    "cargo fmt *",
+    "git status *",
+    "git diff *",
+    "git log *",
+]
+# To run every command in a container without network access instead of on
+# the workstation, uncomment these lines and name an image, ideally by digest:
+# executor = "container"
+# [shell.container]
+# runtime = "docker"            # or "podman"
+# image = "registry.internal.example/build@sha256:<digest>"
+# user = "65534:65534"          # never root
+# memory = "2g"
+# pids_limit = 256

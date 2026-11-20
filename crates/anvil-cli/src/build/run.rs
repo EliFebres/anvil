@@ -14,7 +14,7 @@ use anvil_core::agent::{CheckCommand, PlanDecision, PlanGate};
 use anvil_core::context::{collect_text, new_session_id, session_dir};
 use anvil_core::provider::{Message, Provider};
 use anvil_core::tools::ToolContext;
-use anvil_core::tools::shell::{self, Shell};
+use anvil_core::tools::shell;
 use anvil_types::{Price, SessionState};
 use anyhow::{Context, bail};
 use chrono::Utc;
@@ -82,6 +82,16 @@ pub trait Env {
     fn build_status(&self, _id: &str, _dir: &Path, _spec: &str) -> Option<StatusReporter> {
         None
     }
+
+    /// Decides whether a command the planner chose, or one detected from
+    /// the repository, may run: the shell mode, its allowlist, the deny
+    /// categories and the permission rules apply as they do to the model's
+    /// own `shell` call, and an `ask` asks as a session would.
+    ///
+    /// # Errors
+    ///
+    /// The reason, when the command may not run.
+    fn permit_command(&self, command: &str) -> Result<(), String>;
 }
 
 /// Everything that stays the same for the whole run of a build.
@@ -90,8 +100,9 @@ pub struct Settings {
     pub cwd: PathBuf,
     /// The folder each item's session folder goes in.
     pub sessions_root: PathBuf,
-    /// The shell that runs acceptance and project checks.
-    pub shell: Shell,
+    /// Where acceptance and project checks run: the session's shell, and
+    /// whether commands start directly or in a container.
+    pub ctx: ToolContext,
     /// How the project's own check is found.
     pub check: CheckCommand,
     /// The most weighted tokens one session may use, from the configuration.
@@ -557,7 +568,7 @@ async fn run_item<E: Env>(
             (Some(a), Some(b)) => Some(a + b),
             (a, b) => a.or(b),
         };
-        match verify(settings, &entry.item).await {
+        match verify(env, settings, &entry.item).await {
             Ok(()) => {
                 let hash = git::commit_all(&settings.cwd, &entry.item.title)?;
                 entry.status = ItemStatus::Done;
@@ -603,19 +614,23 @@ async fn run_item<E: Env>(
 
 /// Runs the acceptance command and then the project's own check; both must
 /// exit 0. The session's own report is not consulted.
-async fn verify(settings: &Settings, item: &WorkItem) -> Result<(), String> {
-    let mut commands = vec![("acceptance command", item.acceptance.clone())];
+///
+/// The acceptance command is the planner's and a detected check runs the
+/// repository's code, so both go through [`Env::permit_command`] first; a
+/// check the user configured runs as configured.
+async fn verify(env: &impl Env, settings: &Settings, item: &WorkItem) -> Result<(), String> {
+    let mut commands = vec![("acceptance command", item.acceptance.clone(), true)];
     if let Some(check) = settings.check.resolve(&settings.cwd)
         && check != item.acceptance
     {
-        commands.push(("project check", check));
+        let detected = matches!(settings.check, CheckCommand::Detect);
+        commands.push(("project check", check, detected));
     }
-    let ctx = ToolContext {
-        shell: settings.shell.clone(),
-        ..ToolContext::new(settings.cwd.clone())
-    };
-    for (what, command) in commands {
-        match shell::run_command(&ctx, &command, CHECK_TIMEOUT).await {
+    for (what, command, permit) in commands {
+        if permit && let Err(reason) = env.permit_command(&command) {
+            return Err(format!("the {what} `{command}` may not run: {reason}"));
+        }
+        match shell::run_command(&settings.ctx, &command, CHECK_TIMEOUT).await {
             Ok(run) if run.succeeded() => {}
             Ok(run) => {
                 return Err(format!(

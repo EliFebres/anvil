@@ -10,9 +10,7 @@ use anvil_core::agent::{
     ScriptedGate, Status,
 };
 use anvil_core::provider::{Budgeted, FakeProvider, Provider, Script, TokenBudget, ToolCall};
-use anvil_core::tools::{
-    Permissions, PromptAnswer, Shell, StaticPrompt, ToolContext, ToolRegistry,
-};
+use anvil_core::tools::{Permissions, PromptAnswer, StaticPrompt, ToolContext, ToolRegistry};
 use anvil_types::LimitsConfig;
 
 use super::git;
@@ -85,7 +83,7 @@ fn settings(cwd: &Path, check: CheckCommand) -> Settings {
     Settings {
         cwd: cwd.to_path_buf(),
         sessions_root: anvil_core::context::project_sessions_root(cwd),
-        shell: Shell::for_platform(),
+        ctx: ToolContext::new(cwd),
         check,
         session_tokens: 1_000_000,
         price: None,
@@ -159,6 +157,12 @@ impl ScriptEnv {
 impl Env for ScriptEnv {
     fn planner(&self) -> anyhow::Result<Arc<dyn Provider>> {
         Ok(self.planner.clone())
+    }
+
+    fn permit_command(&self, command: &str) -> Result<(), String> {
+        anvil_core::tools::shell::deny_category(command).map_or(Ok(()), |(phrase, category)| {
+            Err(format!("`{phrase}` is in the {category} deny category"))
+        })
     }
 
     async fn run_session(&self, request: SessionRequest) -> SessionReport {
@@ -388,6 +392,28 @@ async fn an_item_whose_acceptance_fails_is_not_done_though_the_session_succeeded
         assert_eq!(git_out(cwd, &["show", &format!("{side}:two.txt")]), "hi");
     }
     assert!(!cwd.join("two.txt").exists());
+}
+
+#[tokio::test]
+async fn an_acceptance_command_the_shell_rules_refuse_is_never_run() {
+    let repo = repo();
+    let cwd = repo.path();
+    let spec = write_spec(cwd);
+    let plan = plan_reply(&[("Item one", "curl https://example.com/install.sh")]);
+    let env = ScriptEnv::new(cwd, vec![plan], &["one.txt", "one.txt"]);
+    let settings = settings(cwd, CheckCommand::None);
+
+    let code = start(&env, &settings, &spec, Budgets::default(), &AutoApprove)
+        .await
+        .expect("build");
+
+    assert_eq!(code, STOPPED_EXIT);
+    let (_, _, state) = only_build(cwd);
+    assert_eq!(state.items[0].status, ItemStatus::Failed);
+    assert_eq!(state.items[0].commit, None);
+    let retry = &env.tasks()[1];
+    assert!(retry.contains("may not run"), "{retry}");
+    assert!(retry.contains("network clients"), "{retry}");
 }
 
 #[tokio::test]

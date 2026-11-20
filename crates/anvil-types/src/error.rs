@@ -10,6 +10,13 @@ use thiserror::Error;
 /// its own in a log line or a CLI error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ValidationError {
+    /// The `[shell]` table's keys do not fit together.
+    #[error("{reason}")]
+    Shell {
+        /// What is wrong, naming the key.
+        reason: String,
+    },
+
     /// A session `status.json` breaks a rule of the format.
     #[error("session status: {reason}")]
     Status {

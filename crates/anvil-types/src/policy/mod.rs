@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::shell::{ContainerSettings, Executor, ShellMode, validate_shell};
+
 /// The policy file name inside the system folder.
 pub const POLICY_FILE: &str = "policy.toml";
 
@@ -252,6 +254,33 @@ pub struct LimitsPolicy {
     pub build_usd: Option<f64>,
 }
 
+/// `[shell]`: how the `shell` tool may run commands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ShellPolicy {
+    /// `off`, `allowlist` or `ask`. Default `off`: the tool is not
+    /// registered unless the policy turns it on.
+    pub mode: ShellMode,
+    /// Argument-prefix patterns for `allowlist` mode, such as `cargo test *`.
+    pub allow: Vec<String>,
+    /// `host` or `container`. Default `host`.
+    pub executor: Executor,
+    /// The image and limits for `executor = "container"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<ContainerSettings>,
+}
+
+impl Default for ShellPolicy {
+    fn default() -> Self {
+        Self {
+            mode: ShellMode::Off,
+            allow: Vec::new(),
+            executor: Executor::Host,
+            container: None,
+        }
+    }
+}
+
 /// The whole policy file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -281,6 +310,9 @@ pub struct Policy {
     /// Ceilings on spending.
     #[serde(default)]
     pub limits: LimitsPolicy,
+    /// How the `shell` tool may run commands.
+    #[serde(default)]
+    pub shell: ShellPolicy,
 }
 
 /// The serde default for `true` fields.
@@ -425,7 +457,8 @@ pub fn split_host_port(text: &str) -> Option<(&str, u16)> {
 /// [`PolicyError::Parse`] for bad TOML or an unknown key, and
 /// [`PolicyError::Invalid`] when a value breaks a rule: a wrong version,
 /// no allowed host, a host without a numeric port, an allowlist mode
-/// without servers, an empty rule, or a ceiling of zero.
+/// without servers, an empty rule, a ceiling of zero, or a `[shell]` table
+/// whose keys do not fit together.
 pub fn parse(text: &str, path: &Path) -> Result<Policy, PolicyError> {
     let policy: Policy = toml::from_str(text).map_err(|source| PolicyError::Parse {
         path: path.to_path_buf(),
@@ -476,6 +509,14 @@ pub fn parse(text: &str, path: &Path) -> Result<Policy, PolicyError> {
             )));
         }
     }
+    let shell = &policy.shell;
+    validate_shell(
+        shell.mode,
+        &shell.allow,
+        shell.executor,
+        shell.container.as_ref(),
+    )
+    .map_err(invalid)?;
     let limits = &policy.limits;
     if limits.session_tokens == Some(0) || limits.build_tokens == Some(0) {
         return Err(invalid("a token ceiling in [limits] is 0".to_owned()));
@@ -646,6 +687,8 @@ mod tests {
         assert_eq!(f.skills, SkillsMode::Off);
         assert!(!f.hooks && !f.memory && !f.build && !f.delegation);
         assert!(!p.projects.allow_trust);
+        assert_eq!(p.shell.mode, ShellMode::Off, "no shell unless turned on");
+        assert_eq!(p.shell.executor, Executor::Host);
         assert!(!allows_project_trust(Some(&loaded)));
         assert_eq!(loaded.sessions_root(dir.path()), None);
         assert!(loaded.allows_host("MODELS.corp.example:443"));
@@ -664,6 +707,8 @@ mod tests {
             format!("{MINIMAL}[unknown]\nx = 1\n"),
             format!("{MINIMAL}[features]\nhooks = true\nherdr = true\n"),
             format!("{MINIMAL}[features]\nmcp = \"sometimes\"\n"),
+            format!("{MINIMAL}[shell]\nmode = \"sometimes\"\n"),
+            format!("{MINIMAL}[shell]\nmode = \"ask\"\nsandbox = true\n"),
         ];
         let invalid = [
             MINIMAL.replace("version = 1", "version = 2"),
@@ -677,6 +722,13 @@ mod tests {
             format!("{MINIMAL}[permissions]\ndeny = [\":x\"]\n"),
             format!("{MINIMAL}[limits]\nsession_tokens = 0\n"),
             format!("{MINIMAL}[limits]\nbuild_usd = -1.0\n"),
+            format!("{MINIMAL}[shell]\nmode = \"allowlist\"\n"),
+            format!("{MINIMAL}[shell]\nmode = \"ask\"\nallow = [\"git *\"]\n"),
+            format!("{MINIMAL}[shell]\nmode = \"allowlist\"\nallow = [\"git status; id\"]\n"),
+            format!("{MINIMAL}[shell]\nmode = \"ask\"\nexecutor = \"container\"\n"),
+            format!(
+                "{MINIMAL}[shell]\nmode = \"ask\"\nexecutor = \"container\"\n[shell.container]\nimage = \"b:1\"\nuser = \"root\"\n"
+            ),
         ];
         for text in &parse_errors {
             let path = write(dir.path(), POLICY_FILE, text);
@@ -694,6 +746,27 @@ mod tests {
                 "{text}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_shell_table_with_an_allowlist_and_a_container_parses() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = write(
+            dir.path(),
+            POLICY_FILE,
+            &format!(
+                "{MINIMAL}[shell]\nmode = \"allowlist\"\nallow = [\"cargo test *\", \"git status\"]\nexecutor = \"container\"\n[shell.container]\nruntime = \"podman\"\nimage = \"registry.corp.example/build@sha256:0123\"\nmemory = \"4g\"\npids_limit = 128\n"
+            ),
+        );
+        let loaded = load(&path).expect("loads").expect("present");
+        let shell = &loaded.policy.shell;
+        assert_eq!(shell.mode, ShellMode::Allowlist);
+        assert_eq!(shell.allow.len(), 2);
+        assert_eq!(shell.executor, Executor::Container);
+        let container = shell.container.as_ref().expect("container");
+        assert_eq!(container.runtime, crate::shell::ContainerRuntime::Podman);
+        assert_eq!(container.user, crate::shell::DEFAULT_CONTAINER_USER);
+        assert_eq!(container.pids_limit, 128);
     }
 
     #[test]

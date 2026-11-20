@@ -3,8 +3,9 @@
 //! anvil does not trust the repository it runs in. The repository's own
 //! `.anvil/config.toml` may only make anvil stricter: its `[permissions]`
 //! table can add `deny`, `ask` and `shell_programs`. A key that would
-//! change providers, roles, the shell or check program, folders or network
-//! rules, or loosen permissions is an error that names the key, so a cloned
+//! change providers, roles, the shell or check program, the shell mode,
+//! folders or network rules, or loosen permissions is an error that names
+//! the key, so a cloned
 //! repository can neither change those settings nor seem to. Any other key
 //! is ignored with a warning.
 //!
@@ -25,8 +26,9 @@ pub const PROJECT_RULE_KEYS: [&str; 3] = ["deny", "ask", "shell_programs"];
 
 /// Top-level tables of `.anvil/config.toml` that would loosen anvil or
 /// redirect it: providers and their URLs, roles, the shell and check
-/// programs and extra folders (`[tools]`), and plain-http hosts.
-const FORBIDDEN_TABLES: [&str; 4] = ["providers", "roles", "tools", "network"];
+/// programs and extra folders (`[tools]`), plain-http hosts, and the shell
+/// mode and executor (`[shell]`).
+const FORBIDDEN_TABLES: [&str; 5] = ["providers", "roles", "tools", "network", "shell"];
 
 /// Permission keys that loosen: refused in `.anvil/config.toml`, and in
 /// `.anvil/permissions.toml` except `allow`, which waits for trust there.
@@ -101,7 +103,7 @@ pub fn load(root: &Path) -> Result<ProjectRules, ConfigError> {
                 return Err(forbidden(
                     &config_file,
                     &format!("[{key}]"),
-                    "providers, roles, tools and network rules come only from your own ~/.anvil/config.toml",
+                    "providers, roles, tools, network rules and the shell mode come only from your own ~/.anvil/config.toml",
                 ));
             }
             rules.ignored.push(format!(
@@ -281,6 +283,7 @@ mod tests {
                 "[tools]\nshell = \"evil.exe\"\n",
                 "[tools]",
             ),
+            (".anvil/config.toml", "[shell]\nmode = \"ask\"\n", "[shell]"),
             (
                 ".anvil/config.toml",
                 "[network]\nallow_http_hosts = [\"x\"]\n",

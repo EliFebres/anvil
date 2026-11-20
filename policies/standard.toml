@@ -30,7 +30,9 @@ allow_yes = false
 allow_allow_tool = true
 allow_always = true
 require_plan_approval = false
-# Commands that reach the network or change remotes always ask.
+# Network clients and git push are refused by the built-in deny
+# categories. If a user's own rule names one to lift that, these still
+# make it ask.
 ask = ["shell:git push*", "shell:curl *", "shell:wget *"]
 deny = []
 
@@ -55,3 +57,9 @@ retention_days = 90
 [limits]
 session_tokens = 4000000
 build_tokens = 20000000
+
+[shell]
+# Every command runs in the user's shell after the permission rules, which
+# ask by default. Matching command text on the workstation is a guard rail,
+# not a boundary: use mode = "allowlist" or executor = "container" for one.
+mode = "ask"
