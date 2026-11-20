@@ -296,14 +296,14 @@ async fn proxy_child() {
 fn run_child(target: &str, proxy: &str, mode: &str) {
     let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .args(["net::tests::proxy_child", "--exact", "--ignored"])
+        .env_clear()
+        .envs(anvil_types::child_env::vars())
         .env(CHILD_TARGET, target)
         .env(CHILD_MODE, mode)
         .env("HTTP_PROXY", proxy)
         .env("http_proxy", proxy)
         .env("HTTPS_PROXY", proxy)
         .env("ALL_PROXY", proxy)
-        .env_remove("NO_PROXY")
-        .env_remove("no_proxy")
         .output()
         .expect("child runs");
     assert!(
