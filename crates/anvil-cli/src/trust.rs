@@ -127,6 +127,56 @@ pub fn shipped(root: &Path) -> Vec<String> {
     items
 }
 
+/// The first symbolic link (or Windows junction) found in the folders
+/// whose files load as skills, commands and agents, the folders
+/// themselves included.
+///
+/// The loaders follow links, and a link's target can change without any
+/// change to the repository's own files, so a repository with one is
+/// never trusted. Links are not followed while looking.
+///
+/// # Arguments
+///
+/// * `root` - The repository root.
+///
+/// # Returns
+///
+/// The link's path, or `None` when there is none.
+pub fn linked_item(root: &Path) -> Option<std::path::PathBuf> {
+    for dir in DIGEST_DIRS {
+        let dir = root.join(dir);
+        let is_link = |path: &Path| {
+            std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+        };
+        let parent_link = dir.parent().filter(|parent| is_link(parent));
+        if let Some(parent) = parent_link {
+            return Some(parent.to_path_buf());
+        }
+        if is_link(&dir) {
+            return Some(dir);
+        }
+        if !dir.is_dir() {
+            continue;
+        }
+        let walk = ignore::WalkBuilder::new(&dir)
+            .standard_filters(false)
+            .follow_links(false)
+            .build();
+        if let Some(entry) = walk.flatten().find(ignore::DirEntry::path_is_symlink) {
+            return Some(entry.into_path());
+        }
+    }
+    None
+}
+
+/// The reason a repository with a link in `link` is not trusted.
+fn link_reason(link: &Path) -> String {
+    format!(
+        "{} is a symbolic link; anvil does not trust a repository that links a skill, command or agent, because the target can change without the repository changing; replace the link with a copy",
+        link.display()
+    )
+}
+
 /// The SHA-256 digest, in hex, of everything a trust decision covers.
 ///
 /// It covers the content of [`DIGEST_FILES`], every file under
@@ -197,6 +247,8 @@ pub fn fingerprint(root: &Path) -> String {
 
 /// Decides whether what the repository ships takes effect in this run.
 ///
+/// A repository with a [`linked_item`] is never trusted.
+///
 /// A stored refusal is used as it is, and so is trust recorded for exactly
 /// the content the repository ships now. Otherwise, when `ask` is true and
 /// the repository ships something, the user is asked and the answer is
@@ -238,6 +290,12 @@ pub fn decide(
                 "note: the managed policy does not allow trusting repositories; nothing this repository ships takes effect"
             );
         }
+        return Ok(false);
+    }
+    if let Some(link) = linked_item(root) {
+        let reason = link_reason(&link);
+        tracing::warn!(root = %root.display(), "repository not trusted: {reason}");
+        eprintln!("note: nothing this repository ships takes effect: {reason}");
         return Ok(false);
     }
     let mut store = TrustStore::load(home)?;
@@ -312,6 +370,9 @@ pub fn run(
         allow_trust,
         "the managed policy does not allow trusting repositories"
     );
+    if let Some(link) = linked_item(root) {
+        anyhow::bail!("{}", link_reason(&link));
+    }
     let items = shipped(root);
     if items.is_empty() {
         println!(
@@ -522,6 +583,79 @@ mod tests {
                 "a change to {file} still trusted"
             );
         }
+    }
+
+    /// Links the repository's agent `a.md` to `docs/agents/a.md`: the file
+    /// itself on Unix, the `.claude/agents` folder as a junction on
+    /// Windows, where a file link needs a privilege a junction does not.
+    /// `false` when the link cannot be made.
+    fn link_agent(root: &Path) -> bool {
+        let target = root.join("docs").join("agents");
+        let agents = root.join(".claude").join("agents");
+        std::fs::create_dir_all(&agents).expect("mkdir");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target.join("a.md"), agents.join("a.md")).is_ok();
+        #[cfg(windows)]
+        let made = std::fs::remove_dir(&agents).is_ok()
+            && std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&agents)
+                .arg(&target)
+                .output()
+                .is_ok_and(|out| out.status.success());
+        made
+    }
+
+    #[test]
+    fn a_repository_that_links_an_agent_is_never_trusted() {
+        let root = tempfile::tempdir().expect("root");
+        let home = tempfile::tempdir().expect("home");
+        let agent = "docs/agents/a.md";
+        write(
+            root.path(),
+            agent,
+            "---
+name: a
+description: d
+---
+body
+",
+        );
+        assert!(link_agent(root.path()), "the link could not be made");
+        assert!(
+            AgentSet::discover(Some(root.path()), None)
+                .get("a")
+                .is_some(),
+            "the loader follows the link"
+        );
+        let mut store = TrustStore::default();
+        store.set(
+            root.path(),
+            TrustDecision::Trusted,
+            &fingerprint(root.path()),
+        );
+        store.save(home.path()).expect("saves");
+        assert!(
+            !decide(root.path(), Some(home.path()), false, true).expect("decides"),
+            "trust recorded over a linked agent counts"
+        );
+        write(
+            root.path(),
+            agent,
+            "---
+name: a
+description: d
+---
+other
+",
+        );
+        assert!(
+            !decide(root.path(), Some(home.path()), false, true).expect("decides"),
+            "the link's target changed and the repository is still trusted"
+        );
+        let error = run(root.path(), Some(home.path()), false, true)
+            .expect_err("anvil trust refuses a linked agent");
+        assert!(error.to_string().contains("symbolic link"), "{error}");
     }
 
     #[test]
