@@ -553,6 +553,7 @@ const UNSET_POLICY_KEYS: &[(&str, &str, &str)] = &[
     ("limits", "session_tokens", "no ceiling"),
     ("limits", "build_tokens", "no ceiling"),
     ("limits", "build_usd", "no ceiling"),
+    ("shell", "container", "none; commands run on the host"),
 ];
 
 /// Every effective policy setting, one `key = value  (layer)` line each,
@@ -606,6 +607,13 @@ pub fn policy_lines(loaded: &LoadedPolicy) -> Vec<String> {
             .or_insert_with(|| format!("[{table}] {key} = (default: {meaning})  (default)"));
     }
     lines.into_values().collect()
+}
+
+/// A string value as TOML would show it, or nothing when unset.
+fn quoted(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("\"{value}\""))
+        .unwrap_or_default()
 }
 
 /// One user setting the policy constrains, with its layer: the user's
@@ -726,6 +734,32 @@ pub fn show(
             ("memory", "always_summarize"),
             config.memory.always_summarize.to_string(),
             None,
+        ),
+        (
+            ("tools", "check"),
+            quoted(config.tools.check.as_deref()),
+            Some("detected from the project's files"),
+        ),
+        (
+            ("shell", "mode"),
+            quoted(config.shell.mode.map(ShellMode::as_str)),
+            Some("the policy's mode"),
+        ),
+        (("shell", "allow"), list(&config.shell.allow), None),
+        (
+            ("shell", "executor"),
+            quoted(config.shell.executor.map(|executor| executor.as_str())),
+            Some("the policy's executor"),
+        ),
+        (
+            ("shell", "container"),
+            config
+                .shell
+                .container
+                .as_ref()
+                .map(|container| format!("{{ image = \"{}\" }}", container.image))
+                .unwrap_or_default(),
+            Some("none; the policy names the container"),
         ),
     ];
     for (key, value, unset) in lines {
@@ -1026,6 +1060,11 @@ retention_days = 3
 session_tokens = 1
 build_tokens = 1
 build_usd = 1.0
+[shell]
+mode = \"ask\"
+executor = \"container\"
+[shell.container]
+image = \"build:1\"
 ",
         );
         let every_key = keys_of(&policy_lines(&everything));
@@ -1042,6 +1081,7 @@ build_usd = 1.0
             "[limits] session_tokens = (default: no ceiling)  (default)",
             "[limits] build_tokens = (default: no ceiling)  (default)",
             "[limits] build_usd = (default: no ceiling)  (default)",
+            "[shell] container = (default: none; commands run on the host)  (default)",
         ] {
             assert!(
                 text.contains(unset),
