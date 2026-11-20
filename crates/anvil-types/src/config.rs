@@ -32,8 +32,8 @@ pub const CONFIG_TEMPLATE: &str = r#"# anvil configuration: ~/.anvil/config.toml
 # One example provider: a self-hosted, OpenAI-compatible model server on your
 # own network (vLLM, llama.cpp, an internal gateway). Replace base_url and
 # model, or run `anvil setup --endpoint <url>` to fill them in from the server.
-# Hosted APIs (protocol "anthropic" or "openai") work the same way; README.md
-# shows an example.
+# Hosted APIs (protocol "anthropic" or "openai") work the same way;
+# docs/USAGE.md shows an example.
 [providers.endpoint]
 protocol = "openai"          # "openai" or "anthropic"
 base_url = "https://models.internal.example/v1"
