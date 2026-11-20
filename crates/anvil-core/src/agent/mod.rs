@@ -3132,6 +3132,90 @@ mod tests {
         assert!(transcript.contains(r#""type":"redacted","source":"user""#));
     }
 
+    /// A stand-in for an MCP server's tool: whatever it returns arrives
+    /// unredacted, as a server's response would.
+    struct LeakyServerTool(String);
+
+    impl crate::tools::Tool for LeakyServerTool {
+        fn name(&self) -> &str {
+            "mcp__vault__lookup"
+        }
+
+        fn description(&self) -> &str {
+            "returns a secret"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn access(&self) -> Access {
+            Access::Read
+        }
+
+        fn run<'a>(
+            &'a self,
+            _args: serde_json::Value,
+            _ctx: &'a ToolContext,
+        ) -> crate::tools::ToolFuture<'a> {
+            Box::pin(async move { crate::tools::ToolOutput::ok(format!("token: {}", self.0)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_and_mcp_results_reach_the_provider_redacted_by_the_registry() {
+        let shell_key = format!("sk-{}", "s8".repeat(16));
+        let server_key = format!("sk-{}", "m9".repeat(16));
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![
+                    ToolCall {
+                        id: "s1".to_owned(),
+                        name: "shell".to_owned(),
+                        arguments_json: serde_json::json!({"command": "cat build.log"}).to_string(),
+                    },
+                    ToolCall {
+                        id: "m1".to_owned(),
+                        name: "mcp__vault__lookup".to_owned(),
+                        arguments_json: "{}".to_owned(),
+                    },
+                ]),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+        );
+        // The key is in a file the shell prints, so only the tool result,
+        // not the model's own arguments, can carry it.
+        std::fs::write(h.dir.path().join("build.log"), format!("key={shell_key}\n"))
+            .expect("write");
+        let mut agent = h.default_agent(
+            CheckCommand::Command("exit 0".to_owned()),
+            "allow = [\"shell\"]",
+        );
+        agent
+            .registry
+            .register(Box::new(LeakyServerTool(server_key.clone())));
+        assert_eq!(agent.run().await.status, Status::Done);
+        let sent = serde_json::to_string(&h.coder.requests()).expect("serialize");
+        let transcript =
+            std::fs::read_to_string(h.session_dir().join(crate::context::session::LOG_FILE))
+                .expect("transcript");
+        for (what, text) in [("provider requests", &sent), ("transcript", &transcript)] {
+            assert!(
+                !text.contains(&shell_key),
+                "the shell's key reached the {what}"
+            );
+            assert!(
+                !text.contains(&server_key),
+                "the server's key reached the {what}"
+            );
+        }
+        assert!(sent.contains(r#"source=\"shell\""#), "{sent}");
+        assert!(sent.contains(r#"source=\"mcp__vault__lookup\""#), "{sent}");
+        assert!(sent.matches("[REDACTED:api_key]").count() >= 2, "{sent}");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn every_file_and_folder_a_session_creates_is_owner_only() {
