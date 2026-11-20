@@ -59,8 +59,11 @@ Two policies ship as starting points: `policies/restricted.toml` (one model serv
 | key | default | meaning |
 |---|---|---|
 | `version` | required | Must be `1`. |
-| `[network] allowed_hosts` | required | The only `host:port` pairs a provider's `base_url` may name, such as `models.internal.example:443`. The port is required; the host is compared without regard to case. |
+| `[network] allowed_hosts` | required | The only `host:port` pairs a provider's `base_url` or an HTTP MCP server's `url` may name, such as `models.internal.example:443`. The port is required; the host is compared without regard to case. Every request is checked against it when it is sent, and redirects are never followed. |
 | `[network] require_tls` | `true` | Plain http only to a loopback address. With `false`, plain http to the allowed hosts. |
+| `[network] proxy` | `"none"` | `"none"`: no proxy, and `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` are ignored. `"system"`: those variables, or the system settings when they are unset. A URL such as `"http://proxy.internal.example:3128"`: every request goes through that proxy. A proxy URL may not carry a user name or password, because the policy file is readable by every user. |
+| `[network] ca_bundle` | the system store | An absolute path to a PEM file of certificate authorities. When set, server certificates are verified against these alone, not the system's store; include your internal root and, if anvil must reach a public endpoint, its public roots too. |
+| `[network] client_cert`, `client_key` | none | Absolute paths to a PEM certificate chain and its private key, presented for mutual TLS. Set both or neither. Make the key readable by the developers who run anvil and no one else. |
 | `[models] providers` | any | Provider names (`[providers.<name>]`) the user's configuration may define. |
 | `[models] models` | any | Model names (`model = ...`) the user's configuration may use. |
 | `[permissions] deny` | none | Rules (`tool` or `tool:glob`) that refuse a call whatever else allows it. |
@@ -72,7 +75,7 @@ Two policies ship as starting points: `policies/restricted.toml` (one model serv
 | `[files] extra_roots` | none | Folders outside the workspace the file tools may read, never write. The user's `[tools] extra_dirs` is an error under a policy. |
 | `[files] deny` | none | Path globs (such as `**/*.kdbx`) the file tools refuse and searches skip, inside the workspace too. |
 | `[features] mcp` | `"off"` | `"off"`, `"allowlist"` or `"on"`. |
-| `[features] mcp_servers` | none | With `"allowlist"`: entries `{ name = "...", command = "..." }`; both must match a server's definition. |
+| `[features] mcp_servers` | none | With `"allowlist"`: entries `{ name = "...", command = "..." }` for a local server or `{ name = "...", url = "https://..." }` for an HTTP server; the name and the program or URL (a trailing `/` aside) must match the definition. An HTTP server's `host:port` must also be in `allowed_hosts`, with `"on"` too. |
 | `[features] hooks` | `false` | Whether hooks run. |
 | `[features] skills` | `"off"` | `"off"`, `"bundled"` (skills that ship with anvil) or `"local"` (also the user's and a trusted repository's). |
 | `[features] memory` | `false` | Whether remembered facts are read and the end-of-session summarizer proposes new ones. When off, nothing under `~/.anvil/memory` is read or written. |
@@ -113,3 +116,4 @@ Hooks, MCP servers and skills the policy forbids are errors when the user's own 
 - `anvil policy show` prints every key of the policy schema, set or not, and whether the policy file or the default set it; a key left unset shows what that means, such as `[limits] build_usd = (default: no ceiling)`. It then prints every user setting the policy constrains (providers, roles, `[network] allow_http_hosts`, `[tools] extra_dirs`, the `[permissions]` keys, `[memory] always_summarize`, `[limits] session_tokens`) with the layer that set it.
 - `anvil policy check <file> [--ownership]` validates a file and exits 1 with the reasons.
 - `anvil doctor` checks the policy, keys, providers and tools, one row per check.
+- `anvil doctor --egress` lists, without sending anything, every `host:port` the configuration can reach with the provider or MCP server that uses it, each configured endpoint the policy refuses, the plain-http rule, the proxy mode (and which proxy variables are set, never their values), the trust roots and the client certificate. Run it on a pilot workstation to confirm the policy matches the firewall rules.

@@ -28,8 +28,8 @@ A cloned repository tries to make anvil act against the developer: send the API 
 Source code, secrets or customer data reach a server the firm did not approve.
 
 **Stopped today**
-- Requests go only to configured endpoints, over https unless a host is named, without following redirects; under a policy only to the `host:port` pairs in `[network] allowed_hosts`. Only one module can build an HTTP client, enforced by a lint and a test.
-- No telemetry upload, update check or analytics exists. Webhooks, remote MCP servers and skill downloads were removed.
+- Every request is checked when it is sent: it goes only to a host the configuration names, over https except to loopback unless a host is named, without following redirects; under a policy only to the `host:port` pairs in `[network] allowed_hosts`. An API key is sent only to its own provider's host. Proxy variables are ignored unless the policy sets `proxy = "system"`. Only one module can build an HTTP client, enforced by a lint and a test.
+- No telemetry upload, update check or analytics exists. Webhooks and skill downloads were removed. HTTP MCP servers go through the same checked client, and under a policy only when allowed by name and URL.
 - File tools cannot read outside the workspace or open `.env` files, key and certificate files, credentials files, `.git/config`, SSH, cloud and GPG credentials, browser profiles or keychains.
 - Programs anvil starts do not inherit API keys or tokens.
 - The API key is redacted from error bodies and never logged.

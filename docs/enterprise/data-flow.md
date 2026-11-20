@@ -26,16 +26,17 @@ flowchart LR
 
 ## What goes to the endpoint
 
-Each model request carries the system prompt (anvil's own instructions, the user's `~/.anvil/ANVIL.md`, and a trusted repository's instruction files), the task, and the conversation so far: the model's earlier answers, the arguments of its tool calls, and what each tool returned. That includes the contents of files the tools read and the output of commands that ran. The API key goes in the request header. Nothing is sent before the endpoint passes the egress check in `crates/anvil-core/src/net.rs`.
+Each model request carries the system prompt (anvil's own instructions, the user's `~/.anvil/ANVIL.md`, and a trusted repository's instruction files), the task, and the conversation so far: the model's earlier answers, the arguments of its tool calls, and what each tool returned. That includes the contents of files the tools read and the output of commands that ran. The API key goes in the request header. Nothing is sent before the request's URL passes the egress check in `crates/anvil-core/src/net.rs`, which runs on every request, and the key is attached only to a request to the endpoint's own `host:port`.
 
 ## What anvil contacts besides the endpoint
 
 Under a managed policy: nothing. The other destinations in SECURITY.md are each off by default under a policy:
 
-- MCP servers and hooks, which are local programs, and which a policy allows only by name;
+- MCP servers and hooks, which a policy allows only by name: a local server by its program, an HTTP server by its URL, whose `host:port` must also be in `[network] allowed_hosts`;
+- the proxy, when the policy's `[network] proxy` names one or is `system` (the default is none);
 - the model list during `anvil setup --endpoint`, which goes to the same allowed endpoint.
 
-anvil has no telemetry upload, update check, analytics, web search or web fetch. HTTP clients can only be built in `net.rs`, which a test and a lint enforce.
+anvil has no telemetry upload, update check, analytics, web search or web fetch. HTTP clients can only be built in `net.rs`, which a test and a lint enforce. `anvil doctor --egress` lists every destination the installed configuration can reach.
 
 ## What anvil does not control
 

@@ -9,10 +9,19 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 
 ## Managed policy keys still to come
 
-- **`[network]` TLS client settings and proxy mode**: a CA bundle, a client certificate and key for mutual TLS, and `proxy = "none" | "system" | <url>`. Today anvil uses the system's trust store and reqwest's environment proxy handling.
-- **HTTP MCP servers behind `[network] allowed_hosts`.** Only stdio MCP servers exist today.
 - **`[data]` redaction and transcript modes** (`full`, `metadata`, `off`).
 - **`[audit]`**: a required audit sink, a mirror directory, and full or digested arguments.
+
+## Network
+
+- **Proxy and TLS settings without a policy.** `[network] proxy`, `ca_bundle`, `client_cert` and `client_key` exist only in the managed policy, so an unmanaged developer behind a corporate proxy cannot use one (anvil ignores `HTTPS_PROXY`); a user-level equivalent would serve them without giving a repository a way in.
+- **HTTP MCP sessions that expire.** When a server ends its session and answers 404, anvil reports the error and the server stays unusable until the next session; the specification asks the client to start a new session. anvil also does not open the optional GET stream, answers requests a server sends inside a response with "method not found", and does not support OAuth authorization (a definition's static headers only).
+- **MCP protocol revision 2026-07-28.** anvil speaks 2025-06-18 over stdio and HTTP. The current revision removes protocol-level sessions and the GET stream and adds per-request headers (`Mcp-Method`, `Mcp-Name`); servers that support only it would need those changes.
+- **FIPS-validated cryptography.** Not attempted. What it would take with the current setup, checked against the rustls 0.23.46 manual (`manual::_06_fips`) and crate features, the aws-lc-rs and aws-lc-fips-sys READMEs and platform pages, the reqwest 0.13.5 feature list, and the vendored reqwest source:
+  - rustls has a `fips` feature that turns on `aws-lc-rs/fips` and `webpki/aws-lc-rs-fips` (and changes the `require_ems` defaults). The provider is `rustls::crypto::default_fips_provider()`, and `ClientConfig::fips()` reports whether a configuration only uses FIPS-approved algorithms.
+  - reqwest 0.13 has no FIPS feature: `rustls` brings the aws-lc-rs provider and `rustls-no-provider` brings none. Its builder uses the process default `CryptoProvider` when one is installed and its own aws-lc-rs default otherwise. anvil would add rustls with `fips` to the workspace (feature unification then builds aws-lc-rs against `aws-lc-fips-sys`), install `default_fips_provider()` as the process default before `http_client` runs, and refuse to start if that fails. Checking `fips()` on the actual configuration needs a rustls `ClientConfig` built by anvil and passed with `tls_backend_preconfigured`, which reqwest documents as having no semver stability.
+  - Certificate checks: without `ca_bundle`, reqwest verifies through `rustls-platform-verifier`, which hands chain checks to the operating system on Windows and macOS; with `ca_bundle` it uses webpki with the rustls provider. Which of the two fits the firm's FIPS boundary needs a decision.
+  - Building `aws-lc-fips-sys` needs a C and C++ compiler, CMake, Go and Perl on every platform, and on Windows also NASM, Ninja and bindgen with libclang, on the MSVC targets only (`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`); a Windows FIPS build produces DLLs that ship next to the binary. It binds AWS-LC-FIPS 3.0.x; the rustls manual cites FIPS 140-3 certificate #4816, which was not checked against the NIST list here. A FIPS claim also needs the build and the operating environment to match the module's security policy, and the new crates must pass `cargo deny`.
 
 ## Isolation
 
