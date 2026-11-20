@@ -71,6 +71,13 @@ allow_trust = false
 [data]
 # Delete session transcripts older than 30 days when a session starts.
 retention_days = 30
+# Redact secrets from everything the tools return (the default). Add
+# patterns for identifiers specific to the firm.
+redaction = true
+# patterns = [{ kind = "employee_id", regex = '\bEMP-[0-9]{6}\b' }]
+# Keep sizes, digests, tool names, tokens and timings, but no message
+# text, file contents or command output. Sessions cannot be resumed.
+transcript = "metadata"
 
 [limits]
 # The most tokens one session may use.

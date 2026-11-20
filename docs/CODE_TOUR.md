@@ -55,7 +55,9 @@ The loop is a small state machine: Plan, Build, Verify, Review. In each state `r
 
 In Plan, `run_tools` refuses any call that may write. In Verify, `AgentLoop::project_check` decides the check command once: a command the user configured runs as configured, but one detected from the repository's files (`just check`, `npm test`) is the repository's own code, so it goes through the permission rules like a shell call.
 
-Every message is appended to the transcript by `push_message`, through `SessionLog::append` in `crates/anvil-core/src/context/session.rs`.
+Every message is appended to the transcript by `push_message`, through `SessionLog::append` in `crates/anvil-core/src/context/session.rs`. `push_message` first redacts user text (the task, feedback with check output) through `ctx.guard`; the reviewer's brief is redacted the same way, with the diff and check output inside untrusted-data delimiters.
+
+**Redaction and delimiters: `crates/anvil-core/src/guard.rs`, `crates/anvil-types/src/redact.rs`.** After a tool runs, `ToolRegistry::execute` passes its output through `DataGuard::redact` before anything else (truncation, the `tool-output/` file, the PostToolUse hook), then wraps it with `DataGuard::wrap` in `<untrusted-data id="NONCE" source="tool">` delimiters; hook text is redacted and wrapped on its own. The `Redactor` holds the built-in key shapes, the values of secret-looking environment variables and the policy's `[data] patterns`; `Wiring::new_in` and `Wiring::with_policy` build it once per session, and `Wiring::tool_context` hands the same guard, and so the same nonce, to the session and its subagents. *Safe because there is one choke point between a tool and the conversation, and what the provider receives is what the transcript stores.*
 
 ## 5. The permission check
 
@@ -99,9 +101,11 @@ When the wiring builds a provider (`Wiring::provider`), `from_config` first call
 
 **`crates/anvil-core/src/context/session.rs`: `SessionLog`, `session_dir`, `load_session`, `list_sessions`.**
 
-`SessionLog::open` creates `session.jsonl` in the session folder chosen in step 3, and `append` writes one JSON line per record: the task, each message, state changes, the final status. Full tool output goes to `tool-output/` next to it, and `status.json` keeps the session's state for `anvil status`. `anvil resume`, `anvil sessions` and `anvil status` read from the same `sessions_root`, so they find the sessions wherever the policy put them.
+`AgentLoop::new` opens the log in the policy's transcript mode (`ToolContext::transcript`): none at all under `off`, and under `metadata` `SessionRecord::kept_as` replaces the task and every message with sizes and SHA-256 digests before `append` writes it. `append` writes one JSON line per record: the task, each message, each completion's tokens and timing, redaction counts, state changes, the final status. Every file and folder is created through `anvil_types::private_fs`, owner-only on Unix. Full tool output goes to `tool-output/` next to it, and `status.json` keeps the session's state for `anvil status`. `anvil resume`, `anvil sessions` and `anvil status` read from the same `sessions_root`, so they find the sessions wherever the policy put them.
 
-At the end, `memory::finish_session` runs the end-of-session summarizer only if `Wiring::memory_allowed`, and the Stop hooks run if any are loaded.
+At the end, `memory::finish_session` runs the end-of-session summarizer only if `Wiring::memory_allowed` and the transcript is `full`, and the Stop hooks run if any are loaded.
+
+MCP servers are loaded before the session in `Wiring::load_mcp`, through `McpTools::load` and `McpStore` (`crates/anvil-compat/src/mcp/approval.rs`): a fresh listing is compared with the approved SHA-256 in `~/.anvil/mcp-approvals.toml`, a changed one drops the server, and the cache in `~/.anvil/mcp-cache/` is used only while it hashes to the approved listing.
 
 ## Where to look when demoing
 

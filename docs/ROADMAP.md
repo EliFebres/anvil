@@ -9,7 +9,6 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 
 ## Managed policy keys still to come
 
-- **`[data]` redaction and transcript modes** (`full`, `metadata`, `off`).
 - **`[audit]`**: a required audit sink, a mirror directory, and full or digested arguments.
 
 ## Network
@@ -41,7 +40,8 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 ## Records and secrets
 
 - **Append-only, hash-chained audit log with export.** Transcripts are plain files today; a chained log lets a reviewer prove nothing was removed or changed after the fact.
-- **Secret redaction in transcripts and prompts.** The deny list keeps the file tools away from credential stores, but a secret inside an ordinary file is still sent and stored as text.
+- **Redaction beyond known shapes.** Redaction catches the built-in key shapes, secret environment values and policy patterns; a password or connection string in an ordinary file is still sent and stored, and detecting those needs format-aware or entropy-based rules that do not flood the model with false positives.
+- **Owner-only access lists on Windows at creation.** On Unix anvil creates its files 0600; on Windows they inherit the folder's access list and `anvil doctor` only reports a folder others can open.
 - **Operating-system credential store for the endpoint key.** The key lives in the environment or `~/.anvil/.env` behind file permissions; the Windows Credential Manager, the macOS Keychain or the Secret Service would keep it out of files.
 
 ## Trust

@@ -38,7 +38,7 @@ The pilot ends on the end date unless a new version of this document extends it.
   - `allow_yes = false`, `allow_allow_tool = false`, `allow_always = false` and `require_plan_approval = true`;
   - `[permissions] ask = ["shell", "write_file", "edit_file"]`, so every command and write asks a person;
   - `[features] hooks = false`, `mcp = "off"`, `memory = false`;
-  - `[data] transcript_dir` set to [folder] and `retention_days` to [days].
+  - `[data] transcript_dir` set to [folder], `retention_days` to [days], and `transcript` to `"metadata"` (or `"full"` if sessions must be resumable).
 - `anvil doctor` run on each machine at the start, and its policy block attached to this document.
 - Version of anvil: [commit or release], built by [who] from [where].
 

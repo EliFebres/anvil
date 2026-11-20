@@ -66,6 +66,8 @@ allow_trust = true
 
 [data]
 retention_days = 90
+# Keep the whole (redacted) conversation so sessions can be resumed.
+transcript = "full"
 
 [limits]
 session_tokens = 4000000

@@ -33,13 +33,14 @@ Source code, secrets or customer data reach a server the firm did not approve.
 - File tools cannot read outside the workspace or open `.env` files, key and certificate files, credentials files, `.git/config`, SSH, cloud and GPG credentials, browser profiles or keychains.
 - Programs anvil starts do not inherit API keys or tokens.
 - The API key is redacted from error bodies and never logged.
+- Known secret shapes, private key blocks, JWTs, the values of secret-looking environment variables and the policy's own patterns are redacted from everything the tools return before it is sent or stored.
 
 **Not stopped**
 - Everything a session reads is sent to the model endpoint by design. Choose the endpoint and its host accordingly.
 - An approved shell command on the host can reach the network directly when it gets past the deny categories, which match text only. `allowlist` mode narrows this to what the allowed programs themselves do (a build script or test the model wrote can still open a connection); the container executor (`--network none`) closes it.
-- Secrets inside ordinary files are sent and stored in transcripts like any other text.
+- Secrets in a format redaction does not know (a password in a configuration file, a connection string, customer data) are sent and stored like any other text. A policy can keep transcripts to `metadata` or `off`.
 
-**Roadmap:** secret redaction in prompts and transcripts; operating-system sandboxing of shell commands with network control; an append-only, hash-chained audit log with export.
+**Roadmap:** redaction beyond known shapes; operating-system sandboxing of shell commands with network control; an append-only, hash-chained audit log with export.
 
 ## 3. Supply chain
 
