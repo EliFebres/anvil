@@ -85,7 +85,12 @@ impl Tool for Grep {
             let matcher = match RegexMatcher::new_line_matcher(&args.pattern) {
                 Ok(matcher) => matcher,
                 Err(error) => {
-                    return ToolOutput::error(format!("invalid regex `{}`: {error}", args.pattern));
+                    return ToolOutput::error(format!(
+                        "argument `pattern` is not a valid regular expression (`{}`: {error}); \
+                         it accepts Rust regex syntax, with characters such as `(` and `.` \
+                         escaped as `\\(` and `\\.` to match them literally",
+                        args.pattern
+                    ));
                 }
             };
             let filter = match args.glob.as_deref().map(FileFilter::new) {
@@ -296,7 +301,12 @@ impl FileFilter {
         let matcher = GlobBuilder::new(glob)
             .literal_separator(by_path)
             .build()
-            .map_err(|error| format!("invalid glob `{glob}`: {error}"))?
+            .map_err(|error| {
+                format!(
+                    "argument `glob` is not a valid glob (`{glob}`: {error}); it accepts a glob \
+                     such as `*.rs` or `src/**/*.ts`"
+                )
+            })?
             .compile_matcher();
         Ok(Self { matcher, by_path })
     }

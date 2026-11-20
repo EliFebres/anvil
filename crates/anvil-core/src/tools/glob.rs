@@ -55,7 +55,11 @@ impl Tool for Glob {
             {
                 Ok(glob) => glob.compile_matcher(),
                 Err(error) => {
-                    return ToolOutput::error(format!("invalid glob `{}`: {error}", args.pattern));
+                    return ToolOutput::error(format!(
+                        "argument `pattern` is not a valid glob (`{}`: {error}); it accepts a \
+                         glob such as `src/**/*.rs`",
+                        args.pattern
+                    ));
                 }
             };
             let root = match ctx.checked_path(args.path.as_deref().unwrap_or("."), false) {
@@ -64,7 +68,8 @@ impl Tool for Glob {
             };
             if !root.is_dir() {
                 return ToolOutput::error(format!(
-                    "{} is not a directory",
+                    "argument `path` names {}, which is not a directory; it accepts a directory \
+                     (default: the project root)",
                     ctx.display_path(&root)
                 ));
             }

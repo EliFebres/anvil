@@ -115,11 +115,17 @@ impl Tool for ReadFile {
                     output.with_redactions(counts)
                 }
                 (None, Some(files)) => read_many(&files, ctx),
-                (Some(_), Some(_)) => {
-                    ToolOutput::error("pass either `path` or `files`, not both".to_owned())
-                }
+                (Some(_), Some(_)) => ToolOutput::error(
+                    "invalid arguments: both `path` and `files` were given; pass either `path` \
+                     (a string) for one file or `files` (an array of {path, offset?, limit?}) \
+                     for several, not both"
+                        .to_owned(),
+                ),
                 (None, None) => ToolOutput::error(
-                    "invalid arguments: pass `path` for one file or `files` for several".to_owned(),
+                    "invalid arguments: neither `path` nor `files` was given; pass `path` (a \
+                     string) for one file or `files` (an array of {path, offset?, limit?}) for \
+                     several"
+                        .to_owned(),
                 ),
             }
         })
@@ -130,11 +136,15 @@ impl Tool for ReadFile {
 /// of the output cap so one long file cannot push the others out.
 fn read_many(files: &[FileRange], ctx: &ToolContext) -> ToolOutput {
     if files.is_empty() {
-        return ToolOutput::error("`files` is empty; list at least one file".to_owned());
+        return ToolOutput::error(
+            "argument `files` is empty; it accepts 1 to 20 {path, offset?, limit?} entries"
+                .to_owned(),
+        );
     }
     if files.len() > MAX_FILES {
         return ToolOutput::error(format!(
-            "`files` lists {} entries; read at most {MAX_FILES} per call",
+            "argument `files` lists {} entries; it accepts at most {MAX_FILES} per call, so \
+             split the read",
             files.len()
         ));
     }
@@ -208,7 +218,14 @@ fn number_lines(text: &str, offset: usize, limit: usize, max_bytes: usize) -> St
         if total == 0 {
             return "(empty file)".to_owned();
         }
-        return format!("(no lines at offset {offset}; the file has {total} lines)");
+        if limit == 0 {
+            return "(no lines: argument `limit` is 0; it accepts 1 or more, default 2000)"
+                .to_owned();
+        }
+        return format!(
+            "(no lines: argument `offset` is {offset}, past the end of the file's {total} \
+             lines; it accepts 1 to {total})"
+        );
     }
     if last_shown < total {
         out.push_str(&format!(
@@ -243,7 +260,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             number_lines("a\nb", 5, 1, usize::MAX),
-            "(no lines at offset 5; the file has 2 lines)"
+            "(no lines: argument `offset` is 5, past the end of the file's 2 lines; it \
+             accepts 1 to 2)"
         );
         assert_eq!(number_lines("", 1, 1, usize::MAX), "(empty file)");
         assert_eq!(
@@ -375,5 +393,76 @@ pub(crate) mod tests {
 
         let output = ReadFile.run(json!({"offset": 1}), &ctx).await;
         assert!(output.content.starts_with("invalid arguments"));
+    }
+
+    #[tokio::test]
+    async fn argument_errors_name_the_argument_what_was_wrong_and_what_it_accepts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("x.txt"), "one\ntwo\n").expect("write");
+        let ctx = ToolContext::new(dir.path());
+        let cases = [
+            (
+                json!({"path": 5}),
+                "argument `path` is the number 5; it must be a string",
+            ),
+            (
+                json!({"path": "x.txt", "offset": "2"}),
+                "argument `offset` is the string \"2\"; it must be a whole number of 0 or more",
+            ),
+            (
+                json!({"path": "x.txt", "limit": -1}),
+                "argument `limit` is the number -1; it must be a whole number of 0 or more",
+            ),
+            (
+                json!({"files": [{"offset": 1}]}),
+                "missing argument `files[0].path`: a string is required",
+            ),
+            (
+                json!({"files": "x.txt"}),
+                "argument `files` is the string \"x.txt\"; it must be an array of objects",
+            ),
+            (
+                json!({}),
+                "neither `path` nor `files` was given; pass `path` (a string) for one file",
+            ),
+            (
+                json!({"files": []}),
+                "argument `files` is empty; it accepts 1 to 20",
+            ),
+        ];
+        for (args, expected) in cases {
+            let output = ReadFile.run(args.clone(), &ctx).await;
+            assert!(output.is_error, "{args}");
+            assert!(
+                output.content.contains(expected),
+                "{args}: {}",
+                output.content
+            );
+        }
+        let output = ReadFile.run(json!({"path": 5}), &ctx).await;
+        assert!(
+            output.content.contains("Accepted arguments: `files`"),
+            "{}",
+            output.content
+        );
+        let past = ReadFile
+            .run(json!({"path": "x.txt", "offset": 9}), &ctx)
+            .await;
+        assert!(
+            past.content.contains(
+                "argument `offset` is 9, past the end of the file's 2 lines; it accepts 1 to 2"
+            ),
+            "{}",
+            past.content
+        );
+        let none = ReadFile
+            .run(json!({"path": "x.txt", "limit": 0}), &ctx)
+            .await;
+        assert!(
+            none.content
+                .contains("argument `limit` is 0; it accepts 1 or more"),
+            "{}",
+            none.content
+        );
     }
 }

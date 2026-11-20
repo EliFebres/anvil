@@ -6,12 +6,18 @@
 //! output on disk. Nothing here prints; prompting goes through
 //! [`PermissionPrompt`], which the CLI implements.
 
+/// Explains tool arguments that do not fit the tool's schema.
+mod arg_errors;
 /// The `edit_file` tool: exact-string replacement that refuses ambiguity.
 pub mod edit_file;
+/// The message `edit_file` returns when its old text is not in the file.
+mod edit_hint;
 /// The `glob` tool: finds files by pattern, honoring `.gitignore`.
 pub mod glob;
 /// The `grep` tool: regex search over files, honoring `.gitignore`.
 pub mod grep;
+/// Line endings for the file tools that write.
+mod line_endings;
 /// The `list_dir` tool.
 pub mod list_dir;
 /// The `outline` tool: a file's or directory's structure without the bodies.
@@ -549,10 +555,17 @@ pub fn schema_for<T: JsonSchema>() -> Value {
 ///
 /// # Errors
 ///
-/// A [`ToolOutput::error`] naming the problem, to be returned to the model.
-pub fn parse_args<T: DeserializeOwned>(args: Value) -> Result<T, ToolOutput> {
-    serde_json::from_value(args)
-        .map_err(|error| ToolOutput::error(format!("invalid arguments: {error}")))
+/// A [`ToolOutput::error`] to be returned to the model that names each
+/// argument at fault, what was wrong with it and what it accepts, read from
+/// the same schema the model was given.
+pub fn parse_args<T: DeserializeOwned + JsonSchema>(args: Value) -> Result<T, ToolOutput> {
+    T::deserialize(&args).map_err(|error| {
+        ToolOutput::error(arg_errors::explain(
+            &args,
+            &schema_for::<T>(),
+            &error.to_string(),
+        ))
+    })
 }
 
 /// How a tool call ended.
