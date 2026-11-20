@@ -707,4 +707,33 @@ fn audit_verify_exits_non_zero_at_the_first_break_and_show_prints_the_records() 
     let stdout = String::from_utf8_lossy(&broken.stdout);
     assert_eq!(broken.status.code(), Some(1), "{stdout}");
     assert!(stdout.contains("chain broken at line 2"), "{stdout}");
+
+    let same = dir.path().join("same.jsonl");
+    std::fs::copy(&file, &same).expect("copy");
+    let matched = anvil(dir.path())
+        .args(["audit", "verify", session, "--mirror"])
+        .arg(&same)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&matched.stdout);
+    assert!(matched.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("the mirror holds the same 3 records"),
+        "{stdout}"
+    );
+
+    // A session file cut at its end still verifies on its own; the mirror
+    // shows the cut.
+    std::fs::write(&file, format!("{}\n{}\n", lines[0], lines[1])).expect("cut");
+    let cut = anvil(dir.path())
+        .args(["audit", "verify", session, "--mirror"])
+        .arg(&same)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&cut.stdout);
+    assert_eq!(cut.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.contains("the mirror differs from the session file at line 3"),
+        "{stdout}"
+    );
 }

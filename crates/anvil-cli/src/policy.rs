@@ -1136,6 +1136,48 @@ mod tests {
     }
 
     #[test]
+    fn a_running_builds_audit_log_is_kept_and_an_expired_one_goes_with_its_folder() {
+        use anvil_audit::audit::{AUDIT_FILE, AuditEvent, AuditLog, AuditTarget, mirror_file};
+
+        let dir = tempfile::tempdir().expect("dir");
+        let sessions = dir.path().join(".anvil").join("sessions");
+        let build = crate::build::state::builds_root(dir.path()).join("01ARZ3NDEKTSV4RRFFQ69G5FAW");
+        std::fs::create_dir_all(&build).expect("mkdir");
+        let lock = std::fs::File::create(build.join(anvil_types::status::LOCK_FILE)).expect("lock");
+        lock.lock().expect("locks");
+        let mirror = mirror_file(&dir.path().join("mirror"), "01ARZ3NDEKTSV4RRFFQ69G5FAW");
+        let target = AuditTarget {
+            primary: build.join(AUDIT_FILE),
+            mirror: Some(mirror.clone()),
+            required: true,
+        };
+        let log = AuditLog::open(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            crate::audit::identity(None),
+            &target,
+        )
+        .expect("open");
+        log.append(
+            "main",
+            AuditEvent::SessionEnd {
+                outcome: "running".to_owned(),
+            },
+        )
+        .expect("append");
+        let later = SystemTime::now() + Duration::from_secs(40 * 24 * 60 * 60);
+        assert_eq!(prune_all(&sessions, dir.path(), 30, later), (0, 0));
+        assert!(
+            build.join(AUDIT_FILE).is_file(),
+            "a running build keeps its log"
+        );
+        drop(log);
+        drop(lock);
+        assert_eq!(prune_all(&sessions, dir.path(), 30, later), (0, 1));
+        assert!(!build.exists(), "the log goes with its build folder");
+        assert!(mirror.is_file(), "the mirror is never pruned");
+    }
+
+    #[test]
     fn show_and_report_name_each_setting_and_its_layer() {
         let dir = tempfile::tempdir().expect("dir");
         let loaded = policy(dir.path(), "[features]\nhooks = false\nmemory = true\n");

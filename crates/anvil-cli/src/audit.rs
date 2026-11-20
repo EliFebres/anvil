@@ -307,7 +307,10 @@ impl SessionAudit {
     pub fn decision(&self, decision: &PermissionDecision) {
         let allowed = matches!(
             decision.scope,
-            DecisionScope::Once | DecisionScope::Session | DecisionScope::Rule
+            DecisionScope::Once
+                | DecisionScope::Session
+                | DecisionScope::Saved
+                | DecisionScope::Rule
         );
         self.record(
             MAIN_AGENT,
@@ -456,42 +459,99 @@ fn audit_file(sessions_root: &Path, target: &str) -> std::path::PathBuf {
     sessions_root.join(target).join(AUDIT_FILE)
 }
 
-/// `anvil audit verify`: walks the chain and reports the first break.
+/// `anvil audit verify`: walks the chain, reports the first break, and
+/// compares the file with its mirror when there is one.
 ///
 /// # Arguments
 ///
 /// * `sessions_root` - This repository's sessions folder.
 /// * `target` - A session id or an audit file.
+/// * `mirror` - A mirrored copy given on the command line.
+/// * `mirror_dir` - The policy's `[audit] mirror_dir`, where the copy of a
+///   session named by id is looked for when `mirror` is not given; that
+///   copy must exist.
 ///
 /// # Returns
 ///
-/// `0` when the chain is intact, `1` at a break.
+/// `0` when the chain is intact and the mirror, if any, holds the same
+/// bytes; `1` otherwise.
 ///
 /// # Errors
 ///
-/// When the file cannot be read.
-pub fn verify_command(sessions_root: &Path, target: &str) -> anyhow::Result<i32> {
+/// When a file cannot be read.
+pub fn verify_command(
+    sessions_root: &Path,
+    target: &str,
+    mirror: Option<std::path::PathBuf>,
+    mirror_dir: Option<&Path>,
+) -> anyhow::Result<i32> {
     let file = audit_file(sessions_root, target);
+    let mirror = mirror.or_else(|| {
+        (!Path::new(target).is_file())
+            .then_some(mirror_dir)
+            .flatten()
+            .map(|dir| mirror_file(dir, target))
+    });
     let text = std::fs::read_to_string(&file)
         .with_context(|| format!("reading the audit log {}", file.display()))?;
-    match anvil_audit::audit::verify(&text) {
-        Ok(verified) => {
+    let verified = match anvil_audit::audit::verify(&text) {
+        Ok(verified) => verified,
+        Err(error) => {
+            println!("{}: chain broken at {error}", file.display());
+            return Ok(1);
+        }
+    };
+    println!(
+        "{}: chain intact, {} records, last hash {}",
+        file.display(),
+        verified.records.len(),
+        verified.last_hash()
+    );
+    let Some(mirror) = mirror else {
+        println!(
+            "An intact chain shows no record was edited, removed or moved. It cannot show that records were cut from the end or that the whole file was rewritten; pass the mirrored copy with --mirror to compare."
+        );
+        return Ok(0);
+    };
+    let copy = match std::fs::read_to_string(&mirror) {
+        Ok(copy) => copy,
+        Err(error) => {
+            println!("{}: the mirror cannot be read: {error}", mirror.display());
+            return Ok(1);
+        }
+    };
+    match first_difference(&text, &copy) {
+        None => {
             println!(
-                "{}: chain intact, {} records, last hash {}",
-                file.display(),
-                verified.records.len(),
-                verified.last_hash()
-            );
-            println!(
-                "An intact chain shows no record was edited, removed or moved. It cannot show that records were cut from the end or that the whole file was rewritten; compare it with the mirrored copy."
+                "{}: the mirror holds the same {} records",
+                mirror.display(),
+                verified.records.len()
             );
             Ok(0)
         }
-        Err(error) => {
-            println!("{}: chain broken at {error}", file.display());
+        Some(line) => {
+            println!(
+                "{}: the mirror differs from the session file at line {line}",
+                mirror.display()
+            );
             Ok(1)
         }
     }
+}
+
+/// The first line, from 1, where two audit files differ; `None` when they
+/// are the same bytes.
+fn first_difference(primary: &str, mirror: &str) -> Option<usize> {
+    if primary == mirror {
+        return None;
+    }
+    let mut left = primary.split('\n');
+    let mut right = mirror.split('\n');
+    let mut line = 1;
+    while left.next() == right.next() {
+        line += 1;
+    }
+    Some(line)
 }
 
 /// `anvil audit show`: prints the records readably.
@@ -514,6 +574,12 @@ pub fn show_command(sessions_root: &Path, target: &str) -> anyhow::Result<i32> {
         .with_context(|| format!("reading the audit log {}", file.display()))?;
     print!("{}", anvil_audit::audit::show::render(&text));
     Ok(i32::from(anvil_audit::audit::verify(&text).is_err()))
+}
+
+impl anvil_core::tools::PermissionObserver for SessionAudit {
+    fn decided(&self, decision: &PermissionDecision) {
+        self.decision(decision);
+    }
 }
 
 impl CallGate for SessionAudit {
@@ -622,6 +688,7 @@ fn scope_label(scope: DecisionScope) -> &'static str {
     match scope {
         DecisionScope::Once => "once",
         DecisionScope::Session => "session",
+        DecisionScope::Saved => "saved",
         DecisionScope::Rule => "rule",
         DecisionScope::Deny => "deny",
         DecisionScope::Blocked => "blocked",

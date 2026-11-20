@@ -282,6 +282,11 @@ pub enum AuditCommand {
         /// A session id of this repository, or the path of an audit file
         /// such as a mirrored copy.
         target: String,
+        /// A mirrored copy to compare with byte for byte. For a session id
+        /// under a policy with `[audit] mirror_dir`, the copy there is
+        /// compared without this flag.
+        #[arg(long)]
+        mirror: Option<std::path::PathBuf>,
     },
     /// Print a session's audit records one per line, then whether the
     /// chain verifies.

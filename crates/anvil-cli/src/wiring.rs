@@ -236,6 +236,14 @@ impl Provider for GatedProvider {
     }
 }
 
+/// A permission observer that records nothing, for a decision that belongs
+/// to no open audit log.
+struct Unobserved;
+
+impl PermissionObserver for Unobserved {
+    fn decided(&self, _decision: &anvil_core::tools::PermissionDecision) {}
+}
+
 /// The main session's prompt, lent to a sub-agent's registry.
 struct ParentPrompt(Arc<dyn PermissionPrompt>);
 
@@ -814,13 +822,17 @@ impl Wiring {
             Some(session) => (session.id.clone(), Some(session.dir.clone())),
             None => ("none".to_owned(), None),
         };
-        Some(Arc::new(HookRunner::new(
+        let runner = HookRunner::new(
             Arc::clone(&self.hooks),
             self.cwd.clone(),
             Shell::from_config(self.config.tools.shell.as_deref()),
             id,
             dir,
-        )))
+        );
+        Some(Arc::new(match self.call_gate() {
+            Some(gate) => runner.with_gate(gate),
+            None => runner,
+        }))
     }
 
     /// Wraps `SessionStart` hook output as a prompt section, redacted and
@@ -1021,8 +1033,16 @@ impl Wiring {
     ///
     /// # Arguments
     ///
+    /// The decision goes to `audit` and nowhere else: never to the
+    /// session whose permission observer the wiring holds, which may have
+    /// ended already.
+    ///
+    /// # Arguments
+    ///
     /// * `command` - The command line.
     /// * `prompt` - Who answers an `ask`.
+    /// * `audit` - The audit log the decision is recorded in, such as the
+    ///   build's; when it is required, a failed write refuses the command.
     ///
     /// # Errors
     ///
@@ -1031,10 +1051,20 @@ impl Wiring {
         &self,
         command: &str,
         prompt: Box<dyn PermissionPrompt>,
+        audit: Option<Arc<crate::audit::SessionAudit>>,
     ) -> Result<(), String> {
-        let registry = self
+        let mut registry = self
             .registry_without_delegate(prompt)
             .map_err(|error| format!("{error:#}"))?;
+        match audit {
+            Some(audit) => {
+                if audit.required() {
+                    registry.set_gate(Arc::clone(&audit) as Arc<dyn CallGate>);
+                }
+                registry.set_observer(audit);
+            }
+            None => registry.set_observer(Arc::new(Unobserved)),
+        }
         registry.permit(
             SHELL_TOOL_NAME,
             &serde_json::json!({ "command": command }),

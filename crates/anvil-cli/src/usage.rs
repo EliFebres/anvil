@@ -615,7 +615,7 @@ impl PermissionObserver for SessionUsage {
         }
         let scope = match decision.scope {
             DecisionScope::Once => PermissionScope::Once,
-            DecisionScope::Session => PermissionScope::Session,
+            DecisionScope::Session | DecisionScope::Saved => PermissionScope::Session,
             DecisionScope::Rule => PermissionScope::Rule,
             DecisionScope::Deny => PermissionScope::Deny,
             DecisionScope::Blocked => PermissionScope::Blocked,

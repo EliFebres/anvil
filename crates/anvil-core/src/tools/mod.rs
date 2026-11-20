@@ -907,6 +907,10 @@ impl ToolRegistry {
                 return Execution::finished(call, outcome.0, outcome.1);
             }
         }
+        // Recording the decision may itself have closed the gate.
+        if let Some(reason) = self.gate_refusal() {
+            return Execution::finished(call, ToolOutput::error(reason), ToolOutcome::Blocked);
+        }
         if let Some(hook) = &self.hook
             && let HookDecision::Block { reason } = hook.before(call, &args, ctx).await
         {
@@ -939,6 +943,9 @@ impl ToolRegistry {
         } else {
             ctx
         };
+        if let Some(reason) = self.gate_refusal() {
+            return Execution::finished(call, ToolOutput::error(reason), ToolOutcome::Blocked);
+        }
         let mut output = tool.run(args.clone(), ctx).await;
         let redacted_by_tool = std::mem::take(&mut output.redactions);
         let redacted = ctx.guard.redact(&call.name, &output.content);
@@ -986,8 +993,10 @@ impl ToolRegistry {
         // A PostToolUse hook sees the redacted output as the tool produced
         // it, without the delimiters, so existing hook scripts keep working.
         let note = match &self.hook {
-            Some(hook) => hook.after(call, &args, &execution.result, ctx).await,
-            None => None,
+            Some(hook) if self.gate_refusal().is_none() => {
+                hook.after(call, &args, &execution.result, ctx).await
+            }
+            _ => None,
         };
         execution.result.content = ctx.guard.wrap(&call.name, &execution.result.content);
         if let Some(note) = note {
@@ -1062,7 +1071,11 @@ impl ToolRegistry {
                 return Err(output.content);
             }
         }
-        Ok(())
+        // Recording the decision may itself have closed the gate.
+        match self.gate_refusal() {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
     }
 
     /// Applies the blocked list, the rules and the session approvals; `None`
@@ -1147,7 +1160,7 @@ impl ToolRegistry {
                     name,
                     DecisionScope::Deny,
                     false,
-                    rule_source.unwrap_or(DecisionSource::Rule(RuleOrigin::User)),
+                    rule_source.unwrap_or(DecisionSource::Rule(RuleOrigin::Builtin)),
                 );
                 Some((
                     ToolOutput::error("denied by a permission rule".to_owned()),
@@ -1203,10 +1216,14 @@ impl ToolRegistry {
                     }
                     PromptAnswer::Always => {
                         let rule = permissions::always_rule(name, target);
-                        if let Err(error) = permissions.add_allow(&rule) {
-                            tracing::warn!(%error, rule, "could not save the permission rule");
-                        }
-                        self.observe(name, DecisionScope::Session, false, answered_by);
+                        let scope = match permissions.add_allow(&rule) {
+                            Ok(()) => DecisionScope::Saved,
+                            Err(error) => {
+                                tracing::warn!(%error, rule, "could not save the permission rule");
+                                DecisionScope::Session
+                            }
+                        };
+                        self.observe(name, scope, false, answered_by);
                         None
                     }
                 }
@@ -1391,6 +1408,30 @@ mod tests {
         // The scripted prompt has no answers left; a second prompt would say No.
         let second = registry.execute(&call(r#"{"text": "again"}"#), &ctx).await;
         assert_eq!(second.outcome, ToolOutcome::Completed);
+    }
+
+    #[tokio::test]
+    async fn an_always_answer_is_reported_as_saved_only_when_its_rule_is_kept() {
+        let scopes = |saving: bool| async move {
+            let observer = Arc::new(RecordingObserver::default());
+            let mut registry = make_registry("", vec![PromptAnswer::Always]).with_always(saving);
+            registry.set_observer(Arc::clone(&observer) as Arc<dyn PermissionObserver>);
+            registry
+                .execute(&call(r#"{"text": "hi"}"#), &ToolContext::new("."))
+                .await;
+            lock_or_recover(&observer.0)
+                .iter()
+                .map(|decision| (decision.scope, decision.source))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            scopes(true).await,
+            [(DecisionScope::Saved, DecisionSource::Prompt)]
+        );
+        assert_eq!(
+            scopes(false).await,
+            [(DecisionScope::Session, DecisionSource::Prompt)]
+        );
     }
 
     #[tokio::test]
@@ -1992,6 +2033,84 @@ mod tests {
         assert!(!dir.path().join("a.txt").exists());
         let args = serde_json::json!({"command": "echo hi"});
         assert!(registry.permit("shell", &args, dir.path()).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_gate_closed_by_the_decision_record_stops_the_hook_and_the_call() {
+        /// Closes when its decision observer is told anything, as a
+        /// required audit log does when writing the decision fails.
+        #[derive(Default)]
+        struct FailsOnRecord(std::sync::atomic::AtomicBool);
+        impl CallGate for FailsOnRecord {
+            fn refusal(&self) -> Option<String> {
+                self.0
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .then(|| "the audit log cannot be written".to_owned())
+            }
+        }
+        impl PermissionObserver for FailsOnRecord {
+            fn decided(&self, _decision: &PermissionDecision) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        #[derive(Default)]
+        struct CountingHook(std::sync::atomic::AtomicUsize);
+        impl ToolHook for CountingHook {
+            fn before<'a>(
+                &'a self,
+                _call: &'a ToolCall,
+                _args: &'a Value,
+                _ctx: &'a ToolContext,
+            ) -> HookFuture<'a, HookDecision> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { HookDecision::Allow })
+            }
+
+            fn after<'a>(
+                &'a self,
+                _call: &'a ToolCall,
+                _args: &'a Value,
+                _result: &'a ToolResult,
+                _ctx: &'a ToolContext,
+            ) -> HookFuture<'a, Option<String>> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { None })
+            }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gate = Arc::new(FailsOnRecord::default());
+        let hook = Arc::new(CountingHook::default());
+        let mut registry = ToolRegistry::with_builtins(
+            Permissions::from_toml("allow = [\"write_file\", \"shell\"]", None).expect("rules"),
+            Box::new(StaticPrompt(PromptAnswer::Yes)),
+        );
+        registry.set_gate(Arc::clone(&gate) as Arc<dyn CallGate>);
+        registry.set_observer(Arc::clone(&gate) as Arc<dyn PermissionObserver>);
+        registry.set_hook(Arc::clone(&hook) as Arc<dyn ToolHook>);
+        let write = ToolCall {
+            id: "w1".to_owned(),
+            name: "write_file".to_owned(),
+            arguments_json: serde_json::json!({"path": "a.txt", "content": "x"}).to_string(),
+        };
+        let execution = registry
+            .execute(&write, &ToolContext::new(dir.path()))
+            .await;
+        assert_eq!(execution.outcome, ToolOutcome::Blocked);
+        assert!(!dir.path().join("a.txt").exists(), "the call did not run");
+        assert_eq!(
+            hook.0.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nor the hook"
+        );
+
+        let fresh = Arc::new(FailsOnRecord::default());
+        registry.set_gate(Arc::clone(&fresh) as Arc<dyn CallGate>);
+        registry.set_observer(Arc::clone(&fresh) as Arc<dyn PermissionObserver>);
+        let args = serde_json::json!({"command": "echo hi"});
+        assert!(
+            registry.permit("shell", &args, dir.path()).is_err(),
+            "a command is not permitted once its decision could not be recorded"
+        );
     }
 
     #[tokio::test]

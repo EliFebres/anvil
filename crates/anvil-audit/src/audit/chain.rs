@@ -12,23 +12,21 @@
 //! hash is the SHA-256 of the canonical bytes. `prev` of the first record
 //! is [`GENESIS`], 64 zeros; `seq` counts from 0.
 //!
-//! So a reviewer can check a file without anvil: for each line, cut it at
-//! the last `,"hash":"`, add `}` to the part before, compare its SHA-256
-//! with the 64 digits after, parse it, and check that `seq` counts up by
-//! one and `prev` is the hash of the line before. In Python:
+//! [`verify`] reads the file as UTF-8 with LF line ends; every line, the
+//! last included, ends with a newline. For each line it cuts at the last
+//! `,"hash":"`, adds `}` to the part before, compares its SHA-256 with the
+//! 64 lowercase digits after, parses it (a duplicate key is an error),
+//! serializes the parsed record again and requires the same bytes, so an
+//! extra, missing or reordered field, an escape JSON does not require, or a
+//! space is a break even when the line was resealed. Then `seq` must count
+//! up by one from 0, `prev` must be the hash of the line before, and every
+//! record must name the first one's session.
 //!
-//! ```text
-//! import hashlib, json
-//! prev, seq = "0" * 64, 0
-//! for line in open("audit.jsonl", encoding="utf-8").read().split("\n")[:-1]:
-//!     cut = line.rindex(',"hash":"')
-//!     body, digest = line[:cut] + "}", line[cut + 9:cut + 73]
-//!     assert line[cut + 73:] == '"}'
-//!     assert hashlib.sha256(body.encode()).hexdigest() == digest
-//!     record = json.loads(body)
-//!     assert record["seq"] == seq and record["prev"] == prev
-//!     prev, seq = digest, seq + 1
-//! ```
+//! `verify_audit.py` next to this file checks a file by the same rules
+//! without anvil (`python verify_audit.py audit.jsonl`), including the
+//! fields and types of every event; `tests/python_check.rs` runs it and
+//! [`verify`] over the same intact and tampered files and requires the
+//! same verdict.
 //!
 //! The chain shows a record edited, removed or moved inside the file. It
 //! cannot show that records were cut from the end, or that the whole file
@@ -72,6 +70,19 @@ pub enum AuditError {
         line: usize,
         /// What is wrong with it.
         reason: String,
+    },
+    /// The mirror does not hold the same records as the session's own file,
+    /// so one of them was cut, removed or rewritten.
+    #[error(
+        "the audit mirror {} does not hold the same records as {}",
+        mirror.display(),
+        primary.display()
+    )]
+    MirrorDiffers {
+        /// The session's own file.
+        primary: PathBuf,
+        /// The mirror.
+        mirror: PathBuf,
     },
     /// An earlier write failed under a policy that requires the audit log,
     /// so nothing more is written.
@@ -212,6 +223,16 @@ pub fn open_line(line: &str) -> Result<SealedRecord, String> {
     }
     let body: RecordBody = serde_json::from_str(&canonical)
         .map_err(|error| format!("the record does not parse: {error}"))?;
+    // Byte equality with the re-serialization, so one record has exactly one
+    // valid line and two verifiers cannot read the same line differently.
+    let again = serde_json::to_string(&body)
+        .map_err(|error| format!("the record does not serialize: {error}"))?;
+    if again != canonical {
+        return Err(
+            "the record is not in canonical form (an extra or reordered field, an escape or a space)"
+                .to_owned(),
+        );
+    }
     Ok(SealedRecord {
         body,
         hash: hash.to_owned(),
@@ -453,5 +474,59 @@ mod tests {
             verify(&file(&[lines[0].clone(), other])),
             Err(AuditError::Broken { line: 2, ref reason }) if reason.contains("session")
         ));
+    }
+
+    /// Reseals `line` after `edit` changed its canonical bytes.
+    fn resealed(line: &str, edit: impl Fn(&str) -> String) -> String {
+        let cut = line.rfind(HASH_KEY).expect("hash");
+        let body = edit(&format!("{}}}", &line[..cut]));
+        let hash = sha256_hex(body.as_bytes());
+        format!("{}{HASH_KEY}{hash}\"}}", &body[..body.len() - 1])
+    }
+
+    #[test]
+    fn a_line_that_is_not_the_canonical_form_is_a_break_even_when_resealed() {
+        let lines = chain(1);
+        let cases: Vec<(&str, String)> = vec![
+            (
+                "extra field",
+                resealed(&lines[0], |b| {
+                    b.replacen(r#""agent":"main""#, r#""agent":"main","extra":"x""#, 1)
+                }),
+            ),
+            (
+                "escape",
+                resealed(&lines[0], |b| {
+                    b.replacen(r#""o0""#, &format!("\"{}u006f0\"", char::from(92u8)), 1)
+                }),
+            ),
+            (
+                "duplicate key",
+                resealed(&lines[0], |b| {
+                    b.replacen(r#""agent":"main""#, r#""agent":"main","agent":"evil""#, 1)
+                }),
+            ),
+            (
+                "key order",
+                resealed(&lines[0], |b| {
+                    b.replacen(r#""user":"u","host":"h""#, r#""host":"h","user":"u""#, 1)
+                }),
+            ),
+            (
+                "space",
+                resealed(&lines[0], |b| b.replacen(r#""seq":0"#, r#""seq": 0"#, 1)),
+            ),
+        ];
+        for (what, line) in cases {
+            assert_ne!(line, lines[0], "{what} changed the line");
+            assert!(
+                matches!(
+                    verify(&format!("{line}\n")),
+                    Err(AuditError::Broken { line: 1, .. })
+                ),
+                "{what}: {:?}",
+                verify(&format!("{line}\n"))
+            );
+        }
     }
 }

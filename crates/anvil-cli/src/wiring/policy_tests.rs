@@ -1000,7 +1000,8 @@ async fn a_policy_allowlist_refuses_metacharacters_and_starts_programs_directly(
     assert_eq!(
         managed.permit_shell(
             "git push origin main",
-            Box::new(StaticPrompt(PromptAnswer::Yes))
+            Box::new(StaticPrompt(PromptAnswer::Yes)),
+            None
         ),
         Ok(()),
         "a pattern that names `git push` lifts its deny category"

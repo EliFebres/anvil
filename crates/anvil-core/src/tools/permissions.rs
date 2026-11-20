@@ -1099,9 +1099,13 @@ pub fn resolve_path(root: &Path, target: &str) -> Option<PathBuf> {
 pub enum DecisionScope {
     /// Allowed for this call only, at a prompt.
     Once,
-    /// Allowed for the rest of the session: a `session` or `always` answer,
-    /// a session approval, or a pre-approved tool.
+    /// Allowed for the rest of the session: a `session` answer, an
+    /// `always` answer that may not be saved, a session approval, or a
+    /// pre-approved tool.
     Session,
+    /// Allowed by an `always` answer whose `allow` rule was added to the
+    /// user's rules, so later calls it covers are allowed by that rule.
+    Saved,
     /// Allowed by a permission rule (an `allow` rule or `default = "allow"`).
     Rule,
     /// Refused, by the user at a prompt or by a `deny` rule.

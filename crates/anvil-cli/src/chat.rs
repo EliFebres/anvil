@@ -86,6 +86,8 @@ async fn chat_session(
 ) -> anyhow::Result<i32> {
     let usage =
         SessionUsage::start(wiring, &id, SessionMode::Chat, yes)?.with_status(status.clone());
+    // Before any hook runs, so a required audit log gates the hooks too.
+    usage.observe_permissions(wiring);
     memory::prompt_sections(wiring.home.as_deref(), &wiring.cwd, wiring.memory_allowed())?;
     let hooks = wiring.hook_runner();
     let mut session_context = Vec::new();
@@ -95,7 +97,6 @@ async fn chat_session(
     let info = session_info(wiring, SessionKind::Chat, false, State::Build);
     let (mut frontend, events_tx) = Frontend::start(ui, info);
     let (events, tee) = usage.sink(Some(events_tx));
-    usage.observe_permissions(wiring);
     let mut registry =
         wiring.registry(usage.recording(status.prompt(false, frontend.prompt(false))))?;
     frontend.install_tool_hook(

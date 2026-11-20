@@ -83,6 +83,29 @@ pub trait Env {
         None
     }
 
+    /// Opens the build's own audit log, `<build folder>/audit.jsonl`, which
+    /// holds the decisions on acceptance and check commands; each item's
+    /// session keeps its own log.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The build id.
+    /// * `dir` - The build folder.
+    ///
+    /// # Errors
+    ///
+    /// When the policy requires the log and it cannot be written.
+    fn open_build_log(&self, _id: &str, _dir: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Ends the build's audit log.
+    ///
+    /// # Arguments
+    ///
+    /// * `outcome` - How the build ended.
+    fn close_build_log(&self, _outcome: &str) {}
+
     /// Decides whether a command the planner chose, or one detected from
     /// the repository, may run: the shell mode, its allowlist, the deny
     /// categories and the permission rules apply as they do to the model's
@@ -381,7 +404,18 @@ async fn run_build<E: Env>(
     spec: &str,
 ) -> anyhow::Result<i32> {
     let status = env.build_status(&state.id, dir, &state.spec_path);
+    if let Err(error) = env.open_build_log(&state.id, dir) {
+        if let Some(status) = &status {
+            status.fail(&format!("{error:#}"));
+        }
+        return Err(error);
+    }
     let outcome = run_items(env, settings, dir, state, spec, status.as_ref()).await;
+    env.close_build_log(&match &outcome {
+        Err(error) => format!("failed: {error:#}"),
+        Ok(_) if state.detail.is_empty() => state.status.name().to_owned(),
+        Ok(_) => format!("{}: {}", state.status.name(), state.detail),
+    });
     if let Some(status) = &status {
         match &outcome {
             Err(error) => status.fail(&format!("{error:#}")),

@@ -321,7 +321,11 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
         Some(Command::Audit { command }) => {
             let root = policy::sessions_root(cwd, env.policy.as_deref());
             match command {
-                cli::AuditCommand::Verify { target } => audit::verify_command(&root, &target),
+                cli::AuditCommand::Verify { target, mirror } => {
+                    let mirror_dir =
+                        anvil_types::policy::audit_settings(env.policy.as_deref()).mirror_dir;
+                    audit::verify_command(&root, &target, mirror, mirror_dir.as_deref())
+                }
                 cli::AuditCommand::Show { target } => audit::show_command(&root, &target),
             }
         }
