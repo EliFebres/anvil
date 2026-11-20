@@ -308,7 +308,13 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             let config = load_config(home).ok().map(|loaded| loaded.config);
             commands::compat_check(&path, config.as_ref())
         }
-        Some(Command::Doctor) => {
+        Some(Command::Doctor { egress: true }) => {
+            let wiring = unchecked_wiring(&env, profile, false)?;
+            let report = doctor::egress(&wiring);
+            print!("{}", report.render());
+            Ok(i32::from(report.failures() > 0))
+        }
+        Some(Command::Doctor { egress: false }) => {
             let wiring = unchecked_wiring(&env, profile, false)?;
             let options = doctor::Options {
                 env_files: &env.env_files,

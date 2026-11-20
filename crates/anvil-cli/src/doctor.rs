@@ -2,7 +2,8 @@
 //!
 //! Rows: the `.env` files loaded, every API key, every provider, the tools
 //! on `PATH` and the key scan over tracked files. The skill, command, agent,
-//! hook and MCP reports follow unchanged.
+//! hook and MCP reports follow unchanged. `--egress` prints the
+//! destinations report of [`egress`] instead.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -18,6 +19,10 @@ use tokio::process::Command;
 use crate::commands;
 use crate::secrets;
 use crate::wiring::Wiring;
+
+mod egress;
+
+pub use egress::egress;
 
 /// Wall clock allowed for one provider ping.
 const PING_TIMEOUT: Duration = Duration::from_secs(20);

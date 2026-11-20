@@ -281,3 +281,44 @@ fn setup_endpoint_refuses_plain_http_to_a_remote_host_before_sending() {
             .exists()
     );
 }
+
+#[test]
+fn doctor_egress_lists_each_destination_and_sends_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir");
+    // Nothing listens on these ports: the report must not connect.
+    write(
+        &home.join(".anvil").join("config.toml"),
+        &config("http://127.0.0.1:9", "https://models.example.com"),
+    );
+    write(
+        &home.join(".anvil").join("mcp.toml"),
+        "[servers.lan]\nurl = \"http://10.0.0.7:3000/mcp\"\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(&project)
+        .env("ANVIL_HOME", &home)
+        .env("ANVIL_LOG", "off")
+        .args(["doctor", "--egress"])
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for row in [
+        "dest:127.0.0.1:9",
+        "provider good: http://127.0.0.1:9/v1",
+        "dest:models.example.com:443",
+        "provider bad: https://models.example.com/v1",
+        "refused:MCP server lan",
+        "proxy",
+        "redirects",
+    ] {
+        assert!(stdout.contains(row), "{row} missing in:\n{stdout}");
+    }
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the refused server fails the report"
+    );
+}

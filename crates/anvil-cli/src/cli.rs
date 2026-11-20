@@ -110,7 +110,11 @@ pub enum Command {
     },
     /// Check keys, providers, tools and tracked files, one row per check with the
     /// fix for each failure.
-    Doctor,
+    Doctor {
+        /// List every destination the configuration can reach, and why, instead.
+        #[arg(long)]
+        egress: bool,
+    },
     /// Fail if any tracked file contains an API key (`just check` runs this).
     ScanKeys,
     /// Install, list, inspect and remove skills (Claude Code `SKILL.md` folders).
