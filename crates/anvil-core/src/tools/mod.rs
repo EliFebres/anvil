@@ -837,7 +837,7 @@ impl ToolRegistry {
         registry.register(Box::new(edit_file::EditFile));
         registry.register(Box::new(glob::Glob));
         registry.register(Box::new(grep::Grep));
-        registry.register(Box::new(shell::ShellTool));
+        registry.register(Box::new(shell::ShellTool::default()));
         registry.register(Box::new(list_dir::ListDir));
         registry.register(Box::new(outline::Outline));
         registry

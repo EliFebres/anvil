@@ -1032,6 +1032,59 @@ fn the_policys_container_executor_reaches_every_tool_context() {
     }
 }
 
+#[test]
+fn the_shell_tool_describes_the_shell_mode_in_force() {
+    let s = setup();
+    let description = |wiring: &Wiring| {
+        let registry = wiring
+            .registry(Box::new(StaticPrompt(PromptAnswer::No)))
+            .expect("registry");
+        registry
+            .specs()
+            .into_iter()
+            .find(|spec| spec.name == SHELL_TOOL_NAME)
+            .map(|spec| spec.description)
+    };
+
+    let unmanaged = wiring(&s, "[tools]\nshell = \"pwsh\"\n", None);
+    let text = description(&unmanaged).expect("shell tool");
+    assert!(text.contains("`pwsh -NoProfile"), "{text}");
+    assert!(text.contains("`Get-Content`"), "{text}");
+
+    let allowlist = wiring(
+        &s,
+        "",
+        Some(load_policy(
+            &s.policy_dir,
+            "[shell]\nmode = \"allowlist\"\nallow = [\"git status\"]\n",
+        )),
+    );
+    let text = description(&allowlist).expect("shell tool");
+    assert!(text.contains("no shell interpreter"), "{text}");
+
+    let container = wiring(
+        &s,
+        "",
+        Some(load_policy(
+            &s.policy_dir,
+            "[shell]\nmode = \"ask\"\nexecutor = \"container\"\n[shell.container]\nimage = \"registry.corp.example/build@sha256:0123\"\n",
+        )),
+    );
+    let text = description(&container).expect("shell tool");
+    assert!(text.contains("inside a Linux container"), "{text}");
+
+    let off = wiring(
+        &s,
+        "",
+        Some(load_policy(&s.policy_dir, "[shell]\nmode = \"off\"\n")),
+    );
+    assert_eq!(
+        description(&off),
+        None,
+        "no shell tool, nothing to describe"
+    );
+}
+
 #[tokio::test]
 async fn subagents_are_confined_like_the_session() {
     let s = setup();

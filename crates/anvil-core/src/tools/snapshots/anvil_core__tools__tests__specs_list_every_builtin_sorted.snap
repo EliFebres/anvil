@@ -218,7 +218,7 @@ expression: specs
   },
   {
     "name": "shell",
-    "description": "Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.",
+    "description": "Runs a command from the project root and returns its combined stdout and stderr followed by the exit code. The shell is PowerShell on Windows and sh elsewhere unless the configuration names another. Output is capped at 30 KB; the full output is kept in the session folder.",
     "parameters": {
       "description": "Arguments of the `shell` tool.",
       "properties": {

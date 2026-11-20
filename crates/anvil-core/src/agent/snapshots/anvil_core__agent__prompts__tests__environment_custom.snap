@@ -1,0 +1,8 @@
+---
+source: crates/anvil-core/src/agent/prompts.rs
+expression: "environment(\"linux\", Some(\"/home/someone/bin/nu\"), &Runner::default())"
+---
+# Environment
+
+Operating system: Linux. Paths use `/` as the separator.
+The shell tool runs each command with `nu -c`, the shell the configuration names. Use that shell's syntax.

@@ -671,11 +671,7 @@ impl Shell {
     /// `powershell` and `pwsh` take `-NoProfile -NonInteractive -Command`,
     /// `cmd` takes `/C`, and anything else is treated as a POSIX shell with `-c`.
     fn named(program: &str) -> Self {
-        let base = std::path::Path::new(program)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or(program)
-            .to_ascii_lowercase();
+        let base = Self::base_name(program);
         let args = match base.as_str() {
             "powershell" | "pwsh" => vec!["-NoProfile", "-NonInteractive", "-Command"],
             "cmd" => vec!["/C"],
@@ -694,6 +690,35 @@ impl Shell {
     /// Its name or path.
     pub fn program(&self) -> &str {
         &self.program
+    }
+
+    /// The file name of `program` without folder or extension, lowercased.
+    /// Both separators count on every platform, so a Windows path never
+    /// passes whole.
+    fn base_name(program: &str) -> String {
+        let file = program.rsplit(['/', '\\']).next().unwrap_or(program);
+        Path::new(file)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(file)
+            .to_ascii_lowercase()
+    }
+
+    /// The program's file name without folder or extension, so a
+    /// configured path such as `C:\Users\me\bin\bash.exe` is told as `bash`.
+    fn name(&self) -> String {
+        Self::base_name(&self.program)
+    }
+
+    /// Which kind of shell the program is.
+    fn kind(&self) -> ShellKind {
+        match self.name().as_str() {
+            "powershell" => ShellKind::WindowsPowerShell,
+            "pwsh" => ShellKind::PowerShell,
+            "cmd" => ShellKind::Cmd,
+            "sh" | "bash" | "dash" | "zsh" | "ksh" | "ash" => ShellKind::Posix,
+            _ => ShellKind::Other,
+        }
     }
 
     /// Prepares a command that runs `script` in this shell.
@@ -733,8 +758,131 @@ pub struct ShellArgs {
     pub timeout_s: Option<u64>,
 }
 
+/// The first sentence of every `shell` tool description.
+const SHELL_RUNS: &str = "Runs a command from the project root and returns its combined stdout \
+     and stderr followed by the exit code.";
+
+/// The last sentence of every `shell` tool description.
+const SHELL_CAP: &str = "Output is capped at 30 KB; the full output is kept in the session folder.";
+
 /// Runs a command in the configured shell.
-pub struct ShellTool;
+pub struct ShellTool {
+    /// What the model is told, including how commands start.
+    description: String,
+}
+
+impl ShellTool {
+    /// The tool, described for the shell and runner commands start with.
+    ///
+    /// # Arguments
+    ///
+    /// * `shell` - The configured shell.
+    /// * `runner` - How commands start.
+    ///
+    /// # Returns
+    ///
+    /// The tool, whose description states [`shell_fact`].
+    pub fn for_context(shell: &Shell, runner: &Runner) -> Self {
+        Self {
+            description: format!("{SHELL_RUNS} {} {SHELL_CAP}", shell_fact(shell, runner)),
+        }
+    }
+}
+
+impl Default for ShellTool {
+    /// The tool with a description that names no one shell, for a registry
+    /// built before the session's shell is known.
+    fn default() -> Self {
+        Self {
+            description: format!(
+                "{SHELL_RUNS} The shell is PowerShell on Windows and sh elsewhere unless the \
+                 configuration names another. {SHELL_CAP}"
+            ),
+        }
+    }
+}
+
+/// The kind of shell a program is, for what the model is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellKind {
+    /// Windows PowerShell 5.1, `powershell`.
+    WindowsPowerShell,
+    /// PowerShell 7, `pwsh`.
+    PowerShell,
+    /// The Command Prompt, `cmd`.
+    Cmd,
+    /// A POSIX shell such as `sh`, `bash` or `zsh`.
+    Posix,
+    /// Any other program the configuration names.
+    Other,
+}
+
+/// What the model is told about how the `shell` tool starts commands: the
+/// program and the syntax that works there.
+///
+/// It names the shell by its file name only, never a configured path, so
+/// no user name or home folder reaches the prompt. It depends only on the
+/// session's configuration, so it is the same text all session long and
+/// the cached prompt prefix holds.
+///
+/// # Arguments
+///
+/// * `shell` - The configured shell.
+/// * `runner` - How commands start: directly (allowlist mode) or through
+///   the shell, on the host or in a container.
+///
+/// # Returns
+///
+/// One or more sentences.
+pub fn shell_fact(shell: &Shell, runner: &Runner) -> String {
+    const DIRECT: &str = "starts one program directly, with plain arguments and no shell \
+         interpreter: pipes (`|`), redirection, `;`, `&&` and shell built-in commands are not \
+         available.";
+    const CONTAINER: &str = "inside a Linux container where the project is mounted at \
+         `/workspace`, with no network";
+    match (&runner.container, runner.direct) {
+        (Some(_), true) => {
+            format!("The shell tool {DIRECT} The program runs {CONTAINER}; use `/` in paths.")
+        }
+        (Some(_), false) => format!(
+            "The shell tool runs each command with `sh -c` {CONTAINER}. Use POSIX shell syntax \
+             and `/` in paths."
+        ),
+        (None, true) => format!("The shell tool {DIRECT}"),
+        (None, false) => {
+            let invocation = format!("`{} {}`", shell.name(), shell.args.join(" "));
+            match shell.kind() {
+                kind @ (ShellKind::WindowsPowerShell | ShellKind::PowerShell) => {
+                    let mut text = format!(
+                        "The shell tool runs each command with {invocation} (PowerShell). Use \
+                         PowerShell commands such as `Get-Content`, `Select-String` and \
+                         `Get-ChildItem`. Command Prompt syntax (`cd /d`, `%VAR%`) and Unix \
+                         tools and flags (`cat -A`, `head`, `tail`, `grep`) fail in PowerShell."
+                    );
+                    if kind == ShellKind::WindowsPowerShell {
+                        text.push_str(
+                            " Windows PowerShell has no `&&` or `||`; separate commands with `;`.",
+                        );
+                    }
+                    text
+                }
+                ShellKind::Cmd => format!(
+                    "The shell tool runs each command with {invocation} (Command Prompt). Use \
+                     Command Prompt commands such as `type`, `dir` and `findstr`. PowerShell \
+                     commands and Unix tools (`cat -A`, `head`, `tail`, `grep`) fail there."
+                ),
+                ShellKind::Posix => format!(
+                    "The shell tool runs each command with {invocation}, a POSIX shell. Use \
+                     POSIX shell syntax and tools such as `cat`, `grep` and `head`."
+                ),
+                ShellKind::Other => format!(
+                    "The shell tool runs each command with {invocation}, the shell the \
+                     configuration names. Use that shell's syntax."
+                ),
+            }
+        }
+    }
+}
 
 impl Tool for ShellTool {
     fn name(&self) -> &str {
@@ -742,9 +890,7 @@ impl Tool for ShellTool {
     }
 
     fn description(&self) -> &str {
-        "Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the \
-         project root and returns its combined stdout and stderr followed by the exit code. \
-         Output is capped at 30 KB; the full output is kept in the session folder."
+        &self.description
     }
 
     fn schema(&self) -> Value {
@@ -1096,7 +1242,7 @@ mod tests {
 
     #[test]
     fn schema_snapshot() {
-        insta::assert_json_snapshot!(ShellTool.schema());
+        insta::assert_json_snapshot!(ShellTool::default().schema());
     }
 
     #[test]
@@ -1114,7 +1260,7 @@ mod tests {
 
     #[test]
     fn blocked_commands_are_detected_case_insensitively() {
-        let tool = ShellTool;
+        let tool = ShellTool::default();
         assert!(
             tool.blocked_reason(&json!({"command": "rm -rf /"}))
                 .is_some()
@@ -1140,14 +1286,16 @@ mod tests {
 
     #[tokio::test]
     async fn runs_a_command_and_records_exit_code() {
-        let output = ShellTool
+        let output = ShellTool::default()
             .run(json!({"command": "echo hello"}), &ctx())
             .await;
         assert!(!output.is_error, "{}", output.content);
         assert!(output.content.starts_with("hello"), "{}", output.content);
         assert!(output.content.ends_with("[exit code: 0]"));
 
-        let output = ShellTool.run(json!({"command": "exit 3"}), &ctx()).await;
+        let output = ShellTool::default()
+            .run(json!({"command": "exit 3"}), &ctx())
+            .await;
         assert!(output.is_error);
         assert!(
             output.content.ends_with("[exit code: 3]"),
@@ -1201,10 +1349,14 @@ mod tests {
         } else {
             "echo oops 1>&2"
         };
-        let output = ShellTool.run(json!({"command": command}), &ctx()).await;
+        let output = ShellTool::default()
+            .run(json!({"command": command}), &ctx())
+            .await;
         assert!(output.content.contains("oops"), "{}", output.content);
 
-        let output = ShellTool.run(json!({"command": "exit 0"}), &ctx()).await;
+        let output = ShellTool::default()
+            .run(json!({"command": "exit 0"}), &ctx())
+            .await;
         assert!(
             output.content.starts_with("(no output)"),
             "{}",
@@ -1220,7 +1372,7 @@ mod tests {
             "sleep 30"
         };
         let started = std::time::Instant::now();
-        let output = ShellTool
+        let output = ShellTool::default()
             .run(json!({"command": command, "timeout_s": 1}), &ctx())
             .await;
         assert!(output.is_error);
@@ -1234,7 +1386,7 @@ mod tests {
 
     #[tokio::test]
     async fn long_output_is_fully_collected_below_the_memory_cap() {
-        let output = ShellTool
+        let output = ShellTool::default()
             .run(json!({"command": many_lines(3000)}), &ctx())
             .await;
         assert!(!output.is_error, "{}", output.content);

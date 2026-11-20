@@ -1,0 +1,8 @@
+---
+source: crates/anvil-core/src/agent/prompts.rs
+expression: allowlist
+---
+# Environment
+
+Operating system: Windows. Paths use `\` as the separator; the file tools also accept `/`.
+The shell tool starts one program directly, with plain arguments and no shell interpreter: pipes (`|`), redirection, `;`, `&&` and shell built-in commands are not available.

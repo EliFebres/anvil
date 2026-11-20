@@ -20,6 +20,7 @@ use anvil_core::context::{
     Conversation, SessionLog, SessionMeta, SessionRecord, discover_instructions,
 };
 use anvil_core::provider::{CompletionRequest, Message, Provider, ToolSpec};
+use anvil_core::tools::shell::{SHELL_TOOL_NAME, shell_fact};
 use anvil_core::tools::{Access, ToolContext, ToolHook, ToolRegistry};
 use anvil_types::policy::TranscriptMode;
 use anyhow::Context;
@@ -577,8 +578,14 @@ impl ChatSession<'_> {
             tools,
             self.wiring.config.prompt.delegate_guidance,
         ));
+        let shell = self
+            .registry
+            .get(SHELL_TOOL_NAME)
+            .map(|_| shell_fact(&self.ctx.shell, &self.ctx.runner));
+        let environment = prompts::environment_section(std::env::consts::OS, shell.as_deref());
         prompts::system_prompt(&PromptInputs {
             state: self.mode,
+            environment: Some(&environment),
             instructions: &instructions,
             sections: &coder_sections,
             tools,

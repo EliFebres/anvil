@@ -559,13 +559,25 @@ impl AgentLoop {
             tools,
             self.config.delegate_guidance,
         ));
+        let environment = self.environment();
         system_prompt(&PromptInputs {
             state,
+            environment: Some(&environment),
             instructions: &instructions,
             sections: &sections,
             tools,
             task: &self.config.task,
         })
+    }
+
+    /// Where the agent runs, from the session's shell and runner; the
+    /// shell is left out when the `shell` tool is not registered.
+    fn environment(&self) -> PromptSection {
+        let shell = self
+            .registry
+            .get(SHELL_TOOL)
+            .map(|_| shell::shell_fact(&self.ctx.shell, &self.ctx.runner));
+        prompts::environment_section(std::env::consts::OS, shell.as_deref())
     }
 
     /// Tells the planner whether a check command was detected, so its
@@ -3079,6 +3091,11 @@ mod tests {
             .replace("\\r\\n", "\\n");
         let cat_error = regex::Regex::new(r"```\\n[^`]*?\\n\[exit code: 1\]").expect("regex");
         let requests = cat_error.replace_all(&requests, "```\\n<cat error>\\n[exit code: 1]");
+        // The environment section names the platform and its shell; its
+        // own tests in `prompts` pin each variant.
+        let environment = regex::Regex::new(r"# Environment\\n\\n.*?\\n\\n# State").expect("regex");
+        let requests =
+            environment.replace_all(&requests, "# Environment\\n\\n<environment>\\n\\n# State");
         insta::assert_snapshot!(requests);
     }
 

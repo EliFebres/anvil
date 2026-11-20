@@ -584,6 +584,7 @@ mod tests {
         assert_eq!(sections.review.len(), 1);
         let prompt = system_prompt(&PromptInputs {
             state: State::Build,
+            environment: None,
             instructions: &[],
             sections: &sections.coder,
             tools: &[],

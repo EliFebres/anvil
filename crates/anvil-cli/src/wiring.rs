@@ -17,11 +17,12 @@ use anvil_core::context;
 use anvil_core::guard::DataGuard;
 use anvil_core::net::{self, HttpClient};
 use anvil_core::provider::{self, Egress, Provider, SharedBudget, TokenBudget};
-use anvil_core::tools::shell::SHELL_TOOL_NAME;
+use anvil_core::tools::shell::{SHELL_TOOL_NAME, ShellTool};
 use anvil_core::tools::workspace::{DeniedPaths, deny_globs};
 use anvil_core::tools::{
     CallGate, PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
-    RuleOrigin, SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry, Workspace,
+    RuleOrigin, Runner, SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry,
+    Workspace,
 };
 use anvil_types::policy::{LoadedPolicy, McpMode, SkillsMode, TranscriptMode};
 use anvil_types::redact::Redactor;
@@ -1115,6 +1116,11 @@ impl Wiring {
             .with_always(always);
         if self.shell.mode == ShellMode::Off {
             registry.unregister(SHELL_TOOL_NAME);
+        } else {
+            registry.register(Box::new(ShellTool::for_context(
+                &Shell::from_config(self.config.tools.shell.as_deref()),
+                &self.runner(),
+            )));
         }
         let observer = self.observer.lock().ok().and_then(|slot| slot.clone());
         if let Some(observer) = observer {
@@ -1207,6 +1213,18 @@ impl Wiring {
         dirs
     }
 
+    /// How commands start: directly under any allowlist, in a container
+    /// when one is configured.
+    fn runner(&self) -> Runner {
+        // A rules file that cannot be read counts as limiting, so commands
+        // never fall back to a shell when an allowlist might be in force.
+        let programs_limit = !self.project.rules.shell_programs.is_empty()
+            || self
+                .user_permissions()
+                .map_or(true, |rules| rules.has_shell_allowlist());
+        self.shell.runner(programs_limit)
+    }
+
     /// Where tools run.
     ///
     /// # Returns
@@ -1220,15 +1238,9 @@ impl Wiring {
     /// project that a loaded hook or MCP server runs, which they never
     /// write either.
     pub fn tool_context(&self) -> ToolContext {
-        // A rules file that cannot be read counts as limiting, so commands
-        // never fall back to a shell when an allowlist might be in force.
-        let programs_limit = !self.project.rules.shell_programs.is_empty()
-            || self
-                .user_permissions()
-                .map_or(true, |rules| rules.has_shell_allowlist());
         ToolContext {
             shell: Shell::from_config(self.config.tools.shell.as_deref()),
-            runner: self.shell.runner(programs_limit),
+            runner: self.runner(),
             workspace: Workspace {
                 extra_dirs: self.config.tools.extra_dirs.clone(),
                 read_only_dirs: self
