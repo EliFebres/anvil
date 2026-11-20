@@ -18,6 +18,24 @@ const WINDOW: usize = 12;
 /// reviewer can check.
 const EXCEPTIONS: [(&str, &str, &str); 0] = [];
 
+/// The text before the first inline test module: `#[cfg(test)]` followed
+/// by `mod name {`. A `#[cfg(test)] mod name;` declaration near the top of
+/// a file does not end the code, so the rest of the file is still checked.
+fn non_test_code(text: &str) -> &str {
+    const MARK: &str = "#[cfg(test)]";
+    let mut from = 0;
+    while let Some(found) = text[from..].find(MARK) {
+        let at = from + found;
+        let after = text[at + MARK.len()..].trim_start();
+        let line = after.lines().next().unwrap_or_default();
+        if line.starts_with("mod ") && line.contains('{') {
+            return &text[..at];
+        }
+        from = at + MARK.len();
+    }
+    text
+}
+
 fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -82,14 +100,21 @@ fn every_non_test_command_starts_from_a_cleared_environment() {
         }
         let text = std::fs::read_to_string(&file).unwrap_or_default();
         // Test modules start programs freely to build fixtures.
-        let code = text.split("#[cfg(test)]").next().unwrap_or_default();
-        offenders.extend(uncleared(&relative, code));
+        offenders.extend(uncleared(&relative, non_test_code(&text)));
     }
     assert!(
         offenders.is_empty(),
         "start these with .env_clear().envs(anvil_types::child_env::vars()):\n{}",
         offenders.join("\n")
     );
+}
+
+#[test]
+fn a_test_module_declaration_does_not_hide_the_rest_of_the_file() {
+    let text = "#[cfg(test)]\nmod helpers;\nfn f() { Command::new(\"x\"); }\n#[cfg(test)]\nmod tests {\n}\n";
+    let code = non_test_code(text);
+    assert!(code.contains("fn f()"), "{code}");
+    assert!(!code.contains("mod tests"), "{code}");
 }
 
 #[test]
