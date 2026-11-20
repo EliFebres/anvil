@@ -154,8 +154,18 @@ const SECRET_FILES: &[&str] = &[
 /// forms and their `.pub` and backup copies) and any `credentials*` file.
 const SECRET_PREFIXES: &[&str] = &["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "credentials"];
 
-/// Extensions of key and certificate stores.
-const SECRET_EXTENSIONS: &[&str] = &[".pem", ".key", ".pfx", ".p12"];
+/// Extensions of key and certificate stores: PEM and PKCS#12 files, PuTTY
+/// private keys, Java key stores and KeePass databases.
+const SECRET_EXTENSIONS: &[&str] = &[
+    ".pem",
+    ".key",
+    ".pfx",
+    ".p12",
+    ".ppk",
+    ".jks",
+    ".keystore",
+    ".kdbx",
+];
 
 /// Suffixes of `.env.*` files that hold examples rather than secrets.
 const ENV_EXAMPLE_SUFFIXES: &[&str] = &[".example", ".sample", ".template"];
@@ -444,6 +454,19 @@ mod tests {
             r"C:\Users\u\AppData\Roaming\Microsoft\Protect\S-1-5",
         ] {
             let path = path.replace(['\\', '/'], std::path::MAIN_SEPARATOR_STR);
+            assert!(holds_secrets(Path::new(&path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn putty_java_and_password_manager_stores_hold_secrets() {
+        for path in [
+            "keys/server.ppk",
+            "android/release.jks",
+            "android/debug.KEYSTORE",
+            "vault/passwords.kdbx",
+        ] {
+            let path = path.replace('/', std::path::MAIN_SEPARATOR_STR);
             assert!(holds_secrets(Path::new(&path)), "{path}");
         }
     }
