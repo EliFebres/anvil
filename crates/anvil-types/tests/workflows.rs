@@ -358,6 +358,27 @@ fn release_runs_only_on_version_tags_and_builds_locked() {
     }
 }
 
+#[test]
+fn release_publishes_checksums_an_sbom_vendored_source_and_provenance() {
+    let path = workflows_dir().join(WRITER);
+    let text = std::fs::read_to_string(&path).expect("release.yml");
+    let steps: Vec<&str> = text
+        .lines()
+        .map(|line| strip_comment(line).trim())
+        .collect();
+    let has = |needle: &str| steps.iter().any(|line| line.contains(needle));
+    for needle in [
+        "> SHA256SUMS",
+        "cargo cyclonedx",
+        "cargo vendor --locked",
+        "-vendored-src.tar.gz",
+        "uses: actions/attest@",
+        "subject-checksums: dist/SHA256SUMS",
+    ] {
+        assert!(has(needle), "release.yml has no step with `{needle}`");
+    }
+}
+
 /// The channel pinned in the repository's `rust-toolchain.toml`.
 fn pinned_toolchain() -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rust-toolchain.toml");
