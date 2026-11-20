@@ -1,6 +1,49 @@
 # Administrator guide
 
-This guide is for the team that installs anvil on developer workstations and controls it with a managed policy. SECURITY.md says what each control does and which test proves it; this page says how to set it up.
+This guide is for the team that installs Anvil on developer workstations and controls it with a managed policy. SECURITY.md says what each control does, docs/SECURITY_TESTS.md names the test that proves it, and docs/DEPLOYMENT.md shows reference layouts; this page says how to set it up.
+
+Contents: verifying a release, air-gapped installation, the policy file (ownership, rollout, every key), MCP listing approval, collecting audit logs, inspecting a machine, upgrading by hand.
+
+## Verifying a release
+
+Each release on the [releases page](https://github.com/EliFebres/anvil/releases) carries the binaries (`anvil-x86_64-unknown-linux-gnu`, `anvil-x86_64-unknown-linux-musl`, `anvil-x86_64-pc-windows-msvc.exe`, `anvil-aarch64-apple-darwin`), `SHA256SUMS`, `anvil.cdx.json` (a CycloneDX 1.5 SBOM) and `anvil-<version>-vendored-src.tar.gz`. They are built by `.github/workflows/release.yml` on GitHub-hosted runners from the tagged commit, with `--locked` and the toolchain pinned in `rust-toolchain.toml`. Check three things before a file is distributed:
+
+1. **The checksum.** Download the files and `SHA256SUMS` into one folder:
+
+   ```sh
+   sha256sum --check --ignore-missing SHA256SUMS
+   ```
+
+   On Windows: `(Get-FileHash .\anvil-x86_64-pc-windows-msvc.exe -Algorithm SHA256).Hash` and compare it with the line in `SHA256SUMS`. A checksum from the same page only proves the download is intact; step 2 proves where it came from.
+
+2. **The build provenance.** Every file listed in `SHA256SUMS` has a GitHub artifact attestation (SLSA build provenance, signed through Sigstore). With the GitHub CLI:
+
+   ```sh
+   gh attestation verify anvil-x86_64-unknown-linux-gnu --repo EliFebres/anvil
+   ```
+
+   It succeeds only when the file was built by this repository's release workflow; the output names the workflow and the commit. For a machine without network access, `gh` can download the attestation bundle and Sigstore's trusted root on a connected machine and verify against them offline; see `gh attestation verify --help` in your `gh` version for `--bundle` and `--custom-trusted-root`. An attestation is not a publisher code signature: Windows and macOS still treat the binary as unsigned.
+
+3. **The SBOM.** `anvil.cdx.json` lists every crate compiled into the binary for every platform, with versions and licenses. It is covered by `SHA256SUMS` and the attestation like the binaries. Feed it to the organization's software composition analysis tool, or compare it with `Cargo.lock` of the tagged commit.
+
+`cargo deny` (advisories, licenses, banned crates, crates.io as the only source; `deny.toml`) runs on every pull request in CI. To repeat it on a release's source: `cargo deny --all-features --locked check` in the extracted vendored archive, with `cargo-deny` installed.
+
+## Air-gapped installation
+
+Two routes, both without network access on the target machine.
+
+- **A verified binary.** Verify it as above on a connected machine, then move it through the organization's transfer process. Rename it to `anvil` (`anvil.exe`) and put it on the `PATH`, for example `/usr/local/bin/anvil` or `C:\Program Files\anvil\anvil.exe`, writable only by administrators.
+- **An offline build from source.** `anvil-<version>-vendored-src.tar.gz` holds the tagged source, every dependency in `vendor/`, and a `.cargo/config.toml` that points cargo at it. On the build machine, with the toolchain named in `rust-toolchain.toml` already installed (and, for the musl target, its standard library):
+
+  ```sh
+  tar -xzf anvil-<version>-vendored-src.tar.gz
+  cd anvil-<version>
+  cargo build --release --locked --offline -p anvil-cli    # target/release/anvil
+  ```
+
+  `--locked` refuses to build if `Cargo.lock` would change and `--offline` refuses any download, so the build uses exactly the dependencies the SBOM lists. Verify the archive's checksum and attestation before you move it. TLS uses rustls, so no OpenSSL is needed on any platform.
+
+Anvil never downloads anything by itself: it has no self-update, no update check and no package or skill download. The container executor runs with `--pull=never`, so its image must be loaded on each workstation (`docker load` from a file you transferred).
 
 ## The policy file
 
@@ -52,9 +95,17 @@ anvil doctor
 
 The policy is a plain file, so roll it out with the configuration management the organization already uses (Group Policy file preferences, Intune, Ansible, Puppet, Chef, Jamf). Validate every change with `anvil policy check <file>` in the pipeline that publishes it. A broken file stops anvil on every machine that receives it, which is the intended failure: no machine runs with a policy it could not read.
 
+A rollout that holds up under review:
+
+- Keep the policy file in a repository of its own, changed through reviewed pull requests, with `anvil policy check <file>` as a required check.
+- Have the configuration management tool set the owner and mode (or the access list) in the same step that writes the file, as in "Ownership" above; a file that lands user-writable for a moment stops Anvil until it is fixed, which is safe but noisy.
+- Stage it: a pilot group first, then everyone. Record the SHA-256 of each version (`sha256sum policy.toml`); every audit record carries it as `policy`, so a log shows which version was in force.
+- Install the binary from the same pipeline, pinned to a verified version (see "Verifying a release"), so the policy is always checked against the binary that reads it.
+- Pre-load the container image on each workstation when the policy sets `executor = "container"`.
+
 ## Keys
 
-Two policies ship as starting points: `policies/restricted.toml` (one model server, no extensions, no trust in repositories, every write and command asks, commands limited to an allowlist and started without a shell) and `policies/standard.toml` (the shell in `ask` mode). Every key except `version` and `[network] allowed_hosts` is optional; the default of each is the restrictive choice.
+Two policies ship as starting points: `policies/restricted.toml` (one model server, no extensions, no trust in repositories, every write and command asks, commands limited to an allowlist and started without a shell) and `policies/standard.toml` (the shell in `ask` mode). Every key except `version` and `[network] allowed_hosts` is optional; the default of each is the restrictive choice. The table below lists every key of the schema; `the_admin_guide_lists_every_policy_key_and_no_other` (`crates/anvil-types/tests/docs_match_code.rs`) fails when a key is added to `crates/anvil-types/src/policy/mod.rs` without a row here, or a row names a key the schema does not have.
 
 | key | default | meaning |
 |---|---|---|
@@ -141,3 +192,15 @@ Each session writes `audit.jsonl` in its session folder (`<project>/.anvil/sessi
 - `anvil policy check <file> [--ownership]` validates a file and exits 1 with the reasons.
 - `anvil doctor` checks the policy, keys, providers and tools, one row per check. Its `data:~/.anvil` and `data:.anvil` rows fail when anyone besides the user (and SYSTEM and Administrators on Windows) can open those folders, and print the `chmod` or `icacls` command that fixes it.
 - `anvil doctor --egress` lists, without sending anything, every `host:port` anvil's HTTP client can reach under the configuration, with the provider or MCP server that uses it, each configured endpoint the policy refuses, the plain-http rule, the proxy mode (and which proxy variables are set, never their values), the trust roots and the client certificate. Local MCP servers, hooks and shell commands are programs that make their own connections; it does not list those. Run it on a pilot workstation to confirm the policy matches the firewall rules.
+
+## Upgrading by hand
+
+Anvil does not update itself and never checks for a newer version. A new version reaches a workstation only the way the first one did.
+
+1. Read the version's section of `CHANGELOG.md` (it is also the release notes). Look for removed or renamed configuration keys, policy keys, and records that will not carry over (for example, a change to how trust decisions are stored makes every developer answer the trust prompt again).
+2. Verify the new release as in "Verifying a release", or build it offline from its vendored source.
+3. Check the current policy with the new binary before rollout, on a test machine: `anvil policy check --ownership /etc/anvil/policy.toml`. A key the new version no longer knows is an error, and an error stops Anvil on every machine that receives that combination.
+4. Replace the binary through the same configuration management that installed it, keeping the previous one for rollback. Roll out the policy change, if any, in the same step.
+5. On a pilot workstation, run `anvil --version` and `anvil doctor` (and `anvil doctor --egress` when the network settings changed), and record the version and the `policy:sha256` row with the rollout.
+
+Rolling back is the same steps in reverse: the previous binary with the policy it was checked against. Session folders, audit logs and usage records stay where they are.
