@@ -252,3 +252,76 @@ fn trust_revoke_records_the_repository_as_untrusted() {
         Some(anvil_types::trust::TrustDecision::Untrusted)
     );
 }
+
+#[test]
+fn a_repositorys_env_files_reach_no_child_and_no_provider_request() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path().join("repo");
+    let home = dir.path().join("home");
+    let script = dir.path().join("script.json");
+    let print = if cfg!(windows) {
+        "Write-Output \"H=$env:ANVIL_DOTENV_HOME_MARK P=$env:ANVIL_DOTENV_PROJECT_MARK A=$env:ANVIL_DOTENV_DOT_ANVIL_MARK\""
+    } else {
+        "echo \"H=$ANVIL_DOTENV_HOME_MARK P=$ANVIL_DOTENV_PROJECT_MARK A=$ANVIL_DOTENV_DOT_ANVIL_MARK\""
+    };
+    let turns = serde_json::json!({"turns": [
+        {"text": "1. [ ] print the variables"},
+        {"tool_calls": [{"name": "shell", "arguments": {"command": print}}]},
+        {"text": "built"},
+    ]});
+    write(&script, &turns.to_string());
+    write(
+        &home.join(".anvil").join("config.toml"),
+        &format!(
+            "[providers.fake]\nprotocol = \"fake\"\nmodel = \"m\"\ncontext_window = 100000\nsupports_tools = true\nsupports_reasoning = false\nscript = '{}'\n\n[roles]\ncoder = \"fake\"\nsummarizer = \"fake\"\n\n[tools]\npass_env = [\"ANVIL_DOTENV_HOME_MARK\", \"ANVIL_DOTENV_PROJECT_MARK\", \"ANVIL_DOTENV_DOT_ANVIL_MARK\"]\n",
+            script.display()
+        ),
+    );
+    write(
+        &home.join(".anvil").join(".env"),
+        "ANVIL_DOTENV_HOME_MARK=home-file-value\n",
+    );
+    let key = format!("sk-proj-{}", "k3".repeat(16));
+    write(
+        &repo.join(".env"),
+        &format!("ANVIL_DOTENV_PROJECT_MARK=project-file-value\nOPENAI_API_KEY={key}\n"),
+    );
+    write(
+        &repo.join(".anvil").join(".env"),
+        "ANVIL_DOTENV_DOT_ANVIL_MARK=dot-anvil-file-value\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(&repo)
+        .env("ANVIL_HOME", &home)
+        .env("ANVIL_LOG", "off")
+        .env("ANVIL_NO_ANIMATION", "1")
+        .env_remove("ANVIL_DOTENV_HOME_MARK")
+        .env_remove("ANVIL_DOTENV_PROJECT_MARK")
+        .env_remove("ANVIL_DOTENV_DOT_ANVIL_MARK")
+        .env_remove("OPENAI_API_KEY")
+        .stdin(Stdio::null())
+        .args(["--yes", "run", "print the variables"])
+        .output()
+        .expect("anvil runs");
+    let sessions = repo.join(".anvil").join("sessions");
+    let transcript: String = std::fs::read_dir(&sessions)
+        .unwrap_or_else(|error| {
+            panic!(
+                "no sessions ({error}): {}",
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+        .flatten()
+        .filter_map(|entry| std::fs::read_to_string(entry.path().join("session.jsonl")).ok())
+        .collect();
+    assert!(
+        transcript.contains("H=home-file-value"),
+        "the shell ran and saw the home file: {transcript}"
+    );
+    for value in ["project-file-value", "dot-anvil-file-value", key.as_str()] {
+        assert!(
+            !transcript.contains(value),
+            "a value from the repository's .env reached a child or the provider: {value}"
+        );
+    }
+}
