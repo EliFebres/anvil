@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::workspace::Workspace;
 use super::{Access, Tool, ToolContext, ToolFuture, ToolOutput, parse_args, schema_for};
 
 /// Most paths returned before the list is cut.
@@ -54,18 +55,26 @@ impl Tool for Glob {
             {
                 Ok(glob) => glob.compile_matcher(),
                 Err(error) => {
-                    return ToolOutput::error(format!("invalid glob `{}`: {error}", args.pattern));
+                    return ToolOutput::error(format!(
+                        "argument `pattern` is not a valid glob (`{}`: {error}); it accepts a \
+                         glob such as `src/**/*.rs`",
+                        args.pattern
+                    ));
                 }
             };
-            let root = ctx.resolve(args.path.as_deref().unwrap_or("."));
+            let root = match ctx.checked_path(args.path.as_deref().unwrap_or("."), false) {
+                Ok(root) => root,
+                Err(reason) => return ToolOutput::error(reason),
+            };
             if !root.is_dir() {
                 return ToolOutput::error(format!(
-                    "{} is not a directory",
+                    "argument `path` names {}, which is not a directory; it accepts a directory \
+                     (default: the project root)",
                     ctx.display_path(&root)
                 ));
             }
             let mut paths = Vec::new();
-            for entry in walk(&root) {
+            for entry in walk(&root, &ctx.workspace) {
                 if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                     continue;
                 }
@@ -92,14 +101,20 @@ impl Tool for Glob {
     }
 }
 
-/// Walks `root` respecting `.gitignore`, skipping hidden entries and the root itself.
-pub(crate) fn walk(root: &Path) -> impl Iterator<Item = ignore::DirEntry> {
+/// Walks `root` respecting `.gitignore`, skipping hidden entries, the root
+/// itself and anything the workspace refuses (secrets and denied globs).
+/// Symlinks are not followed.
+pub(crate) fn walk<'a>(
+    root: &Path,
+    workspace: &'a Workspace,
+) -> impl Iterator<Item = ignore::DirEntry> + 'a {
     ignore::WalkBuilder::new(root)
         .require_git(false)
         .sort_by_file_name(|a, b| a.cmp(b))
         .build()
         .filter_map(Result::ok)
         .filter(|entry| entry.depth() > 0)
+        .filter(move |entry| !workspace.refuses(entry.path()))
 }
 
 /// The path relative to `root` with forward slashes.

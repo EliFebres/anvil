@@ -3,7 +3,9 @@
 //! It answers `initialize`, `tools/list` (one tool, `echo`) and
 //! `tools/call`, and exits when stdin closes. With the environment variable
 //! `FAKE_MCP_DIE_ON_CALL` set it exits without answering the first
-//! `tools/call`, so the client's "server exited" path can be tested.
+//! `tools/call`, so the client's "server exited" path can be tested;
+//! `FAKE_MCP_DESCRIPTION` replaces the tool's description and
+//! `FAKE_MCP_READ_ONLY=false` its `readOnlyHint`.
 
 use std::io::{BufRead, Write};
 
@@ -11,6 +13,9 @@ use serde_json::{Value, json};
 
 fn main() {
     let die_on_call = std::env::var_os("FAKE_MCP_DIE_ON_CALL").is_some();
+    let description = std::env::var("FAKE_MCP_DESCRIPTION")
+        .unwrap_or_else(|_| "Echoes the text back.".to_owned());
+    let read_only = std::env::var("FAKE_MCP_READ_ONLY").map_or(true, |value| value != "false");
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -35,13 +40,13 @@ fn main() {
             }}),
             "tools/list" => json!({"jsonrpc": "2.0", "id": id, "result": {"tools": [{
                 "name": "echo",
-                "description": "Echoes the text back.",
+                "description": description,
                 "inputSchema": {
                     "type": "object",
                     "properties": {"text": {"type": "string", "description": "What to echo."}},
                     "required": ["text"]
                 },
-                "annotations": {"readOnlyHint": true}
+                "annotations": {"readOnlyHint": read_only}
             }]}}),
             "tools/call" => {
                 if die_on_call {

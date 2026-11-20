@@ -38,7 +38,7 @@ fn prompt_text(request: &PermissionRequest, detail: &str) -> String {
         "\n? {tool} {detail}\n  [y] allow once\n  [s] allow {tool} for the rest of this session (within the current workspace root)\n  [n] deny\n"
     );
     if request.offers_always() {
-        text.push_str("  [a] always allow, saved as a rule in .anvil/permissions.toml\n");
+        text.push_str("  [a] always allow, saved as your rule in ~/.anvil/permissions/\n");
     }
     text.push_str("  choice: ");
     text
@@ -115,6 +115,7 @@ mod tests {
             tool: tool.to_owned(),
             target: Some(target.to_owned()),
             arguments: serde_json::json!({}),
+            may_save: true,
         }
     }
 
@@ -138,7 +139,7 @@ mod tests {
         );
         assert!(
             text.ends_with(
-                "  [a] always allow, saved as a rule in .anvil/permissions.toml\n  choice: "
+                "  [a] always allow, saved as your rule in ~/.anvil/permissions/\n  choice: "
             ),
             "{text}"
         );

@@ -5,6 +5,11 @@
 //! module adds what Claude Code also honors: `~/.claude/CLAUDE.md`,
 //! `.claude/CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.local.md`, and
 //! `@path` imports inside any of them, one level deep.
+//!
+//! A file from the repository may import only files inside the repository.
+//! Without that rule a cloned repository's `CLAUDE.md` could write
+//! `@~/.ssh/id_ed25519` and put the key into the prompt that is sent to the
+//! model. The user's own files under `~` may import anything.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -26,7 +31,8 @@ const PROJECT_FILES: &[&str] = &[
 /// # Arguments
 ///
 /// * `home` - The home directory, if known.
-/// * `cwd` - The project root.
+/// * `project` - The project root, or `None` when the repository is not
+///   trusted and none of its files may load.
 /// * `base` - The instructions anvil-core already loaded; their imports
 ///   are expanded, their text is not repeated.
 ///
@@ -34,14 +40,18 @@ const PROJECT_FILES: &[&str] = &[
 ///
 /// New instructions in prompt order: the extra files, then the imports of
 /// the base files and of the extra files. A file is never loaded twice.
-pub fn discover_extra(home: Option<&Path>, cwd: &Path, base: &[Instruction]) -> Vec<Instruction> {
+pub fn discover_extra(
+    home: Option<&Path>,
+    project: Option<&Path>,
+    base: &[Instruction],
+) -> Vec<Instruction> {
     let mut loaded: BTreeSet<PathBuf> = base
         .iter()
-        .filter_map(|instruction| source_path(&instruction.source, home, cwd))
+        .filter_map(|instruction| source_path(&instruction.source, home, project))
         .map(|path| key(&path))
         .collect();
     let mut found = Vec::new();
-    for (path, source) in extra_files(home, cwd) {
+    for (path, source) in extra_files(home, project) {
         if !loaded.insert(key(&path)) {
             continue;
         }
@@ -51,12 +61,23 @@ pub fn discover_extra(home: Option<&Path>, cwd: &Path, base: &[Instruction]) -> 
     }
     let mut imports = Vec::new();
     for instruction in base.iter().chain(found.iter()) {
-        let Some(path) = source_path(&instruction.source, home, cwd) else {
+        let Some(path) = source_path(&instruction.source, home, project) else {
             continue;
         };
-        let dir = path.parent().unwrap_or(cwd);
+        let Some(dir) = path.parent() else {
+            continue;
+        };
+        let from_repository = !instruction.source.starts_with("~/");
         for import in find_imports(&instruction.text) {
             let resolved = resolve_import(&import, dir, home);
+            if from_repository && !project.is_some_and(|root| is_inside(root, &resolved)) {
+                tracing::warn!(
+                    import,
+                    from = %instruction.source,
+                    "skipping an @import that leaves the repository"
+                );
+                continue;
+            }
             if !loaded.insert(key(&resolved)) {
                 continue;
             }
@@ -78,30 +99,41 @@ pub fn discover_extra(home: Option<&Path>, cwd: &Path, base: &[Instruction]) -> 
 }
 
 /// The extra files with their prompt labels, in order.
-fn extra_files(home: Option<&Path>, cwd: &Path) -> Vec<(PathBuf, String)> {
+fn extra_files(home: Option<&Path>, project: Option<&Path>) -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
     if let Some(home) = home {
         for name in HOME_FILES {
             files.push((home.join(name), format!("~/{name}")));
         }
     }
-    for name in PROJECT_FILES {
-        files.push((cwd.join(name), (*name).to_owned()));
+    if let Some(project) = project {
+        for name in PROJECT_FILES {
+            files.push((project.join(name), (*name).to_owned()));
+        }
     }
     files
+}
+
+/// Whether `path` exists and resolves, symlinks and `..` included, to a
+/// place inside `root`.
+fn is_inside(root: &Path, path: &Path) -> bool {
+    match (std::fs::canonicalize(root), std::fs::canonicalize(path)) {
+        (Ok(root), Ok(path)) => path.starts_with(root),
+        _ => false,
+    }
 }
 
 /// The file behind an instruction's source label, when it names one.
 ///
 /// Labels are `~/...` for home files and project-relative paths otherwise.
 /// Import labels (`... (imported by ...)`) are not files and give `None`.
-fn source_path(source: &str, home: Option<&Path>, cwd: &Path) -> Option<PathBuf> {
+fn source_path(source: &str, home: Option<&Path>, project: Option<&Path>) -> Option<PathBuf> {
     if source.contains(" (imported by ") {
         return None;
     }
     match source.strip_prefix("~/") {
         Some(rest) => home.map(|home| home.join(rest)),
-        None => Some(cwd.join(source)),
+        None => project.map(|project| project.join(source)),
     }
 }
 
@@ -192,7 +224,7 @@ mod tests {
         write(&project.path().join("CLAUDE.local.md"), "local rules");
         write(&project.path().join(".claude/CLAUDE.local.md"), "   ");
 
-        let extra = discover_extra(Some(home.path()), project.path(), &[]);
+        let extra = discover_extra(Some(home.path()), Some(project.path()), &[]);
         let sources: Vec<&str> = extra.iter().map(|i| i.source.as_str()).collect();
         assert_eq!(
             sources,
@@ -203,6 +235,10 @@ mod tests {
             ]
         );
         assert_eq!(extra[2].text, "local rules");
+
+        let untrusted = discover_extra(Some(home.path()), None, &[]);
+        let sources: Vec<&str> = untrusted.iter().map(|i| i.source.as_str()).collect();
+        assert_eq!(sources, ["~/.claude/CLAUDE.md"], "no repository file");
     }
 
     #[test]
@@ -226,18 +262,47 @@ mod tests {
             base("crates/a/CLAUDE.md", "See @README.md for the crate."),
         ];
 
-        let extra = discover_extra(Some(home.path()), project.path(), &loaded);
+        let extra = discover_extra(Some(home.path()), Some(project.path()), &loaded);
         let sources: Vec<&str> = extra.iter().map(|i| i.source.as_str()).collect();
         assert_eq!(
             sources,
             [
                 "docs/style.md (imported by CLAUDE.md)",
-                "~/shared.md (imported by CLAUDE.md)",
                 "README.md (imported by crates/a/CLAUDE.md)",
             ]
         );
-        assert_eq!(extra[2].text, "crate readme");
+        assert_eq!(extra[1].text, "crate readme");
         assert!(extra.iter().all(|i| i.text != "too deep"));
+    }
+
+    #[test]
+    fn a_repository_file_cannot_import_from_outside_the_repository() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let project = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir");
+        write(&home.path().join(".ssh/id_ed25519"), "PRIVATE KEY");
+        write(&outside.path().join("secret.txt"), "SECRET");
+        write(&project.path().join("inside.md"), "inside");
+        let absolute = outside.path().join("secret.txt");
+        let claude = format!(
+            "@~/.ssh/id_ed25519\n@../{}/secret.txt\n@{}\n@inside.md\n",
+            outside.path().file_name().expect("name").to_string_lossy(),
+            absolute.display()
+        );
+        let loaded = [base("CLAUDE.md", &claude)];
+        let extra = discover_extra(Some(home.path()), Some(project.path()), &loaded);
+        let texts: Vec<&str> = extra.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(texts, ["inside"]);
+    }
+
+    #[test]
+    fn the_users_own_file_may_import_from_home() {
+        let home = tempfile::tempdir().expect("tempdir");
+        write(&home.path().join("shared.md"), "shared rules");
+        let loaded = [base("~/.anvil/ANVIL.md", "@~/shared.md")];
+        let extra = discover_extra(Some(home.path()), None, &loaded);
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra[0].text, "shared rules");
     }
 
     #[test]
@@ -245,7 +310,7 @@ mod tests {
         let project = tempfile::tempdir().expect("tempdir");
         write(&project.path().join("CLAUDE.local.md"), "local rules");
         let loaded = [base("CLAUDE.md", "@CLAUDE.local.md\n@CLAUDE.md")];
-        let extra = discover_extra(None, project.path(), &loaded);
+        let extra = discover_extra(None, Some(project.path()), &loaded);
         assert_eq!(extra.len(), 1);
         assert_eq!(extra[0].source, "CLAUDE.local.md");
     }

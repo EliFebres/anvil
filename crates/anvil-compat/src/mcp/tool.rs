@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anvil_core::net::HttpClient;
 use anvil_core::tools::{Access, Tool, ToolContext, ToolFuture, ToolOutput};
 use serde_json::Value;
 use tokio::sync::OnceCell;
@@ -19,6 +20,8 @@ pub struct LazyServer {
     server: McpServer,
     /// The working directory for stdio servers.
     cwd: PathBuf,
+    /// The client HTTP servers are reached with.
+    http: HttpClient,
     /// The connection, once made.
     client: OnceCell<McpClient>,
 }
@@ -30,14 +33,16 @@ impl LazyServer {
     ///
     /// * `server` - The definition.
     /// * `cwd` - The working directory for stdio servers.
+    /// * `http` - The client HTTP servers are reached with.
     ///
     /// # Returns
     ///
     /// The lazy server.
-    pub fn new(server: McpServer, cwd: PathBuf) -> Self {
+    pub fn new(server: McpServer, cwd: PathBuf, http: HttpClient) -> Self {
         Self {
             server,
             cwd,
+            http,
             client: OnceCell::new(),
         }
     }
@@ -48,15 +53,17 @@ impl LazyServer {
     ///
     /// * `server` - The definition.
     /// * `cwd` - The working directory for stdio servers.
+    /// * `http` - The client HTTP servers are reached with.
     /// * `client` - The live connection.
     ///
     /// # Returns
     ///
     /// The server, with no connection to make later.
-    pub fn connected(server: McpServer, cwd: PathBuf, client: McpClient) -> Self {
+    pub fn connected(server: McpServer, cwd: PathBuf, http: HttpClient, client: McpClient) -> Self {
         Self {
             server,
             cwd,
+            http,
             client: OnceCell::from(client),
         }
     }
@@ -83,7 +90,7 @@ impl LazyServer {
         self.client
             .get_or_try_init(|| async {
                 tracing::info!(server = self.server.name, "connecting to mcp server");
-                McpClient::connect(&self.server, &self.cwd).await
+                McpClient::connect(&self.server, &self.cwd, &self.http).await
             })
             .await
     }

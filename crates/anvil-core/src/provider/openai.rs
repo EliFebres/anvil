@@ -12,15 +12,20 @@ use super::retry::RetryPolicy;
 use super::sse::SseFrame;
 use super::types::{CompletionRequest, Event, Message, StopReason, ToolCall, ToolSpec, Usage};
 use super::{EventStream, Provider};
+use crate::net::HttpClient;
 
 /// A provider speaking `POST {base_url}/chat/completions` with SSE streaming.
 pub struct OpenAiProvider {
     /// HTTP client shared by every request.
-    client: reqwest::Client,
+    client: HttpClient,
     /// Full endpoint URL.
     url: String,
+    /// The configured `base_url`; the key goes only to its host.
+    base_url: String,
     /// `Authorization` header value.
     authorization: String,
+    /// The key inside `authorization`, removed from error bodies.
+    api_key: String,
     /// Model name as the server expects it.
     model: String,
     /// Default output cap, if configured.
@@ -48,12 +53,14 @@ impl OpenAiProvider {
         cfg: &ProviderConfig,
         api_key: String,
         limits: &LimitsConfig,
-        client: reqwest::Client,
+        client: HttpClient,
     ) -> Self {
         Self {
             client,
             url: format!("{}/chat/completions", cfg.base_url.trim_end_matches('/')),
+            base_url: cfg.base_url.clone(),
             authorization: format!("Bearer {api_key}"),
+            api_key,
             model: cfg.model.clone(),
             max_output_tokens: cfg.max_output_tokens,
             stream_cfg: StreamConfig {
@@ -72,13 +79,15 @@ impl Provider for OpenAiProvider {
         let client = self.client.clone();
         let url = self.url.clone();
         let authorization = self.authorization.clone();
+        let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
         let attempt = move |index: u32| {
             tracing::debug!(attempt = index, url = %url, "sending chat completion");
             let builder = client
                 .post(&url)
-                .header("authorization", &authorization)
+                .api_key("authorization", &authorization, &base_url)
                 .json(&body);
-            http::send_attempt(builder)
+            http::send_attempt(builder, api_key.clone())
         };
         http::start(self.stream_cfg.clone(), attempt, OpenAiDecoder::default())
     }

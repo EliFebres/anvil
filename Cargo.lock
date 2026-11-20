@@ -88,13 +88,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "anvil-cli"
-version = "0.1.0"
+name = "anvil-audit"
+version = "0.2.0"
 dependencies = [
+ "anvil-types",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+]
+
+[[package]]
+name = "anvil-cli"
+version = "0.2.0"
+dependencies = [
+ "anvil-audit",
  "anvil-compat",
  "anvil-core",
  "anvil-memory",
- "anvil-telemetry",
  "anvil-tui",
  "anvil-types",
  "anyhow",
@@ -102,11 +116,11 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "ignore",
  "insta",
  "pulldown-cmark",
  "ratatui",
  "regex",
- "reqwest",
  "rustyline",
  "serde",
  "serde_json",
@@ -126,14 +140,13 @@ dependencies = [
 
 [[package]]
 name = "anvil-compat"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil-core",
  "anvil-types",
  "futures-util",
  "insta",
  "regex",
- "reqwest",
  "schemars",
  "serde",
  "serde-saphyr",
@@ -143,11 +156,12 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
 name = "anvil-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anvil-types",
  "chrono",
@@ -161,9 +175,11 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "toml",
  "tracing",
@@ -175,43 +191,27 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "ulid",
+ "wiremock",
 ]
 
 [[package]]
 name = "anvil-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "anvil-types",
  "ignore",
  "insta",
  "regex",
  "serde",
- "sha2",
- "similar",
  "tempfile",
  "thiserror 2.0.21",
  "toml",
  "tracing",
-]
-
-[[package]]
-name = "anvil-telemetry"
-version = "0.1.0"
-dependencies = [
- "anvil-types",
- "chrono",
- "insta",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "toml",
- "tracing",
- "ulid",
 ]
 
 [[package]]
 name = "anvil-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -220,18 +220,17 @@ dependencies = [
 
 [[package]]
 name = "anvil-types"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dotenvy",
- "insta",
- "schemars",
+ "regex",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "toml",
- "ulid",
 ]
 
 [[package]]

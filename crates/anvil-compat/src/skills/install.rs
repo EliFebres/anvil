@@ -1,5 +1,5 @@
 //! `anvil skill add`, `remove`, `list` and `show`: copying skill folders
-//! from a path, a git URL or a GitHub `owner/repo[/subdir]` shorthand.
+//! from a directory on this machine.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -56,40 +56,24 @@ impl Scope {
     }
 }
 
-/// Where a skill comes from.
+/// Where a skill comes from: a directory on this machine.
+///
+/// anvil does not download skills. To install one from a repository, clone
+/// it yourself and pass the directory, so you can read what you install.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    /// A directory on this machine.
-    Dir(PathBuf),
-    /// A git repository, optionally a subdirectory of it.
-    Git {
-        /// The clone URL.
-        url: String,
-        /// The directory inside the checkout that holds `SKILL.md`.
-        subdir: Option<PathBuf>,
-    },
+pub struct Source {
+    /// The directory that holds `SKILL.md`.
+    pub dir: PathBuf,
 }
 
 impl fmt::Display for Source {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Dir(path) => write!(f, "{}", path.display()),
-            Self::Git { url, subdir: None } => f.write_str(url),
-            Self::Git {
-                url,
-                subdir: Some(subdir),
-            } => write!(f, "{url} ({})", subdir.display()),
-        }
+        write!(f, "{}", self.dir.display())
     }
 }
 
 impl Source {
     /// Interprets what the user typed after `anvil skill add`.
-    ///
-    /// An existing directory wins. Then `http(s)://`, `ssh://`, `git@` and
-    /// `.git` sources are git URLs; a GitHub `/tree/<branch>/<path>` URL
-    /// yields the path as the subdirectory. Anything of the form
-    /// `owner/repo[/subdir...]` is a GitHub shorthand.
     ///
     /// # Arguments
     ///
@@ -102,70 +86,24 @@ impl Source {
     ///
     /// # Errors
     ///
-    /// [`CompatError::Install`] when the text is neither a directory nor a
-    /// recognizable git source.
+    /// [`CompatError::Install`] when the text is not an existing directory,
+    /// with a hint when it looks like a URL.
     pub fn parse(text: &str, cwd: &Path) -> Result<Self, CompatError> {
         let text = text.trim();
-        let as_path = cwd.join(text);
-        if as_path.is_dir() {
-            return Ok(Self::Dir(as_path));
+        let dir = cwd.join(text);
+        if dir.is_dir() {
+            return Ok(Self { dir });
         }
-        if let Some(rest) = text
-            .strip_prefix("https://github.com/")
-            .or_else(|| text.strip_prefix("http://github.com/"))
-            && let Some((repo, _branch, path)) = split_tree_url(rest)
-        {
-            return Ok(Self::Git {
-                url: format!("https://github.com/{repo}.git"),
-                subdir: Some(PathBuf::from(path)),
-            });
-        }
-        if text.starts_with("http://")
-            || text.starts_with("https://")
-            || text.starts_with("ssh://")
-            || text.starts_with("git@")
-            || text.ends_with(".git")
-        {
-            return Ok(Self::Git {
-                url: text.to_owned(),
-                subdir: None,
-            });
-        }
-        let segments: Vec<&str> = text.split('/').filter(|s| !s.is_empty()).collect();
-        let looks_like_shorthand = segments.len() >= 2
-            && !text.contains(char::is_whitespace)
-            && !text.starts_with('.')
-            && !text.contains(':')
-            && !text.contains('\\');
-        if looks_like_shorthand {
-            let subdir = (segments.len() > 2).then(|| segments[2..].iter().collect());
-            return Ok(Self::Git {
-                url: format!("https://github.com/{}/{}.git", segments[0], segments[1]),
-                subdir,
-            });
-        }
+        let looks_remote = text.contains("://") || text.starts_with("git@");
+        let hint = if looks_remote {
+            "; anvil does not download skills, so clone the repository yourself and pass the directory"
+        } else {
+            ""
+        };
         Err(CompatError::Install {
-            detail: format!(
-                "`{text}` is not a directory, a git URL or a GitHub owner/repo[/subdir] shorthand"
-            ),
+            detail: format!("`{text}` is not a directory{hint}"),
         })
     }
-}
-
-/// Splits `owner/repo/tree/<branch>/<path>` into its parts.
-fn split_tree_url(rest: &str) -> Option<(String, &str, &str)> {
-    let mut parts = rest.splitn(5, '/');
-    let owner = parts.next()?;
-    let repo = parts.next()?.trim_end_matches(".git");
-    if parts.next()? != "tree" {
-        return None;
-    }
-    let branch = parts.next()?;
-    let path = parts.next().unwrap_or("").trim_end_matches('/');
-    if owner.is_empty() || repo.is_empty() || path.is_empty() {
-        return None;
-    }
-    Some((format!("{owner}/{repo}"), branch, path))
 }
 
 /// What `install` produced.
@@ -193,10 +131,10 @@ pub struct Installed {
 ///
 /// # Errors
 ///
-/// [`CompatError::Install`] when `git` fails, the source has no `SKILL.md`,
-/// or the destination exists and `force` is off; the loader's errors when
-/// the frontmatter is invalid; [`CompatError::Io`] when copying fails.
-pub async fn install(
+/// [`CompatError::Install`] when the source has no `SKILL.md` or the
+/// destination exists and `force` is off; the loader's errors when the
+/// frontmatter is invalid; [`CompatError::Io`] when copying fails.
+pub fn install(
     source: &Source,
     scope: Scope,
     home: Option<&Path>,
@@ -204,25 +142,10 @@ pub async fn install(
     force: bool,
 ) -> Result<Installed, CompatError> {
     let dest_root = scope.root(home, cwd)?;
-    let checkout = match source {
-        Source::Dir(_) => None,
-        Source::Git { url, .. } => Some(clone(url).await?),
-    };
-    let skill_dir = match (source, &checkout) {
-        (Source::Dir(path), _) => path.clone(),
-        (Source::Git { subdir, .. }, Some(checkout)) => match subdir {
-            Some(subdir) => checkout.path().join(subdir),
-            None => checkout.path().to_path_buf(),
-        },
-        (Source::Git { .. }, None) => unreachable!("git sources are always cloned"),
-    };
+    let skill_dir = &source.dir;
     let skill_file = skill_dir.join(SKILL_FILE);
     if !skill_file.is_file() {
-        return Err(no_skill_here(
-            source,
-            &skill_dir,
-            checkout.as_ref().map(|c| c.path()),
-        ));
+        return Err(no_skill_here(skill_dir));
     }
     let skill = load_skill(&skill_file, scope.source())?;
     let dest = dest_root.join(skill.name());
@@ -239,7 +162,7 @@ pub async fn install(
     if replaced {
         std::fs::remove_dir_all(&dest).map_err(|error| CompatError::io(&dest, &error))?;
     }
-    copy_dir(&skill_dir, &dest)?;
+    copy_dir(skill_dir, &dest)?;
     let skill = load_skill(&dest.join(SKILL_FILE), scope.source())?;
     Ok(Installed { skill, replaced })
 }
@@ -277,48 +200,22 @@ pub fn remove(
     Ok(dir)
 }
 
-/// Shallow-clones a repository into a fresh temporary directory.
-async fn clone(url: &str) -> Result<tempfile::TempDir, CompatError> {
-    let dir = tempfile::tempdir().map_err(|error| CompatError::Install {
-        detail: format!("cannot create a temporary directory: {error}"),
-    })?;
-    let output = tokio::process::Command::new("git")
-        .args(["clone", "--depth", "1", "--quiet", url])
-        .arg(dir.path())
-        .output()
-        .await
-        .map_err(|error| CompatError::Install {
-            detail: format!("cannot run git: {error}"),
-        })?;
-    if !output.status.success() {
-        return Err(CompatError::Install {
-            detail: format!(
-                "git clone {url} failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        });
-    }
-    Ok(dir)
-}
-
 /// The error for a source that has no `SKILL.md`, listing the skills that
 /// were found nearby so the user can pick one.
-fn no_skill_here(source: &Source, skill_dir: &Path, checkout: Option<&Path>) -> CompatError {
-    let search_root = checkout.unwrap_or(skill_dir);
+fn no_skill_here(skill_dir: &Path) -> CompatError {
     let mut candidates = Vec::new();
-    find_candidates(search_root, search_root, 0, &mut candidates);
+    find_candidates(skill_dir, skill_dir, 0, &mut candidates);
     candidates.sort();
     let hint = if candidates.is_empty() {
         String::new()
     } else {
-        let suffix = match source {
-            Source::Git { .. } => "; add one of them to the source, e.g. owner/repo/<path>",
-            Source::Dir(_) => "; point at one of them",
-        };
-        format!("\nskills found under it: {}{suffix}", candidates.join(", "))
+        format!(
+            "\nskills found under it: {}; point at one of them",
+            candidates.join(", ")
+        )
     };
     CompatError::Install {
-        detail: format!("{source} has no {SKILL_FILE}{hint}"),
+        detail: format!("{} has no {SKILL_FILE}{hint}", skill_dir.display()),
     }
 }
 
@@ -345,9 +242,10 @@ fn find_candidates(base: &Path, dir: &Path, depth: usize, found: &mut Vec<String
     }
 }
 
-/// Copies a directory tree, skipping `.git`.
+/// Copies a directory tree, skipping `.git`, owner-only on Unix (folders
+/// 0700, files 0600, or 0700 for a file its owner may run).
 fn copy_dir(from: &Path, to: &Path) -> Result<(), CompatError> {
-    std::fs::create_dir_all(to).map_err(|error| CompatError::io(to, &error))?;
+    anvil_types::private_fs::create_dir_all(to).map_err(|error| CompatError::io(to, &error))?;
     let entries = std::fs::read_dir(from).map_err(|error| CompatError::io(from, &error))?;
     for entry in entries {
         let entry = entry.map_err(|error| CompatError::io(from, &error))?;
@@ -360,7 +258,8 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), CompatError> {
         if source.is_dir() {
             copy_dir(&source, &target)?;
         } else {
-            std::fs::copy(&source, &target).map_err(|error| CompatError::io(&source, &error))?;
+            anvil_types::private_fs::copy(&source, &target)
+                .map_err(|error| CompatError::io(&source, &error))?;
         }
     }
     Ok(())
@@ -371,50 +270,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_sources() {
+    fn only_a_local_directory_is_a_source() {
         let cwd = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(cwd.path().join("local")).expect("mkdir");
         assert_eq!(
             Source::parse("local", cwd.path()),
-            Ok(Source::Dir(cwd.path().join("local")))
-        );
-        assert_eq!(
-            Source::parse("JuliusBrussee/caveman/skills/caveman", cwd.path()),
-            Ok(Source::Git {
-                url: "https://github.com/JuliusBrussee/caveman.git".to_owned(),
-                subdir: Some(PathBuf::from("skills").join("caveman")),
+            Ok(Source {
+                dir: cwd.path().join("local")
             })
         );
-        assert_eq!(
-            Source::parse("owner/repo", cwd.path()),
-            Ok(Source::Git {
-                url: "https://github.com/owner/repo.git".to_owned(),
-                subdir: None,
-            })
-        );
-        assert_eq!(
-            Source::parse(
-                "https://github.com/owner/repo/tree/main/skills/x",
-                cwd.path()
-            ),
-            Ok(Source::Git {
-                url: "https://github.com/owner/repo.git".to_owned(),
-                subdir: Some(PathBuf::from("skills/x")),
-            })
-        );
-        assert_eq!(
-            Source::parse("git@github.com:owner/repo.git", cwd.path()),
-            Ok(Source::Git {
-                url: "git@github.com:owner/repo.git".to_owned(),
-                subdir: None,
-            })
-        );
-        assert!(Source::parse("just-a-word", cwd.path()).is_err());
+        for remote in [
+            "https://github.com/owner/repo",
+            "git@github.com:owner/repo.git",
+            "ssh://host/repo.git",
+        ] {
+            let error = Source::parse(remote, cwd.path()).expect_err(remote);
+            assert!(error.to_string().contains("does not download"), "{error}");
+        }
+        assert!(Source::parse("owner/repo", cwd.path()).is_err());
         assert!(Source::parse("./missing", cwd.path()).is_err());
     }
 
-    #[tokio::test]
-    async fn installs_from_a_directory_and_refuses_to_overwrite() {
+    #[cfg(unix)]
+    #[test]
+    fn a_global_install_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let home = tempfile::tempdir().expect("home");
+        let source_dir = cwd.path().join("src-skill");
+        std::fs::create_dir_all(source_dir.join("scripts")).expect("mkdir");
+        std::fs::write(
+            source_dir.join(SKILL_FILE),
+            "---\nname: caveman\ndescription: Terse voice.\n---\n\nBody.\n",
+        )
+        .expect("write");
+        std::fs::write(source_dir.join("scripts/x.sh"), "echo\n").expect("write");
+        std::fs::set_permissions(
+            source_dir.join(SKILL_FILE),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+        let source = Source::parse("src-skill", cwd.path()).expect("source");
+        let installed = install(&source, Scope::Global, Some(home.path()), cwd.path(), false)
+            .expect("installs");
+        let dir = installed.skill.dir.clone();
+        let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("scripts")), 0o700);
+        assert_eq!(mode(&dir.join(SKILL_FILE)), 0o600);
+        assert_eq!(mode(&dir.join("scripts/x.sh")), 0o600);
+    }
+
+    #[test]
+    fn installs_from_a_directory_and_refuses_to_overwrite() {
         let cwd = tempfile::tempdir().expect("tempdir");
         let source_dir = cwd.path().join("src-skill");
         std::fs::create_dir_all(source_dir.join("scripts")).expect("mkdir");
@@ -426,9 +334,8 @@ mod tests {
         std::fs::write(source_dir.join("scripts/x.sh"), "echo\n").expect("write");
 
         let source = Source::parse("src-skill", cwd.path()).expect("source");
-        let installed = install(&source, Scope::Project, None, cwd.path(), false)
-            .await
-            .expect("installs");
+        let installed =
+            install(&source, Scope::Project, None, cwd.path(), false).expect("installs");
         assert_eq!(installed.skill.name(), "caveman");
         assert!(!installed.replaced);
         assert_eq!(
@@ -437,13 +344,11 @@ mod tests {
         );
         assert_eq!(installed.skill.files, ["scripts/x.sh"]);
 
-        let again = install(&source, Scope::Project, None, cwd.path(), false).await;
+        let again = install(&source, Scope::Project, None, cwd.path(), false);
         assert!(
             matches!(again, Err(CompatError::Install { detail }) if detail.contains("--force"))
         );
-        let forced = install(&source, Scope::Project, None, cwd.path(), true)
-            .await
-            .expect("replaces");
+        let forced = install(&source, Scope::Project, None, cwd.path(), true).expect("replaces");
         assert!(forced.replaced);
 
         let removed = remove("caveman", Scope::Project, None, cwd.path()).expect("removes");
@@ -451,8 +356,8 @@ mod tests {
         assert!(remove("caveman", Scope::Project, None, cwd.path()).is_err());
     }
 
-    #[tokio::test]
-    async fn a_directory_without_a_skill_lists_candidates() {
+    #[test]
+    fn a_directory_without_a_skill_lists_candidates() {
         let cwd = tempfile::tempdir().expect("tempdir");
         let repo = cwd.path().join("repo");
         for name in ["skills/caveman", "skills/ultracave"] {
@@ -463,9 +368,14 @@ mod tests {
             )
             .expect("write");
         }
-        let error = install(&Source::Dir(repo), Scope::Project, None, cwd.path(), false)
-            .await
-            .expect_err("no skill at the root");
+        let error = install(
+            &Source { dir: repo },
+            Scope::Project,
+            None,
+            cwd.path(),
+            false,
+        )
+        .expect_err("no skill at the root");
         let CompatError::Install { detail } = error else {
             panic!("unexpected error {error:?}");
         };

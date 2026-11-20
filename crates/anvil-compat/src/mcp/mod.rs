@@ -3,11 +3,23 @@
 //!
 //! Servers come from `.mcp.json`, the `mcpServers` key of
 //! `.claude/settings.json`, and `~/.anvil/mcp.toml`. Registration needs
-//! each server's tool list, but connecting at every startup would be slow,
-//! so the list is cached under `.anvil/mcp-cache/` keyed by a hash of the
-//! server's definition. A server with a fresh cache entry is not started
-//! until one of its tools is called.
+//! each server's tool list, so every server is started and listed live
+//! when a session loads it. The first listing a server returns is recorded
+//! as a SHA-256 in `~/.anvil/mcp-approvals.toml`; a later listing that
+//! differs stops the server until it is approved again, and under a
+//! managed policy only a pinned `listing_sha256` accepts a new one (see
+//! [`approval`]).
+//!
+//! Two transports are supported: local servers that anvil starts as a
+//! child process (stdio), and remote servers reached over the streamable
+//! HTTP transport (a definition with a `url`). An HTTP server is contacted
+//! only through `anvil_core::net`'s client, so the egress rules apply to
+//! every request: in unmanaged mode its URL joins the allowed set because
+//! the user's own (or a trusted repository's) definition names it; under
+//! a managed policy its `host:port` must be in `[network] allowed_hosts`
+//! and `[features] mcp` must allow it by name and URL.
 
+pub mod approval;
 pub mod client;
 pub mod http;
 pub mod jsonrpc;
@@ -15,15 +27,16 @@ pub mod stdio;
 pub mod tool;
 
 use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anvil_core::net::HttpClient;
 use anvil_core::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use approval::{McpStore, Verdict};
 pub use client::{McpClient, ToolInfo};
 pub use jsonrpc::McpError;
 pub use tool::{LazyServer, McpTool, qualified_name};
@@ -32,9 +45,6 @@ use crate::error::LoadError;
 
 /// Per-request timeout when a server sets none.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Where tool lists are cached, relative to the project root.
-pub const CACHE_DIR: &str = ".anvil/mcp-cache";
 
 /// How to reach a server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -48,13 +58,29 @@ pub enum Transport {
         /// Extra environment variables.
         env: BTreeMap<String, String>,
     },
-    /// A remote endpoint speaking streamable HTTP.
+    /// A remote server: one HTTP POST per message (streamable HTTP).
     Http {
-        /// The URL.
+        /// The endpoint, an `http://` or `https://` URL.
         url: String,
-        /// Extra request headers.
+        /// Extra request headers, such as `Authorization`, sent only to
+        /// the endpoint's host; `${VAR}` references are expanded.
         headers: BTreeMap<String, String>,
     },
+}
+
+impl Transport {
+    /// What the definition starts or contacts, for messages and policy
+    /// rules.
+    ///
+    /// # Returns
+    ///
+    /// The `command` of a local server or the `url` of an HTTP server.
+    pub fn target(&self) -> &str {
+        match self {
+            Self::Stdio { command, .. } => command,
+            Self::Http { url, .. } => url,
+        }
+    }
 }
 
 /// One server definition.
@@ -70,20 +96,6 @@ pub struct McpServer {
     pub source: PathBuf,
 }
 
-impl McpServer {
-    /// A hash of everything that changes what the server offers.
-    ///
-    /// # Returns
-    ///
-    /// The hash, used to validate cache entries.
-    pub fn config_hash(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.name.hash(&mut hasher);
-        self.transport.hash(&mut hasher);
-        hasher.finish()
-    }
-}
-
 /// Every server definition found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerSet {
@@ -94,22 +106,41 @@ pub struct ServerSet {
 }
 
 impl ServerSet {
+    /// Keeps only the servers `keep` accepts, as a managed policy requires.
+    ///
+    /// # Arguments
+    ///
+    /// * `keep` - Decides per server.
+    ///
+    /// # Returns
+    ///
+    /// The servers that were dropped.
+    pub fn retain(&mut self, keep: impl Fn(&McpServer) -> bool) -> Vec<McpServer> {
+        let (kept, dropped) = std::mem::take(&mut self.servers)
+            .into_iter()
+            .partition(|server| keep(server));
+        self.servers = kept;
+        dropped
+    }
+
     /// The definition files consulted, in priority order.
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and its servers may not load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The paths, whether or not they exist.
-    pub fn definition_files(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-        let mut files = vec![
-            cwd.join(".mcp.json"),
-            cwd.join(".claude").join("settings.json"),
-            cwd.join(".claude").join("settings.local.json"),
-        ];
+    pub fn definition_files(project: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        if let Some(project) = project {
+            files.push(project.join(".mcp.json"));
+            files.push(project.join(".claude").join("settings.json"));
+            files.push(project.join(".claude").join("settings.local.json"));
+        }
         if let Some(home) = home {
             files.push(home.join(".anvil").join("mcp.toml"));
         }
@@ -120,15 +151,16 @@ impl ServerSet {
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and its servers may not load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The set. Missing files are skipped; broken ones are listed in `errors`.
-    pub fn load(cwd: &Path, home: Option<&Path>) -> Self {
+    pub fn load(project: Option<&Path>, home: Option<&Path>) -> Self {
         let mut set = Self::default();
-        for path in Self::definition_files(cwd, home) {
+        for path in Self::definition_files(project, home) {
             let text = match std::fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -279,7 +311,7 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
         entry
             .get(key)
             .and_then(Value::as_str)
-            .map(|text| expand_env(text.trim()))
+            .map(|text| text.trim().to_owned())
     };
     let map = |key: &str| -> BTreeMap<String, String> {
         entry
@@ -287,7 +319,7 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
             .and_then(Value::as_object)
             .into_iter()
             .flatten()
-            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), expand_env(v))))
+            .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_owned())))
             .collect()
     };
     let timeout = entry
@@ -296,26 +328,31 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
         .and_then(Value::as_f64)
         .filter(|secs| *secs > 0.0)
         .map_or(DEFAULT_TIMEOUT, Duration::from_secs_f64);
-    let kind = string("type").unwrap_or_default();
+    let config_error = |detail: String| McpError::Config {
+        path: path.to_path_buf(),
+        detail,
+    };
     let transport = match (string("url"), string("command")) {
-        (Some(url), _)
-            if kind.is_empty()
-                || kind == "http"
-                || kind == "streamable-http"
-                || kind == "streamable_http" =>
-        {
+        (Some(_), Some(_)) => {
+            return Err(config_error(format!(
+                "server `{name}` has both `command` and `url`"
+            )));
+        }
+        (Some(url), None) => {
+            if string("type").as_deref() == Some("sse") {
+                return Err(config_error(format!(
+                    "server `{name}` uses the older SSE transport; anvil speaks only streamable HTTP"
+                )));
+            }
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err(config_error(format!(
+                    "server `{name}` has the url `{url}`, which is not http or https"
+                )));
+            }
             Transport::Http {
                 url,
                 headers: map("headers"),
             }
-        }
-        (Some(_), _) => {
-            return Err(McpError::Config {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "server `{name}` has type `{kind}`; anvil supports stdio and streamable HTTP"
-                ),
-            });
         }
         (None, Some(command)) if command.is_empty() => {
             return Err(McpError::Config {
@@ -331,7 +368,7 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
                 .into_iter()
                 .flatten()
                 .filter_map(Value::as_str)
-                .map(expand_env)
+                .map(str::to_owned)
                 .collect(),
             env: map("env"),
         },
@@ -350,8 +387,13 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
     })
 }
 
-/// Expands `${VAR}` and `${VAR:-default}` from the environment, the way
-/// Claude Code does in `.mcp.json`.
+/// Expands `${VAR}` and `${VAR:-default}` the way Claude Code does in
+/// `.mcp.json`, from the variables a child process receives.
+///
+/// A definition may only name variables anvil passes to the programs it
+/// starts (`anvil_types::child_env`, plus `[tools] pass_env`), so a
+/// definition cannot copy a provider key into a server's arguments or
+/// environment.
 ///
 /// # Arguments
 ///
@@ -361,7 +403,22 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
 ///
 /// The value with every reference replaced; an unset variable without a
 /// default becomes empty.
-pub fn expand_env(text: &str) -> String {
+///
+/// # Errors
+///
+/// The name of the first variable that children do not receive.
+pub fn expand_env(text: &str) -> Result<String, String> {
+    expand_with(text, &anvil_types::child_env::may_pass, &|name| {
+        std::env::var(name).ok()
+    })
+}
+
+/// [`expand_env`] with the pass rule and the lookup supplied.
+fn expand_with(
+    text: &str,
+    may_pass: &dyn Fn(&str) -> bool,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, String> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("${") {
@@ -369,30 +426,111 @@ pub fn expand_env(text: &str) -> String {
         let after = &rest[start + 2..];
         let Some(end) = after.find('}') else {
             out.push_str(&rest[start..]);
-            return out;
+            return Ok(out);
         };
         let reference = &after[..end];
         let (name, default) = match reference.split_once(":-") {
             Some((name, default)) => (name, Some(default)),
             None => (reference, None),
         };
-        match std::env::var(name) {
-            Ok(value) if !value.is_empty() => out.push_str(&value),
+        if !may_pass(name) {
+            return Err(name.to_owned());
+        }
+        match lookup(name) {
+            Some(value) if !value.is_empty() => out.push_str(&value),
             _ => out.push_str(default.unwrap_or("")),
         }
         rest = &after[end + 1..];
     }
     out.push_str(rest);
-    out
+    Ok(out)
 }
 
-/// A cached tool list for one server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CacheEntry {
-    /// [`McpServer::config_hash`] when the list was fetched.
-    config_hash: u64,
-    /// The tools.
-    tools: Vec<ToolInfo>,
+/// A server's program, arguments and environment with every `${VAR}`
+/// expanded, ready to start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launch {
+    /// The program.
+    pub command: String,
+    /// Its arguments.
+    pub args: Vec<String>,
+    /// Extra environment variables.
+    pub env: BTreeMap<String, String>,
+}
+
+impl McpServer {
+    /// Expands the definition into what is started.
+    ///
+    /// # Returns
+    ///
+    /// The expanded program, arguments and environment.
+    ///
+    /// # Errors
+    ///
+    /// [`McpError::Spawn`] for an HTTP server, which is not started, or
+    /// naming a referenced variable that children do not receive, with how
+    /// to allow it.
+    pub fn launch(&self) -> Result<Launch, McpError> {
+        let Transport::Stdio { command, args, env } = &self.transport else {
+            return Err(McpError::Spawn {
+                server: self.name.clone(),
+                command: self.transport.target().to_owned(),
+                detail: "an HTTP server is contacted, not started".to_owned(),
+            });
+        };
+        let refuse = |variable: String| self.unpassed(variable);
+        Ok(Launch {
+            command: expand_env(command).map_err(refuse)?,
+            args: args
+                .iter()
+                .map(|arg| expand_env(arg))
+                .collect::<Result<_, _>>()
+                .map_err(refuse)?,
+            env: env
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), expand_env(value)?)))
+                .collect::<Result<_, String>>()
+                .map_err(refuse)?,
+        })
+    }
+}
+
+impl McpServer {
+    /// The error for a `${VAR}` reference to a variable children do not
+    /// receive.
+    fn unpassed(&self, variable: String) -> McpError {
+        McpError::Spawn {
+            server: self.name.clone(),
+            command: self.transport.target().to_owned(),
+            detail: format!(
+                "the definition uses `${{{variable}}}`, which anvil does not pass to the \
+                 programs it starts; add `{variable}` to `[tools] pass_env` in \
+                 ~/.anvil/config.toml to allow it"
+            ),
+        }
+    }
+
+    /// An HTTP server's headers with every `${VAR}` expanded, under the
+    /// same rule as a local server's environment.
+    ///
+    /// # Returns
+    ///
+    /// The headers; empty for a local server.
+    ///
+    /// # Errors
+    ///
+    /// [`McpError::Spawn`] naming a referenced variable that children do
+    /// not receive, with how to allow it.
+    pub fn http_headers(&self) -> Result<BTreeMap<String, String>, McpError> {
+        let Transport::Http { headers, .. } = &self.transport else {
+            return Ok(BTreeMap::new());
+        };
+        headers
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), expand_env(value)?)))
+            .collect::<Result<_, String>>()
+            .map_err(|variable| self.unpassed(variable))
+    }
 }
 
 /// How one server fared during [`McpTools::load`].
@@ -402,8 +540,9 @@ pub struct ServerReport {
     pub name: String,
     /// How many tools it offers, when known.
     pub tools: Result<usize, McpError>,
-    /// Whether the list came from the cache (no connection was made).
-    pub from_cache: bool,
+    /// The [`approval::listing_digest`] of what it listed, when it listed
+    /// anything, so an administrator can pin it.
+    pub listing_sha256: Option<String>,
 }
 
 /// Every server's tools, ready to register.
@@ -416,55 +555,56 @@ pub struct McpTools {
 }
 
 impl McpTools {
-    /// Resolves every server's tool list, from the cache when it is valid
-    /// and by connecting otherwise.
+    /// Starts and lists every server, live, and keeps those whose listing
+    /// is the approved one.
     ///
     /// # Arguments
     ///
     /// * `set` - The servers.
-    /// * `cwd` - The project root; stdio servers run there and the cache
-    ///   lives under it.
-    /// * `refresh` - Ignore the cache and connect to every server.
+    /// * `cwd` - The project root; stdio servers run there.
+    /// * `http` - The client HTTP servers are reached with.
+    /// * `store` - The approvals and the policy's pins.
     ///
     /// # Returns
     ///
-    /// The tools. A server that cannot be reached contributes no tools and
-    /// an error in its report; the others still load.
-    pub async fn load(set: &ServerSet, cwd: &Path, refresh: bool) -> Self {
-        let cache_dir = cwd.join(CACHE_DIR);
+    /// The tools. A server that cannot be reached, or whose listing differs
+    /// from the approved one, contributes no tools and an error in its
+    /// report; the others still load.
+    pub async fn load(set: &ServerSet, cwd: &Path, http: &HttpClient, store: &McpStore) -> Self {
         let mut tools = Self::default();
         for server in set.servers() {
-            let cache_path = cache_dir.join(format!("{}.json", safe_file_name(&server.name)));
-            if !refresh && let Some(cached) = read_cache(&cache_path, server.config_hash()) {
-                tools.reports.push(ServerReport {
-                    name: server.name.clone(),
-                    tools: Ok(cached.len()),
-                    from_cache: true,
-                });
-                tools.servers.push((
-                    Arc::new(LazyServer::new(server.clone(), cwd.to_path_buf())),
-                    cached,
-                ));
-                continue;
-            }
             let listed = async {
-                let client = McpClient::connect(server, cwd).await?;
+                let client = McpClient::connect(server, cwd, http).await?;
                 let list = client.list_tools().await?;
                 Ok::<_, McpError>((client, list))
             }
             .await;
+            let listing_sha256 = listed
+                .as_ref()
+                .ok()
+                .map(|(_, list)| approval::listing_digest(list));
+            let listed = listed.and_then(|(client, list)| match store.check(server, &list) {
+                Verdict::Changed if store.is_managed() => Err(McpError::ListingRefused {
+                    server: server.name.clone(),
+                    digest: approval::listing_digest(&list),
+                }),
+                Verdict::Changed => Err(McpError::ListingChanged {
+                    server: server.name.clone(),
+                }),
+                Verdict::Approved | Verdict::Recorded => Ok((client, list)),
+            });
             match listed {
                 Ok((client, list)) => {
-                    write_cache(&cache_path, server.config_hash(), &list);
                     tools.reports.push(ServerReport {
                         name: server.name.clone(),
                         tools: Ok(list.len()),
-                        from_cache: false,
+                        listing_sha256,
                     });
                     tools.servers.push((
                         Arc::new(LazyServer::connected(
                             server.clone(),
                             cwd.to_path_buf(),
+                            http.clone(),
                             client,
                         )),
                         list,
@@ -475,7 +615,7 @@ impl McpTools {
                     tools.reports.push(ServerReport {
                         name: server.name.clone(),
                         tools: Err(error),
-                        from_cache: false,
+                        listing_sha256,
                     });
                 }
             }
@@ -534,41 +674,6 @@ impl McpTools {
     }
 }
 
-/// A cache file name for a server name.
-fn safe_file_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// Reads a cache entry when it matches the server's current definition.
-fn read_cache(path: &Path, config_hash: u64) -> Option<Vec<ToolInfo>> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let entry: CacheEntry = serde_json::from_str(&text).ok()?;
-    (entry.config_hash == config_hash).then_some(entry.tools)
-}
-
-/// Writes a cache entry; failures are logged, never fatal.
-fn write_cache(path: &Path, config_hash: u64, tools: &[ToolInfo]) {
-    let entry = CacheEntry {
-        config_hash,
-        tools: tools.to_vec(),
-    };
-    let written = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, serde_json::to_vec_pretty(&entry).unwrap_or_default()));
-    if let Err(error) = written {
-        tracing::debug!(path = %path.display(), %error, "cannot write the mcp tool cache");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +693,28 @@ mod tests {
         let servers = parse_definitions(json, Path::new(".mcp.json")).expect("parses");
         assert_eq!(server_names(&servers), ["playwright", "remote"]);
         assert_eq!(
+            servers[1].transport,
+            Transport::Http {
+                url: "https://example.test/mcp".to_owned(),
+                headers: BTreeMap::from([(
+                    "Authorization".to_owned(),
+                    "Bearer ${ANVIL_TEST_TOKEN:-anon}".to_owned()
+                )]),
+            },
+            "an http server parses; the older sse transport is refused"
+        );
+        assert_eq!(servers[1].transport.target(), "https://example.test/mcp");
+        assert!(
+            servers[1].launch().is_err(),
+            "an http server is not started"
+        );
+        assert!(
+            servers[1]
+                .http_headers()
+                .is_err_and(|error| error.to_string().contains("pass_env")),
+            "a header may name only variables children receive"
+        );
+        assert_eq!(
             servers[0].transport,
             Transport::Stdio {
                 command: "npx".to_owned(),
@@ -595,10 +722,6 @@ mod tests {
                 env: BTreeMap::new(),
             }
         );
-        let Transport::Http { headers, .. } = &servers[1].transport else {
-            panic!("expected http");
-        };
-        assert_eq!(headers["Authorization"], "Bearer anon");
         assert_eq!(servers[0].timeout, DEFAULT_TIMEOUT);
 
         let settings = r#"{"theme": "dark", "mcpServers": {"fs": {"command": "server-fs", "args": ["."], "env": {"X": "1"}}}}"#;
@@ -613,6 +736,22 @@ mod tests {
         let toml = "[servers.docs]\nurl = \"http://localhost:3000/mcp\"\ntimeout_secs = 5\n\n[servers.local]\ncommand = \"python\"\nargs = [\"server.py\"]\n";
         let servers = parse_definitions(toml, Path::new("mcp.toml")).expect("parses");
         assert_eq!(server_names(&servers), ["docs", "local"]);
+        for refused in [
+            r#"{"mcpServers": {"x": {"url": "ftp://example.test/mcp"}}}"#,
+            r#"{"mcpServers": {"x": {"url": "https://example.test/mcp", "command": "y"}}}"#,
+        ] {
+            assert!(
+                parse_definitions(refused, Path::new(".mcp.json"))
+                    .expect("parses")
+                    .is_empty(),
+                "{refused}"
+            );
+        }
+        let toml = "[servers.local]
+command = \"python\"
+timeout_secs = 5
+";
+        let servers = parse_definitions(toml, Path::new("mcp.toml")).expect("parses");
         assert_eq!(servers[0].timeout, Duration::from_secs(5));
         assert!(parse_definitions("{not json", Path::new(".mcp.json")).is_err());
     }
@@ -632,7 +771,7 @@ mod tests {
             "[servers.a]\ncommand = \"home-a\"\n[servers.b]\ncommand = \"home-b\"\n",
         )
         .expect("write");
-        let set = ServerSet::load(project.path(), Some(home.path()));
+        let set = ServerSet::load(Some(project.path()), Some(home.path()));
         assert_eq!(server_names(set.servers()), ["a", "b"]);
         assert!(
             matches!(&set.get("a").expect("a").transport, Transport::Stdio { command, .. } if command == "project-a")
@@ -642,32 +781,65 @@ mod tests {
 
     #[test]
     fn expands_environment_references() {
-        // SAFETY-free: std::env::set_var is safe to call in a single-threaded test body
-        // only on older toolchains; use a variable that is almost certainly unset instead.
-        assert_eq!(expand_env("x-${ANVIL_SURELY_UNSET_VAR}-y"), "x--y");
+        let may_pass = |name: &str| name != "KEY";
+        let lookup = |name: &str| (name == "SET").then(|| "v".to_owned());
+        let expand = |text: &str| expand_with(text, &may_pass, &lookup);
+        assert_eq!(expand("x-${UNSET}-y"), Ok("x--y".to_owned()));
         assert_eq!(
-            expand_env("${ANVIL_SURELY_UNSET_VAR:-fallback}/bin"),
-            "fallback/bin"
+            expand("${UNSET:-fallback}/bin"),
+            Ok("fallback/bin".to_owned())
         );
-        assert_eq!(expand_env("no refs"), "no refs");
-        assert_eq!(expand_env("broken ${X"), "broken ${X");
+        assert_eq!(expand("${SET}/bin"), Ok("v/bin".to_owned()));
+        assert_eq!(expand("no refs"), Ok("no refs".to_owned()));
+        assert_eq!(expand("broken ${X"), Ok("broken ${X".to_owned()));
+        assert_eq!(expand("a ${KEY:-anon} b"), Err("KEY".to_owned()));
         let path = std::env::var("PATH").unwrap_or_default();
-        assert_eq!(expand_env("${PATH}"), path);
+        assert_eq!(expand_env("${PATH}"), Ok(path));
     }
 
     #[test]
-    fn cache_round_trips_and_rejects_a_changed_definition() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cache").join("s.json");
-        let tools = vec![ToolInfo {
-            name: "echo".to_owned(),
-            description: "d".to_owned(),
-            input_schema: serde_json::json!({"type": "object"}),
-            read_only: true,
-        }];
-        write_cache(&path, 42, &tools);
-        assert_eq!(read_cache(&path, 42), Some(tools));
-        assert_eq!(read_cache(&path, 43), None);
-        assert_eq!(safe_file_name("my server/1"), "my_server_1");
+    fn a_definition_cannot_copy_a_withheld_variable_into_a_server() {
+        // cargo sets CARGO_* variables for the test process that no child
+        // receives; one of them stands in for a provider key.
+        let (name, value) = std::env::vars()
+            .find(|(name, value)| {
+                value.len() >= 4
+                    && !name.contains(value.as_str())
+                    && !"node --k= STOLEN".contains(value.as_str())
+                    && !anvil_types::child_env::is_passed(name, &[])
+            })
+            .expect("a variable children never receive");
+        let json = format!(
+            r#"{{"mcpServers": {{"x": {{"command": "node", "args": ["--k=${{{name}}}"], "env": {{"STOLEN": "${{{name}}}"}}}}}}}}"#
+        );
+        let servers = parse_definitions(&json, Path::new(".mcp.json")).expect("parses");
+        let Transport::Stdio { args, env, .. } = &servers[0].transport else {
+            panic!("a stdio server");
+        };
+        assert!(!args.concat().contains(&value));
+        assert!(!env.values().any(|text| text.contains(&value)));
+        let error = servers[0]
+            .launch()
+            .expect_err("a withheld variable is refused");
+        let message = error.to_string();
+        assert!(!message.contains(&value), "{message}");
+        assert!(
+            message.contains(&name) && message.contains("pass_env"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_launch_expands_only_variables_children_receive() {
+        let server = &parse_definitions(
+            r#"{"mcpServers": {"x": {"command": "node", "args": ["--path=${PATH}"], "env": {"P": "${PATH}"}}}}"#,
+            Path::new(".mcp.json"),
+        )
+        .expect("parses")[0];
+        let launch = server.launch().expect("PATH is passed to children");
+        let path = std::env::var("PATH").unwrap_or_default();
+        assert_eq!(launch.command, "node");
+        assert_eq!(launch.args, [format!("--path={path}")]);
+        assert_eq!(launch.env.get("P"), Some(&path));
     }
 }

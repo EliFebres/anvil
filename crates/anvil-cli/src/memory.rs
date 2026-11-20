@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+use anvil_audit::MemorySkipReason;
 use anvil_core::agent::diff::SMALL_DIFF_LINES;
 use anvil_core::agent::{ChangeCheckFailure, ChangeChecks, LoopResult, PromptSection, Status};
 use anvil_core::context::{collect_text, render_transcript};
@@ -19,14 +20,13 @@ use anvil_memory::rules::{ensure_check_scripts, strip_rule_prefix};
 use anvil_memory::{
     Decision, FactStore, MEMORY_TOKEN_CAP, Proposal, Rule, RuleSet, load_memory, paths, run_checks,
 };
-use anvil_telemetry::MemorySkipReason;
 use anyhow::Context;
 use tokio::sync::oneshot;
 
 use crate::console::Console;
-use crate::telemetry::SessionTelemetry;
 use crate::terminal::read_line;
 use crate::tui::{MemoryAnswer, UiHandle, UiMsg, UiRequest, block_on_reply};
+use crate::usage::SessionUsage;
 use crate::wiring::Wiring;
 
 /// Heading of the rules section in every system prompt.
@@ -86,6 +86,9 @@ pub fn open_rules(home: &Path) -> anyhow::Result<RuleSet> {
 ///
 /// * `home` - The home directory; without one there are no sections.
 /// * `cwd` - The project root, which names the project's facts file.
+/// * `facts` - Whether remembered facts may be read; `false` under a
+///   policy with `[features] memory = false`, and then nothing under
+///   `~/.anvil/memory` is opened.
 ///
 /// # Returns
 ///
@@ -94,7 +97,11 @@ pub fn open_rules(home: &Path) -> anyhow::Result<RuleSet> {
 /// # Errors
 ///
 /// When the rules file is malformed.
-pub fn prompt_sections(home: Option<&Path>, cwd: &Path) -> anyhow::Result<PromptSections> {
+pub fn prompt_sections(
+    home: Option<&Path>,
+    cwd: &Path,
+    facts: bool,
+) -> anyhow::Result<PromptSections> {
     let Some(home) = home else {
         return Ok(PromptSections::default());
     };
@@ -112,6 +119,9 @@ pub fn prompt_sections(home: Option<&Path>, cwd: &Path) -> anyhow::Result<Prompt
             heading: RULES_HEADING.to_owned(),
             text,
         });
+    }
+    if !facts {
+        return Ok(sections);
     }
     let store = FactStore::new(paths::memory_dir(home));
     if let Some(loaded) = load_memory(&store, &paths::repo_name(cwd), MEMORY_TOKEN_CAP) {
@@ -395,6 +405,31 @@ pub fn skip_text(reason: MemorySkipReason) -> String {
     }
 }
 
+/// Why the end-of-session extraction must not run, if it must not: the
+/// policy turns memory off, or its transcript mode keeps no conversation.
+/// Below `full` the summarizer would send the conversation to a provider
+/// once more and keep facts drawn from text the transcript does not keep.
+///
+/// # Arguments
+///
+/// * `wiring` - The session's wiring.
+///
+/// # Returns
+///
+/// The reason, for a `memory: skipped (...)` note.
+pub(crate) fn policy_skip_reason(wiring: &Wiring) -> Option<String> {
+    if !wiring.memory_allowed() {
+        return Some("the managed policy's [features] memory = false".to_owned());
+    }
+    if wiring.transcript != anvil_types::policy::TranscriptMode::Full {
+        return Some(format!(
+            "the managed policy's [data] transcript = \"{}\" keeps no conversation to learn from",
+            wiring.transcript.as_str()
+        ));
+    }
+    None
+}
+
 /// Runs the end-of-session extraction for a finished run or chat and
 /// reports, rather than fails, when it cannot.
 ///
@@ -405,20 +440,24 @@ pub fn skip_text(reason: MemorySkipReason) -> String {
 /// * `messages` - The session's conversation.
 /// * `decide` - Called once per proposed fact.
 /// * `console` - Where progress lines go.
-/// * `telemetry` - Where the summarizer's completions are recorded, if anywhere.
+/// * `usage` - Where the summarizer's completions are recorded, if anywhere.
 pub async fn finish_session(
     wiring: &Wiring,
     session_id: &str,
     messages: &[Message],
     mut decide: Box<dyn FnMut(&Proposal) -> Decision>,
     console: &Console,
-    telemetry: Option<&SessionTelemetry>,
+    usage: Option<&SessionUsage>,
 ) {
+    if let Some(reason) = policy_skip_reason(wiring) {
+        console.notice(format!("memory: skipped ({reason})"));
+        return;
+    }
     let outcome = async {
         let name = &wiring.config.roles.summarizer;
         let mut summarizer = wiring.provider(name)?;
-        if let Some(telemetry) = telemetry {
-            summarizer = telemetry.recorded(name, summarizer, "memory");
+        if let Some(usage) = usage {
+            summarizer = usage.recorded(name, summarizer, "memory");
         }
         extract_after_session(
             &*summarizer,
@@ -540,11 +579,12 @@ mod tests {
                 .is_file()
         );
 
-        let sections = prompt_sections(Some(home.path()), cwd.path()).expect("sections");
+        let sections = prompt_sections(Some(home.path()), cwd.path(), true).expect("sections");
         assert_eq!(sections.coder.len(), 1, "no facts yet, so only the rules");
         assert_eq!(sections.review.len(), 1);
         let prompt = system_prompt(&PromptInputs {
             state: State::Build,
+            environment: None,
             instructions: &[],
             sections: &sections.coder,
             tools: &[],
@@ -599,7 +639,7 @@ mod tests {
         .expect("write");
 
         let (coder, review) =
-            texts(&prompt_sections(Some(home.path()), rust.path()).expect("rust"));
+            texts(&prompt_sections(Some(home.path()), rust.path(), true).expect("rust"));
         for text in [&coder, &review] {
             assert!(!text.contains("[py-only]"), "{text}");
             assert!(
@@ -608,7 +648,7 @@ mod tests {
             );
         }
         let (coder, review) =
-            texts(&prompt_sections(Some(home.path()), python.path()).expect("python"));
+            texts(&prompt_sections(Some(home.path()), python.path(), true).expect("python"));
         for text in [&coder, &review] {
             assert!(
                 text.contains("[py-only]") && text.contains("[any]"),
@@ -635,7 +675,7 @@ mod tests {
         )
         .expect("write");
         let all = open_rules(home.path()).expect("seeded rules");
-        let sections = prompt_sections(Some(home.path()), project.path()).expect("sections");
+        let sections = prompt_sections(Some(home.path()), project.path(), true).expect("sections");
         assert_eq!(sections.coder[0].text, all.prompt_section().expect("coder"));
         assert_eq!(
             sections.review[0].text,
@@ -673,6 +713,7 @@ mod tests {
             check: CheckCommand::Command("exit 0".to_owned()),
             context_window: 100_000,
             home_dir: None,
+            trusted_project: true,
             extra_instructions: Vec::new(),
             sections: Vec::new(),
             review_sections: Vec::new(),
@@ -695,7 +736,12 @@ mod tests {
             EventSink::discard(),
         );
         assert_eq!(agent.run().await.status, Status::Done);
-        let messages = load_session(cwd.path(), "t1").expect("session").messages;
+        let messages = load_session(
+            &anvil_core::context::project_sessions_root(cwd.path()),
+            "t1",
+        )
+        .expect("session")
+        .messages;
 
         let summarizer = FakeProvider::new(vec![FakeProvider::text_turn(
             "tooling: The user runs tests with just check.\n\

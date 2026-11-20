@@ -126,7 +126,8 @@ pub fn write_proposed(
     session_id: &str,
 ) -> Result<PathBuf, MemoryError> {
     let path = store.proposed_path();
-    std::fs::create_dir_all(store.root()).map_err(|error| MemoryError::io(store.root(), &error))?;
+    anvil_types::private_fs::create_dir_all(store.root())
+        .map_err(|error| MemoryError::io(store.root(), &error))?;
     let mut text = format!(
         "# Proposed facts from session {session_id}\n\nNothing here is remembered until it is kept. One line per proposal.\n\n"
     );
@@ -137,7 +138,7 @@ pub fn write_proposed(
             proposal.fact
         ));
     }
-    std::fs::write(&path, text).map_err(|error| MemoryError::io(&path, &error))?;
+    anvil_types::private_fs::write(&path, text).map_err(|error| MemoryError::io(&path, &error))?;
     Ok(path)
 }
 

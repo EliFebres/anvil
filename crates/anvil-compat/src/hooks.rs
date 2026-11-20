@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anvil_core::provider::{ToolCall, ToolResult};
-use anvil_core::tools::{HookDecision, HookFuture, Shell, ToolContext, ToolHook};
+use anvil_core::tools::{CallGate, HookDecision, HookFuture, Shell, ToolContext, ToolHook};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use tokio::io::AsyncWriteExt;
@@ -162,14 +162,18 @@ impl HookConfig {
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and its hooks may not load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The paths, whether or not they exist.
-    pub fn settings_files(cwd: &Path, home: Option<&Path>) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = PROJECT_SETTINGS.iter().map(|name| cwd.join(name)).collect();
+    pub fn settings_files(project: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        if let Some(project) = project {
+            files.extend(PROJECT_SETTINGS.iter().map(|name| project.join(name)));
+        }
         if let Some(home) = home {
             files.extend(HOME_SETTINGS.iter().map(|name| home.join(name)));
         }
@@ -180,16 +184,17 @@ impl HookConfig {
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and its hooks may not load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The config. Files that do not exist are skipped; files that do not
     /// parse are listed in `errors`.
-    pub fn load(cwd: &Path, home: Option<&Path>) -> Self {
+    pub fn load(project: Option<&Path>, home: Option<&Path>) -> Self {
         let mut config = Self::default();
-        for path in Self::settings_files(cwd, home) {
+        for path in Self::settings_files(project, home) {
             let text = match std::fs::read_to_string(&path) {
                 Ok(text) => text,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -387,6 +392,9 @@ pub struct HookRunner {
     session_id: String,
     /// The session folder, sent as `transcript_path`.
     transcript_path: Option<PathBuf>,
+    /// Refuses every hook once it gives a reason, such as a required audit
+    /// log that could not be written.
+    gate: Option<Arc<dyn CallGate>>,
 }
 
 impl HookRunner {
@@ -416,7 +424,29 @@ impl HookRunner {
             shell,
             session_id,
             transcript_path,
+            gate: None,
         }
+    }
+
+    /// Makes the runner refuse to start any hook once `gate` gives a
+    /// reason: a `PreToolUse` hook then blocks its tool with that reason,
+    /// and every other event runs nothing and reports nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `gate` - The gate.
+    ///
+    /// # Returns
+    ///
+    /// The runner.
+    pub fn with_gate(mut self, gate: Arc<dyn CallGate>) -> Self {
+        self.gate = Some(gate);
+        self
+    }
+
+    /// The gate's reason to refuse, if it gives one.
+    fn refusal(&self) -> Option<String> {
+        self.gate.as_ref().and_then(|gate| gate.refusal())
     }
 
     /// Whether any command is configured for an event.
@@ -467,6 +497,12 @@ impl HookRunner {
                 continue;
             }
             for command in &group.commands {
+                if let Some(reason) = self.refusal() {
+                    tracing::warn!(%event, command = command.command, reason, "hook not run");
+                    outcome.context.clear();
+                    outcome.blocked = (event == HookEvent::PreToolUse).then_some(reason);
+                    return outcome;
+                }
                 match self.run_command(command, &payload).await {
                     Ok(run) if run.exit_code == Some(BLOCK_EXIT_CODE) => {
                         let reason = run.stderr.trim();
@@ -538,6 +574,8 @@ impl HookRunner {
         let mut child = self
             .shell
             .command(&command.command)
+            .env_clear()
+            .envs(anvil_types::child_env::vars())
             .current_dir(&self.cwd)
             .env("CLAUDE_PROJECT_DIR", &self.cwd)
             .env("ANVIL_PROJECT_DIR", &self.cwd)
@@ -715,7 +753,7 @@ mod tests {
         std::fs::create_dir_all(project.path().join(".anvil")).expect("mkdir");
         std::fs::write(project.path().join(".anvil/settings.json"), "{not json").expect("write");
 
-        let config = HookConfig::load(project.path(), Some(home.path()));
+        let config = HookConfig::load(Some(project.path()), Some(home.path()));
         assert_eq!(config.events(), [HookEvent::PreToolUse, HookEvent::Stop]);
         assert_eq!(config.command_count(), 3);
         let pre = config.groups(HookEvent::PreToolUse);
@@ -808,6 +846,8 @@ mod tests {
             .content
             .split_once("\n\n[hook] ")
             .expect("hook note appended");
+        let note =
+            anvil_core::guard::unwrap_untrusted(note).expect("hook output is untrusted data");
         let payload: Value = serde_json::from_str(note.trim()).expect("payload is JSON");
         assert_eq!(payload["hook_event_name"], "PostToolUse");
         assert_eq!(payload["tool_name"], "LS");
@@ -839,5 +879,63 @@ mod tests {
         assert_eq!(runner.session_start().await, ["remember-the-milk"]);
         assert_eq!(runner.stop("done", false).await.as_deref(), Some("nope"));
         assert!(!runner.has(HookEvent::PreToolUse));
+    }
+
+    #[tokio::test]
+    async fn a_closed_gate_runs_no_hook_and_blocks_the_tool() {
+        struct Closed;
+        impl CallGate for Closed {
+            fn refusal(&self) -> Option<String> {
+                Some("the audit log cannot be written".to_owned())
+            }
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = |name: &str| {
+            let path = dir.path().join(name);
+            if cfg!(windows) {
+                format!("Set-Content -Path '{}' -Value ran", path.display())
+            } else {
+                format!("echo ran > '{}'", path.display())
+            }
+        };
+        let mut config = HookConfig::default();
+        config.add(
+            &json!({
+                "SessionStart": [{"hooks": [{"command": marker("start")}]}],
+                "PreToolUse": [{"hooks": [{"command": marker("pre")}]}],
+                "PostToolUse": [{"hooks": [{"command": marker("post")}]}],
+                "Stop": [{"hooks": [{"command": marker("stop")}]}]
+            }),
+            Path::new("settings.json"),
+        );
+        let runner = HookRunner::new(
+            Arc::new(config),
+            dir.path().to_path_buf(),
+            Shell::for_platform(),
+            "sess-1".to_owned(),
+            None,
+        )
+        .with_gate(Arc::new(Closed));
+        assert!(runner.session_start().await.is_empty());
+        assert_eq!(
+            runner.stop("done", false).await,
+            None,
+            "stop does not object"
+        );
+        let call = call("list_dir", json!({}));
+        let ctx = ToolContext::new(dir.path());
+        assert!(matches!(
+            runner.before(&call, &json!({}), &ctx).await,
+            HookDecision::Block { ref reason } if reason.contains("audit log")
+        ));
+        let result = ToolResult {
+            call_id: call.id.clone(),
+            content: String::new(),
+            is_error: false,
+        };
+        assert_eq!(runner.after(&call, &json!({}), &result, &ctx).await, None);
+        for name in ["start", "pre", "post", "stop"] {
+            assert!(!dir.path().join(name).exists(), "the {name} hook ran");
+        }
     }
 }

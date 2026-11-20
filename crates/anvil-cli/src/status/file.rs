@@ -6,7 +6,6 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anvil_core::context::session::SESSIONS_DIR;
 use anvil_types::SessionStatus;
 use anvil_types::status::{LOCK_FILE, STATUS_FILE};
 use sha2::{Digest, Sha256};
@@ -37,12 +36,13 @@ impl StatusFile {
     ///
     /// When the folder or the lock file cannot be created.
     pub fn open(dir: &Path) -> io::Result<Self> {
-        fs::create_dir_all(dir)?;
-        let lock = OpenOptions::new()
+        anvil_types::private_fs::create_dir_all(dir)?;
+        let lock = anvil_types::private_fs::owner_only()
             .create(true)
             .truncate(false)
             .write(true)
             .open(dir.join(LOCK_FILE))?;
+        anvil_types::private_fs::narrow(&lock)?;
         let lock = match lock.try_lock() {
             Ok(()) => Some(lock),
             Err(TryLockError::WouldBlock) => {
@@ -92,7 +92,12 @@ impl StatusFile {
 pub fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let temp = dir.join(format!("{name}.tmp"));
     let result = (|| {
-        let mut file = File::create(&temp)?;
+        let mut file = anvil_types::private_fs::owner_only()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&temp)?;
+        anvil_types::private_fs::narrow(&file)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
@@ -151,13 +156,13 @@ pub fn read_status(dir: &Path) -> Option<SessionStatus> {
 ///
 /// # Arguments
 ///
-/// * `project` - The project root.
+/// * `sessions_root` - The folder that holds the project's sessions.
 ///
 /// # Returns
 ///
-/// Every directory under the project's sessions folder; empty when there is none.
-pub fn session_dirs(project: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(project.join(SESSIONS_DIR)) else {
+/// Every directory in it; empty when there is none.
+pub fn session_dirs(sessions_root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(sessions_root) else {
         return Vec::new();
     };
     entries
@@ -168,7 +173,7 @@ pub fn session_dirs(project: &Path) -> Vec<PathBuf> {
 }
 
 /// Remembers that a project ran a session, so `anvil status --all` can
-/// find it. Telemetry records only a digest of the project path, so it
+/// find it. Usage records hold only a digest of the project path, so it
 /// cannot be used to walk projects.
 ///
 /// # Arguments
@@ -181,7 +186,7 @@ pub fn session_dirs(project: &Path) -> Vec<PathBuf> {
 /// When the marker cannot be written.
 pub fn register_project(home: &Path, project: &Path) -> io::Result<()> {
     let dir = home.join(PROJECTS_DIR);
-    fs::create_dir_all(&dir)?;
+    anvil_types::private_fs::create_dir_all(&dir)?;
     let path_text = project.to_string_lossy();
     let digest = Sha256::digest(path_text.as_bytes());
     let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();

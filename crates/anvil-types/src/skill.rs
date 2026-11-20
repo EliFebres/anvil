@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ValidationError;
@@ -21,7 +20,7 @@ pub const MAX_SKILL_DESCRIPTION_CHARS: usize = 1024;
 /// skill written for a newer Claude Code never fails to load.
 ///
 /// [`extra`]: SkillManifest::extra
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillManifest {
     /// Kebab-case name, also the skill's directory name.
     pub name: String,

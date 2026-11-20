@@ -38,12 +38,15 @@ const MAX_LISTED_FILES: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillRoots {
     /// The project root; `.anvil/skills` and `.claude/skills` sit under it.
-    pub project: PathBuf,
+    /// `None` when the repository is not trusted.
+    pub project: Option<PathBuf>,
     /// The home directory, if known; `.anvil/skills` and `.claude/skills`
     /// sit under it.
     pub home: Option<PathBuf>,
     /// anvil's own `skills/` directory, when it exists on this machine.
     pub bundled: Option<PathBuf>,
+    /// Folders a managed policy names; each holds skills directly.
+    pub managed: Vec<PathBuf>,
 }
 
 impl SkillRoots {
@@ -53,10 +56,15 @@ impl SkillRoots {
     ///
     /// Each root with its origin.
     pub fn ordered(&self) -> Vec<(PathBuf, Origin)> {
-        let mut roots = config_dirs(&self.project, self.home.as_deref(), SKILLS_DIR);
+        let mut roots = config_dirs(self.project.as_deref(), self.home.as_deref(), SKILLS_DIR);
         if let Some(bundled) = &self.bundled {
             roots.push((bundled.clone(), Origin::Bundled));
         }
+        roots.extend(
+            self.managed
+                .iter()
+                .map(|dir| (dir.clone(), Origin::Managed)),
+        );
         roots
     }
 }
@@ -537,9 +545,10 @@ mod tests {
 
     fn roots(project: &Path, home: Option<&Path>) -> SkillRoots {
         SkillRoots {
-            project: project.to_path_buf(),
+            project: Some(project.to_path_buf()),
             home: home.map(Path::to_path_buf),
             bundled: None,
+            managed: Vec::new(),
         }
     }
 

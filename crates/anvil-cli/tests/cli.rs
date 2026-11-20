@@ -18,9 +18,10 @@ fn anvil(dir: &Path) -> Command {
     command
 }
 
+/// Writes the user configuration template into the empty home under `dir`.
 fn init(dir: &Path) {
     let out = anvil(dir)
-        .args(["config", "init"])
+        .args(["config", "init", "--global"])
         .output()
         .expect("anvil runs");
     assert!(
@@ -55,13 +56,29 @@ fn no_arguments_prints_help_and_fails() {
 fn config_init_writes_a_valid_template_and_refuses_to_overwrite() {
     let dir = tempfile::tempdir().expect("tempdir");
     init(dir.path());
-    let path = dir.path().join(".anvil").join("config.toml");
+    let path = dir
+        .path()
+        .join("empty-home")
+        .join(".anvil")
+        .join("config.toml");
     let text = std::fs::read_to_string(&path).expect("config written");
     let config: anvil_types::AnvilConfig = toml::from_str(&text).expect("template parses");
     config.validate().expect("template validates");
 
-    let second = anvil(dir.path())
+    let project = anvil(dir.path())
         .args(["config", "init"])
+        .output()
+        .expect("anvil runs");
+    assert!(project.status.success());
+    let rules = anvil_types::project::load(dir.path()).expect("repository template loads");
+    assert!(
+        rules.ignored.is_empty(),
+        "the repository template sets only tightening rules: {:?}",
+        rules.ignored
+    );
+
+    let second = anvil(dir.path())
+        .args(["config", "init", "--global"])
         .output()
         .expect("anvil runs");
     assert!(!second.status.success(), "second init must fail");
@@ -88,8 +105,8 @@ fn config_show_prints_the_merged_toml_with_sources() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("# from "), "{stdout}");
-    assert!(stdout.contains("[providers.runpod]"), "{stdout}");
-    assert!(stdout.contains("coder = \"runpod\""), "{stdout}");
+    assert!(stdout.contains("[providers.endpoint]"), "{stdout}");
+    assert!(stdout.contains("coder = \"endpoint\""), "{stdout}");
 }
 
 #[test]
@@ -136,14 +153,14 @@ fn doctor_reports_a_missing_api_key_without_a_network() {
     init(dir.path());
     let out = anvil(dir.path())
         .arg("doctor")
-        .env_remove("ANVIL_RUNPOD_KEY")
+        .env_remove("ANVIL_ENDPOINT_KEY")
         .output()
         .expect("anvil runs");
     assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("key:ANVIL_RUNPOD_KEY"), "{stdout}");
+    assert!(stdout.contains("key:ANVIL_ENDPOINT_KEY"), "{stdout}");
     assert!(stdout.contains("FAIL"), "{stdout}");
-    assert!(stdout.contains("SKIP  provider:runpod"), "{stdout}");
+    assert!(stdout.contains("SKIP  provider:endpoint"), "{stdout}");
 }
 
 /// A config with one provider on a closed local port, so no ping leaves the machine.
@@ -187,7 +204,7 @@ fn key_row(dir: &Path, home: &Path, real_env: Option<&str>) -> String {
 }
 
 #[test]
-fn env_order_real_env_beats_home_env_beats_project_env() {
+fn the_real_env_beats_the_home_env_and_the_project_env_is_never_read() {
     let dir = tempfile::tempdir().expect("tempdir");
     let home = dir.path().join("home");
     let project = dir.path().join("project");
@@ -215,6 +232,18 @@ fn env_order_real_env_beats_home_env_beats_project_env() {
     assert!(
         key_row(&project, &home, Some("from-the-real-env")).starts_with("PASS"),
         "real environment beats both files"
+    );
+
+    std::fs::remove_file(&home_env).expect("remove the home file");
+    write(
+        &project.join(".env"),
+        "ANVIL_TEST_ORDER_KEY=real-looking-key
+",
+    );
+    let row = key_row(&project, &home, None);
+    assert!(
+        row.starts_with("FAIL") && row.contains("not set"),
+        "a key only in the repository's .env or .anvil/.env is never loaded: {row}"
     );
 }
 
@@ -268,27 +297,28 @@ fn setup_is_idempotent_and_keeps_filled_keys() {
         String::from_utf8_lossy(&first.stderr)
     );
     let stdout = String::from_utf8_lossy(&first.stdout);
-    assert!(stdout.contains("ANTHROPIC_API_KEY in"), "{stdout}");
-    assert!(stdout.contains("claude-opus-5-5"), "{stdout}");
+    assert!(stdout.contains("ANVIL_ENDPOINT_KEY in"), "{stdout}");
+    assert!(stdout.contains("models.internal.example"), "{stdout}");
+    assert!(!stdout.contains("anthropic.com"), "{stdout}");
+    assert!(!stdout.contains("openai.com"), "{stdout}");
     let written = snapshot();
     let config: anvil_types::AnvilConfig = toml::from_str(&written[1]).expect("config parses");
     config.validate().expect("config validates");
 
     let filled = written[0].replace(
-        "ANTHROPIC_API_KEY=\"<console.anthropic.com -> API keys>\"",
-        "ANTHROPIC_API_KEY=my-real-anthropic-key",
+        "ANVIL_ENDPOINT_KEY=\"<your model server's API key>\"",
+        "ANVIL_ENDPOINT_KEY=my-real-endpoint-key",
     );
     assert_ne!(filled, written[0]);
     std::fs::write(&files[0], &filled).expect("fill in");
     let before = snapshot();
 
     let second = setup();
-    assert_eq!(second.status.code(), Some(2));
+    assert_eq!(second.status.code(), Some(0), "every placeholder is filled");
     let stdout = String::from_utf8_lossy(&second.stdout);
-    assert!(!stdout.contains("ANTHROPIC_API_KEY in"), "{stdout}");
-    assert!(stdout.contains("OPENAI_API_KEY in"), "{stdout}");
+    assert!(!stdout.contains("ANVIL_ENDPOINT_KEY in"), "{stdout}");
     assert_eq!(snapshot(), before, "second setup changes nothing");
-    assert!(before[0].contains("ANTHROPIC_API_KEY=my-real-anthropic-key"));
+    assert!(before[0].contains("ANVIL_ENDPOINT_KEY=my-real-endpoint-key"));
 }
 
 #[test]
@@ -496,21 +526,9 @@ fn skill_add_list_show_and_remove_in_project_scope() {
 }
 
 #[test]
-fn ticket_list_and_stats_work_on_an_empty_project() {
+fn stats_work_on_an_empty_project() {
     let dir = tempfile::tempdir().expect("tempdir");
     let home = tempfile::tempdir().expect("home");
-    let list = anvil(dir.path())
-        .env("ANVIL_HOME", home.path())
-        .args(["ticket", "list"])
-        .output()
-        .expect("anvil runs");
-    assert!(
-        list.status.success(),
-        "{}",
-        String::from_utf8_lossy(&list.stderr)
-    );
-    assert!(String::from_utf8_lossy(&list.stdout).contains("no tickets"));
-
     let stats = anvil(dir.path())
         .env("ANVIL_HOME", home.path())
         .args(["stats", "--since", "2w"])
@@ -532,93 +550,30 @@ fn ticket_list_and_stats_work_on_an_empty_project() {
         .expect("anvil runs");
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("not a duration"));
-
-    let missing = anvil(dir.path())
-        .env("ANVIL_HOME", home.path())
-        .args(["ticket", "show", "01NOPE"])
-        .output()
-        .expect("anvil runs");
-    assert!(!missing.status.success());
 }
 
 #[test]
-fn ticket_submit_help_states_the_outbound_rule() {
+fn removed_commands_are_not_part_of_the_binary() {
     let dir = tempfile::tempdir().expect("tempdir");
     let help = anvil(dir.path())
-        .args(["ticket", "submit", "--help"])
+        .arg("--help")
         .output()
         .expect("anvil runs");
     assert!(help.status.success());
     let stdout = String::from_utf8_lossy(&help.stdout);
-    assert!(
-        stdout.contains("only thing that ever leaves this machine"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("--all"), "{stdout}");
-}
-
-#[test]
-fn ticket_submit_without_a_queue_sends_nothing_and_keeps_the_draft() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let home = tempfile::tempdir().expect("home");
-    write(
-        &home.path().join(".anvil").join("config.toml"),
-        anvil_types::config::SETUP_PROVIDERS,
-    );
-    let ticket = anvil_types::Ticket {
-        id: ulid::Ulid::generate(),
-        created_at: chrono::Utc::now(),
-        kind: anvil_types::TicketKind::Bug,
-        title: "A draft from an earlier anvil".to_owned(),
-        symptom: "Something went wrong.".to_owned(),
-        repro: None,
-        spec: "Make it right.".to_owned(),
-        acceptance: vec!["it is right".to_owned()],
-        evidence: Vec::new(),
-        priority: anvil_types::Priority::P2,
-        status: anvil_types::TicketStatus::Draft,
-        origin: anvil_types::TicketOrigin::Human,
-        claimed_at: None,
-        claimed_by: None,
-        pr: None,
-        note: None,
-    };
-    ticket.validate().expect("a valid draft");
-    let id = ticket.id.to_string();
-    let old_draft = dir
-        .path()
-        .join("tickets")
-        .join("draft")
-        .join(format!("{id}.toml"));
-    write(&old_draft, &toml::to_string(&ticket).expect("serializes"));
-
-    let out = anvil(dir.path())
-        .env("ANVIL_HOME", home.path())
-        .args(["ticket", "submit", "--all"])
-        .output()
-        .expect("anvil runs");
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("no ticket queue is configured"), "{stderr}");
-    assert!(stderr.contains("[tickets]"), "{stderr}");
-    assert!(
-        !home.path().join(".anvil").join("queue.git").exists(),
-        "no cache, so nothing was fetched or pushed"
-    );
-
-    let moved = home
-        .path()
-        .join(".anvil")
-        .join("tickets")
-        .join("draft")
-        .join(format!("{id}.toml"));
-    assert!(
-        moved.is_file(),
-        "the old project draft moved to the anvil home"
-    );
-    assert!(!old_draft.exists());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("moved 1 draft(s)"), "{stdout}");
+    let commands: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("  "))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    assert!(commands.contains(&"doctor"), "{stdout}");
+    for removed in ["ticket", "update", "memory"] {
+        assert!(
+            !commands.contains(&removed),
+            "`{removed}` in:
+{stdout}"
+        );
+    }
 }
 
 /// The escape sequence that enters the alternate screen; the full-screen
@@ -646,4 +601,214 @@ fn plain_is_selected_without_a_tty() {
             "{args:?} entered the alternate screen off a terminal"
         );
     }
+}
+
+#[test]
+fn purge_removes_session_folders_older_than_the_given_days() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sessions = dir.path().join(".anvil").join("sessions");
+    let session = sessions.join("01JAAAAAAAAAAAAAAAAAAAAAAA");
+    std::fs::create_dir_all(&session).expect("mkdir");
+    std::fs::write(session.join("session.jsonl"), "{}\n").expect("write");
+    let other = sessions.join("not-a-session");
+    std::fs::create_dir_all(&other).expect("mkdir");
+
+    let kept = anvil(dir.path())
+        .args(["purge", "--older-than", "30"])
+        .output()
+        .expect("anvil runs");
+    assert!(
+        kept.status.success(),
+        "{}",
+        String::from_utf8_lossy(&kept.stderr)
+    );
+    assert!(session.is_dir(), "a fresh session is kept");
+
+    let out = anvil(dir.path())
+        .args(["purge", "--older-than", "0"])
+        .output()
+        .expect("anvil runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("removed 1 session folder(s)"));
+    assert!(!session.exists(), "an older session is removed");
+    assert!(
+        other.is_dir(),
+        "a folder that is not a session is left alone"
+    );
+}
+
+#[test]
+fn audit_verify_exits_non_zero_at_the_first_break_and_show_prints_the_records() {
+    use anvil_audit::audit::chain::{GENESIS, RecordBody, seal};
+    use anvil_audit::audit::{AUDIT_FILE, AuditEvent};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session = "01JBBBBBBBBBBBBBBBBBBBBBBB";
+    let folder = dir.path().join(".anvil").join("sessions").join(session);
+    std::fs::create_dir_all(&folder).expect("mkdir");
+    let mut prev = GENESIS.to_owned();
+    let mut lines = Vec::new();
+    for (seq, outcome) in ["one", "two", "three"].iter().enumerate() {
+        let body = RecordBody {
+            seq: seq as u64,
+            ts: "2026-11-19T21:00:00.000Z".to_owned(),
+            session: session.to_owned(),
+            agent: "main".to_owned(),
+            user: "dev".to_owned(),
+            host: "box".to_owned(),
+            version: "0.0.0".to_owned(),
+            commit: "unknown".to_owned(),
+            binary_sha256: "unknown".to_owned(),
+            policy: "unmanaged".to_owned(),
+            event: if seq == 0 {
+                AuditEvent::SessionStart {
+                    mode: "run".to_owned(),
+                    providers: Vec::new(),
+                    roles: Default::default(),
+                    flags: Default::default(),
+                }
+            } else {
+                AuditEvent::SessionEnd {
+                    outcome: (*outcome).to_owned(),
+                }
+            },
+            prev: prev.clone(),
+        };
+        let (line, hash) = seal(&body).expect("seal");
+        prev = hash;
+        lines.push(line);
+    }
+    let file = folder.join(AUDIT_FILE);
+    std::fs::write(
+        &file,
+        lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+    )
+    .expect("write");
+
+    let intact = anvil(dir.path())
+        .args(["audit", "verify", session])
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&intact.stdout);
+    assert!(intact.status.success(), "{stdout}");
+    assert!(stdout.contains("chain intact, 3 records"), "{stdout}");
+
+    let shown = anvil(dir.path())
+        .args(["audit", "show", session])
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&shown.stdout);
+    assert!(shown.status.success(), "{stdout}");
+    assert!(stdout.contains("session end: two"), "{stdout}");
+
+    let swapped = format!("{}\n{}\n{}\n", lines[0], lines[2], lines[1]);
+    let copy = dir.path().join("copy.jsonl");
+    std::fs::write(&copy, swapped).expect("write");
+    let broken = anvil(dir.path())
+        .args(["audit", "verify"])
+        .arg(&copy)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&broken.stdout);
+    assert_eq!(broken.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("chain broken at line 2"), "{stdout}");
+
+    let same = dir.path().join("same.jsonl");
+    std::fs::copy(&file, &same).expect("copy");
+    let matched = anvil(dir.path())
+        .args(["audit", "verify", session, "--mirror"])
+        .arg(&same)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&matched.stdout);
+    assert!(matched.status.success(), "{stdout}");
+    assert!(
+        stdout.contains("the mirror holds the same 3 records"),
+        "{stdout}"
+    );
+
+    // A session file cut at its end still verifies on its own; the mirror
+    // shows the cut.
+    std::fs::write(&file, format!("{}\n{}\n", lines[0], lines[1])).expect("cut");
+    let cut = anvil(dir.path())
+        .args(["audit", "verify", session, "--mirror"])
+        .arg(&same)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&cut.stdout);
+    assert_eq!(cut.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.contains("the mirror differs from the session file at line 3"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn audit_verify_fails_on_an_empty_log_and_on_one_that_does_not_open_the_session() {
+    use anvil_audit::audit::AuditEvent;
+    use anvil_audit::audit::chain::{GENESIS, RecordBody, seal};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let empty = dir.path().join("empty.jsonl");
+    std::fs::write(&empty, "").expect("write");
+    let out = anvil(dir.path())
+        .args(["audit", "verify"])
+        .arg(&empty)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "an empty log verified: {stdout}");
+    assert!(stdout.contains("no records"), "{stdout}");
+
+    let body = RecordBody {
+        seq: 0,
+        ts: "2026-11-19T21:00:00.000Z".to_owned(),
+        session: "01JBBBBBBBBBBBBBBBBBBBBBBB".to_owned(),
+        agent: "main".to_owned(),
+        user: "dev".to_owned(),
+        host: "box".to_owned(),
+        version: "0.0.0".to_owned(),
+        commit: "unknown".to_owned(),
+        binary_sha256: "unknown".to_owned(),
+        policy: "unmanaged".to_owned(),
+        event: AuditEvent::SessionEnd {
+            outcome: "done".to_owned(),
+        },
+        prev: GENESIS.to_owned(),
+    };
+    let (line, _) = seal(&body).expect("seal");
+    let headless = dir.path().join("headless.jsonl");
+    std::fs::write(&headless, format!("{line}\n")).expect("write");
+    let out = anvil(dir.path())
+        .args(["audit", "verify"])
+        .arg(&headless)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "a log without its start verified: {stdout}"
+    );
+    assert!(stdout.contains("session_start"), "{stdout}");
+}
+
+#[test]
+fn help_opens_with_the_one_line_description() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = anvil(dir.path())
+        .arg("--help")
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().next(),
+        Some(
+            "Anvil is a coding agent harness for open-weight models in regulated, restricted-network environments."
+        ),
+        "{stdout}"
+    );
 }

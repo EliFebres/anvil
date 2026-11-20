@@ -272,6 +272,7 @@ mod tests {
             rules: Vec::new(),
             skills: 0,
             mcp_servers: 0,
+            policy: "unmanaged".to_owned(),
             recent_sessions: Vec::new(),
             animate: false,
         }

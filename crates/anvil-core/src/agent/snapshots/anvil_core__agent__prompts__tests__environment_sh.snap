@@ -1,0 +1,8 @@
+---
+source: crates/anvil-core/src/agent/prompts.rs
+expression: text
+---
+# Environment
+
+Operating system: Linux. Paths use `/` as the separator.
+The shell tool runs each command with `sh -c`, a POSIX shell. Use POSIX shell syntax and tools such as `cat`, `grep` and `head`.

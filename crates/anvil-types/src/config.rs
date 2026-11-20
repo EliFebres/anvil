@@ -1,18 +1,20 @@
 //! Provider and role configuration: which model does which job.
 //!
-//! Lives at `~/.anvil/config.toml` (global) and `.anvil/config.toml`
-//! (project, overrides global). Models are swapped by editing these files,
-//! never by changing code.
+//! Lives in the user's own `~/.anvil/config.toml`, optionally with a named
+//! profile on top. A repository's `.anvil/config.toml` is not part of it:
+//! a repository can only add permission rules that tighten (see
+//! [`crate::project`]). Models are swapped by editing these files, never by
+//! changing code.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ConfigError, ValidationError};
+use crate::shell::ShellConfig;
 
-/// Directory that holds anvil configuration, both globally and per project.
+/// Directory that holds anvil configuration, in the home directory and in a repository.
 pub const CONFIG_DIR: &str = ".anvil";
 
 /// File name of the configuration file inside [`CONFIG_DIR`].
@@ -21,19 +23,25 @@ pub const CONFIG_FILE: &str = "config.toml";
 /// Folder of named profiles under the home directory: `~/.anvil/profiles/<name>.toml`.
 pub const PROFILES_DIR: &str = ".anvil/profiles";
 
-/// The commented template written by `anvil config init`.
-pub const CONFIG_TEMPLATE: &str = r#"# anvil configuration.
-# Global: ~/.anvil/config.toml   Project: .anvil/config.toml (project overrides global).
+/// The commented template written by `anvil config init --global`.
+pub const CONFIG_TEMPLATE: &str = r#"# anvil configuration: ~/.anvil/config.toml.
+# A repository's own .anvil/config.toml cannot change anything here; it can
+# only add permission rules that refuse calls or make them ask first.
 # Swap models by editing this file; no code changes are needed.
 
-[providers.runpod]
+# One example provider: a self-hosted, OpenAI-compatible model server on your
+# own network (vLLM, llama.cpp, an internal gateway). Replace base_url and
+# model, or run `anvil setup --endpoint <url>` to fill them in from the server.
+# Hosted APIs (protocol "anthropic" or "openai") work the same way;
+# docs/USAGE.md shows an example.
+[providers.endpoint]
 protocol = "openai"          # "openai" or "anthropic"
-base_url = "https://<pod-id>-8000.proxy.runpod.net/v1"
-api_key_env = "ANVIL_RUNPOD_KEY"   # environment variable that holds the API key
+base_url = "https://models.internal.example/v1"
+api_key_env = "ANVIL_ENDPOINT_KEY"   # environment variable that holds the API key
 model = "<model name as served>"
-context_window = 131072
+context_window = 32768
 supports_tools = true
-supports_reasoning = true
+supports_reasoning = false
 # max_output_tokens = 16384   # optional; Anthropic requires one and defaults to 16384
 # USD per million tokens, used by `anvil stats` to estimate cost. Optional;
 # `cached` falls back to `input`.
@@ -42,20 +50,35 @@ supports_reasoning = true
 # Each role names a provider above, so the coder, the summarizer and the
 # reviewer can each be a different model.
 [roles]
-coder = "runpod"
-summarizer = "runpod"
-# reviewer = "runpod"
+coder = "endpoint"
+summarizer = "endpoint"
+# reviewer = "endpoint"
 # Optional: a model that plans, and takes a build round when the coder is
 # stuck. The coder plans when this is absent.
-# planner = "runpod"
+# planner = "endpoint"
 # Optional: a model for delegated work, the `explore` and `implement`
 # subagents and any agent file with `model: worker`. The coder when absent.
-# worker = "runpod"
+# worker = "endpoint"
 
 # Optional. The shell program behind the `shell` tool: "powershell", "pwsh",
 # "sh", "bash", "zsh" or "cmd". Default: PowerShell on Windows, sh elsewhere.
 # [tools]
 # shell = "pwsh"
+# Folders outside the project the file tools may open; nothing else outside is.
+# extra_dirs = ["C:/shared/specs"]
+# Variables shell commands and hooks receive on top of the built-in list
+# (PATH, HOME, TEMP, the toolchain folders). Others, keys included, are not passed.
+# pass_env = ["JAVA_HOME"]
+
+# Optional. How the `shell` tool runs commands. "ask" (the default) runs
+# each command in the shell above after asking; matching command text there
+# is a guard rail, not a boundary. "allowlist" starts only commands that
+# match a pattern, as one program with plain arguments and no shell. "off"
+# removes the tool. executor = "container" runs commands in a container
+# without network access.
+# [shell]
+# mode = "allowlist"
+# allow = ["cargo test *", "cargo check *", "git diff *", "git status"]
 
 # Every key is optional; these are the defaults.
 # [limits]
@@ -77,31 +100,10 @@ summarizer = "runpod"
 # [memory]
 # always_summarize = false
 
-# Lines that turn provider statistics into tickets. Defaults shown.
-# [telemetry]
-# slow_median_ms = 60000       # median completion latency over the last 20 sessions
-# error_rate_percent = 20      # provider errors as a share of completions
-
-# The git repository `anvil ticket submit` pushes `tickets/<id>` branches to.
-# Unset by default, and while it is unset nothing is ever sent.
-# [tickets]
-# queue = "https://github.com/<owner>/<queue-repository>.git"
-
-# Where `anvil update` looks for releases when this anvil was built from source.
-# Release builds know their repository and ignore this.
-# [update]
-# repo = "owner/repo"
-
-# Post one short message to a Discord, Slack or ntfy webhook when a session needs
-# you, is blocked, finishes or fails. `webhook_env` names the environment
-# variable that holds the URL.
-# [notify]
-# webhook_env = "ANVIL_WEBHOOK_URL"
-
-# Report the session to herdr (a terminal multiplexer for coding agents) when it
-# runs in a herdr pane.
-# [integrations]
-# herdr = false
+# Hosts a provider may be reached on over plain http, such as a GPU server on
+# your own network. Everything else must use https, except localhost.
+# [network]
+# allow_http_hosts = ["gpu.lan"]
 
 # Lines added to the coder's system prompt, one instruction each. Profiles use
 # this to explain their own rules.
@@ -110,60 +112,65 @@ summarizer = "runpod"
 # delegate_guidance = true   # tell the model when delegating to a subagent pays off
 "#;
 
-/// The provider entries and roles `anvil setup` adds to `~/.anvil/config.toml`.
+/// Sections older versions of anvil read, each with the reason it is gone.
 ///
-/// Model ids and prices were taken from each vendor's own pages on
-/// 2026-10-30; `anvil setup` prints them so they can be changed.
-pub const SETUP_PROVIDERS: &str = r#"# anvil configuration, written by `anvil setup`.
-# Global: ~/.anvil/config.toml   Project: .anvil/config.toml (project overrides global).
+/// A file that still sets one fails to load with that reason, so nobody
+/// believes a feature is on when it no longer exists.
+const REMOVED_SECTIONS: [(&str, &str); 5] = [
+    (
+        "update",
+        "self-update was removed; updates come from whoever distributes the anvil binary",
+    ),
+    (
+        "notify",
+        "webhook notifications were removed; anvil no longer posts session updates anywhere",
+    ),
+    (
+        "tickets",
+        "tickets were removed; anvil no longer drafts or submits tickets",
+    ),
+    (
+        "telemetry",
+        "the ticket signal thresholds were removed with ticket drafting",
+    ),
+    (
+        "integrations",
+        "herdr reporting was removed; anvil reports a session only in its status.json",
+    ),
+];
+
+/// The provider and roles `anvil setup` adds to `~/.anvil/config.toml`: one
+/// example of a self-hosted, OpenAI-compatible model server.
+///
+/// Hosted APIs are a documented option, never something setup writes.
+pub const SETUP_PROVIDERS: &str = r#"# anvil configuration, written by `anvil setup`: ~/.anvil/config.toml.
+# A repository's own .anvil/config.toml cannot change providers or roles.
 # Keys never live here: each provider names the environment variable that
-# holds its key, and `anvil` loads ~/.anvil/.env (then .anvil/.env) at start.
+# holds its key, read from the environment or ~/.anvil/.env.
 
-# Claude Opus 5.5: platform.claude.com -> pricing (cache reads 0.20).
-[providers.anthropic]
-protocol = "anthropic"
-base_url = "https://api.anthropic.com/v1"
-api_key_env = "ANTHROPIC_API_KEY"
-model = "claude-opus-5-5"
-context_window = 1000000
-supports_tools = true
-supports_reasoning = true
-price_per_mtoken = { input = 4.0, output = 20.0, cached = 0.2 }
-
-# GPT-6 Astra: developers.openai.com -> pricing (standard tier, <= 272K input).
-[providers.openai]
+# One example provider: a self-hosted, OpenAI-compatible model server on your
+# own network (vLLM, llama.cpp, an internal gateway). Replace base_url and
+# model, or run `anvil setup --endpoint <url>` to fill them in from the server.
+[providers.endpoint]
 protocol = "openai"
-base_url = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
-model = "gpt-6-astra"
-context_window = 1048576
+base_url = "https://models.internal.example/v1"
+api_key_env = "ANVIL_ENDPOINT_KEY"
+model = "<model name as served>"
+context_window = 32768
 supports_tools = true
-supports_reasoning = true
-price_per_mtoken = { input = 10.0, output = 50.0 }
-
-# Gemini 4 Argon through Gemini's OpenAI-compatible endpoint: ai.google.dev -> pricing.
-# Launch price until 2026-11-30; from 2026-12-01 it is input = 4.0, output = 20.0.
-[providers.google]
-protocol = "openai"
-base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
-api_key_env = "GEMINI_API_KEY"
-model = "gemini-4-argon"
-context_window = 1000000
-supports_tools = true
-supports_reasoning = true
-price_per_mtoken = { input = 2.0, output = 10.0 }
+supports_reasoning = false
 
 # Each role names a provider above.
 [roles]
-coder = "anthropic"
-reviewer = "openai"
-summarizer = "anthropic"
+coder = "endpoint"
+summarizer = "endpoint"
+# reviewer = "endpoint"
 # Optional: a model that plans, and takes a build round when the coder is
 # stuck. The coder plans when this is absent.
-# planner = "anthropic"
+# planner = "endpoint"
 # Optional: a model for delegated work (the `explore` and `implement`
 # subagents). The coder when absent.
-# worker = "anthropic"
+# worker = "endpoint"
 "#;
 
 /// The optional, commented sections `anvil setup` appends to a new config file.
@@ -172,6 +179,21 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # "sh", "bash", "zsh" or "cmd". Default: PowerShell on Windows, sh elsewhere.
 # [tools]
 # shell = "pwsh"
+# Folders outside the project the file tools may open; nothing else outside is.
+# extra_dirs = ["C:/shared/specs"]
+# Variables shell commands and hooks receive on top of the built-in list
+# (PATH, HOME, TEMP, the toolchain folders). Others, keys included, are not passed.
+# pass_env = ["JAVA_HOME"]
+
+# Optional. How the `shell` tool runs commands. "ask" (the default) runs
+# each command in the shell above after asking; matching command text there
+# is a guard rail, not a boundary. "allowlist" starts only commands that
+# match a pattern, as one program with plain arguments and no shell. "off"
+# removes the tool. executor = "container" runs commands in a container
+# without network access.
+# [shell]
+# mode = "allowlist"
+# allow = ["cargo test *", "cargo check *", "git diff *", "git status"]
 
 # Every key is optional; these are the defaults.
 # [limits]
@@ -193,19 +215,10 @@ pub const OPTIONAL_SECTIONS: &str = r#"
 # [memory]
 # always_summarize = false
 
-# Lines that turn provider statistics into tickets. Defaults shown.
-# [telemetry]
-# slow_median_ms = 60000       # median completion latency over the last 20 sessions
-# error_rate_percent = 20      # provider errors as a share of completions
-
-# The git repository `anvil ticket submit` pushes `tickets/<id>` branches to.
-# Unset by default, and while it is unset nothing is ever sent.
-# [tickets]
-# queue = "https://github.com/<owner>/<queue-repository>.git"
 "#;
 
 /// Wire protocol a provider speaks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     /// OpenAI chat-completions style API.
@@ -218,7 +231,7 @@ pub enum Protocol {
 }
 
 /// What a provider charges, in USD per million tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Price {
     /// Price of uncached input tokens.
@@ -256,7 +269,7 @@ impl Price {
 }
 
 /// One model endpoint.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     /// Which API shape to speak.
@@ -357,7 +370,7 @@ impl ProviderConfig {
 }
 
 /// Which provider handles each job.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Roles {
     /// Provider that writes code in the agent loop.
@@ -397,7 +410,7 @@ impl Roles {
 }
 
 /// What one agent-loop state may spend before the session ends as incomplete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StateBudget {
     /// Model completions allowed in the state, summed over every visit.
@@ -417,7 +430,7 @@ impl Default for StateBudget {
 }
 
 /// Retry, timeout and budget limits. Every field has a default.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LimitsConfig {
     /// Wall-clock seconds allowed for one completion, including streaming and retries.
@@ -452,7 +465,7 @@ impl Default for LimitsConfig {
 }
 
 /// Settings for the built-in tools.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ToolsConfig {
     /// Program behind the `shell` tool, such as `pwsh` or `bash`. `None`
@@ -463,10 +476,19 @@ pub struct ToolsConfig {
     /// detect it from the project files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
+    /// Folders outside the project the file tools may read and write. The
+    /// tools refuse every other path outside the project.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra_dirs: Vec<PathBuf>,
+    /// Environment variables shell commands, hooks, checks and MCP servers
+    /// receive on top of the built-in list. A name here is passed even when
+    /// it looks like a secret (`*TOKEN*`, `*KEY*` and so on).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pass_env: Vec<String>,
 }
 
 /// When the end-of-session memory summarizer runs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MemoryConfig {
     /// Run the summarizer after every session, including an uneventful one
@@ -474,65 +496,18 @@ pub struct MemoryConfig {
     pub always_summarize: bool,
 }
 
-/// Where session status messages are posted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SessionNotifyConfig {
-    /// Environment variable that holds the webhook URL.
-    pub webhook_env: String,
-}
-
-/// Optional reports to other tools.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// Rules for anvil's outbound requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct IntegrationsConfig {
-    /// Report the session's state to herdr when running in a herdr pane.
-    pub herdr: bool,
-}
-
-/// Lines above which provider statistics become tickets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, default)]
-pub struct TelemetryConfig {
-    /// Median completion latency, in milliseconds, over the last 20 sessions
-    /// above which a provider counts as slow.
-    pub slow_median_ms: u64,
-    /// Provider errors as a percentage of completions over the last 20
-    /// sessions above which a provider counts as failing.
-    pub error_rate_percent: u8,
-}
-
-impl Default for TelemetryConfig {
-    fn default() -> Self {
-        Self {
-            slow_median_ms: 60_000,
-            error_rate_percent: 20,
-        }
-    }
-}
-
-/// Where submitted tickets go.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, default)]
-pub struct TicketsConfig {
-    /// The git URL of the ticket queue `anvil ticket submit` pushes
-    /// `tickets/<id>` branches to. `None`, the default, sends nothing.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub queue: Option<String>,
-}
-
-/// Where `anvil update` finds releases.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields, default)]
-pub struct UpdateConfig {
-    /// The GitHub `owner/repo` whose releases a source build updates from.
-    /// A release build carries its own and ignores this.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo: Option<String>,
+pub struct NetworkConfig {
+    /// Hosts a provider may be reached on over plain http. Every other
+    /// endpoint must use https, except loopback (`localhost`, `127.0.0.1`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow_http_hosts: Vec<String>,
 }
 
 /// Lines a profile adds to the coder's system prompt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PromptConfig {
     /// One instruction per entry, shown under a "Profile notes" heading.
@@ -552,7 +527,7 @@ impl Default for PromptConfig {
 }
 
 /// What a call gets when no permission rule matches it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Unmatched {
     /// Run it.
@@ -570,7 +545,7 @@ pub enum Unmatched {
 /// A project keeps them in `.anvil/permissions.toml`; a profile under
 /// `~/.anvil/profiles/` carries them as its `[permissions]` table, which
 /// then replaces the project file.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PermissionRules {
     /// Calls that run without asking.
@@ -586,6 +561,11 @@ pub struct PermissionRules {
     /// `--allow-tool <name>`. Kept in memory, never written back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub allow_tools: Vec<String>,
+    /// When not empty, a `shell` call must be one program from this list
+    /// with plain arguments: no `&&`, `;`, `|`, redirection, substitution or
+    /// their PowerShell and cmd forms. No rule, answer or `--yes` lifts it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub shell_programs: Vec<String>,
 }
 
 impl PermissionRules {
@@ -600,11 +580,12 @@ impl PermissionRules {
             || !self.ask.is_empty()
             || !self.deny.is_empty()
             || self.unmatched.is_some()
+            || !self.shell_programs.is_empty()
     }
 }
 
 /// The whole anvil configuration file.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnvilConfig {
     /// Named model endpoints.
@@ -621,15 +602,6 @@ pub struct AnvilConfig {
     /// When the end-of-session memory summarizer runs.
     #[serde(default)]
     pub memory: MemoryConfig,
-    /// Lines that turn provider statistics into tickets.
-    #[serde(default)]
-    pub telemetry: TelemetryConfig,
-    /// Where submitted tickets go.
-    #[serde(default)]
-    pub tickets: TicketsConfig,
-    /// Where `anvil update` finds releases.
-    #[serde(default)]
-    pub update: UpdateConfig,
     /// Extra lines for the coder's system prompt.
     #[serde(default)]
     pub prompt: PromptConfig,
@@ -637,22 +609,23 @@ pub struct AnvilConfig {
     /// Normally set by a profile, not by hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionRules>,
-    /// Where session status messages are posted; none by default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notify: Option<SessionNotifyConfig>,
-    /// Optional reports to other tools.
+    /// Rules for outbound requests.
     #[serde(default)]
-    pub integrations: IntegrationsConfig,
+    pub network: NetworkConfig,
+    /// How the `shell` tool runs commands: its mode, allowlist and executor.
+    #[serde(default)]
+    pub shell: ShellConfig,
 }
 
 impl AnvilConfig {
-    /// Checks every provider and that every role names a declared provider.
+    /// Checks every provider, that every role names a declared provider,
+    /// and that the `[shell]` table's keys fit together.
     ///
     /// # Returns
     ///
     /// `Ok(())` when all providers validate, `coder`, `summarizer` and
     /// (if set) `reviewer`, `planner` and `worker` each name a key in
-    /// `providers`, and `[update] repo` (if set) is `owner/repo`.
+    /// `providers`, and `[shell]` is consistent.
     ///
     /// # Errors
     ///
@@ -672,17 +645,9 @@ impl AnvilConfig {
         if let Some(worker) = &self.roles.worker {
             self.check_role("worker", worker)?;
         }
-        if let Some(repo) = &self.update.repo {
-            let mut parts = repo.split('/');
-            let valid = matches!(
-                (parts.next(), parts.next(), parts.next()),
-                (Some(owner), Some(name), None) if !owner.is_empty() && !name.is_empty()
-            );
-            if !valid {
-                return Err(ValidationError::InvalidUpdateRepo { repo: repo.clone() });
-            }
-        }
-        Ok(())
+        self.shell
+            .validate()
+            .map_err(|reason| ValidationError::Shell { reason })
     }
 
     /// Fails unless `provider` is a key in `providers`.
@@ -709,13 +674,13 @@ pub struct LoadedConfig {
     pub merged: toml::Table,
 }
 
-/// The global or project configuration path.
+/// The user's or the repository's configuration path.
 ///
 /// # Arguments
 ///
 /// * `home` - The home directory, if known.
 /// * `global` - When true, `~/.anvil/config.toml`; otherwise `.anvil/config.toml`
-///   relative to the current directory.
+///   relative to the current directory, which holds only tightening rules.
 ///
 /// # Returns
 ///
@@ -729,26 +694,21 @@ pub fn config_path(home: Option<&Path>, global: bool) -> Option<PathBuf> {
     Some(base.join(CONFIG_DIR).join(CONFIG_FILE))
 }
 
-/// Loads `~/.anvil/config.toml` and `.anvil/config.toml` and merges them.
-///
-/// Tables merge key by key, so a project file can override one provider
-/// field or one limit without repeating the rest. Scalars and arrays from
-/// the project file replace the global ones.
+/// Loads `~/.anvil/config.toml`.
 ///
 /// # Arguments
 ///
 /// * `home` - The home directory, if known.
-/// * `cwd` - The project root.
 ///
 /// # Returns
 ///
-/// The merged configuration.
+/// The configuration.
 ///
 /// # Errors
 ///
-/// When neither file exists, a file does not parse, or validation fails.
-pub fn load(home: Option<&Path>, cwd: &Path) -> Result<LoadedConfig, ConfigError> {
-    load_profile(home, cwd, None)
+/// When the file does not exist, does not parse, or validation fails.
+pub fn load(home: Option<&Path>) -> Result<LoadedConfig, ConfigError> {
+    load_profile(home, None)
 }
 
 /// The path of a named profile.
@@ -765,17 +725,18 @@ pub fn profile_path(home: &Path, name: &str) -> PathBuf {
     home.join(PROFILES_DIR).join(format!("{name}.toml"))
 }
 
-/// Loads the global and project files, then a named profile on top.
+/// Loads `~/.anvil/config.toml`, then a named profile on top.
 ///
-/// A profile is a third layer, `~/.anvil/profiles/<name>.toml`, with the
-/// same shape as the other two. Unlike them it is required when named:
+/// A profile is a second layer, `~/.anvil/profiles/<name>.toml`, with the
+/// same shape. Tables merge key by key, so a profile can override one
+/// provider field or one limit without repeating the rest; scalars and
+/// arrays replace. Unlike the config file a profile is required when named:
 /// running with a profile that does not exist would silently drop the
 /// restrictions the caller asked for.
 ///
 /// # Arguments
 ///
 /// * `home` - The home directory, if known.
-/// * `cwd` - The project root.
 /// * `profile` - The profile name, if any.
 ///
 /// # Returns
@@ -788,17 +749,19 @@ pub fn profile_path(home: &Path, name: &str) -> PathBuf {
 /// `home` is unknown), and the errors of [`load`].
 pub fn load_profile(
     home: Option<&Path>,
-    cwd: &Path,
     profile: Option<&str>,
 ) -> Result<LoadedConfig, ConfigError> {
     let mut merged = toml::Table::new();
     let mut sources = Vec::new();
     let profile_file = match profile {
         Some(name) => {
-            let path = home
-                .map(|home| profile_path(home, name))
-                .unwrap_or_else(|| PathBuf::from(PROFILES_DIR).join(format!("{name}.toml")));
-            if !path.is_file() {
+            let path = match home {
+                Some(home) => profile_path(home, name),
+                None => PathBuf::from("~")
+                    .join(PROFILES_DIR)
+                    .join(format!("{name}.toml")),
+            };
+            if home.is_none() || !path.is_file() {
                 return Err(ConfigError::ProfileNotFound { path });
             }
             Some(path)
@@ -807,7 +770,6 @@ pub fn load_profile(
     };
     let candidates = [
         home.map(|home| home.join(CONFIG_DIR).join(CONFIG_FILE)),
-        Some(cwd.join(CONFIG_DIR).join(CONFIG_FILE)),
         profile_file,
     ];
     for path in candidates.into_iter().flatten() {
@@ -818,6 +780,7 @@ pub fn load_profile(
             path: path.clone(),
             source,
         })?;
+        reject_removed_sections(&table, &path)?;
         merge_tables(&mut merged, table);
         sources.push(path);
     }
@@ -861,6 +824,20 @@ pub fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
     }
 }
 
+/// Fails when `table` sets a section listed in [`REMOVED_SECTIONS`].
+fn reject_removed_sections(table: &toml::Table, path: &Path) -> Result<(), ConfigError> {
+    for (section, reason) in REMOVED_SECTIONS {
+        if table.contains_key(section) {
+            return Err(ConfigError::RemovedSection {
+                path: path.to_path_buf(),
+                section,
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Lists the source paths for error messages.
 fn describe(sources: &[PathBuf]) -> String {
     sources
@@ -881,18 +858,23 @@ mod tests {
     }
 
     #[test]
-    fn update_repo_must_be_owner_slash_repo() {
-        let mut config: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
-        config.update.repo = Some("owner/repo".to_owned());
-        assert_eq!(config.validate(), Ok(()));
-        for bad in ["owner", "owner/", "/repo", "a/b/c"] {
-            config.update.repo = Some(bad.to_owned());
-            assert_eq!(
-                config.validate(),
-                Err(ValidationError::InvalidUpdateRepo {
-                    repo: bad.to_owned()
-                })
+    fn removed_sections_fail_with_the_reason() {
+        let home = tempfile::tempdir().expect("home");
+        for (section, expected) in [
+            ("update", "self-update was removed"),
+            ("notify", "webhook"),
+            ("tickets", "tickets were removed"),
+            ("telemetry", "ticket signal thresholds"),
+            ("integrations", "herdr reporting was removed"),
+        ] {
+            let text = format!("{SETUP_PROVIDERS}\n[{section}]\n");
+            write(home.path(), &text);
+            let error = load(Some(home.path())).expect_err("removed section");
+            assert!(
+                matches!(error, ConfigError::RemovedSection { .. }),
+                "{section}: {error:?}"
             );
+            assert!(error.to_string().contains(expected), "{error}");
         }
     }
 
@@ -900,47 +882,49 @@ mod tests {
     fn setup_providers_parse_and_validate() {
         let config: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
         config.validate().expect("validates");
-        assert_eq!(config.roles.coder, "anthropic");
-        assert_eq!(config.roles.reviewer.as_deref(), Some("openai"));
-        assert_eq!(config.providers["google"].protocol, Protocol::Openai);
-        assert_eq!(config.providers["anthropic"].protocol, Protocol::Anthropic);
+        assert_eq!(
+            config.providers.keys().collect::<Vec<_>>(),
+            ["endpoint"],
+            "setup writes one example provider"
+        );
+        let endpoint = &config.providers["endpoint"];
+        assert_eq!(endpoint.protocol, Protocol::Openai);
+        assert!(
+            endpoint.base_url.starts_with("https://")
+                && !endpoint.base_url.contains("anthropic.com")
+                && !endpoint.base_url.contains("openai.com"),
+            "a self-hosted example, not a hosted API: {}",
+            endpoint.base_url
+        );
+        assert_eq!(config.roles.coder, "endpoint");
+        assert_eq!(config.roles.summarizer, "endpoint");
+        assert_eq!(config.roles.reviewer, None);
+        let template: AnvilConfig = toml::from_str(CONFIG_TEMPLATE).expect("parses");
+        assert_eq!(
+            template.providers.keys().collect::<Vec<_>>(),
+            ["endpoint"],
+            "`anvil config init --global` writes the same single example"
+        );
         let with_optional = format!("{SETUP_PROVIDERS}{OPTIONAL_SECTIONS}");
         let same: AnvilConfig = toml::from_str(&with_optional).expect("parses with comments");
         assert_eq!(same, config);
     }
 
     #[test]
-    fn project_overrides_global_key_by_key() {
+    fn profile_overrides_the_config_key_by_key_and_must_exist() {
         let home = tempfile::tempdir().expect("home");
-        let cwd = tempfile::tempdir().expect("cwd");
-        write(home.path(), CONFIG_TEMPLATE);
-        write(
-            cwd.path(),
-            "[providers.runpod]\nmodel = \"local-model\"\n\n[limits]\nmax_retries = 1\n",
-        );
-        let loaded = load(Some(home.path()), cwd.path()).expect("loads");
-        assert_eq!(loaded.sources.len(), 2);
-        let runpod = &loaded.config.providers["runpod"];
-        assert_eq!(runpod.model, "local-model");
-        assert_eq!(runpod.context_window, 131_072, "global field kept");
-        assert_eq!(loaded.config.limits.max_retries, 1);
-        assert_eq!(loaded.config.limits.request_timeout_s, 600);
-        assert_eq!(loaded.config.roles.coder, "runpod");
-    }
-
-    #[test]
-    fn profile_is_a_third_layer_and_must_exist() {
-        let home = tempfile::tempdir().expect("home");
-        let cwd = tempfile::tempdir().expect("cwd");
         write(home.path(), CONFIG_TEMPLATE);
         let profile = profile_path(home.path(), "ci");
         std::fs::create_dir_all(profile.parent().expect("parent")).expect("mkdir");
         std::fs::write(
             &profile,
-            "[limits]\nsession_tokens = 7\n[permissions]\nallow = [\"shell:cargo *\"]\ndefault = \"deny\"\n",
+            "[providers.endpoint]\nmodel = \"local-model\"\n[limits]\nsession_tokens = 7\n[permissions]\nallow = [\"shell:cargo *\"]\ndefault = \"deny\"\n",
         )
         .expect("write");
-        let loaded = load_profile(Some(home.path()), cwd.path(), Some("ci")).expect("loads");
+        let loaded = load_profile(Some(home.path()), Some("ci")).expect("loads");
+        let endpoint = &loaded.config.providers["endpoint"];
+        assert_eq!(endpoint.model, "local-model");
+        assert_eq!(endpoint.context_window, 32_768, "config field kept");
         assert_eq!(loaded.sources.len(), 2);
         assert_eq!(loaded.sources[1], profile);
         assert_eq!(loaded.config.limits.session_tokens, 7);
@@ -951,22 +935,46 @@ mod tests {
         assert_eq!(rules.allow, vec!["shell:cargo *".to_owned()]);
         assert_eq!(rules.unmatched, Some(Unmatched::Deny));
         assert!(
-            load(Some(home.path()), cwd.path())
+            load(Some(home.path()))
                 .expect("no profile")
                 .config
                 .permissions
                 .is_none()
         );
 
-        let error = load_profile(Some(home.path()), cwd.path(), Some("work")).expect_err("missing");
+        let error = load_profile(Some(home.path()), Some("work")).expect_err("missing");
         assert!(
             matches!(&error, ConfigError::ProfileNotFound { path } if path.ends_with("work.toml")),
             "{error}"
         );
         assert!(matches!(
-            load_profile(None, cwd.path(), Some("work")),
+            load_profile(None, Some("work")),
             Err(ConfigError::ProfileNotFound { .. })
         ));
+    }
+
+    #[test]
+    fn the_shipped_strict_profile_loads_as_a_profile() {
+        let home = tempfile::tempdir().expect("home");
+        write(home.path(), CONFIG_TEMPLATE);
+        let profile = profile_path(home.path(), "strict");
+        std::fs::create_dir_all(profile.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&profile, include_str!("../../../profiles/strict.toml")).expect("write");
+        let loaded = load_profile(Some(home.path()), Some("strict")).expect("loads");
+        let shell = &loaded.config.shell;
+        assert_eq!(shell.mode, Some(crate::shell::ShellMode::Allowlist));
+        assert!(shell.allow.contains(&"cargo test *".to_owned()));
+        for broad in ["cargo *", "git *", "just *", "rustc *"] {
+            assert!(
+                !shell.allow.contains(&broad.to_owned()),
+                "{broad} lets an allowed program run any program"
+            );
+        }
+        let rules = loaded.config.permissions.expect("a [permissions] table");
+        assert_eq!(rules.unmatched, Some(Unmatched::Ask));
+        assert!(rules.shell_programs.is_empty(), "folded into [shell] allow");
+        assert!(!rules.allow.iter().any(|rule| rule.starts_with("shell")));
+        assert!(rules.has_rules());
     }
 
     #[test]
@@ -994,22 +1002,23 @@ mod tests {
 
     #[test]
     fn missing_everything_and_invalid_files_fail_clearly() {
-        let cwd = tempfile::tempdir().expect("cwd");
-        let error = load(None, cwd.path()).expect_err("no config");
-        assert!(error.to_string().contains("anvil config init"));
+        let home = tempfile::tempdir().expect("home");
+        let error = load(Some(home.path())).expect_err("no config");
+        assert!(error.to_string().contains("anvil config init --global"));
         assert!(error.to_string().contains("anvil setup"));
+        assert!(matches!(load(None), Err(ConfigError::NotFound)));
 
         write(
-            cwd.path(),
+            home.path(),
             "[roles]\ncoder = \"nope\"\nsummarizer = \"nope\"\n",
         );
-        let error = load(None, cwd.path()).expect_err("unknown provider");
+        let error = load(Some(home.path())).expect_err("unknown provider");
         assert!(matches!(error, ConfigError::Invalid { .. }), "{error}");
         assert!(error.to_string().contains("validating"), "{error}");
 
-        write(cwd.path(), "not = [toml");
+        write(home.path(), "not = [toml");
         assert!(matches!(
-            load(None, cwd.path()),
+            load(Some(home.path())),
             Err(ConfigError::Parse { .. })
         ));
     }
@@ -1049,18 +1058,24 @@ mod tests {
     fn template_parses_and_validates() {
         let config = template();
         config.validate().expect("template validates");
-        assert_eq!(config.roles.coder, "runpod");
+        assert_eq!(config.roles.coder, "endpoint");
         assert_eq!(config.roles.reviewer, None);
-        let runpod = &config.providers["runpod"];
-        assert_eq!(runpod.protocol, Protocol::Openai);
-        assert_eq!(runpod.context_window, 131_072);
-        assert!(runpod.supports_tools && runpod.supports_reasoning);
+        let endpoint = &config.providers["endpoint"];
+        assert_eq!(endpoint.protocol, Protocol::Openai);
+        assert_eq!(endpoint.context_window, 32_768);
+        assert!(endpoint.supports_tools && !endpoint.supports_reasoning);
+    }
+
+    #[test]
+    fn setup_and_config_init_write_the_same_example_provider() {
+        let setup: AnvilConfig = toml::from_str(SETUP_PROVIDERS).expect("parses");
+        assert_eq!(setup.providers, template().providers);
     }
 
     #[test]
     fn toml_round_trip() {
         let mut config = template();
-        config.roles.reviewer = Some("runpod".to_owned());
+        config.roles.reviewer = Some("endpoint".to_owned());
         let text = toml::to_string_pretty(&config).expect("serializes");
         let back: AnvilConfig = toml::from_str(&text).expect("parses back");
         assert_eq!(back, config);
@@ -1119,7 +1134,11 @@ mod tests {
     #[test]
     fn provider_fields_are_checked() {
         let mut config = template();
-        config.providers.get_mut("runpod").expect("exists").base_url = "ftp://x".to_owned();
+        config
+            .providers
+            .get_mut("endpoint")
+            .expect("exists")
+            .base_url = "ftp://x".to_owned();
         assert!(matches!(
             config.validate(),
             Err(ValidationError::InvalidBaseUrl { .. })
@@ -1128,7 +1147,7 @@ mod tests {
         let mut config = template();
         config
             .providers
-            .get_mut("runpod")
+            .get_mut("endpoint")
             .expect("exists")
             .context_window = 0;
         assert!(matches!(
@@ -1137,11 +1156,11 @@ mod tests {
         ));
 
         let mut config = template();
-        config.providers.get_mut("runpod").expect("exists").model = String::new();
+        config.providers.get_mut("endpoint").expect("exists").model = String::new();
         assert_eq!(
             config.validate(),
             Err(ValidationError::EmptyProviderField {
-                name: "runpod".to_owned(),
+                name: "endpoint".to_owned(),
                 field: "model"
             })
         );
@@ -1152,9 +1171,9 @@ mod tests {
         let mut config = template();
         assert_eq!(config.roles.worker, None);
         assert_eq!(config.roles.worker_or_coder(), config.roles.coder);
-        config.roles.worker = Some("runpod".to_owned());
+        config.roles.worker = Some("endpoint".to_owned());
         config.validate().expect("a declared worker is valid");
-        assert_eq!(config.roles.worker_or_coder(), "runpod");
+        assert_eq!(config.roles.worker_or_coder(), "endpoint");
         config.roles.worker = Some("nope".to_owned());
         assert_eq!(
             config.validate(),
@@ -1180,7 +1199,7 @@ delegate_guidance = false
 
     #[test]
     fn unknown_keys_are_rejected() {
-        let text = format!("{CONFIG_TEMPLATE}\n[roles]\nplanner = \"runpod\"\n");
+        let text = format!("{CONFIG_TEMPLATE}\n[roles]\nplanner = \"endpoint\"\n");
         assert!(toml::from_str::<AnvilConfig>(&text).is_err());
     }
 
@@ -1191,7 +1210,7 @@ delegate_guidance = false
         assert_eq!(config.limits.request_timeout_s, 600);
         assert_eq!(config.limits.max_retries, 4);
         assert_eq!(config.limits.session_tokens, 2_000_000);
-        assert_eq!(config.providers["runpod"].max_output_tokens, None);
+        assert_eq!(config.providers["endpoint"].max_output_tokens, None);
     }
 
     #[test]
@@ -1219,12 +1238,12 @@ delegate_guidance = false
 
     #[test]
     fn price_is_optional_and_costs_tokens() {
-        assert_eq!(template().providers["runpod"].price_per_mtoken, None);
+        assert_eq!(template().providers["endpoint"].price_per_mtoken, None);
         let text = format!(
-            "{CONFIG_TEMPLATE}\n[providers.runpod.price_per_mtoken]\ninput = 3.0\noutput = 15.0\n"
+            "{CONFIG_TEMPLATE}\n[providers.endpoint.price_per_mtoken]\ninput = 3.0\noutput = 15.0\n"
         );
         let config: AnvilConfig = toml::from_str(&text).expect("parses");
-        let price = config.providers["runpod"]
+        let price = config.providers["endpoint"]
             .price_per_mtoken
             .expect("price set");
         assert!((price.cost(1_000_000, 1_000_000, 1_000_000) - 21.0).abs() < 1e-9);
@@ -1240,7 +1259,7 @@ delegate_guidance = false
         let mut config = template();
         config
             .providers
-            .get_mut("runpod")
+            .get_mut("endpoint")
             .expect("exists")
             .price_per_mtoken = Some(Price {
             input: -1.0,
@@ -1250,31 +1269,9 @@ delegate_guidance = false
         assert_eq!(
             config.validate(),
             Err(ValidationError::NegativePrice {
-                name: "runpod".to_owned()
+                name: "endpoint".to_owned()
             })
         );
-    }
-
-    #[test]
-    fn telemetry_and_tickets_tables_default() {
-        let config = template();
-        assert_eq!(config.telemetry, TelemetryConfig::default());
-        assert_eq!(config.telemetry.slow_median_ms, 60_000);
-        assert_eq!(config.telemetry.error_rate_percent, 20);
-        assert_eq!(config.tickets.queue, None, "no queue, so nothing is sent");
-        let text = format!(
-            "{CONFIG_TEMPLATE}\n[telemetry]\nslow_median_ms = 5\n[tickets]\nqueue = \"https://example.com/q.git\"\n"
-        );
-        let config: AnvilConfig = toml::from_str(&text).expect("parses");
-        assert_eq!(config.telemetry.slow_median_ms, 5);
-        assert_eq!(config.telemetry.error_rate_percent, 20);
-        assert_eq!(
-            config.tickets.queue.as_deref(),
-            Some("https://example.com/q.git")
-        );
-        let old = format!("{CONFIG_TEMPLATE}\n[tickets]\nremote = \"origin\"\n");
-        let error = toml::from_str::<AnvilConfig>(&old).expect_err("the old key is refused");
-        assert!(error.to_string().contains("queue"), "{error}");
     }
 
     #[test]

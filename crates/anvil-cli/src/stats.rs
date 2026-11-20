@@ -1,10 +1,10 @@
-//! `anvil stats`: a summary of this project's telemetry.
+//! `anvil stats`: a summary of this project's usage.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anvil_telemetry::paths::project_telemetry_dir;
-use anvil_telemetry::{Stats, load_records, parse_since};
+use anvil_audit::paths::project_usage_dir;
+use anvil_audit::{Stats, load_records, parse_since};
 use anvil_types::AnvilConfig;
 use chrono::Utc;
 
@@ -23,10 +23,10 @@ use chrono::Utc;
 ///
 /// # Errors
 ///
-/// When `since` is not a duration or the telemetry folder cannot be read.
+/// When `since` is not a duration or the usage folder cannot be read.
 pub fn run(config: Option<&AnvilConfig>, cwd: &Path, since: &str) -> anyhow::Result<i32> {
     let window = parse_since(since)?;
-    let records = load_records(&project_telemetry_dir(cwd), Some(Utc::now() - window))?;
+    let records = load_records(&project_usage_dir(cwd), Some(Utc::now() - window))?;
     let prices: BTreeMap<String, Option<anvil_types::Price>> = config
         .map(|config| {
             config

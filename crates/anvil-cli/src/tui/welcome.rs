@@ -15,7 +15,7 @@ use anvil_tui::{Shade, Theme};
 pub use anvil_tui::LOGO;
 
 /// The tagline under the version.
-const TAGLINE: &str = "Eli's personal coding agent that constantly improves itself";
+const TAGLINE: &str = "A coding agent harness for open-weight models";
 
 /// How long after the previous row the next logo row appears.
 const ROW_DELAY: Duration = Duration::from_millis(80);
@@ -37,6 +37,7 @@ pub struct Welcome {
     rules: Vec<(String, String)>,
     skills: usize,
     mcp_servers: usize,
+    policy: String,
     sessions: Vec<RecentSession>,
     started: Instant,
     animate: bool,
@@ -63,6 +64,7 @@ impl Welcome {
             rules: info.rules.clone(),
             skills: info.skills,
             mcp_servers: info.mcp_servers,
+            policy: info.policy.clone(),
             sessions: info.recent_sessions.clone(),
             started: now,
             animate: info.animate,
@@ -215,6 +217,7 @@ impl Welcome {
                 count_label(self.mcp_servers, "mcp server")
             ),
         ));
+        lines.push(pair("policy", self.policy.clone()));
         lines
     }
 
@@ -271,6 +274,7 @@ mod tests {
             )],
             skills: 2,
             mcp_servers: 0,
+            policy: "unmanaged".to_owned(),
             recent_sessions: vec![RecentSession {
                 id: "01J".to_owned(),
                 status: "done".to_owned(),
@@ -325,7 +329,11 @@ mod tests {
             "{:?}",
             text[0]
         );
-        assert!(text[1].ends_with(TAGLINE));
+        assert!(
+            text[1].ends_with("A coding agent harness for open-weight models"),
+            "{:?}",
+            text[1]
+        );
         assert!(
             text[3].contains("project  /work/anvil") || text[3].contains("project  \\work\\anvil"),
             "{:?}",

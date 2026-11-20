@@ -84,15 +84,16 @@ impl AgentSet {
     ///
     /// # Arguments
     ///
-    /// * `cwd` - The project root.
+    /// * `project` - The project root, or `None` when the repository is not
+    ///   trusted and nothing it ships may load.
     /// * `home` - The home directory, if known.
     ///
     /// # Returns
     ///
     /// The set. Broken files are listed in `errors`, never fatal.
-    pub fn discover(cwd: &Path, home: Option<&Path>) -> Self {
+    pub fn discover(project: Option<&Path>, home: Option<&Path>) -> Self {
         let mut set = Self::default();
-        for (dir, origin) in config_dirs(cwd, home, AGENTS_DIR) {
+        for (dir, origin) in config_dirs(project, home, AGENTS_DIR) {
             let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
@@ -317,7 +318,7 @@ mod tests {
             "---\nname: broken\n---\nno description\n",
         );
 
-        let set = AgentSet::discover(project.path(), Some(home.path()));
+        let set = AgentSet::discover(Some(project.path()), Some(home.path()));
         assert_eq!(
             set.names(),
             ["explore", "explorer", "implement", "reviewer"]
@@ -363,7 +364,7 @@ mod tests {
     #[test]
     fn built_in_agents_load_without_any_files() {
         let empty = tempfile::tempdir().expect("tempdir");
-        let set = AgentSet::discover(empty.path(), Some(empty.path()));
+        let set = AgentSet::discover(Some(empty.path()), Some(empty.path()));
         assert_eq!(set.names(), ["explore", "implement"]);
         assert!(set.errors().is_empty());
         for name in ["explore", "implement"] {
@@ -377,7 +378,7 @@ mod tests {
 
     #[test]
     fn built_in_agent_snapshot() {
-        let set = AgentSet::discover(Path::new("no-such-project"), None);
+        let set = AgentSet::discover(Some(Path::new("no-such-project")), None);
         let mut text = String::new();
         for name in ["explore", "implement"] {
             let agent = set.get(name).expect("built in");
@@ -422,7 +423,7 @@ description: project implement
 Project body.
 ",
         );
-        let set = AgentSet::discover(project.path(), Some(home.path()));
+        let set = AgentSet::discover(Some(project.path()), Some(home.path()));
         let explore = set.get("explore").expect("explore");
         assert_eq!(explore.description, "home explore");
         assert_eq!(explore.origin, Origin::HomeClaude);
@@ -440,7 +441,7 @@ description: project explore
 B.
 ",
         );
-        let set = AgentSet::discover(project.path(), Some(home.path()));
+        let set = AgentSet::discover(Some(project.path()), Some(home.path()));
         assert_eq!(
             set.get("explore").expect("explore").description,
             "project explore"
@@ -454,7 +455,7 @@ B.
             &project.path().join(".claude/agents/reviewer.md"),
             "---\ndescription: Reviews\n  diffs.\n---\nSECRET BODY\n",
         );
-        let set = AgentSet::discover(project.path(), None);
+        let set = AgentSet::discover(Some(project.path()), None);
         let section = set.prompt_section().expect("section");
         assert_eq!(section.source, "subagents");
         assert!(section.text.contains("- reviewer: Reviews diffs."));

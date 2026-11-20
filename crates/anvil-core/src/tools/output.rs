@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 /// Folder under the session directory that holds full tool outputs.
 const OUTPUT_DIR: &str = "tool-output";
 
-/// Size and shape of a tool's full output, for telemetry that must never
-/// see the content itself.
+/// Size and shape of a tool's full output, for usage and audit records
+/// that must never see the content itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OutputStats {
     /// Byte length of the full output, before truncation.
@@ -15,6 +15,10 @@ pub struct OutputStats {
     pub truncated: bool,
     /// [`digest`] of the full output.
     pub digest: u64,
+    /// SHA-256 of the full output, as redacted.
+    pub sha256: [u8; 32],
+    /// The exit code of the program the tool ran, for `shell`.
+    pub exit_code: Option<i32>,
 }
 
 impl OutputStats {
@@ -29,15 +33,49 @@ impl OutputStats {
     ///
     /// The stats.
     pub fn of(content: &str, truncated: bool) -> Self {
+        use sha2::Digest as _;
         Self {
             bytes: content.len(),
             truncated,
             digest: digest(content.as_bytes()),
+            sha256: sha2::Sha256::digest(content.as_bytes()).into(),
+            exit_code: None,
         }
+    }
+
+    /// The stats with the exit code of the program the tool ran.
+    ///
+    /// # Arguments
+    ///
+    /// * `exit_code` - The code, if the tool ran a program.
+    ///
+    /// # Returns
+    ///
+    /// The stats.
+    pub fn exited(mut self, exit_code: Option<i32>) -> Self {
+        self.exit_code = exit_code;
+        self
     }
 }
 
-/// A stable 64-bit FNV-1a digest, for telemetry keys that must not reveal
+/// The SHA-256 of `bytes` as lowercase hex.
+///
+/// # Arguments
+///
+/// * `bytes` - What to digest.
+///
+/// # Returns
+///
+/// 64 hex digits.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// A stable 64-bit FNV-1a digest, for usage record keys that must not reveal
 /// the text they stand for.
 ///
 /// # Arguments
@@ -120,7 +158,7 @@ pub(crate) fn write_full(
     content: &str,
 ) -> std::io::Result<PathBuf> {
     let dir = session_dir.join(OUTPUT_DIR);
-    std::fs::create_dir_all(&dir)?;
+    anvil_types::private_fs::create_dir_all(&dir)?;
     let safe: String = call_id
         .chars()
         .map(|c| {
@@ -132,7 +170,7 @@ pub(crate) fn write_full(
         })
         .collect();
     let path = dir.join(format!("{safe}.txt"));
-    std::fs::write(&path, content)?;
+    anvil_types::private_fs::write(&path, content)?;
     Ok(path)
 }
 

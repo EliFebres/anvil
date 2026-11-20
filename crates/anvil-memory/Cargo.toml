@@ -5,14 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Cross-project memory and coding-style rules for anvil."
 
 [dependencies]
+anvil-types.workspace = true
 ignore.workspace = true
 regex.workspace = true
 serde.workspace = true
-sha2.workspace = true
-similar.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true

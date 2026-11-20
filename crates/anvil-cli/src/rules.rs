@@ -1,7 +1,6 @@
 //! `anvil rules`: list, add, remove and check standing rules.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anvil_memory::{Check, Rule, paths, run_checks};
 use anyhow::{Context, bail};
@@ -135,10 +134,9 @@ fn git_changed_files(cwd: &Path) -> anyhow::Result<Vec<PathBuf>> {
         vec!["diff", "--name-only", "--diff-filter=ACMR", "HEAD"],
         vec!["ls-files", "--others", "--exclude-standard"],
     ] {
-        let output = Command::new("git")
+        let output = anvil_core::git::command(cwd)?
             .args(["-c", "core.quotepath=false"])
             .args(&args)
-            .current_dir(cwd)
             .output()
             .context("running git; pass file paths to check without it")?;
         if !output.status.success() {

@@ -222,7 +222,7 @@ pub fn instantiate(template: &Template, dest: &Path) -> Result<usize, MemoryErro
             path: dest.to_path_buf(),
         });
     }
-    copy_tree(&template.dir, dest, false)
+    copy_tree(&template.dir, dest, false, false)
 }
 
 /// Saves a directory as a template.
@@ -275,13 +275,13 @@ pub fn save_template(
         }
         std::fs::remove_dir_all(&dir).map_err(|error| MemoryError::io(&dir, &error))?;
     }
-    copy_tree(source, &dir, true)?;
+    copy_tree(source, &dir, true, true)?;
     let manifest_path = dir.join(MANIFEST_FILE);
     let text = toml::to_string(&manifest).map_err(|error| MemoryError::Parse {
         path: manifest_path.clone(),
         detail: error.to_string(),
     })?;
-    std::fs::write(&manifest_path, text)
+    anvil_types::private_fs::write(&manifest_path, text)
         .map_err(|error| MemoryError::io(&manifest_path, &error))?;
     Ok(Template { manifest, dir })
 }
@@ -317,9 +317,24 @@ pub fn plan_section_text(templates: &[Template]) -> Option<String> {
     ))
 }
 
-/// Copies every file under `source` into `dest`, byte for byte.
-fn copy_tree(source: &Path, dest: &Path, honor_gitignore: bool) -> Result<usize, MemoryError> {
-    std::fs::create_dir_all(dest).map_err(|error| MemoryError::io(dest, &error))?;
+/// Copies every file under `source` into `dest`, byte for byte. With
+/// `private` (saving into `~/.anvil/templates`) folders are 0700 and files
+/// 0600 on Unix; without it (`anvil new`, into the user's project) the
+/// user's umask applies.
+fn copy_tree(
+    source: &Path,
+    dest: &Path,
+    honor_gitignore: bool,
+    private: bool,
+) -> Result<usize, MemoryError> {
+    let make_dir = |dir: &Path| {
+        if private {
+            anvil_types::private_fs::create_dir_all(dir)
+        } else {
+            std::fs::create_dir_all(dir)
+        }
+    };
+    make_dir(dest).map_err(|error| MemoryError::io(dest, &error))?;
     let walker = WalkBuilder::new(source)
         .hidden(false)
         .require_git(false)
@@ -351,13 +366,17 @@ fn copy_tree(source: &Path, dest: &Path, honor_gitignore: bool) -> Result<usize,
         let target = dest.join(relative);
         let kind = entry.file_type();
         if kind.is_some_and(|kind| kind.is_dir()) {
-            std::fs::create_dir_all(&target).map_err(|error| MemoryError::io(&target, &error))?;
+            make_dir(&target).map_err(|error| MemoryError::io(&target, &error))?;
         } else if kind.is_some_and(|kind| kind.is_file()) {
             if relative == Path::new(MANIFEST_FILE) {
                 continue;
             }
-            std::fs::copy(entry.path(), &target)
-                .map_err(|error| MemoryError::io(entry.path(), &error))?;
+            let copied_file = if private {
+                anvil_types::private_fs::copy(entry.path(), &target)
+            } else {
+                std::fs::copy(entry.path(), &target).map(|_| ())
+            };
+            copied_file.map_err(|error| MemoryError::io(entry.path(), &error))?;
             copied += 1;
         }
     }
@@ -434,6 +453,34 @@ mod tests {
             ("src/main.rs".to_owned(), b"fn main() {}\r\n".to_vec()),
         ];
         assert_eq!(read_tree(&dest.path().join("new")), expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_saved_template_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("home");
+        let source = tempfile::tempdir().expect("source");
+        write(source.path(), "src/main.rs", b"fn main() {}\n");
+        let script = source.path().join("run.sh");
+        write(source.path(), "run.sh", b"#!/bin/sh\n");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::set_permissions(
+            source.path().join("src/main.rs"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+        let saved = save_template(home.path(), "t", source.path(), None, false).expect("saves");
+        let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode(&saved.dir), 0o700);
+        assert_eq!(mode(&saved.dir.join("src")), 0o700);
+        assert_eq!(mode(&saved.dir.join("src/main.rs")), 0o600);
+        assert_eq!(
+            mode(&saved.dir.join("run.sh")),
+            0o700,
+            "a script stays runnable"
+        );
+        assert_eq!(mode(&saved.dir.join(MANIFEST_FILE)), 0o600);
     }
 
     #[test]

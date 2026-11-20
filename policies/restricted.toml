@@ -1,0 +1,154 @@
+# anvil managed policy: restricted.
+#
+# For a workstation with no internet access that talks to one model server
+# on the internal network. Nothing runs besides the built-in tools, every
+# write and command asks a person, commands are limited to an allowlist and
+# started without a shell, and repositories cannot be trusted.
+#
+# Install as an administrator at /etc/anvil/policy.toml (Linux and macOS,
+# owned by root, not writable by group or others) or
+# C:\ProgramData\anvil\policy.toml (Windows, owned by and writable only by
+# Administrators and SYSTEM). docs/ADMIN_GUIDE.md describes every key.
+# Check it before rollout with: anvil policy check restricted.toml
+
+version = 1
+
+[network]
+# The only model server anvil may call, as host:port. Edit this.
+allowed_hosts = ["models.internal.example:443"]
+# Every request uses https (the default).
+require_tls = true
+# Requests go through no proxy (the default); HTTPS_PROXY and the other
+# proxy variables are ignored. "system" uses them or the system settings;
+# a URL such as "http://proxy.internal.example:3128" names one proxy.
+proxy = "none"
+# To trust only your own certificate authorities instead of the system's
+# store, and to present a client certificate, uncomment (absolute paths):
+# ca_bundle = "/etc/anvil/pki/ca.pem"
+# client_cert = "/etc/anvil/pki/client.pem"
+# client_key = "/etc/anvil/pki/client.key"
+
+[models]
+# The provider names and model names the user's configuration may use.
+# Empty means any. Edit these to match the model server.
+providers = ["endpoint"]
+models = []
+
+[permissions]
+# Nothing skips a prompt: no --yes, no --allow-tool, no saved "always" rules.
+allow_yes = false
+allow_allow_tool = false
+allow_always = false
+# A person approves every plan.
+require_plan_approval = true
+# Every write and command asks, whatever the user's own rules say.
+ask = ["write_file", "edit_file", "shell"]
+deny = []
+
+[files]
+# No folders outside the workspace.
+extra_roots = []
+# Extra paths the file tools refuse, on top of the built-in secret list.
+deny = ["**/*.kdbx", "**/*.jks", "**/*.keystore"]
+
+[features]
+# MCP servers stay off. To allow one HTTP server, add its host:port to
+# allowed_hosts and use:
+# mcp = "allowlist"
+# mcp_servers = [{ name = "docs", url = "https://mcp.internal.example/mcp" }]
+mcp = "off"
+hooks = false
+skills = "off"
+memory = false
+build = false
+delegation = false
+
+[projects]
+# A repository's hooks, MCP servers, skills, commands, agents and
+# instruction files never load. Its deny and ask rules still apply.
+allow_trust = false
+
+[data]
+# Delete session folders (the transcript and the session's audit.jsonl with
+# them) and build folders older than 30 days when a session starts. The
+# audit mirror under [audit] mirror_dir is kept.
+retention_days = 30
+# Redact secrets from everything the tools return (the default). Add
+# patterns for identifiers specific to the firm.
+redaction = true
+# patterns = [{ kind = "employee_id", regex = '\bEMP-[0-9]{6}\b' }]
+# Keep sizes, digests, tool names, tokens and timings, but no message
+# text, file contents or command output. Sessions cannot be resumed.
+transcript = "metadata"
+
+[audit]
+# Every session writes a hash-chained audit.jsonl in its session folder.
+# required = true: a session does not start when its audit log cannot be
+# written, and stops when a write fails.
+required = true
+# Prompts and tool arguments are kept as size and SHA-256 only.
+record = "digest"
+# A second copy of every record outside the developer's reach. A chain on
+# the same disk shows edits and removals inside the file, but not a file
+# cut at the end or rewritten whole; this copy is how you find out. Use an
+# absolute path the user can append to but not rewrite, for example:
+# mirror_dir = "/var/log/anvil"
+# mirror_dir = 'C:\ProgramData\anvil\audit'
+
+[limits]
+# The most tokens one session may use.
+session_tokens = 2000000
+
+[shell]
+# Commands are one program with plain arguments, started without a shell
+# interpreter, and must match one of these patterns (`*` at the end allows
+# any further arguments). `;`, `&`, `|`, `<`, `>`, backticks, `$(`,
+# parentheses, braces and line breaks are refused. Network clients,
+# package installs, sudo and runas stay refused unless a pattern names
+# them; git push, clone, fetch, pull and the other subcommands outside the
+# list below never run, whatever the pattern. Edit the list to the
+# toolchain.
+#
+# What this guarantees: only these programs start, with these leading
+# words, without a shell; no argument may name a path outside the project
+# (absolute, `~`, a drive or UNC path, or `..` that climbs out); git takes
+# no option before its subcommand, runs only status, diff, log, show,
+# rev-parse, ls-files, blame, branch, add, commit, restore, switch,
+# checkout, stash, merge-base, describe, shortlog, cat-file, grep and tag
+# (list only) even under a `git *` pattern, never takes `--output`, `-o`,
+# `--no-index`, `--ext-diff`, `--textconv`, `-O`, `--exec`,
+# `--upload-pack`, `--extcmd`, `--gpg-sign`, `--edit` or `--filters`,
+# runs with hooks, the file system monitor, pagers, editors, external diff
+# and text conversion programs and remotes off, and refuses a repository whose own config defines aliases or
+# programs. What it does not guarantee: an allowed program still does what
+# it does with the project's files. Run executor = "container" (below) to
+# put a boundary around that.
+mode = "allowlist"
+allow = [
+    # Residual risk: build scripts and procedural macros run, and they are
+    # code the model can write. That is the point of building; the
+    # container executor is the boundary for it.
+    "cargo build *",
+    "cargo check *",
+    # Residual risk: runs tests the model wrote, as above.
+    "cargo test *",
+    "cargo clippy *",
+    # Residual risk: rewrites Rust files in the project, which is its job.
+    "cargo fmt *",
+    # Residual risk: none beyond reading the repository; status refreshes
+    # the index inside .git.
+    "git status *",
+    # Residual risk: reads the repository and the work tree only, since
+    # --no-index, --output and diff programs are refused.
+    "git diff *",
+    "git log *",
+]
+# To run every command in a container without network access instead of on
+# the workstation, uncomment these lines and name an image, ideally by digest:
+# executor = "container"
+# [shell.container]
+# runtime = "docker"            # or "podman"
+# image = "registry.internal.example/build@sha256:<digest>"
+# user = "65534:65534"          # never root
+# memory = "2g"
+# pids_limit = 256

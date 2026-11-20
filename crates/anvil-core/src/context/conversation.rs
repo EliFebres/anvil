@@ -43,8 +43,9 @@ pub struct Compaction {
     pub dropped_messages: usize,
     /// The summary text.
     pub summary: String,
-    /// Where the summary was written.
-    pub summary_path: PathBuf,
+    /// Where the summary was written; `None` when the transcript mode keeps
+    /// no conversation text, so no file was written.
+    pub summary_path: Option<PathBuf>,
     /// Tokens the summarizer used.
     pub usage: Option<Usage>,
 }
@@ -209,7 +210,8 @@ impl Conversation {
     ///
     /// * `summarizer` - The model that writes the summary.
     /// * `task` - The user's task, given to the summarizer.
-    /// * `session_dir` - Where `compaction-<n>.md` is written.
+    /// * `summary_dir` - Where `compaction-<n>.md` is written; `None` writes
+    ///   no file.
     /// * `max_transcript_chars` - Cap on the transcript sent to the summarizer.
     ///
     /// # Returns
@@ -223,7 +225,7 @@ impl Conversation {
         &mut self,
         summarizer: &dyn Provider,
         task: &str,
-        session_dir: &Path,
+        summary_dir: Option<&Path>,
         max_transcript_chars: usize,
     ) -> Result<Option<Compaction>, ProviderError> {
         let Some(split) = self.split_point() else {
@@ -240,9 +242,12 @@ impl Conversation {
         };
         let (summary, usage) = collect_text(summarizer, request).await?;
         self.compactions += 1;
-        let summary_path = session_dir.join(format!("compaction-{}.md", self.compactions));
-        if let Err(error) = std::fs::write(&summary_path, &summary) {
-            tracing::warn!(%error, path = %summary_path.display(), "cannot write the compaction summary");
+        let summary_path =
+            summary_dir.map(|dir| dir.join(format!("compaction-{}.md", self.compactions)));
+        if let Some(path) = &summary_path
+            && let Err(error) = anvil_types::private_fs::write(path, &summary)
+        {
+            tracing::warn!(%error, path = %path.display(), "cannot write the compaction summary");
         }
         let kept = self.messages.split_off(split);
         let dropped_messages = self.messages.len();
@@ -524,14 +529,15 @@ mod tests {
             "## Task\nthing\n## Decisions\nnone\n## Files touched\n- a.txt\n## Open items\n- finish",
         )]);
         let compaction = conversation
-            .compact(&summarizer, "do the thing", dir.path(), 100_000)
+            .compact(&summarizer, "do the thing", Some(dir.path()), 100_000)
             .await
             .expect("summarizer ok")
             .expect("compacted");
         assert_eq!(compaction.dropped_messages, 7);
         assert!(compaction.summary.contains("## Open items"));
-        assert_eq!(compaction.summary_path, dir.path().join("compaction-1.md"));
-        assert!(compaction.summary_path.exists());
+        let path = compaction.summary_path.clone().expect("a folder was given");
+        assert_eq!(path, dir.path().join("compaction-1.md"));
+        assert!(path.exists());
         assert_eq!(conversation.compactions(), 1);
 
         let messages = conversation.messages();
@@ -551,7 +557,7 @@ mod tests {
 
         assert_eq!(
             conversation
-                .compact(&summarizer, "t", dir.path(), 100_000)
+                .compact(&summarizer, "t", Some(dir.path()), 100_000)
                 .await
                 .expect("ok"),
             None,
@@ -565,7 +571,7 @@ mod tests {
         let mut conversation = seven_turns();
         let summarizer = FakeProvider::new(vec![vec![Err(ProviderError::Timeout { after_s: 1 })]]);
         let result = conversation
-            .compact(&summarizer, "t", dir.path(), 100_000)
+            .compact(&summarizer, "t", Some(dir.path()), 100_000)
             .await;
         assert_eq!(result, Err(ProviderError::Timeout { after_s: 1 }));
         assert_eq!(conversation.messages().len(), 14);

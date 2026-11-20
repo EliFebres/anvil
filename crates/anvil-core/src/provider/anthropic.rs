@@ -12,6 +12,7 @@ use super::retry::RetryPolicy;
 use super::sse::SseFrame;
 use super::types::{CompletionRequest, Event, Message, StopReason, ToolCall, Usage};
 use super::{EventStream, Provider};
+use crate::net::HttpClient;
 
 /// The API version header value this adapter targets.
 pub const ANTHROPIC_VERSION: &str = "2026-10-21";
@@ -22,9 +23,11 @@ pub const DEFAULT_MAX_TOKENS: u32 = 16_384;
 /// A provider speaking `POST {base_url}/messages` with SSE streaming.
 pub struct AnthropicProvider {
     /// HTTP client shared by every request.
-    client: reqwest::Client,
+    client: HttpClient,
     /// Full endpoint URL.
     url: String,
+    /// The configured `base_url`; the key goes only to its host.
+    base_url: String,
     /// `x-api-key` header value.
     api_key: String,
     /// Model name as the server expects it.
@@ -56,11 +59,12 @@ impl AnthropicProvider {
         cfg: &ProviderConfig,
         api_key: String,
         limits: &LimitsConfig,
-        client: reqwest::Client,
+        client: HttpClient,
     ) -> Self {
         Self {
             client,
             url: format!("{}/messages", cfg.base_url.trim_end_matches('/')),
+            base_url: cfg.base_url.clone(),
             api_key,
             model: cfg.model.clone(),
             max_output_tokens: cfg.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
@@ -84,14 +88,15 @@ impl Provider for AnthropicProvider {
         let client = self.client.clone();
         let url = self.url.clone();
         let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
         let attempt = move |index: u32| {
             tracing::debug!(attempt = index, url = %url, "sending messages request");
             let builder = client
                 .post(&url)
-                .header("x-api-key", &api_key)
+                .api_key("x-api-key", &api_key, &base_url)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .json(&body);
-            http::send_attempt(builder)
+            http::send_attempt(builder, api_key.clone())
         };
         http::start(
             self.stream_cfg.clone(),
@@ -817,7 +822,9 @@ mod tests {
             script: None,
         };
         let limits = LimitsConfig::default();
-        let client = reqwest::Client::new();
+        let egress = crate::net::Egress::personal([cfg.base_url.as_str()], Vec::new());
+        let client =
+            crate::net::http_client(&egress, std::time::Duration::from_secs(1)).expect("client");
         let provider = AnthropicProvider::new("a", &cfg, "k".to_owned(), &limits, client.clone());
         assert_eq!(provider.max_output_tokens, DEFAULT_MAX_TOKENS);
         assert_eq!(provider.url, "https://api.anthropic.com/v1/messages");

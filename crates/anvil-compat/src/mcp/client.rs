@@ -7,6 +7,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use anvil_core::net::HttpClient;
+
 use super::http::HttpTransport;
 use super::jsonrpc::{McpError, PROTOCOL_VERSION, Response};
 use super::stdio::StdioTransport;
@@ -50,12 +52,20 @@ pub trait RpcTransport: Send + Sync {
 pub struct ToolInfo {
     /// The tool's name on the server.
     pub name: String,
+    /// Its display title, when the server gives one.
+    #[serde(default)]
+    pub title: Option<String>,
     /// What it does.
     #[serde(default)]
     pub description: String,
     /// JSON Schema of its arguments.
     #[serde(default = "empty_object_schema")]
     pub input_schema: Value,
+    /// The server's `annotations` object as sent (`readOnlyHint`,
+    /// `destructiveHint`, `idempotentHint`, `openWorldHint`, `title`), or
+    /// null; hashed whole into the approved listing.
+    #[serde(default)]
+    pub annotations: Value,
     /// Whether the server marked it read-only (`annotations.readOnlyHint`).
     #[serde(default)]
     pub read_only: bool,
@@ -94,6 +104,8 @@ impl McpClient {
     ///
     /// * `server` - The server definition.
     /// * `cwd` - The working directory for stdio servers.
+    /// * `http` - The client HTTP servers are reached with; its egress
+    ///   rules decide whether the server's URL may be called.
     ///
     /// # Returns
     ///
@@ -102,18 +114,28 @@ impl McpClient {
     /// # Errors
     ///
     /// Any [`McpError`] from spawning, connecting or the handshake.
-    pub async fn connect(server: &McpServer, cwd: &std::path::Path) -> Result<Self, McpError> {
+    pub async fn connect(
+        server: &McpServer,
+        cwd: &std::path::Path,
+        http: &HttpClient,
+    ) -> Result<Self, McpError> {
         let transport: Box<dyn RpcTransport> = match &server.transport {
-            Transport::Stdio { command, args, env } => Box::new(StdioTransport::spawn(
-                &server.name,
-                command,
-                args,
-                env,
-                cwd,
-            )?),
-            Transport::Http { url, headers } => {
-                Box::new(HttpTransport::new(&server.name, url, headers)?)
+            Transport::Stdio { .. } => {
+                let launch = server.launch()?;
+                Box::new(StdioTransport::spawn(
+                    &server.name,
+                    &launch.command,
+                    &launch.args,
+                    &launch.env,
+                    cwd,
+                )?)
             }
+            Transport::Http { url, .. } => Box::new(HttpTransport::new(
+                &server.name,
+                url,
+                server.http_headers()?,
+                http.clone(),
+            )),
         };
         let mut client = Self {
             name: server.name.clone(),
@@ -181,8 +203,10 @@ impl McpClient {
                 let Some(name) = tool.get("name").and_then(Value::as_str) else {
                     continue;
                 };
+                let annotations = tool.get("annotations").cloned().unwrap_or(Value::Null);
                 tools.push(ToolInfo {
                     name: name.to_owned(),
+                    title: tool.get("title").and_then(Value::as_str).map(str::to_owned),
                     description: tool
                         .get("description")
                         .and_then(Value::as_str)
@@ -193,11 +217,11 @@ impl McpClient {
                         .cloned()
                         .filter(Value::is_object)
                         .unwrap_or_else(empty_object_schema),
-                    read_only: tool
-                        .get("annotations")
-                        .and_then(|a| a.get("readOnlyHint"))
+                    read_only: annotations
+                        .get("readOnlyHint")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
+                    annotations,
                 });
             }
             cursor = result

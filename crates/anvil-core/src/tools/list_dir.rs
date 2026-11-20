@@ -39,7 +39,10 @@ impl Tool for ListDir {
                 Ok(args) => args,
                 Err(output) => return output,
             };
-            let path = ctx.resolve(args.path.as_deref().unwrap_or("."));
+            let path = match ctx.checked_path(args.path.as_deref().unwrap_or("."), false) {
+                Ok(path) => path,
+                Err(reason) => return ToolOutput::error(reason),
+            };
             let shown = ctx.display_path(&path);
             let entries = match std::fs::read_dir(&path) {
                 Ok(entries) => entries,
@@ -47,6 +50,7 @@ impl Tool for ListDir {
             };
             let mut names: Vec<String> = entries
                 .filter_map(Result::ok)
+                .filter(|entry| !ctx.workspace.refuses(&entry.path()))
                 .map(|entry| {
                     let name = entry.file_name().to_string_lossy().into_owned();
                     if entry.file_type().is_ok_and(|kind| kind.is_dir()) {

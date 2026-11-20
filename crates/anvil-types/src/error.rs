@@ -10,13 +10,11 @@ use thiserror::Error;
 /// its own in a log line or a CLI error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ValidationError {
-    /// A ticket title exceeds the character limit.
-    #[error("ticket title is {len} characters; the limit is {max}")]
-    TitleTooLong {
-        /// Length of the offending title in characters.
-        len: usize,
-        /// The limit that was exceeded.
-        max: usize,
+    /// The `[shell]` table's keys do not fit together.
+    #[error("{reason}")]
+    Shell {
+        /// What is wrong, naming the key.
+        reason: String,
     },
 
     /// A session `status.json` breaks a rule of the format.
@@ -31,30 +29,6 @@ pub enum ValidationError {
     EmptyField {
         /// Name of the empty field.
         field: &'static str,
-    },
-
-    /// A ticket has no acceptance checks.
-    #[error("ticket needs at least one acceptance check")]
-    EmptyAcceptance,
-
-    /// A ticket text field references a file path outside the project.
-    #[error("field `{field}` references a path outside the project: `{path}`")]
-    OutsidePath {
-        /// Name of the field that holds the path.
-        field: &'static str,
-        /// The offending token as written.
-        path: String,
-    },
-
-    /// A ticket text field contains more code than the boundary allows.
-    #[error("field `{field}` contains {lines} lines of code; the limit is {max}")]
-    TooMuchCode {
-        /// Name of the field that holds the code.
-        field: &'static str,
-        /// Number of code lines counted.
-        lines: usize,
-        /// The limit that was exceeded.
-        max: usize,
     },
 
     /// A role names a provider that is not declared in `[providers]`.
@@ -107,22 +81,6 @@ pub enum ValidationError {
         field: &'static str,
     },
 
-    /// `[update] repo` is not `owner/repo`.
-    #[error("update.repo `{repo}` must be `owner/repo`")]
-    InvalidUpdateRepo {
-        /// The value as written.
-        repo: String,
-    },
-
-    /// A ticket in some status lacks a field that status implies.
-    #[error("a ticket with status `{status:?}` needs `{field}`")]
-    MissingForStatus {
-        /// Name of the missing field.
-        field: &'static str,
-        /// The status that requires it.
-        status: crate::ticket::TicketStatus,
-    },
-
     /// A skill name is not kebab-case or is too long.
     #[error(
         "skill name `{name}` must be kebab-case (a-z, 0-9, single hyphens) and at most {max} characters"
@@ -147,11 +105,30 @@ pub enum ValidationError {
 /// Why the anvil configuration could not be loaded.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// Neither the global nor the project file exists.
+    /// The user has no `~/.anvil/config.toml`.
     #[error(
-        "no configuration found; run `anvil setup` (global, with the standard providers) or `anvil config init` (project template)"
+        "no configuration found in ~/.anvil/config.toml; run `anvil setup` (with the standard providers) or `anvil config init --global` (a template)"
     )]
     NotFound,
+
+    /// A file exists but cannot be read.
+    #[error("reading {path}: {source}")]
+    Read {
+        /// The file.
+        path: PathBuf,
+        /// The I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A repository's own rules are malformed.
+    #[error("{path}: {detail}")]
+    Project {
+        /// The repository file.
+        path: PathBuf,
+        /// What is wrong.
+        detail: String,
+    },
 
     /// A configuration file is not valid TOML.
     #[error("parsing {path}: {source}")]
@@ -171,6 +148,17 @@ pub enum ConfigError {
         /// The TOML error.
         #[source]
         source: toml::de::Error,
+    },
+
+    /// A file still sets a section that anvil no longer has.
+    #[error("{path}: the [{section}] section was removed: {reason}")]
+    RemovedSection {
+        /// The file that sets it.
+        path: PathBuf,
+        /// The section name.
+        section: &'static str,
+        /// What replaced it, in one sentence.
+        reason: &'static str,
     },
 
     /// The profile named on the command line has no file.

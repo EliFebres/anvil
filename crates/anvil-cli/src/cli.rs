@@ -1,17 +1,37 @@
 //! Command-line definition for `anvil`.
 
+use std::path::PathBuf;
+use std::sync::LazyLock;
+
 use clap::{ArgAction, Args, Parser, Subcommand};
 
-/// A CLI coding agent.
+/// The commit a release build was made from, set by the release workflow
+/// through `ANVIL_BUILD_SHA`; `None` for a build from source.
+pub const BUILD_COMMIT: Option<&str> = option_env!("ANVIL_BUILD_SHA");
+
+/// What `anvil --version` prints after the program name.
+static VERSION: LazyLock<String> =
+    LazyLock::new(|| version_line(env!("CARGO_PKG_VERSION"), BUILD_COMMIT));
+
+/// The version line: the package version, plus the build commit when known.
+fn version_line(version: &str, commit: Option<&str>) -> String {
+    match commit.map(str::trim).filter(|commit| !commit.is_empty()) {
+        Some(commit) => format!("{version} ({commit})"),
+        None => version.to_owned(),
+    }
+}
+
+/// A coding agent harness for open-weight models in regulated,
+/// restricted-network environments.
 #[derive(Debug, Parser)]
-#[command(name = "anvil", version, about, arg_required_else_help = true)]
+#[command(name = "anvil", version = VERSION.as_str(), about, arg_required_else_help = true)]
 pub struct Cli {
     /// Skip plan approval and every permission prompt; run unattended.
     #[arg(long, global = true)]
     pub yes: bool,
 
-    /// A named profile, `~/.anvil/profiles/<name>.toml`, layered over the global and
-    /// project configuration; its `[permissions]` table replaces `.anvil/permissions.toml`.
+    /// A named profile, `~/.anvil/profiles/<name>.toml`, layered over `~/.anvil/config.toml`;
+    /// its `[permissions]` table replaces your saved rules for the repository.
     #[arg(long, global = true, value_name = "NAME")]
     pub profile: Option<String>,
 
@@ -54,6 +74,26 @@ pub enum Command {
     },
     /// List saved sessions, newest first.
     Sessions,
+    /// Delete this repository's session folders (transcripts, tool outputs,
+    /// plans and summaries) last changed more than the given number of days ago.
+    Purge {
+        /// Age in days; `0` deletes every session folder.
+        #[arg(long, value_name = "DAYS")]
+        older_than: u32,
+    },
+    /// Show what this repository ships (hooks, MCP servers, skills, commands,
+    /// agents, instruction files) and decide whether anvil may load it.
+    Trust {
+        /// Record the repository as not trusted, without asking.
+        #[arg(long)]
+        revoke: bool,
+    },
+    /// Show the managed policy in force, or check a policy file before rollout.
+    Policy {
+        /// Which policy action to take.
+        #[command(subcommand)]
+        command: PolicyCommand,
+    },
     /// Manage anvil configuration.
     Config {
         /// Which configuration action to take.
@@ -61,11 +101,28 @@ pub enum Command {
         command: ConfigCommand,
     },
     /// Write ~/.anvil/.env and ~/.anvil/config.toml without overwriting anything
-    /// already filled in; exit 2 while placeholders remain.
-    Setup,
+    /// already filled in; exit 2 while placeholders remain. With --endpoint, set up
+    /// one OpenAI-compatible server for every role instead of the example provider.
+    Setup {
+        /// The base URL of an OpenAI-compatible server, such as
+        /// `https://gpu.example/v1`; its model list is read first.
+        #[arg(long, value_name = "URL")]
+        endpoint: Option<String>,
+        /// The model to use when the server lists several.
+        #[arg(long, requires = "endpoint")]
+        model: Option<String>,
+        /// The environment variable that holds the endpoint's key
+        /// (default ANVIL_ENDPOINT_KEY).
+        #[arg(long, value_name = "NAME", requires = "endpoint")]
+        key_env: Option<String>,
+    },
     /// Check keys, providers, tools and tracked files, one row per check with the
     /// fix for each failure.
-    Doctor,
+    Doctor {
+        /// List every destination the configuration can reach, and why, instead.
+        #[arg(long)]
+        egress: bool,
+    },
     /// Fail if any tracked file contains an API key (`just check` runs this).
     ScanKeys,
     /// Install, list, inspect and remove skills (Claude Code `SKILL.md` folders).
@@ -79,6 +136,18 @@ pub enum Command {
         /// Which check to run.
         #[command(subcommand)]
         command: CompatCommand,
+    },
+    /// Check or read a session's audit log.
+    Audit {
+        /// Which audit action to take.
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+    /// Approve what an MCP server offers.
+    Mcp {
+        /// Which MCP action to take.
+        #[command(subcommand)]
+        command: McpCommand,
     },
     /// Manage the standing coding rules in `~/.anvil/rules.toml`.
     Rules {
@@ -99,13 +168,7 @@ pub enum Command {
         #[command(subcommand)]
         command: TemplateCommand,
     },
-    /// Work with what anvil remembers about you.
-    Memory {
-        /// Which memory action to take.
-        #[command(subcommand)]
-        command: MemoryCommand,
-    },
-    /// Summarize this project's telemetry: sessions, completion rate, tokens and cost.
+    /// Summarize this project's usage: sessions, completion rate, tokens and cost.
     Stats {
         /// How far back to look: a number followed by m, h, d or w.
         #[arg(long, default_value = "7d")]
@@ -120,19 +183,6 @@ pub enum Command {
         /// Include every project that has run a session.
         #[arg(long)]
         all: bool,
-    },
-    /// Download the latest release for this platform, verify its SHA256, swap the binary
-    /// and print the changes since the installed version.
-    Update {
-        /// The binary to replace instead of this executable (for tests).
-        #[arg(long, hide = true)]
-        exe: Option<std::path::PathBuf>,
-    },
-    /// Draft, review and submit improvement tickets from this project's telemetry.
-    Ticket {
-        /// Which ticket action to take.
-        #[command(subcommand)]
-        command: TicketCommand,
     },
 }
 
@@ -191,50 +241,6 @@ pub enum TemplateCommand {
     },
 }
 
-/// Subcommands under `anvil memory`.
-#[derive(Debug, Subcommand)]
-pub enum MemoryCommand {
-    /// Find files you edited after anvil wrote them and propose rules from the changes; you
-    /// keep or drop each one, and nothing reaches `rules.toml` until you keep it.
-    Learn,
-}
-
-/// Subcommands under `anvil ticket`.
-#[derive(Debug, Subcommand)]
-pub enum TicketCommand {
-    /// Turn recorded signals into ticket drafts under `~/.anvil/tickets/draft/` with the summarizer.
-    Draft,
-    /// List drafts and open tickets.
-    List,
-    /// Print one ticket.
-    Show {
-        /// A ticket id or a unique prefix of one.
-        id: String,
-    },
-    /// Validate a draft, move it to `~/.anvil/tickets/open/`, commit it on a `tickets/<id>`
-    /// branch and push it to the ticket queue named by `[tickets] queue`.
-    ///
-    /// With no queue configured nothing is sent. Otherwise the queue is
-    /// fetched into ~/.anvil/queue.git and this push is the only thing that
-    /// ever leaves this machine. The ticket carries no project code, paths
-    /// or session text; the validator refuses one that does.
-    Submit {
-        /// A ticket id or a unique prefix of one.
-        #[arg(required_unless_present = "all")]
-        id: Option<String>,
-        /// Submit every draft.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Delete a draft.
-    Drop {
-        /// A ticket id or a unique prefix of one.
-        id: String,
-    },
-    /// Walk through every draft and submit, drop or edit each one.
-    Review,
-}
-
 /// Subcommands under `anvil rules`.
 #[derive(Debug, Subcommand)]
 pub enum RulesCommand {
@@ -269,6 +275,40 @@ pub enum RulesCommand {
     },
 }
 
+/// Subcommands under `anvil audit`.
+#[derive(Debug, Subcommand)]
+pub enum AuditCommand {
+    /// Walk a session's hash chain and exit non-zero at the first break.
+    Verify {
+        /// A session id of this repository, or the path of an audit file
+        /// such as a mirrored copy.
+        target: String,
+        /// A mirrored copy to compare with byte for byte. For a session id
+        /// under a policy with `[audit] mirror_dir`, the copy there is
+        /// compared without this flag.
+        #[arg(long)]
+        mirror: Option<std::path::PathBuf>,
+    },
+    /// Print a session's audit records one per line, then whether the
+    /// chain verifies.
+    Show {
+        /// A session id of this repository, or the path of an audit file.
+        target: String,
+    },
+}
+
+/// Subcommands under `anvil mcp`.
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Connect to a server, print its tools and record that listing as
+    /// approved, after its listing changed. Under a managed policy only a
+    /// server the policy allows can be approved.
+    Approve {
+        /// The server name.
+        name: String,
+    },
+}
+
 /// Subcommands under `anvil compat`.
 #[derive(Debug, Subcommand)]
 pub enum CompatCommand {
@@ -284,7 +324,8 @@ pub enum CompatCommand {
 pub enum SkillCommand {
     /// Copy a skill folder into `~/.anvil/skills/<name>` (or the project with --project).
     Add {
-        /// A directory, a git URL, or a GitHub `owner/repo[/subdir]` shorthand.
+        /// A directory on this machine that holds `SKILL.md`. anvil does not
+        /// download skills; clone a repository yourself and pass the folder.
         source: String,
         /// Install into the project's `.anvil/skills` instead of the home directory.
         #[arg(long)]
@@ -315,17 +356,48 @@ pub enum SkillCommand {
 pub enum ConfigCommand {
     /// Write a template config file. Refuses to overwrite an existing one.
     Init {
-        /// Write the global `~/.anvil/config.toml` instead of the project `.anvil/config.toml`.
+        /// Write your own `~/.anvil/config.toml` instead of the repository's
+        /// `.anvil/config.toml`, which may only add deny and ask rules.
         #[arg(long)]
         global: bool,
     },
-    /// Print the merged configuration (project over global) as TOML.
+    /// Print your configuration (and profile, if given) as TOML.
     Show,
+}
+
+/// Subcommands under `anvil policy`.
+#[derive(Debug, Subcommand)]
+pub enum PolicyCommand {
+    /// Print every effective policy setting and the layer that set it
+    /// (policy or default), then the user settings the policy bounds.
+    Show,
+    /// Validate a policy file for an administrator: syntax, schema and
+    /// values. Exits 1 with the reasons when it is invalid.
+    Check {
+        /// The policy file to check.
+        file: PathBuf,
+        /// Also check that only an administrator can change the file and
+        /// its folder, as anvil does at startup.
+        #[arg(long)]
+        ownership: bool,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_version_names_the_build_commit_when_there_is_one() {
+        assert_eq!(version_line("0.2.0", Some("abc123")), "0.2.0 (abc123)");
+        assert_eq!(version_line("0.2.0", Some(" ")), "0.2.0");
+        assert_eq!(version_line("0.2.0", None), "0.2.0");
+        let rendered = <Cli as clap::CommandFactory>::command().render_version();
+        assert!(
+            rendered.starts_with(&format!("anvil {}", env!("CARGO_PKG_VERSION"))),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn allow_tool_repeats_before_or_after_the_subcommand() {

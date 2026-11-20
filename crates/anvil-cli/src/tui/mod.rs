@@ -5,7 +5,7 @@
 //! [`App`] consumes [`UiMsg`]s and draws into a frame, so tests drive it
 //! with messages and a `TestBackend`. The module knows the core's events
 //! and prompt types and nothing about how a session is wired: it never
-//! imports `Wiring`, the memory crate, the compat crate or telemetry.
+//! imports `Wiring`, the memory crate, the compat crate or the usage records.
 
 pub mod app;
 pub mod bridge;
@@ -132,6 +132,8 @@ pub struct SessionInfo {
     pub skills: usize,
     /// How many MCP servers are configured.
     pub mcp_servers: usize,
+    /// The policy in force: `unmanaged`, or `managed` with its hash.
+    pub policy: String,
     /// The newest saved sessions, newest first.
     pub recent_sessions: Vec<RecentSession>,
     /// Whether the logo draws in over time; off when stdout is not a
@@ -237,6 +239,8 @@ pub enum UiMsg {
     ToolResult {
         /// The call.
         call_id: String,
+        /// The tool, so a row made before the start event shows its name.
+        name: String,
         /// The result as the model saw it, already capped.
         text: String,
         /// Whether the tool failed.

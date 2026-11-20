@@ -5,7 +5,7 @@ expression: specs
 [
   {
     "name": "edit_file",
-    "description": "Replaces an exact string in a file. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.",
+    "description": "Replaces an exact string in a file. Line endings do not need to match (LF and CRLF are treated alike and the file keeps its own); spaces, tabs and indentation must. Fails when the old string is missing or, unless replace_all is true, when it occurs more than once; include more surrounding context to make it unique.",
     "parameters": {
       "description": "Arguments of the `edit_file` tool.",
       "properties": {
@@ -218,7 +218,7 @@ expression: specs
   },
   {
     "name": "shell",
-    "description": "Runs a command in the project shell (PowerShell on Windows, sh elsewhere) from the project root and returns its combined stdout and stderr followed by the exit code. Output is capped at 30 KB; the full output is kept in the session folder.",
+    "description": "Runs a command from the project root and returns its combined stdout and stderr followed by the exit code. The shell is PowerShell on Windows and sh elsewhere unless the configuration names another. Output is capped at 30 KB; the full output is kept in the session folder.",
     "parameters": {
       "description": "Arguments of the `shell` tool.",
       "properties": {
@@ -245,7 +245,7 @@ expression: specs
   },
   {
     "name": "write_file",
-    "description": "Writes the given content to a file, creating parent directories and replacing any existing contents. Prefer edit_file for small changes to existing files.",
+    "description": "Writes the given content to a file, creating parent directories and replacing any existing contents. An existing file that uses CRLF line endings throughout keeps them. Prefer edit_file for small changes to existing files.",
     "parameters": {
       "description": "Arguments of the `write_file` tool.",
       "properties": {

@@ -536,7 +536,7 @@ impl Checker<'_> {
                             Status::Error,
                             "mcp",
                             path,
-                            format!("`{name}`: needs a `command` or an http `url`; sse-only servers are not supported"),
+                            format!("`{name}`: needs a `command`, or an http(s) `url` without a `command`; the older SSE transport is not supported"),
                         ),
                     }
                 }
@@ -639,7 +639,7 @@ impl Checker<'_> {
             })
             .unwrap_or_default();
         let detail = if installed.is_empty() {
-            "plugins are not supported; install a plugin's skills with `anvil skill add owner/repo/skills/<name>`".to_owned()
+            "plugins are not supported; clone a plugin's repository and install its skills with `anvil skill add <directory>`".to_owned()
         } else {
             format!(
                 "plugins are not supported ({} installed: {}); install their skills with `anvil skill add`",

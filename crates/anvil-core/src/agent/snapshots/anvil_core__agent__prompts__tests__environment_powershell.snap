@@ -1,0 +1,8 @@
+---
+source: crates/anvil-core/src/agent/prompts.rs
+expression: text
+---
+# Environment
+
+Operating system: Windows. Paths use `\` as the separator; the file tools also accept `/`.
+The shell tool runs each command with `powershell -NoProfile -NonInteractive -Command` (PowerShell). Use PowerShell commands such as `Get-Content`, `Select-String` and `Get-ChildItem`. Command Prompt syntax (`cd /d`, `%VAR%`) and Unix tools and flags (`cat -A`, `head`, `tail`, `grep`) fail in PowerShell. Windows PowerShell has no `&&` or `||`; separate commands with `;`.

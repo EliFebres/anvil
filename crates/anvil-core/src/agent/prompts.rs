@@ -106,11 +106,57 @@ impl PromptSection {
     }
 }
 
+/// The heading of the section that says where the agent runs.
+pub const ENVIRONMENT_HEADING: &str = "Environment";
+
+/// The section that tells the model where it runs: the operating system
+/// family, the path separator and, when the `shell` tool is on offer, how
+/// it starts commands.
+///
+/// It holds no user name, host name or path, and it depends only on the
+/// session's configuration, so it stays byte for byte the same within a
+/// session.
+///
+/// # Arguments
+///
+/// * `os` - The operating system, as `std::env::consts::OS` names it.
+/// * `shell` - What [`crate::tools::shell::shell_fact`] says, or `None`
+///   when the `shell` tool is not registered.
+///
+/// # Returns
+///
+/// The section.
+pub fn environment_section(os: &str, shell: Option<&str>) -> PromptSection {
+    let family = match os {
+        "windows" => "Windows",
+        "macos" => "macOS",
+        "linux" => "Linux",
+        other => other,
+    };
+    let separator = if os == "windows" {
+        "Paths use `\\` as the separator; the file tools also accept `/`."
+    } else {
+        "Paths use `/` as the separator."
+    };
+    let mut text = format!("Operating system: {family}. {separator}");
+    if let Some(shell) = shell {
+        text.push('\n');
+        text.push_str(shell);
+    }
+    PromptSection {
+        heading: ENVIRONMENT_HEADING.to_owned(),
+        text,
+    }
+}
+
 /// Everything that goes into one system prompt.
 #[derive(Debug, Clone)]
 pub struct PromptInputs<'a> {
     /// The active state.
     pub state: State,
+    /// Where the agent runs ([`environment_section`]), placed right after
+    /// the base prompt so the prefix every state shares stays the same.
+    pub environment: Option<&'a PromptSection>,
     /// Instruction files, in the order they apply.
     pub instructions: &'a [Instruction],
     /// Sections from outside the loop, after the instruction files.
@@ -131,10 +177,9 @@ pub struct PromptInputs<'a> {
 ///
 /// The prompt text.
 pub fn system_prompt(inputs: &PromptInputs<'_>) -> String {
-    let mut parts = vec![
-        BASE.trim_end().to_owned(),
-        state_prompt(inputs.state).trim_end().to_owned(),
-    ];
+    let mut parts = vec![BASE.trim_end().to_owned()];
+    parts.extend(inputs.environment.map(PromptSection::render));
+    parts.push(state_prompt(inputs.state).trim_end().to_owned());
     for instruction in inputs.instructions {
         parts.push(format!(
             "# Instructions from {}\n\n{}",
@@ -178,6 +223,8 @@ fn tool_section(tools: &[ToolSpec]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::shell::{ShellTool, shell_fact};
+    use crate::tools::{Container, Runner, Shell, Tool};
 
     fn tools() -> Vec<ToolSpec> {
         vec![
@@ -194,9 +241,17 @@ mod tests {
         ]
     }
 
+    /// The environment of a Windows session with the default shell, so the
+    /// state snapshots show where the section goes.
+    fn windows_environment() -> PromptSection {
+        let fact = shell_fact(&Shell::from_config(Some("powershell")), &Runner::default());
+        environment_section("windows", Some(&fact))
+    }
+
     fn inputs(state: State, tools: &[ToolSpec], instructions: &[Instruction]) -> String {
         system_prompt(&PromptInputs {
             state,
+            environment: Some(&windows_environment()),
             instructions,
             sections: &[],
             tools,
@@ -278,6 +333,7 @@ mod tests {
         }];
         let text = system_prompt(&PromptInputs {
             state: State::Build,
+            environment: None,
             instructions: &instructions,
             sections: &sections,
             tools: &[],
@@ -296,5 +352,149 @@ mod tests {
             "{review}"
         );
         assert_eq!(review_prompt(&[]), REVIEW.trim_end());
+    }
+    /// A container executor with any image; the fact does not name it.
+    fn container() -> Option<Container> {
+        let settings =
+            serde_json::from_value(serde_json::json!({"image": "registry.local/build@sha256:00"}))
+                .expect("settings");
+        Some(Container::new(settings))
+    }
+
+    /// The environment section for one shell setting, as the model sees it.
+    fn environment(os: &str, shell: Option<&str>, runner: &Runner) -> String {
+        let fact = shell.map(|name| shell_fact(&Shell::from_config(Some(name)), runner));
+        environment_section(os, fact.as_deref()).render()
+    }
+
+    #[test]
+    fn environment_section_for_powershell_names_its_commands() {
+        let text = environment("windows", Some("powershell"), &Runner::default());
+        assert!(
+            text.starts_with("# Environment\n\nOperating system: Windows."),
+            "{text}"
+        );
+        assert!(text.contains("`\\` as the separator"), "{text}");
+        assert!(
+            text.contains("`powershell -NoProfile -NonInteractive -Command`"),
+            "{text}"
+        );
+        assert!(text.contains("`Get-Content`, `Select-String`"), "{text}");
+        assert!(text.contains("`cat -A`, `head`"), "{text}");
+        assert!(text.contains("no `&&`"), "{text}");
+        let pwsh = environment("windows", Some("pwsh"), &Runner::default());
+        assert!(pwsh.contains("`pwsh -NoProfile"), "{pwsh}");
+        assert!(!pwsh.contains("no `&&`"), "PowerShell 7 has &&: {pwsh}");
+        insta::assert_snapshot!("environment_powershell", text);
+    }
+
+    #[test]
+    fn environment_section_for_sh_is_posix() {
+        let text = environment("linux", Some("sh"), &Runner::default());
+        assert!(
+            text.contains("Operating system: Linux. Paths use `/`"),
+            "{text}"
+        );
+        assert!(text.contains("`sh -c`, a POSIX shell"), "{text}");
+        assert!(!text.contains("PowerShell"), "{text}");
+        insta::assert_snapshot!("environment_sh", text);
+        let mac = environment("macos", Some("zsh"), &Runner::default());
+        assert!(mac.contains("Operating system: macOS."), "{mac}");
+        assert!(mac.contains("`zsh -c`, a POSIX shell"), "{mac}");
+    }
+
+    #[test]
+    fn environment_section_names_no_user_host_or_home() {
+        for (os, configured) in [
+            ("windows", r"C:\Users\someone\tools\nu.exe"),
+            ("linux", "/home/someone/bin/nu"),
+        ] {
+            let text = environment(os, Some(configured), &Runner::default());
+            assert!(
+                text.contains("`nu -c`, the shell the configuration names"),
+                "{text}"
+            );
+            assert!(!text.contains("someone"), "no user name: {text}");
+            assert!(
+                !text.contains("Users") && !text.contains("/home"),
+                "no home path: {text}"
+            );
+        }
+        let cmd = environment(
+            "windows",
+            Some(r"C:\Windows\System32\cmd.exe"),
+            &Runner::default(),
+        );
+        assert!(cmd.contains("`cmd /C` (Command Prompt)"), "{cmd}");
+        assert!(!cmd.contains("System32"), "{cmd}");
+        insta::assert_snapshot!(
+            "environment_custom",
+            environment("linux", Some("/home/someone/bin/nu"), &Runner::default())
+        );
+    }
+
+    #[test]
+    fn environment_section_follows_each_hardening_shell_mode() {
+        // ask: the configured shell on the host, as above.
+        let ask = environment("windows", Some("powershell"), &Runner::default());
+        assert!(ask.contains("(PowerShell)"), "{ask}");
+
+        // allowlist: no shell interpreter, so no pipes or redirection.
+        let direct = Runner {
+            direct: true,
+            container: None,
+        };
+        let allowlist = environment("windows", Some("powershell"), &direct);
+        assert!(allowlist.contains("no shell interpreter"), "{allowlist}");
+        assert!(
+            allowlist.contains("pipes (`|`), redirection"),
+            "{allowlist}"
+        );
+        assert!(!allowlist.contains("PowerShell"), "{allowlist}");
+        insta::assert_snapshot!("environment_allowlist", allowlist);
+
+        // off: the section says nothing about a shell.
+        let off = environment_section("windows", None).render();
+        assert_eq!(
+            off,
+            "# Environment\n\nOperating system: Windows. Paths use `\\` as the separator; the file tools also accept `/`."
+        );
+        assert!(!off.to_lowercase().contains("shell"), "{off}");
+
+        // The container executor runs `sh -c` in Linux whatever the host.
+        let contained = Runner {
+            direct: false,
+            container: container(),
+        };
+        let text = environment("windows", Some("powershell"), &contained);
+        assert!(text.contains("`sh -c` inside a Linux container"), "{text}");
+        assert!(!text.contains("(PowerShell)"), "{text}");
+        assert!(
+            !text.contains("registry.local"),
+            "the image is not told: {text}"
+        );
+        insta::assert_snapshot!("environment_container", text);
+        let both = Runner {
+            direct: true,
+            container: container(),
+        };
+        let text = environment("linux", Some("sh"), &both);
+        assert!(text.contains("no shell interpreter"), "{text}");
+        assert!(text.contains("Linux container"), "{text}");
+    }
+
+    #[test]
+    fn the_shell_tool_says_what_the_environment_section_says() {
+        let shell = Shell::from_config(Some("powershell"));
+        let runner = Runner::default();
+        let fact = shell_fact(&shell, &runner);
+        let tool = ShellTool::for_context(&shell, &runner);
+        assert!(tool.description().contains(&fact), "{}", tool.description());
+        assert_eq!(
+            shell_fact(&shell, &runner),
+            fact,
+            "the same text every time"
+        );
+        insta::assert_snapshot!("shell_tool_description_powershell", tool.description());
     }
 }

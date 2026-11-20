@@ -69,6 +69,13 @@ pub enum ProviderError {
         message: String,
     },
 
+    /// anvil refused to send the request: the endpoint is not allowed.
+    #[error("request refused: {detail}")]
+    Refused {
+        /// Why.
+        detail: String,
+    },
+
     /// The response could not be understood.
     #[error("malformed provider response: {detail}")]
     Malformed {

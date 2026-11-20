@@ -1,0 +1,90 @@
+# anvil managed policy: standard.
+#
+# For a developer workstation on the internal network. The model server is
+# fixed, prompts work as usual, and the features developers rely on
+# (skills, memory, subagents, anvil build, trusted repositories) are on.
+# Hooks and MCP servers, which run programs, stay off.
+#
+# Install as an administrator at /etc/anvil/policy.toml (Linux and macOS,
+# owned by root, not writable by group or others) or
+# C:\ProgramData\anvil\policy.toml (Windows, owned by and writable only by
+# Administrators and SYSTEM). docs/ADMIN_GUIDE.md describes every key.
+# Check it before rollout with: anvil policy check standard.toml
+
+version = 1
+
+[network]
+# The model servers anvil may call, as host:port. Edit these.
+allowed_hosts = ["models.internal.example:443"]
+require_tls = true
+# Requests go through no proxy (the default); HTTPS_PROXY and the other
+# proxy variables are ignored. "system" uses them or the system settings;
+# a URL such as "http://proxy.internal.example:3128" names one proxy.
+proxy = "none"
+# To trust only your own certificate authorities instead of the system's
+# store, and to present a client certificate, uncomment (absolute paths):
+# ca_bundle = "/etc/anvil/pki/ca.pem"
+# client_cert = "/etc/anvil/pki/client.pem"
+# client_key = "/etc/anvil/pki/client.key"
+
+[models]
+# Empty means any provider name and any model the servers offer.
+providers = []
+models = []
+
+[permissions]
+# --yes stays off on workstations; unattended runs belong in CI with
+# their own policy.
+allow_yes = false
+allow_allow_tool = true
+allow_always = true
+require_plan_approval = false
+# Network clients and git push are refused by the built-in deny
+# categories. If a user's own rule names one to lift that, these still
+# make it ask.
+ask = ["shell:git push*", "shell:curl *", "shell:wget *"]
+deny = []
+
+[files]
+extra_roots = []
+deny = []
+
+[features]
+# MCP servers stay off. To allow one HTTP server, add its host:port to
+# allowed_hosts and use:
+# mcp = "allowlist"
+# mcp_servers = [{ name = "docs", url = "https://mcp.internal.example/mcp" }]
+mcp = "off"
+hooks = false
+skills = "local"
+memory = true
+build = true
+delegation = true
+
+[projects]
+allow_trust = true
+
+[data]
+# Delete session folders (with their audit.jsonl) and build folders older
+# than 90 days when a session starts; the audit mirror is kept.
+retention_days = 90
+# Keep the whole (redacted) conversation so sessions can be resumed.
+transcript = "full"
+
+[limits]
+session_tokens = 4000000
+build_tokens = 20000000
+
+[shell]
+# Every command runs in the user's shell after the permission rules, which
+# ask by default. Matching command text on the workstation is a guard rail,
+# not a boundary: use mode = "allowlist" or executor = "container" for one.
+mode = "ask"
+
+[audit]
+# Every session writes a hash-chained audit.jsonl in its session folder.
+# Not required: a session keeps running when a record cannot be written.
+required = false
+# Prompts and tool arguments are kept as size and SHA-256 only; "full"
+# keeps the redacted text.
+record = "digest"

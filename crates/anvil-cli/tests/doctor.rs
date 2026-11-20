@@ -1,5 +1,6 @@
-//! `anvil doctor` against mock providers: the failing one lands in its own
-//! row with a fix, the healthy one passes.
+//! `anvil doctor` and `anvil setup --endpoint` against mock providers: the
+//! failing provider lands in its own row with a fix, the healthy one passes,
+//! an echoed key never shows, and setup writes one provider for every role.
 
 use std::path::Path;
 use std::process::Command;
@@ -168,4 +169,156 @@ async fn doctor_reports_the_failing_provider_in_its_row_with_a_fix() {
     assert!(!stdout.contains("github:"), "{stdout}");
     assert!(stdout.contains("SKIP  secrets"), "{stdout}");
     assert!(stdout.contains("check(s) failed"), "{stdout}");
+}
+
+#[tokio::test]
+async fn a_server_that_echoes_the_key_cannot_put_it_in_output_or_logs() {
+    const KEY: &str = "echoed-secret-value-1234567890";
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_raw(
+            format!(r#"{{"error":{{"message":"bad key Bearer {KEY}"}}}}"#),
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir");
+    write(
+        &home.join(".anvil").join("config.toml"),
+        &config(&server.uri(), &server.uri()),
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(&project)
+        .env("ANVIL_HOME", &home)
+        .env("ANVIL_LOG", "debug")
+        .env("ANVIL_TEST_GOOD_KEY", KEY)
+        .env("ANVIL_TEST_BAD_KEY", KEY)
+        .arg("doctor")
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stdout.contains("[redacted]"), "{stdout}");
+    assert!(!stdout.contains(KEY), "{stdout}");
+    assert!(!stderr.contains(KEY), "{stderr}");
+    let logs = project.join(".anvil").join("logs");
+    for entry in std::fs::read_dir(&logs).expect("logs written").flatten() {
+        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        assert!(
+            !text.contains(KEY),
+            "{} holds the key",
+            entry.path().display()
+        );
+    }
+}
+
+#[tokio::test]
+async fn setup_endpoint_probes_the_server_and_points_every_role_at_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"data": [{"id": "qwen-coder", "max_model_len": 65536}]}"#,
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("home");
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(dir.path())
+        .env("ANVIL_HOME", &home)
+        .env("ANVIL_LOG", "off")
+        .env("ANVIL_ENDPOINT_KEY", "endpoint-key")
+        .args(["setup", "--endpoint", &server.uri()])
+        .output()
+        .expect("anvil runs");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(home.join(".anvil").join("config.toml")).expect("config");
+    let config: anvil_types::AnvilConfig = toml::from_str(&text).expect("parses");
+    config.validate().expect("validates");
+    let endpoint = &config.providers["endpoint"];
+    assert_eq!(
+        endpoint.base_url,
+        format!("{}/v1", server.uri()),
+        "fell back to /v1"
+    );
+    assert_eq!(endpoint.model, "qwen-coder");
+    assert_eq!(endpoint.context_window, 65536);
+    assert_eq!(config.roles.coder, "endpoint");
+    assert_eq!(config.roles.summarizer, "endpoint");
+    assert_eq!(config.providers.len(), 1, "no hosted provider was written");
+}
+
+#[test]
+fn setup_endpoint_refuses_plain_http_to_a_remote_host_before_sending() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(dir.path())
+        .env("ANVIL_HOME", dir.path().join("home"))
+        .env("ANVIL_LOG", "off")
+        .args(["setup", "--endpoint", "http://198.51.100.7:8000/v1"])
+        .output()
+        .expect("anvil runs");
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("plain http"), "{stderr}");
+    assert!(
+        !dir.path()
+            .join("home")
+            .join(".anvil")
+            .join("config.toml")
+            .exists()
+    );
+}
+
+#[test]
+fn doctor_egress_lists_each_destination_and_sends_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path().join("home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir");
+    // Nothing listens on these ports: the report must not connect.
+    write(
+        &home.join(".anvil").join("config.toml"),
+        &config("http://127.0.0.1:9", "https://models.example.com"),
+    );
+    write(
+        &home.join(".anvil").join("mcp.toml"),
+        "[servers.lan]\nurl = \"http://10.0.0.7:3000/mcp\"\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_anvil"))
+        .current_dir(&project)
+        .env("ANVIL_HOME", &home)
+        .env("ANVIL_LOG", "off")
+        .args(["doctor", "--egress"])
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for row in [
+        "dest:127.0.0.1:9",
+        "provider good: http://127.0.0.1:9/v1",
+        "dest:models.example.com:443",
+        "provider bad: https://models.example.com/v1",
+        "refused:MCP server lan",
+        "proxy",
+        "redirects",
+    ] {
+        assert!(stdout.contains(row), "{row} missing in:\n{stdout}");
+    }
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the refused server fails the report"
+    );
 }

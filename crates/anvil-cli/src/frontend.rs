@@ -158,7 +158,7 @@ impl Frontend {
     ///
     /// # Returns
     ///
-    /// The prompt, not yet recorded by telemetry.
+    /// The prompt, not yet in the usage records.
     pub fn prompt(&self, yes: bool) -> Box<dyn PermissionPrompt> {
         if yes {
             return Box::new(StaticPrompt(PromptAnswer::Yes));
@@ -308,7 +308,7 @@ impl Frontend {
 /// The slash commands the chat itself handles, for Tab completion.
 pub const BUILTIN_COMMANDS: &[&str] = &[
     "/plan", "/build", "/review", "/compact", "/model", "/cost", "/mode", "/expand", "/plain",
-    "/help", "/ticket", "/quit", "/exit",
+    "/help", "/quit", "/exit",
 ];
 
 /// What the UI shows about a session.
@@ -354,7 +354,7 @@ pub fn session_info(
                 .collect()
         })
         .unwrap_or_default();
-    let recent_sessions = anvil_core::context::list_sessions(&wiring.cwd)
+    let recent_sessions = anvil_core::context::list_sessions(&wiring.sessions_root())
         .unwrap_or_default()
         .into_iter()
         .take(RECENT_SESSIONS)
@@ -385,10 +385,23 @@ pub fn session_info(
         rules,
         skills: wiring.skills.skills().len(),
         mcp_servers: wiring.mcp_servers.servers().len(),
+        policy: policy_label(wiring),
         recent_sessions,
         animate: animate_logo(
             io::stdout().is_terminal(),
             std::env::var_os("ANVIL_NO_ANIMATION").is_some(),
+        ),
+    }
+}
+
+/// The policy as the startup screen shows it: `unmanaged`, or `managed`
+/// with the first twelve hex digits of its hash.
+fn policy_label(wiring: &Wiring) -> String {
+    match &wiring.policy {
+        None => anvil_types::policy::UNMANAGED.to_owned(),
+        Some(loaded) => format!(
+            "managed (sha256:{})",
+            loaded.sha256.get(..12).unwrap_or(&loaded.sha256)
         ),
     }
 }

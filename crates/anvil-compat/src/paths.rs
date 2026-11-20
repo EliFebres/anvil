@@ -2,7 +2,8 @@
 //!
 //! Every kind of file (skills, commands, agents) lives in the same four
 //! places, searched in the same order: the project's `.anvil`, the
-//! project's `.claude`, the home `.anvil`, the home `.claude`.
+//! project's `.claude`, the home `.anvil`, the home `.claude`. The two
+//! project places are skipped for a repository the user has not trusted.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,8 @@ pub enum Origin {
     HomeClaude,
     /// Shipped with anvil.
     Bundled,
+    /// A folder the managed policy names.
+    Managed,
 }
 
 impl fmt::Display for Origin {
@@ -30,6 +33,7 @@ impl fmt::Display for Origin {
             Self::HomeAnvil => "~/.anvil",
             Self::HomeClaude => "~/.claude",
             Self::Bundled => "bundled",
+            Self::Managed => "policy",
         })
     }
 }
@@ -39,18 +43,24 @@ impl fmt::Display for Origin {
 ///
 /// # Arguments
 ///
-/// * `cwd` - The project root.
+/// * `project` - The project root, or `None` when the repository is not
+///   trusted and nothing it ships may load.
 /// * `home` - The home directory, if known.
 /// * `kind` - The subdirectory name, such as `skills` or `commands`.
 ///
 /// # Returns
 ///
 /// Each directory with its origin.
-pub fn config_dirs(cwd: &Path, home: Option<&Path>, kind: &str) -> Vec<(PathBuf, Origin)> {
-    let mut dirs = vec![
-        (cwd.join(".anvil").join(kind), Origin::ProjectAnvil),
-        (cwd.join(".claude").join(kind), Origin::ProjectClaude),
-    ];
+pub fn config_dirs(
+    project: Option<&Path>,
+    home: Option<&Path>,
+    kind: &str,
+) -> Vec<(PathBuf, Origin)> {
+    let mut dirs = Vec::new();
+    if let Some(project) = project {
+        dirs.push((project.join(".anvil").join(kind), Origin::ProjectAnvil));
+        dirs.push((project.join(".claude").join(kind), Origin::ProjectClaude));
+    }
     if let Some(home) = home {
         dirs.push((home.join(".anvil").join(kind), Origin::HomeAnvil));
         dirs.push((home.join(".claude").join(kind), Origin::HomeClaude));
@@ -64,7 +74,7 @@ mod tests {
 
     #[test]
     fn lists_project_then_home_and_skips_home_when_unknown() {
-        let dirs = config_dirs(Path::new("p"), Some(Path::new("h")), "skills");
+        let dirs = config_dirs(Some(Path::new("p")), Some(Path::new("h")), "skills");
         assert_eq!(
             dirs,
             vec![
@@ -74,7 +84,15 @@ mod tests {
                 (PathBuf::from("h/.claude/skills"), Origin::HomeClaude),
             ]
         );
-        assert_eq!(config_dirs(Path::new("p"), None, "x").len(), 2);
+        assert_eq!(config_dirs(Some(Path::new("p")), None, "x").len(), 2);
+        assert_eq!(
+            config_dirs(None, Some(Path::new("h")), "x"),
+            vec![
+                (PathBuf::from("h/.anvil/x"), Origin::HomeAnvil),
+                (PathBuf::from("h/.claude/x"), Origin::HomeClaude),
+            ],
+            "an untrusted project contributes nothing"
+        );
         assert_eq!(Origin::HomeClaude.to_string(), "~/.claude");
     }
 }

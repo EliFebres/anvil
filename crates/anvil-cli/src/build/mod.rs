@@ -13,7 +13,7 @@ mod env;
 mod git;
 mod plan;
 mod run;
-mod state;
+pub(crate) mod state;
 
 #[cfg(test)]
 mod tests;
@@ -64,7 +64,9 @@ pub async fn execute(args: BuildArgs, wiring: Wiring, yes: bool) -> anyhow::Resu
         usd: args.budget_usd,
         tokens: args.budget_tokens,
     };
+    crate::policy::check_build_shell(wiring.policy.as_deref(), &wiring.shell)?;
     let settings = settings(&wiring);
+    let plans_need_a_person = wiring.plans_need_a_person();
     let env = WiringEnv::new(wiring, yes);
     match (args.command, args.spec) {
         (Some(BuildCommand::Resume { id }), _) => {
@@ -74,7 +76,7 @@ pub async fn execute(args: BuildArgs, wiring: Wiring, yes: bool) -> anyhow::Resu
             anyhow::bail!("`status` does not start a build")
         }
         (None, Some(spec)) => {
-            let gate: Box<dyn PlanGate> = if yes {
+            let gate: Box<dyn PlanGate> = if yes && !plans_need_a_person {
                 Box::new(AutoApprove)
             } else {
                 Box::new(TerminalGate)
@@ -92,7 +94,8 @@ fn settings(wiring: &Wiring) -> Settings {
     let config: &AnvilConfig = &wiring.config;
     Settings {
         cwd: wiring.cwd.clone(),
-        shell: anvil_core::tools::Shell::from_config(config.tools.shell.as_deref()),
+        sessions_root: wiring.sessions_root(),
+        ctx: wiring.tool_context(),
         check: config.tools.check.clone().map_or(
             anvil_core::agent::CheckCommand::Detect,
             anvil_core::agent::CheckCommand::Command,

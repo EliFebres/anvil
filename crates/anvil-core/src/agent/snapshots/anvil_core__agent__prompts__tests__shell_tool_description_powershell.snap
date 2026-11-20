@@ -1,0 +1,5 @@
+---
+source: crates/anvil-core/src/agent/prompts.rs
+expression: tool.description()
+---
+Runs a command from the project root and returns its combined stdout and stderr followed by the exit code. The shell tool runs each command with `powershell -NoProfile -NonInteractive -Command` (PowerShell). Use PowerShell commands such as `Get-Content`, `Select-String` and `Get-ChildItem`. Command Prompt syntax (`cd /d`, `%VAR%`) and Unix tools and flags (`cat -A`, `head`, `tail`, `grep`) fail in PowerShell. Windows PowerShell has no `&&` or `||`; separate commands with `;`. Output is capped at 30 KB; the full output is kept in the session folder.

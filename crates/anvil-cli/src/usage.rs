@@ -1,0 +1,1199 @@
+//! Usage wiring: loop events become content-free records and
+//! permission answers are recorded as they happen. The same handle feeds
+//! the session's audit log (`crate::audit`), so every event, decision,
+//! prompt and plan answer reaches both from one place.
+//!
+//! Everything here translates; the rules that keep content out of the
+//! files live in `anvil_audit::record`.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use anvil_audit::{
+    CheckOrigin, PermissionAnswer, PermissionScope, RecordKind, Recorder, SessionMode,
+    SessionOutcome, StopKind, Tokens, ToolOutcomeKind, WarningClass,
+};
+use anvil_core::agent::{
+    CheckSource, EventSink, EventTap, IncompleteReason, LoopEvent, PlanDecision, PlanGate,
+    ReviewVerdict, Status,
+};
+use anvil_core::provider::{
+    CompletionRequest, Event, EventStream, Provider, ProviderError, StopReason,
+};
+use anvil_core::tools::{
+    DecisionScope, PermissionDecision, PermissionObserver, PermissionPrompt, PermissionRequest,
+    PromptAnswer, ToolOutcome, ToolRegistry, permissions,
+};
+use futures_util::StreamExt;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+use crate::audit::{MAIN_AGENT, SessionAudit};
+use crate::status::StatusReporter;
+use crate::wiring::Wiring;
+
+/// Which provider plays which role, so a turn can be attributed.
+#[derive(Debug, Clone)]
+struct Roles {
+    coder: String,
+    planner: Option<String>,
+    worker: Option<String>,
+    reviewer: String,
+    summarizer: String,
+}
+
+/// The usage records of one session.
+///
+/// Cloning shares the recorder and the role names, so the event tee, the
+/// permission prompt and the chat loop all see the same state.
+#[derive(Clone)]
+pub struct SessionUsage {
+    recorder: Arc<Recorder>,
+    roles: Arc<Mutex<Roles>>,
+    /// Provider name to model name, from config.
+    models: Arc<BTreeMap<String, String>>,
+    /// Told of every loop event, so the session's `status.json` follows the loop.
+    status: Option<StatusReporter>,
+    /// The session's audit log; `None` only in tests that do not need one.
+    audit: Option<Arc<SessionAudit>>,
+}
+
+impl SessionUsage {
+    /// Opens the recorder and the audit log for a session and records its
+    /// start in both.
+    ///
+    /// # Arguments
+    ///
+    /// * `wiring` - Config and paths, bound to the session.
+    /// * `session` - The session id.
+    /// * `mode` - How the session was started.
+    /// * `yes` - Whether `--yes` is in effect, for the audit record.
+    ///
+    /// # Returns
+    ///
+    /// The usage handle.
+    ///
+    /// # Errors
+    ///
+    /// When the policy requires the audit log and it cannot be opened; the
+    /// session must not start.
+    pub fn start(
+        wiring: &Wiring,
+        session: &str,
+        mode: SessionMode,
+        yes: bool,
+    ) -> anyhow::Result<Self> {
+        let session_dir = wiring
+            .session_dir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| wiring.sessions_root().join(session));
+        let audit = SessionAudit::open(wiring, session, &session_dir)?;
+        let mode_name = match mode {
+            SessionMode::Run => "run",
+            SessionMode::Chat => "chat",
+            SessionMode::Resume => "resume",
+        };
+        audit.start(wiring, mode_name, yes);
+        let mut this = Self::new(
+            &wiring.cwd,
+            wiring.home.as_deref(),
+            session,
+            &wiring.config.roles.coder,
+            wiring.config.roles.reviewer.as_deref(),
+            &wiring.config.roles.summarizer,
+            wiring
+                .config
+                .providers
+                .iter()
+                .map(|(name, provider)| (name.clone(), provider.model.clone()))
+                .collect(),
+        );
+        this.audit = Some(Arc::new(audit));
+        this.set_planner(wiring.config.roles.planner.as_deref());
+        this.set_worker(wiring.config.roles.worker.as_deref());
+        this.record(RecordKind::SessionStarted { mode });
+        Ok(this)
+    }
+
+    /// The handle with an audit log, for tests that build one by hand.
+    #[cfg(test)]
+    fn with_audit(self, audit: SessionAudit) -> Self {
+        self.with_shared_audit(Arc::new(audit))
+    }
+
+    /// The handle with an audit log the test keeps a handle to.
+    #[cfg(test)]
+    fn with_shared_audit(mut self, audit: Arc<SessionAudit>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// Records a prompt the user submitted, in the audit log.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The prompt as typed.
+    pub fn prompt(&self, text: &str) {
+        if let Some(audit) = &self.audit {
+            audit.prompt(text);
+        }
+    }
+
+    /// Wraps a plan gate so every answer is audited.
+    ///
+    /// # Arguments
+    ///
+    /// * `answered_by` - `user`, `yes_flag` or `build`.
+    /// * `inner` - Who actually answers.
+    ///
+    /// # Returns
+    ///
+    /// The gate.
+    pub fn gate(&self, answered_by: &'static str, inner: Box<dyn PlanGate>) -> Box<dyn PlanGate> {
+        Box::new(AuditedGate {
+            inner,
+            usage: self.clone(),
+            answered_by,
+        })
+    }
+
+    /// Why the audit log stopped the session, once it has.
+    ///
+    /// # Returns
+    ///
+    /// The first failed write of a required log, or `None`.
+    pub fn audit_failure(&self) -> Option<String> {
+        self.audit.as_ref().and_then(|audit| audit.failure())
+    }
+
+    /// Resolves once a required audit log fails; never otherwise.
+    ///
+    /// # Returns
+    ///
+    /// The reason.
+    pub async fn audit_stopped(&self) -> String {
+        match &self.audit {
+            Some(audit) => audit.stopped().await,
+            None => std::future::pending().await,
+        }
+    }
+
+    /// Builds the handle without touching a [`Wiring`], for tests.
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        cwd: &Path,
+        home: Option<&Path>,
+        session: &str,
+        coder: &str,
+        reviewer: Option<&str>,
+        summarizer: &str,
+        models: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            recorder: Arc::new(Recorder::open(cwd, home, session)),
+            roles: Arc::new(Mutex::new(Roles {
+                coder: coder.to_owned(),
+                planner: None,
+                worker: None,
+                reviewer: reviewer.unwrap_or(coder).to_owned(),
+                summarizer: summarizer.to_owned(),
+            })),
+            models: Arc::new(models),
+            status: None,
+            audit: None,
+        }
+    }
+
+    /// Makes the event tee keep a status file current.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The session's status reporter.
+    ///
+    /// # Returns
+    ///
+    /// The handle, to be used before [`SessionUsage::sink`].
+    pub fn with_status(mut self, status: StatusReporter) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Records one event.
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - What happened.
+    pub fn record(&self, kind: RecordKind) {
+        self.recorder.record(kind);
+    }
+
+    /// Switches the coder, as chat's `/model` does.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The provider name.
+    pub fn set_coder(&self, name: &str) {
+        if let Ok(mut roles) = self.roles.lock() {
+            roles.coder = name.to_owned();
+        }
+    }
+
+    /// Sets the planner, which serves Plan turns when present.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The provider name, or `None` when the coder plans.
+    pub fn set_planner(&self, name: Option<&str>) {
+        if let Ok(mut roles) = self.roles.lock() {
+            roles.planner = name.map(str::to_owned);
+        }
+    }
+
+    /// Sets the worker, which serves delegated turns when present.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The provider name, or `None` when the coder works.
+    pub fn set_worker(&self, name: Option<&str>) {
+        if let Ok(mut roles) = self.roles.lock() {
+            roles.worker = name.map(str::to_owned);
+        }
+    }
+
+    /// Records every skill `requires` entry no registered tool satisfies.
+    ///
+    /// # Arguments
+    ///
+    /// * `wiring` - The skill set.
+    /// * `registry` - The registered tools.
+    pub fn record_skill_requires(&self, wiring: &Wiring, registry: &ToolRegistry) {
+        for (skill, tool) in wiring.skills.missing_requires(&registry.names()) {
+            self.record(RecordKind::SkillRequires { skill, tool });
+        }
+    }
+
+    /// Records a provider failure.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider` - The provider name.
+    /// * `error` - The failure; only its kind and HTTP status are kept.
+    pub fn record_provider_error(&self, provider: &str, error: &ProviderError) {
+        let (kind, http_status) = error_kind(error);
+        self.record(RecordKind::ProviderError {
+            provider: provider.to_owned(),
+            kind,
+            http_status,
+        });
+    }
+
+    /// Wraps a prompt so every answer is recorded.
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - Who actually answers.
+    ///
+    /// # Returns
+    ///
+    /// The recording prompt.
+    pub fn recording(&self, inner: Box<dyn PermissionPrompt>) -> Box<dyn PermissionPrompt> {
+        Box::new(RecordingPrompt {
+            inner,
+            usage: self.clone(),
+        })
+    }
+
+    /// Records every permission decision of the session, including the
+    /// ones an existing approval made without a prompt and the ones made
+    /// in sub-agent registries. Call it before [`Wiring::registry`].
+    ///
+    /// # Arguments
+    ///
+    /// * `wiring` - The session's wiring; every registry it builds reports here.
+    pub fn observe_permissions(&self, wiring: &Wiring) {
+        wiring.set_permission_observer(Arc::new(self.clone()));
+        if let Some(audit) = self.audit.as_ref().filter(|audit| audit.required()) {
+            wiring.set_call_gate(Arc::clone(audit) as Arc<dyn anvil_core::tools::CallGate>);
+        }
+        let this = self.clone();
+        wiring.set_subagent_tap(Arc::new(move |agent: &str| {
+            Arc::new(AuditTap {
+                usage: this.clone(),
+                agent: agent.to_owned(),
+            }) as Arc<dyn EventTap>
+        }));
+    }
+
+    /// A sink that records every event and forwards it downstream.
+    ///
+    /// The returned task ends once the sink is dropped and every event has
+    /// been recorded and forwarded; await it before classifying.
+    ///
+    /// # Arguments
+    ///
+    /// * `downstream` - Where to forward events, such as a renderer.
+    ///
+    /// # Returns
+    ///
+    /// The sink and the task.
+    pub fn sink(
+        &self,
+        downstream: Option<mpsc::UnboundedSender<LoopEvent>>,
+    ) -> (EventSink, JoinHandle<()>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let this = self.clone();
+        let task = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let Some(status) = &this.status {
+                    status.observe(&event);
+                }
+                if let Some(kind) = this.translate(&event) {
+                    this.record(kind);
+                }
+                if let Some(downstream) = &downstream {
+                    let _ = downstream.send(event);
+                }
+            }
+        });
+        let sink = EventSink::new(tx).with_tap(Arc::new(AuditTap {
+            usage: self.clone(),
+            agent: MAIN_AGENT.to_owned(),
+        }));
+        (sink, task)
+    }
+
+    /// Wraps a provider so its completions are recorded as turns of `state`.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The provider name.
+    /// * `provider` - The provider.
+    /// * `state` - The label for the turn records, such as `memory`.
+    ///
+    /// # Returns
+    ///
+    /// The wrapped provider.
+    pub fn recorded(
+        &self,
+        name: &str,
+        provider: Arc<dyn Provider>,
+        state: &'static str,
+    ) -> Arc<dyn Provider> {
+        Arc::new(RecordedProvider {
+            inner: provider,
+            usage: self.clone(),
+            provider: name.to_owned(),
+            state,
+        })
+    }
+
+    /// Records how a run ended.
+    ///
+    /// # Arguments
+    ///
+    /// * `status` - The loop's final status.
+    pub fn finish_run(&self, status: &Status) {
+        if let Status::ProviderError { error } = status {
+            let coder = self
+                .roles
+                .lock()
+                .map(|roles| roles.coder.clone())
+                .unwrap_or_default();
+            self.record_provider_error(&coder, error);
+        }
+        self.finish(session_outcome(status));
+    }
+
+    /// Records how a session ended.
+    ///
+    /// # Arguments
+    ///
+    /// * `outcome` - How the session ended.
+    pub fn finish(&self, outcome: SessionOutcome) {
+        if let Some(audit) = &self.audit {
+            audit.end(&outcome_text(&outcome));
+        }
+        self.record(RecordKind::SessionEnded { outcome });
+    }
+
+    /// The project-local usage folder.
+    #[cfg(test)]
+    fn project_dir(&self) -> std::path::PathBuf {
+        self.recorder.project_dir().to_path_buf()
+    }
+
+    /// The provider and model that serve a role.
+    fn provider_for(&self, role: &str) -> (String, String) {
+        let name = match self.roles.lock() {
+            Ok(roles) => match role {
+                "planner" => roles.planner.clone().unwrap_or_else(|| roles.coder.clone()),
+                "worker" => roles.worker.clone().unwrap_or_else(|| roles.coder.clone()),
+                "reviewer" => roles.reviewer.clone(),
+                "summarizer" => roles.summarizer.clone(),
+                _ => roles.coder.clone(),
+            },
+            Err(_) => String::new(),
+        };
+        let model = self.models.get(&name).cloned().unwrap_or_default();
+        (name, model)
+    }
+
+    /// The record for a loop event, or `None` for events that carry only
+    /// text or paths.
+    fn translate(&self, event: &LoopEvent) -> Option<RecordKind> {
+        Some(match event {
+            LoopEvent::StateEntered { state, visit } => RecordKind::StateEntered {
+                state: state.to_string(),
+                visit: *visit,
+            },
+            LoopEvent::TurnFinished {
+                state,
+                stop_reason,
+                role,
+                usage,
+                latency_ms,
+                retries,
+            } => {
+                let (provider, model) = self.provider_for(role.name());
+                RecordKind::Turn {
+                    state: state.to_string(),
+                    role: Some(role.name().to_owned()),
+                    provider,
+                    model,
+                    tokens: usage.map(tokens).unwrap_or_default(),
+                    latency_ms: *latency_ms,
+                    retries: *retries,
+                    stop_reason: stop_kind(stop_reason),
+                }
+            }
+            LoopEvent::ToolStarted { call } => {
+                RecordKind::tool_call(&call.name, &call.arguments_json)
+            }
+            LoopEvent::ToolFinished {
+                name,
+                outcome,
+                preview,
+                stats,
+                ..
+            } => RecordKind::tool_result(
+                name,
+                outcome_kind(*outcome),
+                preview,
+                stats.bytes,
+                stats.truncated,
+                stats.digest,
+            ),
+            LoopEvent::ReviewVerdict { verdict } => match verdict {
+                ReviewVerdict::Approve { .. } => RecordKind::review(true, &[]),
+                ReviewVerdict::Changes { items } => RecordKind::review(false, items),
+            },
+            LoopEvent::CheckFinished {
+                command,
+                source,
+                passed,
+                ..
+            } => {
+                let origin = match source {
+                    CheckSource::Detected => CheckOrigin::Detected,
+                    CheckSource::Plan => CheckOrigin::Plan,
+                    CheckSource::Standing => CheckOrigin::Standing,
+                };
+                RecordKind::check(command, origin, *passed)
+            }
+            LoopEvent::Compacted {
+                dropped_messages,
+                usage,
+                ..
+            } => {
+                let (provider, model) = self.provider_for("summarizer");
+                RecordKind::Compacted {
+                    dropped: *dropped_messages,
+                    provider,
+                    model,
+                    tokens: usage.map(tokens),
+                }
+            }
+            LoopEvent::Warning(message) => RecordKind::Warning {
+                class: WarningClass::of(message),
+            },
+            LoopEvent::Transition { .. }
+            | LoopEvent::TextDelta(_)
+            | LoopEvent::ReasoningDelta(_)
+            | LoopEvent::PlanWritten { .. }
+            | LoopEvent::PlanUpdated { .. }
+            | LoopEvent::FileChanged { .. }
+            | LoopEvent::CheckStarted { .. }
+            | LoopEvent::ProposedEdit { .. }
+            | LoopEvent::Escalated { .. }
+            | LoopEvent::Finished { .. } => return None,
+        })
+    }
+}
+
+/// Records each answer before handing it back to the registry.
+struct RecordingPrompt {
+    inner: Box<dyn PermissionPrompt>,
+    usage: SessionUsage,
+}
+
+impl PermissionPrompt for RecordingPrompt {
+    fn ask(&self, request: &PermissionRequest) -> PromptAnswer {
+        let answer = self.inner.ask(request);
+        let rule = permissions::always_rule(&request.tool, request.target.as_deref());
+        let recorded = match answer {
+            PromptAnswer::Yes => PermissionAnswer::Yes,
+            PromptAnswer::No => PermissionAnswer::No,
+            PromptAnswer::Session => PermissionAnswer::Session,
+            PromptAnswer::Always => PermissionAnswer::Always,
+        };
+        self.usage
+            .record(RecordKind::permission(&request.tool, &rule, recorded));
+        answer
+    }
+
+    fn answer_source(&self) -> anvil_core::tools::DecisionSource {
+        self.inner.answer_source()
+    }
+}
+
+/// Hands each loop event to the audit log the moment it is emitted, so
+/// audit records keep the order things happened in.
+struct AuditTap {
+    usage: SessionUsage,
+    /// `main`, or the subagent whose run this tap serves.
+    agent: String,
+}
+
+impl EventTap for AuditTap {
+    fn seen(&self, event: &LoopEvent) {
+        let Some(audit) = &self.usage.audit else {
+            return;
+        };
+        let role = match event {
+            LoopEvent::TurnFinished { role, .. } => role.name(),
+            _ => "summarizer",
+        };
+        let (provider, _) = self.usage.provider_for(role);
+        audit.event(&self.agent, event, &provider);
+    }
+}
+
+/// Audits each plan answer before handing it back to the loop.
+struct AuditedGate {
+    inner: Box<dyn PlanGate>,
+    usage: SessionUsage,
+    answered_by: &'static str,
+}
+
+impl PlanGate for AuditedGate {
+    fn review(&self, plan: &str) -> PlanDecision {
+        let decision = self.inner.review(plan);
+        if let Some(audit) = &self.usage.audit {
+            audit.plan(&decision, self.answered_by);
+        }
+        decision
+    }
+}
+
+/// How a session ended, in the words of the audit record.
+fn outcome_text(outcome: &SessionOutcome) -> String {
+    match outcome {
+        SessionOutcome::Done => "done".to_owned(),
+        SessionOutcome::Incomplete { reason } => format!("incomplete: {reason}"),
+        SessionOutcome::Denied { reason } => format!("denied: {reason}"),
+        SessionOutcome::ProviderError { kind } => format!("provider_error: {kind}"),
+        SessionOutcome::Chat => "chat".to_owned(),
+    }
+}
+
+impl PermissionObserver for SessionUsage {
+    fn decided(&self, decision: &PermissionDecision) {
+        if let Some(audit) = &self.audit {
+            audit.decision(decision);
+        }
+        let scope = match decision.scope {
+            DecisionScope::Once => PermissionScope::Once,
+            DecisionScope::Session | DecisionScope::Saved => PermissionScope::Session,
+            DecisionScope::Rule => PermissionScope::Rule,
+            DecisionScope::Deny => PermissionScope::Deny,
+            DecisionScope::Blocked => PermissionScope::Blocked,
+        };
+        self.record(RecordKind::PermissionDecision {
+            tool: decision.tool.clone(),
+            scope,
+            covered: decision.covered,
+        });
+    }
+}
+
+/// A provider whose completions outside the loop are recorded as turns.
+struct RecordedProvider {
+    inner: Arc<dyn Provider>,
+    usage: SessionUsage,
+    provider: String,
+    state: &'static str,
+}
+
+impl Provider for RecordedProvider {
+    fn complete(&self, request: CompletionRequest) -> EventStream {
+        let session = self.usage.clone();
+        let provider = self.provider.clone();
+        let model = session.models.get(&provider).cloned().unwrap_or_default();
+        let state = self.state;
+        let started = Instant::now();
+        let mut usage = Tokens::default();
+        let mut retries = 0;
+        Box::pin(
+            self.inner
+                .complete(request)
+                .inspect(move |item| match item {
+                    Ok(Event::Usage(reported)) => usage = tokens(*reported),
+                    Ok(Event::Retried { retries: count }) => retries = *count,
+                    Ok(Event::Done { stop_reason }) => {
+                        if let Some(audit) = &session.audit {
+                            let reported = anvil_core::provider::Usage {
+                                input: usage.input,
+                                output: usage.output,
+                                cached: usage.cached,
+                            };
+                            let event = audit.model_request(
+                                "summarizer",
+                                &provider,
+                                Some(reported),
+                                stop_reason,
+                            );
+                            audit.record_event(MAIN_AGENT, event);
+                        }
+                        session.record(RecordKind::Turn {
+                            state: state.to_owned(),
+                            role: Some("summarizer".to_owned()),
+                            provider: provider.clone(),
+                            model: model.clone(),
+                            tokens: usage,
+                            latency_ms: u64::try_from(started.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                            retries,
+                            stop_reason: stop_kind(stop_reason),
+                        });
+                    }
+                    Err(error) => session.record_provider_error(&provider, error),
+                    Ok(_) => {}
+                }),
+        )
+    }
+}
+
+/// The session outcome for a loop status.
+///
+/// # Arguments
+///
+/// * `status` - The loop's final status.
+///
+/// # Returns
+///
+/// The outcome, with reasons reduced to their tags.
+pub fn session_outcome(status: &Status) -> SessionOutcome {
+    match status {
+        Status::Done => SessionOutcome::Done,
+        Status::Incomplete { reason } => SessionOutcome::Incomplete {
+            reason: reason_tag(reason),
+        },
+        Status::Denied { reason } => SessionOutcome::Denied {
+            reason: reason_tag(reason),
+        },
+        Status::ProviderError { error } => SessionOutcome::ProviderError {
+            kind: error_kind(error).0,
+        },
+    }
+}
+
+/// The serde tag of an incomplete reason, such as `review_rounds_exhausted`.
+fn reason_tag(reason: &IncompleteReason) -> String {
+    serde_json::to_value(reason)
+        .ok()
+        .and_then(|value| value.get("reason")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// The serde tag of a provider error and its HTTP status, looking through
+/// exhausted retries to the error that caused them.
+fn error_kind(error: &ProviderError) -> (String, Option<u16>) {
+    match error {
+        ProviderError::RetriesExhausted { last, .. } => error_kind(last),
+        ProviderError::Http { status, .. } => ("http".to_owned(), Some(*status)),
+        other => (
+            serde_json::to_value(other)
+                .ok()
+                .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".to_owned()),
+            None,
+        ),
+    }
+}
+
+/// Token counts from a provider's usage report.
+fn tokens(usage: anvil_core::provider::Usage) -> Tokens {
+    Tokens {
+        input: usage.input,
+        output: usage.output,
+        cached: usage.cached,
+    }
+}
+
+/// The stop kind for a stop reason.
+fn stop_kind(reason: &StopReason) -> StopKind {
+    match reason {
+        StopReason::EndTurn => StopKind::EndTurn,
+        StopReason::ToolUse => StopKind::ToolUse,
+        StopReason::MaxTokens => StopKind::MaxTokens,
+        StopReason::Other(_) => StopKind::Other,
+    }
+}
+
+/// The record outcome for a tool outcome.
+fn outcome_kind(outcome: ToolOutcome) -> ToolOutcomeKind {
+    match outcome {
+        ToolOutcome::Completed => ToolOutcomeKind::Completed,
+        ToolOutcome::Failed => ToolOutcomeKind::Failed,
+        ToolOutcome::DeniedByRule => ToolOutcomeKind::DeniedByRule,
+        ToolOutcome::DeclinedByUser => ToolOutcomeKind::DeclinedByUser,
+        ToolOutcome::Blocked => ToolOutcomeKind::Blocked,
+        ToolOutcome::UnknownTool => ToolOutcomeKind::UnknownTool,
+        ToolOutcome::InvalidArguments => ToolOutcomeKind::InvalidArguments,
+    }
+}
+
+#[cfg(test)]
+mod audit_tests;
+
+#[cfg(test)]
+mod tests {
+    use anvil_audit::load_records;
+    use anvil_core::agent::{
+        AgentLoop, AutoApprove, CheckCommand, LoopConfig, LoopProviders, State,
+    };
+    use anvil_core::provider::{FakeProvider, ToolCall};
+    use anvil_core::tools::{Permissions, PromptAnswer, StaticPrompt, ToolContext};
+    use anvil_types::LimitsConfig;
+
+    use super::*;
+
+    /// Appears in tool arguments and tool results and must never be written
+    /// anywhere under the usage folder.
+    const MARKER: &str = "MARKER_7f3e_project_secret";
+
+    fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            arguments_json: arguments.to_string(),
+        }
+    }
+
+    /// Every file under `dir`, recursively.
+    fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    found.extend(files_under(&path));
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn unattended_prompt_approves_and_records_every_call() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let usage = SessionUsage::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "fast",
+            None,
+            "fast",
+            BTreeMap::new(),
+        );
+        let request = PermissionRequest {
+            tool: "write_file".to_owned(),
+            target: Some("notes.txt".to_owned()),
+            arguments: serde_json::json!({"path": "notes.txt"}),
+            may_save: true,
+        };
+        let prompt = usage.recording(Box::new(StaticPrompt(PromptAnswer::Yes)));
+        assert_eq!(prompt.ask(&request), PromptAnswer::Yes);
+        let records = load_records(&usage.project_dir(), None).expect("records");
+        assert!(records.iter().any(|r| matches!(
+            &r.kind,
+            RecordKind::Permission { tool, answer: PermissionAnswer::Yes, .. } if tool == "write_file"
+        )));
+    }
+
+    #[tokio::test]
+    async fn each_permission_decision_is_recorded_without_paths_or_contents() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let usage = SessionUsage::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "fast",
+            None,
+            "fast",
+            BTreeMap::new(),
+        );
+        let secret_name = format!("{MARKER}-file.txt");
+        let secret_text = format!("{MARKER} contents\n");
+        std::fs::write(cwd.path().join(&secret_name), &secret_text).expect("write");
+        let prompt = usage.recording(Box::new(StaticPrompt(PromptAnswer::Session)));
+        let mut registry = ToolRegistry::with_builtins(Permissions::empty(), prompt);
+        registry.set_observer(Arc::new(usage.clone()));
+        let ctx = ToolContext::new(cwd.path());
+        for (id, new) in [("e1", "first"), ("e2", "second")] {
+            let old = if id == "e1" { MARKER } else { "first" };
+            let call = tool_call(
+                id,
+                "edit_file",
+                serde_json::json!({"path": secret_name, "old": old, "new": new}),
+            );
+            let execution = registry.execute(&call, &ctx).await;
+            assert_eq!(execution.outcome, ToolOutcome::Completed);
+        }
+
+        let records = load_records(&usage.project_dir(), None).expect("records");
+        let decisions: Vec<(String, PermissionScope, bool)> = records
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RecordKind::PermissionDecision {
+                    tool,
+                    scope,
+                    covered,
+                } => Some((tool.clone(), *scope, *covered)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            decisions,
+            vec![
+                ("edit_file".to_owned(), PermissionScope::Session, false),
+                ("edit_file".to_owned(), PermissionScope::Session, true),
+            ]
+        );
+        for file in files_under(&usage.project_dir()) {
+            let text = std::fs::read_to_string(&file).expect("usage file");
+            assert!(!text.contains(MARKER), "{}: {text}", file.display());
+            assert!(!text.contains("file.txt"), "{}: {text}", file.display());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subagent_decision_with_a_shared_approval_reaches_session_usage() {
+        use anvil_compat::SubagentEnv;
+
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let usage = SessionUsage::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "fast",
+            None,
+            "fast",
+            BTreeMap::new(),
+        );
+        let config: anvil_types::AnvilConfig =
+            toml::from_str(anvil_types::config::CONFIG_TEMPLATE).expect("config parses");
+        let wiring = Wiring::new(config, crate::wiring::ProjectAccess::default()).expect("wiring");
+        usage.observe_permissions(&wiring);
+        let main = wiring
+            .registry(Box::new(StaticPrompt(PromptAnswer::No)))
+            .expect("registry");
+        main.session_approvals()
+            .lock()
+            .expect("lock")
+            .approve("edit_file", cwd.path())
+            .expect("approve");
+
+        let secret_name = format!("{MARKER}-file.txt");
+        std::fs::write(cwd.path().join(&secret_name), format!("{MARKER}\n")).expect("write");
+        let subagent = SubagentEnv::registry(&wiring.clone(), false).expect("subagent registry");
+        let call = tool_call(
+            "s1",
+            "edit_file",
+            serde_json::json!({"path": secret_name, "old": MARKER, "new": "done"}),
+        );
+        let execution = subagent.execute(&call, &ToolContext::new(cwd.path())).await;
+        assert_eq!(execution.outcome, ToolOutcome::Completed);
+
+        let records = load_records(&usage.project_dir(), None).expect("records");
+        assert!(records.iter().any(|r| matches!(
+            &r.kind,
+            RecordKind::PermissionDecision { tool, scope: PermissionScope::Session, covered: true }
+                if tool == "edit_file"
+        )));
+        for file in files_under(&usage.project_dir()) {
+            let text = std::fs::read_to_string(&file).expect("usage file");
+            assert!(!text.contains(MARKER), "{}: {text}", file.display());
+            assert!(!text.contains("file.txt"), "{}: {text}", file.display());
+        }
+    }
+
+    #[tokio::test]
+    async fn each_turn_is_attributed_to_the_role_and_provider_that_served_it() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let usage = SessionUsage::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "cheap",
+            Some("judge"),
+            "cheap",
+            BTreeMap::from([
+                ("cheap".to_owned(), "small-model".to_owned()),
+                ("dear".to_owned(), "big-model".to_owned()),
+                ("judge".to_owned(), "judge-model".to_owned()),
+            ]),
+        );
+        usage.set_planner(Some("dear"));
+        let planner = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
+            "# Plan\n\n1. [ ] x\n",
+        )]));
+        let coder = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn("built")]));
+        let reviewer = Arc::new(FakeProvider::new(vec![FakeProvider::text_turn(
+            "```json\n{\"verdict\": \"approve\"}\n```",
+        )]));
+        let config = LoopConfig {
+            task: "t".to_owned(),
+            cwd: cwd.path().to_path_buf(),
+            session_dir: cwd.path().join(".anvil").join("sessions").join(&session),
+            limits: LimitsConfig::default(),
+            check: CheckCommand::Command("exit 0".to_owned()),
+            context_window: 100_000,
+            home_dir: None,
+            trusted_project: true,
+            extra_instructions: Vec::new(),
+            sections: Vec::new(),
+            review_sections: Vec::new(),
+            delegate_guidance: false,
+        };
+        let (sink, task) = usage.sink(None);
+        let agent = AgentLoop::new(
+            config,
+            LoopProviders {
+                coder: coder as Arc<dyn Provider>,
+                planner: Some(planner as Arc<dyn Provider>),
+                reviewer: reviewer as Arc<dyn Provider>,
+                summarizer: Arc::new(FakeProvider::new(vec![])) as Arc<dyn Provider>,
+            },
+            ToolRegistry::with_builtins(
+                Permissions::empty(),
+                Box::new(StaticPrompt(PromptAnswer::No)),
+            ),
+            ToolContext::new(cwd.path()),
+            Box::new(AutoApprove),
+            sink,
+        );
+        agent.run().await;
+        task.await.expect("tee ends");
+
+        let records = load_records(&usage.project_dir(), None).expect("records");
+        let turns: Vec<(String, String, String)> = records
+            .iter()
+            .filter_map(|record| match &record.kind {
+                RecordKind::Turn {
+                    role: Some(role),
+                    provider,
+                    model,
+                    ..
+                } => Some((role.clone(), provider.clone(), model.clone())),
+                _ => None,
+            })
+            .collect();
+        let turn = |role: &str, provider: &str, model: &str| {
+            (role.to_owned(), provider.to_owned(), model.to_owned())
+        };
+        assert_eq!(
+            turns,
+            [
+                turn("planner", "dear", "big-model"),
+                turn("coder", "cheap", "small-model"),
+                turn("reviewer", "judge", "judge-model"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn marker_in_tool_results_never_reaches_usage_records() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let session = ulid::Ulid::generate().to_string();
+        let usage = SessionUsage::new(
+            cwd.path(),
+            Some(home.path()),
+            &session,
+            "fast",
+            None,
+            "fast",
+            BTreeMap::from([("fast".to_owned(), "m1".to_owned())]),
+        );
+        usage.record(RecordKind::SessionStarted {
+            mode: SessionMode::Run,
+        });
+
+        let plan = "# Plan\n\n1. [ ] Write notes.txt\n";
+        let write = tool_call(
+            "c1",
+            "write_file",
+            serde_json::json!({"path": "notes.txt", "content": format!("line {MARKER}\n")}),
+        );
+        let read = tool_call("c2", "read_file", serde_json::json!({"path": "notes.txt"}));
+        let unknown = tool_call("c3", "browser", serde_json::json!({"url": MARKER}));
+        let coder = Arc::new(FakeProvider::new(vec![
+            FakeProvider::text_turn(plan),
+            FakeProvider::tool_turn(vec![write]),
+            FakeProvider::tool_turn(vec![read, unknown]),
+            FakeProvider::text_turn("built"),
+            FakeProvider::text_turn("addressed the review"),
+        ]));
+        let reviewer = Arc::new(FakeProvider::new(vec![
+            FakeProvider::text_turn(&format!(
+                "```json\n{{\"verdict\": \"changes\", \"items\": [\"rename {MARKER} in notes.txt\", \"add a test\"]}}\n```"
+            )),
+            FakeProvider::text_turn("```json\n{\"verdict\": \"approve\"}\n```"),
+        ]));
+        let session_dir = cwd.path().join(".anvil").join("sessions").join(&session);
+        let config = LoopConfig {
+            task: "write a note".to_owned(),
+            cwd: cwd.path().to_path_buf(),
+            session_dir,
+            limits: LimitsConfig::default(),
+            check: CheckCommand::Command("exit 0".to_owned()),
+            context_window: 100_000,
+            home_dir: None,
+            trusted_project: true,
+            extra_instructions: Vec::new(),
+            sections: Vec::new(),
+            review_sections: Vec::new(),
+            delegate_guidance: false,
+        };
+        let prompt = RecordingPrompt {
+            inner: Box::new(StaticPrompt(PromptAnswer::Yes)),
+            usage: usage.clone(),
+        };
+        let (sink, task) = usage.sink(None);
+        let agent = AgentLoop::new(
+            config,
+            LoopProviders {
+                coder: coder as Arc<dyn Provider>,
+                planner: None,
+                reviewer: reviewer as Arc<dyn Provider>,
+                summarizer: Arc::new(FakeProvider::new(vec![])) as Arc<dyn Provider>,
+            },
+            ToolRegistry::with_builtins(Permissions::empty(), Box::new(prompt)),
+            ToolContext::new(cwd.path()),
+            Box::new(AutoApprove),
+            sink,
+        );
+        let result = agent.run().await;
+        task.await.expect("tee ends");
+        usage.finish_run(&result.status);
+        assert!(
+            std::fs::read_to_string(cwd.path().join("notes.txt"))
+                .expect("the tool wrote the file")
+                .contains(MARKER)
+        );
+
+        let project = load_records(&usage.project_dir(), None).expect("records");
+        assert!(project.iter().any(|r| matches!(&r.kind, RecordKind::ToolResult { name, outcome: ToolOutcomeKind::UnknownTool, .. } if name == "browser")));
+        assert!(project.iter().any(|r| matches!(&r.kind, RecordKind::Permission { tool, answer: PermissionAnswer::Yes, .. } if tool == "write_file")));
+        assert!(project.iter().any(|r| matches!(&r.kind, RecordKind::Turn { provider, model, .. } if provider == "fast" && model == "m1")));
+        assert!(project.iter().any(|r| matches!(
+            &r.kind,
+            RecordKind::Review {
+                approved: false,
+                items: 2,
+                ..
+            }
+        )));
+        assert!(
+            project
+                .iter()
+                .any(|r| matches!(&r.kind, RecordKind::SessionEnded { .. }))
+        );
+
+        let mut checked = 0;
+        for root in [
+            cwd.path().join(".anvil").join("usage"),
+            home.path().join(".anvil").join("usage"),
+        ] {
+            for file in files_under(&root) {
+                let text = std::fs::read_to_string(&file).expect("text file");
+                assert!(
+                    !text.contains(MARKER),
+                    "{} leaks the marker",
+                    file.display()
+                );
+                assert!(
+                    !text.contains("notes.txt"),
+                    "{} leaks a file name",
+                    file.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 2, "{checked} files checked");
+    }
+
+    #[test]
+    fn status_and_error_kinds_reduce_to_tags() {
+        assert_eq!(session_outcome(&Status::Done), SessionOutcome::Done);
+        assert_eq!(
+            session_outcome(&Status::Incomplete {
+                reason: IncompleteReason::ReviewRoundsExhausted
+            }),
+            SessionOutcome::Incomplete {
+                reason: "review_rounds_exhausted".to_owned()
+            }
+        );
+        assert_eq!(
+            session_outcome(&Status::Denied {
+                reason: IncompleteReason::TurnBudget {
+                    state: State::Build
+                }
+            }),
+            SessionOutcome::Denied {
+                reason: "turn_budget".to_owned()
+            }
+        );
+        let error = ProviderError::RetriesExhausted {
+            attempts: 3,
+            last: Box::new(ProviderError::Http {
+                status: 503,
+                body: "secret body".to_owned(),
+            }),
+        };
+        assert_eq!(error_kind(&error), ("http".to_owned(), Some(503)));
+        assert_eq!(
+            session_outcome(&Status::ProviderError { error }),
+            SessionOutcome::ProviderError {
+                kind: "http".to_owned()
+            }
+        );
+        assert_eq!(
+            error_kind(&ProviderError::Timeout { after_s: 5 }),
+            ("timeout".to_owned(), None)
+        );
+    }
+}

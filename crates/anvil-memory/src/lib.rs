@@ -10,12 +10,10 @@
 //!   token cap, and [`facts::extract`] turns a session transcript into
 //!   proposals the user keeps or drops.
 //!
-//! Three more things live beside them:
+//! Two more things live beside them:
 //!
 //! - [`languages`]: language tags by extension and a bounded project scan,
 //!   so a prompt carries only the rules for the project's languages.
-//! - [`corrections`] and [`rule_proposals`]: the files anvil left behind,
-//!   what the owner changed in them, and the rule proposals drawn from it.
 //! - [`templates`]: `~/.anvil/templates/<name>/`, project skeletons.
 //!
 //! Everything here is plain TOML or Markdown: no database, no embeddings,
@@ -23,12 +21,10 @@
 //! fact needs nothing from it; never on anvil-core or anvil-compat. The CLI
 //! wires it into anvil-core from the outside.
 
-pub mod corrections;
 pub mod error;
 pub mod facts;
 pub mod languages;
 pub mod paths;
-pub mod rule_proposals;
 pub mod rules;
 pub mod templates;
 

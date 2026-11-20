@@ -6,24 +6,24 @@ use std::time::Instant;
 
 use std::sync::Arc;
 
+use anvil_audit::{RecordKind, SessionMode};
 use anvil_core::agent::{
     AgentLoop, IncompleteReason, LoopResult, SUMMARY_FILE, State, Status, diff,
 };
 use anvil_core::context;
 use anvil_core::tools::ToolHook;
-use anvil_telemetry::{RecordKind, SessionMode};
 use anyhow::{Context, bail};
 use tokio::task::JoinHandle;
 
 use crate::console::Console;
 use crate::frontend::{Frontend, UiKind, session_info};
-use crate::learn;
 use crate::memory;
 use crate::status::{Setup, StatusReporter};
-use crate::telemetry::SessionTelemetry;
 use crate::tui::{SessionKind, UiMsg, wait_cancel};
+use crate::usage::SessionUsage;
 use crate::wiring::{Wiring, home_dir};
 use anvil_types::LoadedConfig;
+use anvil_types::policy::TranscriptMode;
 
 /// What a cancelled run reports as its summary and its status detail.
 const CANCELLED: &str = "cancelled by the user";
@@ -53,17 +53,15 @@ pub async fn run_task(wiring: &Wiring, task: String, yes: bool, ui: UiKind) -> a
     let result = run_session(&wiring, &id, session_dir, task, yes, ui, &status)
         .await
         .map(|result| result.status.exit_code());
-    end_status(&status, &result).await;
+    end_status(&status, &result);
     result
 }
 
-/// Records an error that aborted the command as `failed`, then lets the
-/// last notifications go out.
-pub(crate) async fn end_status(status: &StatusReporter, result: &anyhow::Result<i32>) {
+/// Records an error that aborted the command as `failed`.
+pub(crate) fn end_status(status: &StatusReporter, result: &anyhow::Result<i32>) {
     if let Err(error) = result {
         status.fail(&format!("{error:#}"));
     }
-    status.shutdown().await;
 }
 
 /// The body of [`run_task`], with the status reporter already running.
@@ -127,80 +125,115 @@ pub(crate) async fn run_session_in(
     status: &StatusReporter,
 ) -> anyhow::Result<LoopResult> {
     let SessionOptions { yes, ui, in_build } = options;
-    let plan_yes = yes || in_build;
-    let telemetry =
-        SessionTelemetry::start(wiring, id, SessionMode::Run).with_status(status.clone());
+    let plan_yes = (yes && !wiring.plans_need_a_person()) || in_build;
+    let usage = SessionUsage::start(wiring, id, SessionMode::Run, yes)?.with_status(status.clone());
+    usage.prompt(&task);
     let (frontend, events) =
         Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
-    if !in_build {
-        learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
-    }
-    telemetry.observe_permissions(wiring);
+    usage.observe_permissions(wiring);
     let mut registry =
-        wiring.registry(telemetry.recording(status.prompt(yes, frontend.prompt(yes))))?;
+        wiring.registry(usage.recording(status.prompt(yes, frontend.prompt(yes))))?;
     frontend.install_tool_hook(
         &mut registry,
         wiring
             .hook_runner()
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
-    telemetry.record_skill_requires(wiring, &registry);
+    usage.record_skill_requires(wiring, &registry);
     let mut config = wiring.loop_config(task, session_dir.clone(), &registry)?;
     let hooks = wiring.hook_runner();
     if let Some(hooks) = &hooks {
         config
             .extra_instructions
-            .extend(Wiring::session_start_instruction(
-                hooks.session_start().await,
-            ));
+            .extend(wiring.session_start_instruction(hooks.session_start().await));
     }
-    let (sink, tee) = telemetry.sink(Some(events));
+    let (sink, tee) = usage.sink(Some(events));
+    let answered_by = if in_build {
+        "build"
+    } else if plan_yes {
+        "yes_flag"
+    } else {
+        "user"
+    };
     let mut agent = AgentLoop::new(
         config,
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
-        status.gate(plan_yes, frontend.gate(plan_yes)),
+        status.gate(plan_yes, usage.gate(answered_by, frontend.gate(plan_yes))),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
+    let result = finish_run(
+        agent,
+        tee,
+        &session_dir,
+        &frontend,
+        hooks.as_deref(),
+        &usage,
+    )
+    .await;
+    if let Err(error) = unaudited(&usage) {
+        frontend.shutdown(true).await?;
+        return Err(error);
+    }
     if !in_build {
-        remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
-        learn::record_run(wiring, id, &frontend.console()).await;
+        remember(wiring, id, &frontend, yes, &usage, status, &result).await;
     }
     status.finish_run(&result.status);
     frontend.shutdown(true).await?;
-    telemetry.finish_run(&result.status);
+    usage.finish_run(&result.status);
     Ok(result)
 }
 
-/// Runs the loop to its end or the user's cancel, waits for every event
-/// to be recorded and shown, then runs the Stop hooks.
+/// Runs the loop to its end, the user's cancel or a failed required audit
+/// write, waits for every event to be recorded and shown, then runs the
+/// Stop hooks unless the audit log stopped the session.
 async fn finish_run(
     agent: AgentLoop,
     tee: JoinHandle<()>,
     session_dir: &Path,
     frontend: &Frontend,
     hooks: Option<&anvil_compat::HookRunner>,
+    usage: &SessionUsage,
 ) -> LoopResult {
     let console = frontend.console();
-    let result = drive(agent, frontend.cancel_watch(), session_dir, &console).await;
+    let result = drive(agent, frontend.cancel_watch(), session_dir, &console, usage).await;
     let _ = tee.await;
-    run_stop_hooks(hooks, &result, &console).await;
+    if usage.audit_failure().is_none() {
+        run_stop_hooks(hooks, &result, &console).await;
+    }
     result
 }
 
-/// Runs the loop until it ends or the user cancels it. Dropping the loop
-/// mid-flight ends the provider stream and kills any shell child; the
-/// session log already holds the progress, so `anvil resume` continues it.
-async fn drive(
+/// The error that ends the command when a required audit log stopped the
+/// session, so nothing more (memory, summaries) runs unaudited. The caller
+/// gives the terminal back first.
+///
+/// # Errors
+///
+/// When the audit log failed under `[audit] required = true`.
+pub(crate) fn unaudited(usage: &SessionUsage) -> anyhow::Result<()> {
+    match usage.audit_failure() {
+        None => Ok(()),
+        Some(detail) => bail!(
+            "the session stopped: the managed policy's [audit] required = true and the audit log cannot be written: {detail}"
+        ),
+    }
+}
+
+/// Runs the loop until it ends, the user cancels it or a required audit
+/// log fails. Dropping the loop mid-flight ends the provider stream and
+/// kills any shell child; the session log already holds the progress, so
+/// `anvil resume` continues it.
+pub(crate) async fn drive(
     agent: AgentLoop,
     mut cancel: Option<tokio::sync::watch::Receiver<u64>>,
     session_dir: &Path,
     console: &Console,
+    usage: &SessionUsage,
 ) -> LoopResult {
     if let Some(cancel) = &mut cancel {
         cancel.mark_unchanged();
@@ -209,13 +242,31 @@ async fn drive(
     tokio::pin!(run);
     tokio::select! {
         result = &mut run => result,
+        reason = usage.audit_stopped() => {
+            if let Some(ui) = console.ui() {
+                ui.send(UiMsg::Busy(false));
+            }
+            console.error(format!("stopped: the audit log cannot be written: {reason}"));
+            LoopResult {
+                status: Status::Incomplete {
+                    reason: IncompleteReason::Unexpected {
+                        detail: format!("the audit log cannot be written: {reason}"),
+                    },
+                },
+                summary: String::new(),
+                summary_path: session_dir.join(SUMMARY_FILE),
+                rounds: Default::default(),
+                spend: Default::default(),
+                role_spend: Default::default(),
+            }
+        }
         () = wait_cancel(cancel.as_mut()) => {
             if let Some(ui) = console.ui() {
                 ui.send(UiMsg::Busy(false));
             }
             console.warn(format!("{CANCELLED}; `anvil resume` continues the session"));
             let summary_path = session_dir.join(SUMMARY_FILE);
-            if let Err(error) = std::fs::write(&summary_path, CANCELLED) {
+            if let Err(error) = anvil_types::private_fs::write(&summary_path, CANCELLED) {
                 tracing::warn!(%error, path = %summary_path.display(), "cannot write the summary");
             }
             LoopResult {
@@ -241,12 +292,16 @@ async fn remember(
     id: &str,
     frontend: &Frontend,
     yes: bool,
-    telemetry: &SessionTelemetry,
+    usage: &SessionUsage,
     status: &StatusReporter,
     result: &LoopResult,
 ) {
     let console = frontend.console();
-    match context::load_session(&wiring.cwd, id) {
+    if let Some(reason) = memory::policy_skip_reason(wiring) {
+        console.notice(format!("memory: skipped ({reason})"));
+        return;
+    }
+    match context::load_session(&wiring.sessions_root(), id) {
         Ok(snapshot) => {
             let diff_lines = match &snapshot.baseline {
                 Some(baseline) => diff::diff_since(&wiring.cwd, &snapshot.dir, baseline)
@@ -257,7 +312,7 @@ async fn remember(
             let always = wiring.config.memory.always_summarize;
             if let Some(reason) = memory::skip_reason(result, diff_lines, always) {
                 console.notice(format!("memory: skipped ({})", memory::skip_text(reason)));
-                telemetry.record(RecordKind::MemorySkipped { reason });
+                usage.record(RecordKind::MemorySkipped { reason });
                 return;
             }
             memory::finish_session(
@@ -266,7 +321,7 @@ async fn remember(
                 &snapshot.messages,
                 status.decider(yes, frontend.decider(yes)),
                 &console,
-                Some(telemetry),
+                Some(usage),
             )
             .await;
         }
@@ -288,6 +343,61 @@ async fn run_stop_hooks(
     }
 }
 
+/// Connects to one MCP server, prints its tools and records that listing
+/// as the approved one (`anvil mcp approve <name>`).
+///
+/// # Arguments
+///
+/// * `wiring` - The servers the user's files, a trusted repository and the
+///   policy allow.
+/// * `name` - The server name.
+///
+/// # Returns
+///
+/// Zero once the listing is recorded.
+///
+/// # Errors
+///
+/// When no allowed server has that name, it cannot be reached, or the
+/// approvals file cannot be written.
+pub async fn mcp_approve(wiring: &Wiring, name: &str) -> anyhow::Result<i32> {
+    if wiring.policy.is_some() {
+        anyhow::bail!(
+            "a managed policy is installed, so only the administrator can accept a new listing of `{name}`: \
+             they set `listing_sha256` on its `[features] mcp_servers` entry to the digest `anvil mcp list` prints"
+        );
+    }
+    let Some(server) = wiring.mcp_servers.get(name) else {
+        anyhow::bail!(
+            "no MCP server `{name}` is defined{}",
+            if wiring.policy.is_some() {
+                " and allowed by the managed policy's [features] mcp; ask the administrator"
+            } else {
+                " in ~/.anvil/mcp.toml or a trusted repository"
+            }
+        );
+    };
+    let http = wiring.http_client()?;
+    let client = anvil_compat::mcp::McpClient::connect(server, &wiring.cwd, &http)
+        .await
+        .with_context(|| format!("connecting to MCP server `{name}`"))?;
+    let tools = client
+        .list_tools()
+        .await
+        .with_context(|| format!("listing the tools of `{name}`"))?;
+    println!("mcp server `{name}` ({}) lists:", server.transport.target());
+    for tool in &tools {
+        println!("- {}: {}", tool.name, tool.description.trim());
+    }
+    let digest = anvil_compat::mcp::approval::listing_digest(&tools);
+    wiring
+        .mcp_store()
+        .approve(server, &digest)
+        .context("writing ~/.anvil/mcp-approvals.toml")?;
+    println!("approved this listing of `{name}` (sha256:{digest})");
+    Ok(0)
+}
+
 /// Continues a saved session.
 ///
 /// # Arguments
@@ -303,10 +413,22 @@ async fn run_stop_hooks(
 ///
 /// # Errors
 ///
-/// When the session cannot be loaded or providers or the front end cannot
-/// be built.
+/// When the policy's transcript mode keeps no conversation, the session
+/// cannot be loaded, or providers or the front end cannot be built.
 pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow::Result<i32> {
-    let snapshot = context::load_session(&wiring.cwd, id).context("loading the session")?;
+    if wiring.transcript != TranscriptMode::Full {
+        anyhow::bail!(
+            "anvil resume needs the full transcript, and the managed policy's [data] transcript = \"{}\" keeps no conversation; start a new session instead",
+            wiring.transcript.as_str()
+        );
+    }
+    let snapshot =
+        context::load_session(&wiring.sessions_root(), id).context("loading the session")?;
+    if snapshot.messages.is_empty() {
+        anyhow::bail!(
+            "session {id} kept no conversation to resume (a chat keeps only redaction counts); start a new session instead"
+        );
+    }
     eprintln!("resuming session {id}: {}", snapshot.meta.task);
     let wiring = wiring.with_session(id, &snapshot.dir);
     let status = StatusReporter::start(Setup::from_wiring(
@@ -316,7 +438,7 @@ pub async fn resume(wiring: &Wiring, id: &str, yes: bool, ui: UiKind) -> anyhow:
         &snapshot.meta.task,
     ));
     let result = resume_session(&wiring, id, snapshot, yes, ui, &status).await;
-    end_status(&status, &result).await;
+    end_status(&status, &result);
     result
 }
 
@@ -329,21 +451,20 @@ async fn resume_session(
     ui: UiKind,
     status: &StatusReporter,
 ) -> anyhow::Result<i32> {
-    let telemetry =
-        SessionTelemetry::start(wiring, id, SessionMode::Resume).with_status(status.clone());
+    let usage =
+        SessionUsage::start(wiring, id, SessionMode::Resume, yes)?.with_status(status.clone());
     let (frontend, events) =
         Frontend::start(ui, session_info(wiring, SessionKind::Run, yes, State::Plan));
-    learn::at_session_start(wiring, &frontend, yes, &telemetry).await;
-    telemetry.observe_permissions(wiring);
+    usage.observe_permissions(wiring);
     let mut registry =
-        wiring.registry(telemetry.recording(status.prompt(yes, frontend.prompt(yes))))?;
+        wiring.registry(usage.recording(status.prompt(yes, frontend.prompt(yes))))?;
     frontend.install_tool_hook(
         &mut registry,
         wiring
             .hook_runner()
             .map(|runner| runner as Arc<dyn ToolHook>),
     );
-    telemetry.record_skill_requires(wiring, &registry);
+    usage.record_skill_requires(wiring, &registry);
     let session_dir = snapshot.dir.clone();
     let mut config =
         wiring.loop_config(snapshot.meta.task.clone(), snapshot.dir.clone(), &registry)?;
@@ -351,29 +472,48 @@ async fn resume_session(
     if let Some(hooks) = &hooks {
         config
             .extra_instructions
-            .extend(Wiring::session_start_instruction(
-                hooks.session_start().await,
-            ));
+            .extend(wiring.session_start_instruction(hooks.session_start().await));
     }
-    let (sink, tee) = telemetry.sink(Some(events));
+    let (sink, tee) = usage.sink(Some(events));
     let mut agent = AgentLoop::resume(
         snapshot,
         config,
         wiring.loop_providers()?,
         registry,
         wiring.tool_context(),
-        status.gate(yes, frontend.gate(yes)),
+        status.gate(
+            yes && !wiring.plans_need_a_person(),
+            usage.gate(
+                if yes && !wiring.plans_need_a_person() {
+                    "yes_flag"
+                } else {
+                    "user"
+                },
+                frontend.gate(yes && !wiring.plans_need_a_person()),
+            ),
+        ),
         sink,
     );
     if let Some(checks) = wiring.change_checks()? {
         agent = agent.with_change_checks(checks);
     }
-    let result = finish_run(agent, tee, &session_dir, &frontend, hooks.as_deref()).await;
-    remember(wiring, id, &frontend, yes, &telemetry, status, &result).await;
-    learn::record_run(wiring, id, &frontend.console()).await;
+    let result = finish_run(
+        agent,
+        tee,
+        &session_dir,
+        &frontend,
+        hooks.as_deref(),
+        &usage,
+    )
+    .await;
+    if let Err(error) = unaudited(&usage) {
+        frontend.shutdown(true).await?;
+        return Err(error);
+    }
+    remember(wiring, id, &frontend, yes, &usage, status, &result).await;
     status.finish_run(&result.status);
     frontend.shutdown(true).await?;
-    telemetry.finish_run(&result.status);
+    usage.finish_run(&result.status);
     Ok(result.status.exit_code())
 }
 
@@ -381,18 +521,15 @@ async fn resume_session(
 ///
 /// # Arguments
 ///
-/// * `cwd` - The project root.
+/// * `root` - The folder that holds the project's sessions.
 ///
 /// # Errors
 ///
 /// When the sessions folder cannot be read.
-pub fn sessions(cwd: &Path) -> anyhow::Result<()> {
-    let sessions = context::list_sessions(cwd).context("listing sessions")?;
+pub fn sessions(root: &Path) -> anyhow::Result<()> {
+    let sessions = context::list_sessions(root).context("listing sessions")?;
     if sessions.is_empty() {
-        println!(
-            "no sessions under {}",
-            cwd.join(context::session::SESSIONS_DIR).display()
-        );
+        println!("no sessions under {}", root.display());
         return Ok(());
     }
     for session in sessions {
@@ -449,8 +586,16 @@ pub(crate) async fn report_mcp(wiring: &Wiring) -> usize {
     if servers.is_empty() {
         return 0;
     }
+    let http = match wiring.http_client() {
+        Ok(http) => http,
+        Err(error) => {
+            println!("mcp error: {error:#}");
+            return servers.servers().len();
+        }
+    };
     let started = Instant::now();
-    let tools = anvil_compat::McpTools::load(servers, &wiring.cwd, true).await;
+    let tools =
+        anvil_compat::McpTools::load(servers, &wiring.cwd, &http, &wiring.mcp_store()).await;
     let millis = started.elapsed().as_millis();
     let mut failures = 0;
     for report in tools.reports() {
@@ -460,6 +605,9 @@ pub(crate) async fn report_mcp(wiring: &Wiring) -> usize {
                 failures += 1;
                 println!("mcp {}: FAILED: {error}", report.name);
             }
+        }
+        if let Some(digest) = &report.listing_sha256 {
+            println!("mcp {}: listing_sha256 = \"{digest}\"", report.name);
         }
     }
     for name in tools.names() {

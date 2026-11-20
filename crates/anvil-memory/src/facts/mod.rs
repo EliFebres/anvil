@@ -184,15 +184,13 @@ impl FactStore {
         }
         let path = self.path(topic);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| MemoryError::io(parent, &error))?;
+            anvil_types::private_fs::create_dir_all(parent)
+                .map_err(|error| MemoryError::io(parent, &error))?;
         }
         let needs_newline = std::fs::read(&path)
             .map(|bytes| !bytes.is_empty() && !bytes.ends_with(b"\n"))
             .unwrap_or(false);
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
+        let mut file = anvil_types::private_fs::open_append(&path)
             .map_err(|error| MemoryError::io(&path, &error))?;
         let mut text = String::new();
         if needs_newline {

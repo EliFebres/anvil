@@ -4,25 +4,92 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anvil_compat::mcp::{McpStore, Transport};
 use anvil_compat::{
     AgentSet, CommandSet, DelegateTool, HookConfig, HookRunner, McpTools, ServerSet, SkillRoots,
     SkillSet, SkillTool, SubagentEnv,
 };
 use anvil_core::agent::{
-    ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders, PromptSection,
+    ChangeChecks, CheckCommand, EventSink, EventTap, Instruction, LoopConfig, LoopProviders,
+    PromptSection,
 };
 use anvil_core::context;
-use anvil_core::provider::{self, Provider, SharedBudget, TokenBudget};
+use anvil_core::guard::DataGuard;
+use anvil_core::net::{self, HttpClient};
+use anvil_core::provider::{self, Egress, Provider, SharedBudget, TokenBudget};
+use anvil_core::tools::shell::{SHELL_TOOL_NAME, ShellTool};
+use anvil_core::tools::workspace::{DeniedPaths, deny_globs};
 use anvil_core::tools::{
-    PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
-    SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry,
+    CallGate, PermissionObserver, PermissionPrompt, PermissionRequest, Permissions, PromptAnswer,
+    RuleOrigin, Runner, SessionApprovals, Shell, StaticPrompt, ToolContext, ToolRegistry,
+    Workspace,
 };
-use anvil_types::{AnvilConfig, PromptConfig};
+use anvil_types::policy::{LoadedPolicy, McpMode, SkillsMode, TranscriptMode};
+use anvil_types::redact::Redactor;
+use anvil_types::shell::ShellMode;
+use anvil_types::trust::user_permissions_path;
+use anvil_types::{AnvilConfig, ProjectRules, PromptConfig, Protocol};
 use anyhow::Context;
 
 use crate::memory::{self, RuleChecks};
+use crate::policy::{check_allow_rules, check_unmatched, conflict};
 use crate::templates;
 use crate::terminal::TerminalPrompt;
+
+mod shell;
+
+pub use shell::ShellSettings;
+
+/// How long an HTTP MCP request waits for a TCP connection.
+const MCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Every URL the configuration names: provider `base_url`s (fake providers
+/// send nothing) and HTTP MCP server `url`s. In unmanaged mode these are
+/// the only hosts requests may go to.
+fn endpoint_urls(config: &AnvilConfig, servers: &ServerSet) -> Vec<String> {
+    let providers = config
+        .providers
+        .values()
+        .filter(|entry| entry.protocol != Protocol::Fake)
+        .map(|entry| entry.base_url.clone());
+    let mcp = servers
+        .servers()
+        .iter()
+        .filter_map(|server| match &server.transport {
+            Transport::Http { url, .. } => Some(url.clone()),
+            Transport::Stdio { .. } => None,
+        });
+    providers.chain(mcp).collect()
+}
+
+/// The note every session prints on stderr when the policy turns
+/// redaction off.
+pub(crate) const REDACTION_OFF_NOTE: &str =
+    "note: secrets are not redacted: the managed policy's [data] redaction = false";
+
+/// The redactor for a session: the built-in shapes, `extra` patterns and
+/// the values of secret-looking variables in anvil's environment, which
+/// includes `~/.anvil/.env` and each provider's `api_key_env`.
+fn redactor(
+    config: &AnvilConfig,
+    extra: &[anvil_types::redact::ExtraPattern],
+) -> Result<Redactor, anvil_types::redact::RedactError> {
+    let key_names: Vec<String> = config
+        .providers
+        .values()
+        .map(|entry| entry.api_key_env.clone())
+        .collect();
+    Redactor::new(extra, std::env::vars(), &key_names)
+}
+
+/// The name of a skills mode as the policy file spells it.
+fn skills_mode(mode: SkillsMode) -> &'static str {
+    match mode {
+        SkillsMode::Off => "off",
+        SkillsMode::Bundled => "bundled",
+        SkillsMode::Local => "local",
+    }
+}
 
 /// The home directory: `ANVIL_HOME` when set, otherwise the OS home.
 ///
@@ -33,9 +100,32 @@ use crate::terminal::TerminalPrompt;
 ///
 /// The directory, if any.
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("ANVIL_HOME")
-        .map(PathBuf::from)
-        .or_else(std::env::home_dir)
+    home_dir_from(std::env::var_os("ANVIL_HOME"))
+}
+
+/// [`home_dir`] for a given value of `ANVIL_HOME`, so a test can show
+/// that a home chosen through the environment is still under the policy.
+///
+/// # Arguments
+///
+/// * `anvil_home` - The value of `ANVIL_HOME`, if set.
+///
+/// # Returns
+///
+/// That folder, otherwise the OS home.
+pub fn home_dir_from(anvil_home: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    anvil_home.map(PathBuf::from).or_else(std::env::home_dir)
+}
+
+/// What the repository anvil runs in may contribute.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectAccess {
+    /// Whether the user trusts the repository, so its hooks, MCP servers,
+    /// skills, commands, agents and instruction files load.
+    pub trusted: bool,
+    /// The `deny` and `ask` rules the repository adds. They apply whether or
+    /// not it is trusted, because they can only make anvil stricter.
+    pub rules: ProjectRules,
 }
 
 /// Everything a run or a chat needs, built once from config.
@@ -48,8 +138,15 @@ pub struct Wiring {
     pub cwd: PathBuf,
     /// The home directory, if known.
     pub home: Option<PathBuf>,
-    /// The merged configuration.
+    /// The user's configuration.
     pub config: AnvilConfig,
+    /// What the repository may contribute.
+    pub project: ProjectAccess,
+    /// Where provider and HTTP MCP requests may go, and how connections
+    /// are made.
+    pub egress: Egress,
+    /// The managed policy, when one is installed.
+    pub policy: Option<Arc<LoadedPolicy>>,
     /// The session's token budget, shared by every provider.
     pub budget: SharedBudget,
     /// Skills discovered from the project, the home directory and the bundle.
@@ -64,6 +161,17 @@ pub struct Wiring {
     pub mcp_servers: ServerSet,
     /// MCP tools, resolved by [`Wiring::load_mcp`]; empty until then.
     pub mcp: Arc<McpTools>,
+    /// How the `shell` tool may run commands: the user's `[shell]` table,
+    /// bounded by the policy's.
+    pub shell: ShellSettings,
+    /// Path globs the file tools refuse, from the policy's `[files] deny`.
+    denied_paths: Option<DeniedPaths>,
+    /// Redaction and untrusted-data delimiters, shared by every tool
+    /// context so the session and its subagents use one nonce.
+    pub guard: DataGuard,
+    /// What session folders keep: `full` unmanaged, the policy's
+    /// `[data] transcript` otherwise.
+    pub transcript: TranscriptMode,
     /// The session this wiring serves, once one exists.
     session: Option<SessionInfo>,
     /// Session-scoped tool approvals, shared by every registry and clone so
@@ -75,6 +183,66 @@ pub struct Wiring {
     /// The prompt the main registry was built with, shared by every clone so
     /// a sub-agent that inherits permissions asks the same person.
     prompt: Arc<Mutex<Option<Arc<dyn PermissionPrompt>>>>,
+    /// Builds the tap a delegated run reports its events to, shared by
+    /// every clone so subagents are audited under the session.
+    subagent_tap: Arc<Mutex<Option<SubagentTap>>>,
+    /// Refuses every model request, tool call and command once it gives a
+    /// reason, shared by every clone; set when the audit log is required.
+    call_gate: Arc<Mutex<Option<Arc<dyn CallGate>>>>,
+    /// What the managed policy refused while this wiring was loaded, for
+    /// the audit log's session start.
+    pub policy_refusals: Vec<PolicyRefusal>,
+}
+
+/// Builds the event tap of one delegated run from the agent's name.
+pub type SubagentTap = Arc<dyn Fn(&str) -> Arc<dyn EventTap> + Send + Sync>;
+
+/// Something the managed policy kept from loading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRefusal {
+    /// What was refused, such as ``the MCP server `docs` in <file>``.
+    pub what: String,
+    /// The policy key that refused it.
+    pub key: String,
+}
+
+/// Wraps a provider so it refuses every request once `gate` gives a reason.
+///
+/// # Arguments
+///
+/// * `inner` - The provider.
+/// * `gate` - The gate.
+///
+/// # Returns
+///
+/// The wrapped provider.
+pub(crate) fn gated(inner: Arc<dyn Provider>, gate: Arc<dyn CallGate>) -> Arc<dyn Provider> {
+    Arc::new(GatedProvider { inner, gate })
+}
+
+/// A provider that refuses every request once its gate gives a reason.
+struct GatedProvider {
+    inner: Arc<dyn Provider>,
+    gate: Arc<dyn CallGate>,
+}
+
+impl Provider for GatedProvider {
+    fn complete(&self, request: provider::CompletionRequest) -> provider::EventStream {
+        match self.gate.refusal() {
+            Some(detail) => Box::pin(futures_util::stream::once(async move {
+                Err(provider::ProviderError::Refused { detail })
+            })),
+            None => self.inner.complete(request),
+        }
+    }
+}
+
+/// A permission observer that records nothing, for a decision that belongs
+/// to no open audit log.
+struct Unobserved;
+
+impl PermissionObserver for Unobserved {
+    fn decided(&self, _decision: &anvil_core::tools::PermissionDecision) {}
 }
 
 /// The main session's prompt, lent to a sub-agent's registry.
@@ -83,6 +251,10 @@ struct ParentPrompt(Arc<dyn PermissionPrompt>);
 impl PermissionPrompt for ParentPrompt {
     fn ask(&self, request: &PermissionRequest) -> PromptAnswer {
         self.0.ask(request)
+    }
+
+    fn answer_source(&self) -> anvil_core::tools::DecisionSource {
+        self.0.answer_source()
     }
 }
 
@@ -103,27 +275,32 @@ struct SessionInfo {
 ///
 /// # Arguments
 ///
-/// * `cwd` - The project root.
+/// * `project` - The project root, or `None` when the repository is not trusted.
 /// * `home` - The home directory, if known.
 ///
 /// # Returns
 ///
 /// The roots.
-pub fn skill_roots(cwd: &Path, home: Option<&Path>) -> SkillRoots {
+pub fn skill_roots(project: Option<&Path>, home: Option<&Path>) -> SkillRoots {
     let bundled = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../skills"));
     SkillRoots {
-        project: cwd.to_path_buf(),
+        project: project.map(Path::to_path_buf),
         home: home.map(Path::to_path_buf),
         bundled: bundled.is_dir().then_some(bundled),
+        managed: Vec::new(),
     }
 }
 
 impl Wiring {
     /// Captures the environment.
     ///
+    /// Skills, commands, agents, hooks and MCP servers are discovered from
+    /// the home directory, and from the repository only when it is trusted.
+    ///
     /// # Arguments
     ///
-    /// * `config` - The merged configuration.
+    /// * `config` - The user's configuration.
+    /// * `project` - What the repository may contribute.
     ///
     /// # Returns
     ///
@@ -133,23 +310,61 @@ impl Wiring {
     ///
     /// When the current directory cannot be determined, or when
     /// `permissions.allow_tools` names an invalid tool.
-    pub fn new(config: AnvilConfig) -> anyhow::Result<Self> {
+    #[cfg(test)]
+    pub fn new(config: AnvilConfig, project: ProjectAccess) -> anyhow::Result<Self> {
         let cwd = std::env::current_dir().context("cannot determine the current directory")?;
-        let home = home_dir();
+        Self::new_in(cwd, home_dir(), config, project)
+    }
+
+    /// [`Wiring::new`] for a given project root and home directory, so a
+    /// test can build the wiring for a fixture repository.
+    ///
+    /// # Arguments
+    ///
+    /// * `cwd` - The project root.
+    /// * `home` - The home directory, if known.
+    /// * `config` - The user's configuration.
+    /// * `project` - What the repository may contribute.
+    ///
+    /// # Returns
+    ///
+    /// The wiring.
+    ///
+    /// # Errors
+    ///
+    /// When `permissions.allow_tools` names an invalid tool.
+    pub fn new_in(
+        cwd: PathBuf,
+        home: Option<PathBuf>,
+        config: AnvilConfig,
+        project: ProjectAccess,
+    ) -> anyhow::Result<Self> {
+        anvil_types::child_env::set_pass_env(config.tools.pass_env.clone());
         let budget = TokenBudget::shared(config.limits.session_tokens);
-        let skills = Arc::new(SkillSet::discover(&skill_roots(&cwd, home.as_deref())));
-        let commands = CommandSet::discover(&cwd, home.as_deref());
-        let agents = Arc::new(AgentSet::discover(&cwd, home.as_deref()));
-        let hooks = Arc::new(HookConfig::load(&cwd, home.as_deref()));
-        let mcp_servers = ServerSet::load(&cwd, home.as_deref());
+        let shipped = project.trusted.then_some(cwd.as_path());
+        let skills = Arc::new(SkillSet::discover(&skill_roots(shipped, home.as_deref())));
+        let commands = CommandSet::discover(shipped, home.as_deref());
+        let agents = Arc::new(AgentSet::discover(shipped, home.as_deref()));
+        let hooks = Arc::new(HookConfig::load(shipped, home.as_deref()));
+        let mcp_servers = ServerSet::load(shipped, home.as_deref());
         let approvals = Arc::new(Mutex::new(
             SessionApprovals::preapproved(config_allow_tools(&config))
                 .context("permissions.allow_tools in the configuration")?,
         ));
+        let egress = Egress::personal(
+            endpoint_urls(&config, &mcp_servers),
+            config.network.allow_http_hosts.clone(),
+        );
+        let shell = ShellSettings::resolve(&config.shell, None);
+        let session_redactor = redactor(&config, &[]).context("building the redactor")?;
+        crate::logging::use_redactor(&session_redactor);
+        let guard = DataGuard::new(Arc::new(session_redactor));
         Ok(Self {
             cwd,
             home,
             config,
+            project,
+            egress,
             budget,
             skills,
             commands,
@@ -157,15 +372,273 @@ impl Wiring {
             hooks,
             mcp_servers,
             mcp: Arc::new(McpTools::default()),
+            shell,
+            denied_paths: None,
+            guard,
+            transcript: TranscriptMode::Full,
             session: None,
             approvals,
             observer: Arc::new(Mutex::new(None)),
             prompt: Arc::new(Mutex::new(None)),
+            subagent_tap: Arc::new(Mutex::new(None)),
+            call_gate: Arc::new(Mutex::new(None)),
+            policy_refusals: Vec::new(),
+            policy: None,
         })
+    }
+
+    /// Applies a managed policy to everything this wiring loads and builds.
+    ///
+    /// This is the one place the policy changes a session:
+    ///
+    /// - requests may go only to `[network] allowed_hosts`, with the
+    ///   policy's CA bundle, client certificate and proxy mode;
+    /// - hooks, MCP servers and skills load only as `[features]` allows,
+    ///   and an HTTP MCP server only when its host is also allowed;
+    ///   one defined in the user's own files under `~/.anvil` or
+    ///   `~/.claude` that the policy forbids is an error, one shipped by a
+    ///   repository or bundled is left out with a note naming the key;
+    /// - saved `always` rules are an error unless `allow_always` is on, and
+    ///   their allow rules may not cover a policy `deny` or `ask` rule;
+    /// - `[limits] session_tokens` caps the session budget;
+    /// - `[files] deny` is compiled for the file tools;
+    /// - `[shell]` sets the mode, the allowlist and the executor.
+    ///
+    /// The policy's `deny` and `ask` rules, `allow_always` and `[files]
+    /// extra_roots` take effect in [`Wiring::registry`] and
+    /// [`Wiring::tool_context`], which subagents share.
+    ///
+    /// # Arguments
+    ///
+    /// * `policy` - The loaded policy.
+    ///
+    /// # Returns
+    ///
+    /// The wiring under the policy.
+    ///
+    /// # Errors
+    ///
+    /// When the user's own files define something the policy forbids, when
+    /// saved rules conflict with it, or when a `[files] deny` glob does not
+    /// compile; each error names the policy key.
+    pub fn with_policy(mut self, policy: Arc<LoadedPolicy>) -> anyhow::Result<Self> {
+        let p = &policy.policy;
+        let own: Vec<PathBuf> = self
+            .home
+            .iter()
+            .flat_map(|home| [home.join(".anvil"), home.join(".claude")])
+            .collect();
+        let is_own = |path: &Path| own.iter().any(|dir| path.starts_with(dir));
+        self.egress = Egress::from_policy(&p.network);
+        self.transcript = p.data.transcript;
+        let redactor = if p.data.redaction {
+            redactor(&self.config, &p.data.extra_patterns())
+                .context("the managed policy's [data] patterns")?
+        } else {
+            tracing::warn!("redaction is off: the managed policy sets [data] redaction = false");
+            eprintln!("{REDACTION_OFF_NOTE}");
+            Redactor::disabled()
+        };
+        crate::logging::use_redactor(&redactor);
+        self.guard = DataGuard::new(Arc::new(redactor));
+
+        if !p.features.hooks {
+            let sources: BTreeSet<PathBuf> = self
+                .hooks
+                .events()
+                .into_iter()
+                .flat_map(|event| self.hooks.groups(event).iter().map(|g| g.source.clone()))
+                .collect();
+            for source in sources {
+                if is_own(&source) {
+                    return Err(conflict(
+                        "[features] hooks = false",
+                        &format!("the hooks defined in {}", source.display()),
+                    ));
+                }
+                eprintln!(
+                    "note: the hooks in {} do not run: the managed policy's [features] hooks = false",
+                    source.display()
+                );
+                self.policy_refusals.push(PolicyRefusal {
+                    what: format!("the hooks in {}", source.display()),
+                    key: "features.hooks".to_owned(),
+                });
+            }
+            self.hooks = Arc::new(HookConfig::default());
+        }
+
+        let mcp_key = match p.features.mcp {
+            McpMode::Off => "[features] mcp = \"off\"",
+            McpMode::Allowlist => "[features] mcp_servers",
+            McpMode::On => "[features] mcp",
+        };
+        let egress = self.egress.clone();
+        let dropped = self.mcp_servers.retain(|server| match &server.transport {
+            Transport::Stdio { command, .. } => policy.allows_mcp_server(&server.name, command),
+            Transport::Http { url, .. } => {
+                policy.allows_mcp_url(&server.name, url) && egress.check(url).is_ok()
+            }
+        });
+        for server in dropped {
+            let mcp_key = match &server.transport {
+                Transport::Http { url, .. } if policy.allows_mcp_url(&server.name, url) => {
+                    "[network] allowed_hosts"
+                }
+                _ => mcp_key,
+            };
+            if is_own(&server.source) {
+                return Err(conflict(
+                    mcp_key,
+                    &format!(
+                        "the MCP server `{}` defined in {}",
+                        server.name,
+                        server.source.display()
+                    ),
+                ));
+            }
+            eprintln!(
+                "note: the MCP server `{}` in {} does not start: the managed policy's {mcp_key}",
+                server.name,
+                server.source.display()
+            );
+            self.policy_refusals.push(PolicyRefusal {
+                what: format!(
+                    "the MCP server `{}` in {}",
+                    server.name,
+                    server.source.display()
+                ),
+                key: mcp_key.to_owned(),
+            });
+        }
+
+        let all = skill_roots(self.trusted_root(), self.home.as_deref());
+        let roots = match p.features.skills {
+            SkillsMode::Off => SkillRoots {
+                project: None,
+                home: None,
+                bundled: None,
+                managed: Vec::new(),
+            },
+            SkillsMode::Bundled => SkillRoots {
+                project: None,
+                home: None,
+                ..all.clone()
+            },
+            SkillsMode::Local => all,
+        };
+        let allowed = SkillSet::discover(&roots);
+        for skill in self.skills.skills() {
+            if allowed.get(skill.name()).is_some() {
+                continue;
+            }
+            if is_own(&skill.dir) {
+                return Err(conflict(
+                    &format!("[features] skills = \"{}\"", skills_mode(p.features.skills)),
+                    &format!("the skill `{}` in {}", skill.name(), skill.dir.display()),
+                ));
+            }
+            eprintln!(
+                "note: the skill `{}` in {} does not load: the managed policy's [features] skills",
+                skill.name(),
+                skill.dir.display()
+            );
+            self.policy_refusals.push(PolicyRefusal {
+                what: format!("the skill `{}` in {}", skill.name(), skill.dir.display()),
+                key: "features.skills".to_owned(),
+            });
+        }
+        self.skills = Arc::new(allowed);
+
+        if self
+            .config
+            .permissions
+            .as_ref()
+            .is_none_or(|r| !r.has_rules())
+            && let Some(home) = &self.home
+        {
+            let saved = user_permissions_path(home, &self.cwd);
+            let rules = Permissions::load_file(saved.clone())
+                .context("loading your permission rules for this repository")?;
+            if rules.rules().has_rules() {
+                if !p.permissions.allow_always {
+                    return Err(conflict(
+                        "[permissions] allow_always = false",
+                        &format!(
+                            "the saved rules in {}; delete the file to continue",
+                            saved.display()
+                        ),
+                    ));
+                }
+                let source = saved.display().to_string();
+                check_allow_rules(p, &rules.rules().allow, &source)?;
+                check_unmatched(p, rules.rules(), &source)?;
+            }
+        }
+
+        if let Some(ceiling) = p.limits.session_tokens
+            && self.config.limits.session_tokens > ceiling
+        {
+            self.config.limits.session_tokens = ceiling;
+            self.budget = TokenBudget::shared(ceiling);
+        }
+        self.denied_paths = deny_globs(&p.files.deny)
+            .map_err(|error| anyhow::anyhow!("the managed policy's [files] deny: {error}"))?;
+        self.shell = ShellSettings::resolve(&self.config.shell, Some(&p.shell));
+        self.policy = Some(policy);
+        Ok(self)
+    }
+
+    /// The folder this repository's sessions live in: where the policy
+    /// puts transcripts, or `<project>/.anvil/sessions`.
+    ///
+    /// # Returns
+    ///
+    /// The folder.
+    pub fn sessions_root(&self) -> PathBuf {
+        crate::policy::sessions_root(&self.cwd, self.policy.as_deref())
+    }
+
+    /// Whether remembered facts are read and the end-of-session summarizer
+    /// proposes new ones: always when unmanaged, only when the policy's
+    /// `[features] memory` is on.
+    ///
+    /// # Returns
+    ///
+    /// `true` when memory may be used.
+    pub fn memory_allowed(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_none_or(|loaded| loaded.policy.features.memory)
+    }
+
+    /// Whether the `delegate` tool may be registered: always when
+    /// unmanaged, only when the policy's `[features] delegation` is on.
+    ///
+    /// # Returns
+    ///
+    /// `true` when subagents may run.
+    pub fn delegation_allowed(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_none_or(|loaded| loaded.policy.features.delegation)
+    }
+
+    /// Whether a plan must be approved by a person even under `--yes`.
+    ///
+    /// # Returns
+    ///
+    /// `true` when the policy requires it.
+    pub fn plans_need_a_person(&self) -> bool {
+        self.policy
+            .as_ref()
+            .is_some_and(|loaded| loaded.policy.permissions.require_plan_approval)
     }
 
     /// Pre-approves tools for this session on top of `permissions.allow_tools`,
     /// as `--allow-tool` does. Call it before building any registry.
+    /// Under a policy that disables pre-approval, both are refused before
+    /// this runs (`crate::policy::check_flags`, `crate::policy::check_config`).
     ///
     /// # Arguments
     ///
@@ -187,11 +660,93 @@ impl Wiring {
     ///
     /// # Arguments
     ///
-    /// * `observer` - The observer, such as the session telemetry.
+    /// * `observer` - The observer, such as the session usage records.
     pub fn set_permission_observer(&self, observer: Arc<dyn PermissionObserver>) {
         if let Ok(mut slot) = self.observer.lock() {
             *slot = Some(observer);
         }
+    }
+
+    /// Sends every delegated run's turns and tool calls to the tap `make`
+    /// builds for it; clones share the setting.
+    ///
+    /// # Arguments
+    ///
+    /// * `make` - Builds a tap from the agent's name.
+    pub fn set_subagent_tap(&self, make: SubagentTap) {
+        if let Ok(mut slot) = self.subagent_tap.lock() {
+            *slot = Some(make);
+        }
+    }
+
+    /// Makes every provider and registry this wiring builds from now on,
+    /// and every clone's, refuse to work once `gate` gives a reason.
+    ///
+    /// # Arguments
+    ///
+    /// * `gate` - The gate, such as a required audit log.
+    pub fn set_call_gate(&self, gate: Arc<dyn CallGate>) {
+        if let Ok(mut slot) = self.call_gate.lock() {
+            *slot = Some(gate);
+        }
+    }
+
+    /// The call gate, if one is set.
+    fn call_gate(&self) -> Option<Arc<dyn CallGate>> {
+        self.call_gate.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// The session folder, once [`Wiring::with_session`] set one.
+    ///
+    /// # Returns
+    ///
+    /// The folder.
+    pub fn session_dir(&self) -> Option<&Path> {
+        self.session.as_ref().map(|session| session.dir.as_path())
+    }
+
+    /// Checks every endpoint the configuration names against the egress
+    /// rules, so a refused one stops anvil at startup instead of at its
+    /// first request.
+    ///
+    /// # Errors
+    ///
+    /// The first provider `base_url` or HTTP MCP server `url` the rules
+    /// refuse, with the reason and the rule's key.
+    pub fn check_endpoints(&self) -> anyhow::Result<()> {
+        for (name, entry) in &self.config.providers {
+            if entry.protocol != Protocol::Fake {
+                self.egress
+                    .check(&entry.base_url)
+                    .with_context(|| format!("provider `{name}`"))?;
+            }
+        }
+        for server in self.mcp_servers.servers() {
+            if let Transport::Http { url, .. } = &server.transport {
+                self.egress.check(url).with_context(|| {
+                    format!(
+                        "the MCP server `{}` in {}",
+                        server.name,
+                        server.source.display()
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The HTTP client for MCP servers, built from [`Wiring::egress`].
+    ///
+    /// # Returns
+    ///
+    /// The client.
+    ///
+    /// # Errors
+    ///
+    /// When a `[network]` certificate, key or proxy cannot be used.
+    pub fn http_client(&self) -> anyhow::Result<HttpClient> {
+        net::http_client(&self.egress, MCP_CONNECT_TIMEOUT)
+            .context("building the HTTP client from the [network] settings")
     }
 
     /// Resolves every MCP server's tool list so [`Wiring::registry`] can
@@ -201,11 +756,38 @@ impl Wiring {
         if self.mcp_servers.is_empty() {
             return;
         }
-        self.mcp = Arc::new(McpTools::load(&self.mcp_servers, &self.cwd, false).await);
+        let http = match self.http_client() {
+            Ok(http) => http,
+            Err(error) => {
+                eprintln!("warning: no MCP server loads: {error:#}");
+                return;
+            }
+        };
+        self.mcp =
+            Arc::new(McpTools::load(&self.mcp_servers, &self.cwd, &http, &self.mcp_store()).await);
         for report in self.mcp.reports() {
             if let Err(error) = &report.tools {
                 eprintln!("warning: {error}");
             }
+        }
+    }
+
+    /// Where MCP listing approvals live (under `~/.anvil`, never in the
+    /// repository), with the policy's `listing_sha256` pins under a policy.
+    ///
+    /// # Returns
+    ///
+    /// The store for this project.
+    pub fn mcp_store(&self) -> McpStore {
+        let store = McpStore::new(
+            self.home
+                .as_ref()
+                .map(|home| home.join(anvil_types::config::CONFIG_DIR)),
+            &self.cwd,
+        );
+        match &self.policy {
+            Some(policy) => store.managed(policy.mcp_listing_pins()),
+            None => store,
         }
     }
 
@@ -241,16 +823,21 @@ impl Wiring {
             Some(session) => (session.id.clone(), Some(session.dir.clone())),
             None => ("none".to_owned(), None),
         };
-        Some(Arc::new(HookRunner::new(
+        let runner = HookRunner::new(
             Arc::clone(&self.hooks),
             self.cwd.clone(),
             Shell::from_config(self.config.tools.shell.as_deref()),
             id,
             dir,
-        )))
+        );
+        Some(Arc::new(match self.call_gate() {
+            Some(gate) => runner.with_gate(gate),
+            None => runner,
+        }))
     }
 
-    /// Wraps `SessionStart` hook output as a prompt section.
+    /// Wraps `SessionStart` hook output as a prompt section, redacted and
+    /// inside the session's untrusted-data delimiters.
     ///
     /// # Arguments
     ///
@@ -259,10 +846,10 @@ impl Wiring {
     /// # Returns
     ///
     /// The section, or `None` when they printed nothing.
-    pub fn session_start_instruction(context: Vec<String>) -> Option<Instruction> {
+    pub fn session_start_instruction(&self, context: Vec<String>) -> Option<Instruction> {
         (!context.is_empty()).then(|| Instruction {
             source: "SessionStart hooks".to_owned(),
-            text: context.join("\n"),
+            text: self.guard.guard("hook", &context.join("\n")).0,
         })
     }
 
@@ -347,10 +934,19 @@ impl Wiring {
             .providers
             .get(name)
             .with_context(|| format!("no provider named `{name}` in [providers]"))?;
-        let provider =
-            provider::from_config(name, entry, &self.config.limits, Arc::clone(&self.budget))
-                .with_context(|| format!("building provider `{name}`"))?;
-        Ok(Arc::from(provider))
+        let provider = provider::from_config(
+            name,
+            entry,
+            &self.config.limits,
+            Arc::clone(&self.budget),
+            &self.egress,
+        )
+        .with_context(|| format!("building provider `{name}`"))?;
+        let provider: Arc<dyn Provider> = Arc::from(provider);
+        Ok(match self.call_gate() {
+            Some(gate) => gated(provider, gate),
+            None => provider,
+        })
     }
 
     /// The coder, reviewer and summarizer named in `[roles]`.
@@ -400,8 +996,9 @@ impl Wiring {
             .unwrap_or(32_000)
     }
 
-    /// The tool registry with the project's permissions: the built-ins, the
-    /// `skill` tool and, when any subagent is defined, the `delegate` tool.
+    /// The tool registry with the user's permission rules, tightened by the
+    /// repository's: the built-ins, the `skill` tool and, when any subagent
+    /// is defined, the `delegate` tool.
     ///
     /// # Arguments
     ///
@@ -413,14 +1010,15 @@ impl Wiring {
     ///
     /// # Errors
     ///
-    /// When `.anvil/permissions.toml` exists but cannot be read.
+    /// When a permission rules file exists but cannot be read, or a rule
+    /// does not compile.
     pub fn registry(&self, prompt: Box<dyn PermissionPrompt>) -> anyhow::Result<ToolRegistry> {
         let prompt: Arc<dyn PermissionPrompt> = Arc::from(prompt);
         if let Ok(mut slot) = self.prompt.lock() {
             *slot = Some(Arc::clone(&prompt));
         }
         let mut registry = self.registry_without_delegate(Box::new(ParentPrompt(prompt)))?;
-        if !self.agents.is_empty() {
+        if !self.agents.is_empty() && self.delegation_allowed() {
             registry.register(Box::new(DelegateTool::new(
                 Arc::clone(&self.agents),
                 Arc::new(self.clone()),
@@ -429,20 +1027,101 @@ impl Wiring {
         Ok(registry)
     }
 
+    /// Decides whether a command anvil runs itself, such as an acceptance
+    /// command of `anvil build`, may run: the shell mode, the allowlist, the
+    /// deny categories and the permission rules apply as they would to the
+    /// model's own `shell` call, and an `ask` asks `prompt`.
+    ///
+    /// # Arguments
+    ///
+    /// The decision goes to `audit` and nowhere else: never to the
+    /// session whose permission observer the wiring holds, which may have
+    /// ended already.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command line.
+    /// * `prompt` - Who answers an `ask`.
+    /// * `audit` - The audit log the decision is recorded in, such as the
+    ///   build's; when it is required, a failed write refuses the command.
+    ///
+    /// # Errors
+    ///
+    /// The reason, when the command may not run.
+    pub fn permit_shell(
+        &self,
+        command: &str,
+        prompt: Box<dyn PermissionPrompt>,
+        audit: Option<Arc<crate::audit::SessionAudit>>,
+    ) -> Result<(), String> {
+        let mut registry = self
+            .registry_without_delegate(prompt)
+            .map_err(|error| format!("{error:#}"))?;
+        match audit {
+            Some(audit) => {
+                if audit.required() {
+                    registry.set_gate(Arc::clone(&audit) as Arc<dyn CallGate>);
+                }
+                registry.set_observer(audit);
+            }
+            None => registry.set_observer(Arc::new(Unobserved)),
+        }
+        registry.permit(
+            SHELL_TOOL_NAME,
+            &serde_json::json!({ "command": command }),
+            &self.cwd,
+        )
+    }
+
     /// The registry a subagent gets: everything but `delegate`, so
-    /// delegations do not nest.
+    /// delegations do not nest. The shell's allowlist layers and mode apply
+    /// here, so every registry of a session, a subagent's included, has them.
     fn registry_without_delegate(
         &self,
         prompt: Box<dyn PermissionPrompt>,
     ) -> anyhow::Result<ToolRegistry> {
-        let permissions = match &self.config.permissions {
-            Some(rules) if rules.has_rules() => {
-                Permissions::from_rules(rules).context("permissions in the configuration")?
-            }
-            _ => Permissions::load(&self.cwd).context("loading permissions")?,
-        };
+        let mut permissions = self.user_permissions()?;
+        permissions
+            .tighten(
+                &self.project.rules.deny,
+                &self.project.rules.ask,
+                &self.project.rules.shell_programs,
+            )
+            .context("the repository's permission rules")?;
+        if self.project.trusted {
+            permissions
+                .allow_from_project(&self.project.rules.allow)
+                .context("the repository's allow rules")?;
+        }
+        let mut always = true;
+        if let Some(loaded) = &self.policy {
+            let p = &loaded.policy.permissions;
+            permissions
+                .tighten_as(RuleOrigin::Policy, &p.deny, &p.ask, &[])
+                .context("the managed policy's [permissions]")?;
+            always = p.allow_always;
+        }
+        for (source, patterns) in &self.shell.layers {
+            let origin = if source.starts_with(shell::POLICY_LAYER) {
+                RuleOrigin::Policy
+            } else {
+                RuleOrigin::User
+            };
+            permissions
+                .limit_shell_as(patterns, source, origin)
+                .with_context(|| format!("the patterns of {source}"))?;
+        }
         let mut registry = ToolRegistry::with_builtins(permissions, prompt)
-            .with_session_approvals(Arc::clone(&self.approvals));
+            .with_session_approvals(Arc::clone(&self.approvals))
+            .with_always(always);
+        if self.shell.mode == ShellMode::Off {
+            registry.unregister(SHELL_TOOL_NAME);
+        } else {
+            registry.register(Box::new(ShellTool::for_context(
+                &Shell::from_config(self.config.tools.shell.as_deref()),
+                &self.runner(),
+            )));
+        }
         let observer = self.observer.lock().ok().and_then(|slot| slot.clone());
         if let Some(observer) = observer {
             registry.set_observer(observer);
@@ -452,7 +1131,33 @@ impl Wiring {
         if let Some(runner) = self.hook_runner() {
             registry.set_hook(runner);
         }
+        if let Some(gate) = self.call_gate() {
+            registry.set_gate(gate);
+        }
         Ok(registry)
+    }
+
+    /// The user's own permission rules: the configuration's or profile's
+    /// `[permissions]` when it sets any, otherwise the user's file for this
+    /// repository under `~/.anvil/permissions/`, which `always` answers
+    /// are saved to. Under a policy with `allow_always = false` that file
+    /// is not used; [`Wiring::with_policy`] already refused it if it held
+    /// rules.
+    fn user_permissions(&self) -> anyhow::Result<Permissions> {
+        if let Some(rules) = self.config.permissions.as_ref().filter(|r| r.has_rules()) {
+            return Permissions::from_rules(rules).context("permissions in the configuration");
+        }
+        let saving_allowed = self
+            .policy
+            .as_ref()
+            .is_none_or(|loaded| loaded.policy.permissions.allow_always);
+        match &self.home {
+            Some(home) if saving_allowed => {
+                Permissions::load_file(user_permissions_path(home, &self.cwd))
+                    .context("loading your permission rules for this repository")
+            }
+            _ => Ok(Permissions::empty()),
+        }
     }
 
     /// Prompt sections that come from outside anvil-core: the Claude Code
@@ -468,25 +1173,104 @@ impl Wiring {
     ///
     /// The sections, possibly empty.
     pub fn extra_instructions(&self, tool_names: &[&str]) -> Vec<Instruction> {
-        let base =
-            context::discover_instructions(self.home.as_deref(), &self.cwd, &BTreeSet::new());
+        let project = self.trusted_root();
+        let base = context::discover_instructions(self.home.as_deref(), project, &BTreeSet::new());
         let mut extra =
-            anvil_compat::instructions::discover_extra(self.home.as_deref(), &self.cwd, &base);
+            anvil_compat::instructions::discover_extra(self.home.as_deref(), project, &base);
         extra.extend(self.skills.prompt_section(tool_names));
         extra.extend(self.agents.prompt_section());
         extra
+    }
+
+    /// The repository root when the user trusts it, for loading its files.
+    ///
+    /// # Returns
+    ///
+    /// The root, or `None` when nothing the repository ships may load.
+    pub fn trusted_root(&self) -> Option<&Path> {
+        self.project.trusted.then_some(self.cwd.as_path())
+    }
+
+    /// The folders that hold anvil's records, which file tools never write.
+    ///
+    /// # Returns
+    ///
+    /// The sessions root (the project's `.anvil/sessions` or the policy's
+    /// `transcript_dir`), the project's `.anvil/builds`, `.anvil/logs` and
+    /// `.anvil/usage`, and the policy's `[audit] mirror_dir` when it sets one.
+    pub fn records_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![
+            self.sessions_root(),
+            crate::build::state::builds_root(&self.cwd),
+            self.cwd.join(crate::logging::LOG_DIR),
+            anvil_audit::paths::project_usage_dir(&self.cwd),
+        ];
+        dirs.extend(
+            self.policy
+                .as_ref()
+                .and_then(|loaded| loaded.policy.audit.mirror_dir.clone()),
+        );
+        dirs
+    }
+
+    /// How commands start: directly under any allowlist, in a container
+    /// when one is configured.
+    fn runner(&self) -> Runner {
+        // A rules file that cannot be read counts as limiting, so commands
+        // never fall back to a shell when an allowlist might be in force.
+        let programs_limit = !self.project.rules.shell_programs.is_empty()
+            || self
+                .user_permissions()
+                .map_or(true, |rules| rules.has_shell_allowlist());
+        self.shell.runner(programs_limit)
     }
 
     /// Where tools run.
     ///
     /// # Returns
     ///
-    /// The context, with the configured shell.
+    /// The context, with the configured shell and how commands start
+    /// (directly under an allowlist, in a container when configured), and
+    /// the folders outside the project the file tools may open: `[tools]
+    /// extra_dirs`, and the loaded skills' folders for reading their
+    /// supporting files; the user's `~/.anvil`, which they never write;
+    /// anvil's records ([`Wiring::records_dirs`]); and the files in the
+    /// project that a loaded hook or MCP server runs, which they never
+    /// write either.
     pub fn tool_context(&self) -> ToolContext {
         ToolContext {
-            cwd: self.cwd.clone(),
-            session_dir: None,
             shell: Shell::from_config(self.config.tools.shell.as_deref()),
+            runner: self.runner(),
+            workspace: Workspace {
+                extra_dirs: self.config.tools.extra_dirs.clone(),
+                read_only_dirs: self
+                    .skills
+                    .skills()
+                    .iter()
+                    .map(|s| s.dir.clone())
+                    .chain(
+                        self.policy
+                            .iter()
+                            .flat_map(|loaded| loaded.policy.files.extra_roots.clone()),
+                    )
+                    .collect(),
+                denied: self.denied_paths.clone(),
+                protected_dirs: self
+                    .home
+                    .iter()
+                    .map(|home| home.join(anvil_types::config::CONFIG_DIR))
+                    .collect(),
+                records_dirs: self.records_dirs(),
+                protected_files: anvil_core::tools::workspace::command_files(
+                    &self.cwd,
+                    crate::trust::commands_run(&self.hooks, &self.mcp_servers)
+                        .iter()
+                        .map(String::as_str),
+                ),
+            },
+            guard: self.guard.clone(),
+            transcript: self.transcript,
+            ..ToolContext::new(self.cwd.clone())
         }
     }
 
@@ -512,8 +1296,10 @@ impl Wiring {
         session_dir: PathBuf,
         registry: &ToolRegistry,
     ) -> anyhow::Result<LoopConfig> {
-        let mut sections = memory::prompt_sections(self.home.as_deref(), &self.cwd)?;
+        let mut sections =
+            memory::prompt_sections(self.home.as_deref(), &self.cwd, self.memory_allowed())?;
         sections.coder.extend(profile_section(&self.config.prompt));
+        sections.coder.extend(self.shell.prompt_section());
         sections
             .coder
             .extend(templates::plan_section(self.home.as_deref(), &self.cwd));
@@ -530,6 +1316,7 @@ impl Wiring {
                 .map_or(CheckCommand::Detect, CheckCommand::Command),
             context_window: self.context_window(),
             home_dir: self.home.clone(),
+            trusted_project: self.project.trusted,
             extra_instructions: self.extra_instructions(&registry.names()),
             sections: sections.coder,
             review_sections: sections.review,
@@ -560,7 +1347,7 @@ impl Wiring {
     /// Its path and id.
     pub fn new_session_dir(&self) -> (PathBuf, String) {
         let id = context::new_session_id();
-        (context::session_dir(&self.cwd, &id), id)
+        (context::session_dir(&self.sessions_root(), &id), id)
     }
 
     /// The permission prompt for this invocation.
@@ -599,6 +1386,14 @@ impl SubagentEnv for Wiring {
     fn context_window(&self) -> u32 {
         Wiring::context_window(self)
     }
+
+    fn events(&self, agent: &str) -> EventSink {
+        let make = self.subagent_tap.lock().ok().and_then(|slot| slot.clone());
+        match make {
+            Some(make) => EventSink::discard().with_tap(make(agent)),
+            None => EventSink::discard(),
+        }
+    }
 }
 
 /// The tools `permissions.allow_tools` pre-approves, if any.
@@ -628,6 +1423,12 @@ fn profile_section(prompt: &PromptConfig) -> Option<PromptSection> {
         text,
     })
 }
+
+#[cfg(test)]
+mod hostile_tests;
+
+#[cfg(test)]
+mod policy_tests;
 
 #[cfg(test)]
 mod tests {
@@ -689,19 +1490,22 @@ mod tests {
     #[tokio::test]
     async fn allow_tool_flag_and_config_key_pre_approve_edit_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut flagged = Wiring::new(config("")).expect("wiring");
+        let mut flagged = Wiring::new(config(""), ProjectAccess::default()).expect("wiring");
         flagged
             .allow_tools(&["edit_file".to_owned()])
             .expect("valid names");
         let registry = flagged.registry(refusing()).expect("registry");
         assert_eq!(completed_edits(&registry, dir.path()).await, 5);
 
-        let configured =
-            Wiring::new(config("[permissions]\nallow_tools = [\"edit_file\"]\n")).expect("wiring");
+        let configured = Wiring::new(
+            config("[permissions]\nallow_tools = [\"edit_file\"]\n"),
+            ProjectAccess::default(),
+        )
+        .expect("wiring");
         let registry = configured.registry(refusing()).expect("registry");
         assert_eq!(completed_edits(&registry, dir.path()).await, 5);
 
-        let neither = Wiring::new(config("")).expect("wiring");
+        let neither = Wiring::new(config(""), ProjectAccess::default()).expect("wiring");
         let registry = neither.registry(refusing()).expect("registry");
         assert_eq!(completed_edits(&registry, dir.path()).await, 0);
     }
@@ -710,13 +1514,13 @@ mod tests {
     fn the_planner_is_a_role_name_for_model_keys() {
         let mut config = config("");
         let coder = config.roles.coder.clone();
-        let wiring = Wiring::new(config.clone()).expect("wiring");
+        let wiring = Wiring::new(config.clone(), ProjectAccess::default()).expect("wiring");
         assert_eq!(wiring.resolve_model(Some("planner")), (coder.clone(), None));
 
         let big = config.providers[&coder].clone();
         config.providers.insert("big".to_owned(), big);
         config.roles.planner = Some("big".to_owned());
-        let wiring = Wiring::new(config).expect("wiring");
+        let wiring = Wiring::new(config, ProjectAccess::default()).expect("wiring");
         assert_eq!(
             wiring.resolve_model(Some("planner")),
             ("big".to_owned(), None)
@@ -728,13 +1532,13 @@ mod tests {
     fn the_worker_is_a_role_name_for_model_keys_and_falls_back_to_the_coder() {
         let mut config = config("");
         let coder = config.roles.coder.clone();
-        let wiring = Wiring::new(config.clone()).expect("wiring");
+        let wiring = Wiring::new(config.clone(), ProjectAccess::default()).expect("wiring");
         assert_eq!(wiring.resolve_model(Some("worker")), (coder.clone(), None));
 
         let cheap = config.providers[&coder].clone();
         config.providers.insert("cheap".to_owned(), cheap);
         config.roles.worker = Some("cheap".to_owned());
-        let wiring = Wiring::new(config).expect("wiring");
+        let wiring = Wiring::new(config, ProjectAccess::default()).expect("wiring");
         assert_eq!(
             wiring.resolve_model(Some("worker")),
             ("cheap".to_owned(), None)
@@ -779,7 +1583,8 @@ mod tests {
     async fn a_delegated_run_draws_on_the_session_budget_and_stops_when_it_is_spent() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Every fake completion costs 15 weighted tokens.
-        let wiring = Wiring::new(scripted_config(dir.path(), 20, 3)).expect("wiring");
+        let wiring = Wiring::new(scripted_config(dir.path(), 20, 3), ProjectAccess::default())
+            .expect("wiring");
         let coder = wiring.provider("coder").expect("coder provider");
         let request = anvil_core::provider::CompletionRequest {
             system: String::new(),
@@ -807,7 +1612,11 @@ mod tests {
     #[tokio::test]
     async fn a_delegated_run_within_budget_reports_its_turns() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wiring = Wiring::new(scripted_config(dir.path(), 10_000, 1)).expect("wiring");
+        let wiring = Wiring::new(
+            scripted_config(dir.path(), 10_000, 1),
+            ProjectAccess::default(),
+        )
+        .expect("wiring");
         let explore = wiring.agents.get("explore").expect("built-in explore");
         let run = anvil_compat::delegate::run_subagent(explore, "look around", &wiring).await;
         assert_eq!(run.result.as_deref(), Ok("all done"));
@@ -816,20 +1625,113 @@ mod tests {
     }
 
     #[test]
+    fn plain_http_to_a_lan_host_is_refused_unless_the_user_lists_it() {
+        // `PATH` stands in for a key variable that is always set.
+        let endpoint = r#"
+[providers.gpu]
+protocol = "openai"
+base_url = "http://10.0.0.5:8000/v1"
+api_key_env = "PATH"
+model = "m"
+context_window = 1000
+supports_tools = true
+supports_reasoning = false
+"#;
+        let wiring = Wiring::new(config(endpoint), ProjectAccess::default()).expect("wiring");
+        let error = wiring.provider("gpu").err().expect("refused");
+        assert!(format!("{error:#}").contains("plain http"), "{error:#}");
+        let listed = format!("{endpoint}\n[network]\nallow_http_hosts = [\"10.0.0.5\"]\n");
+        let wiring = Wiring::new(config(&listed), ProjectAccess::default()).expect("wiring");
+        assert!(wiring.provider("gpu").is_ok());
+    }
+
+    #[test]
+    fn unmanaged_egress_allows_the_users_endpoints_and_a_trusted_repositorys_only() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(home.join(".anvil")).expect("mkdir");
+        std::fs::create_dir_all(&project).expect("mkdir");
+        std::fs::write(
+            home.join(".anvil").join("mcp.toml"),
+            "[servers.docs]
+url = \"https://mcp.example.com/mcp\"
+",
+        )
+        .expect("write");
+        std::fs::write(
+            project.join(".mcp.json"),
+            r#"{"mcpServers": {"exfil": {"url": "https://exfil.example/mcp"}}}"#,
+        )
+        .expect("write");
+        let endpoint = r#"
+[providers.cloud]
+protocol = "openai"
+base_url = "https://api.example.com/v1"
+api_key_env = "PATH"
+model = "m"
+context_window = 1000
+supports_tools = true
+supports_reasoning = false
+"#;
+        let build = |trusted: bool| {
+            Wiring::new_in(
+                project.clone(),
+                Some(home.clone()),
+                config(endpoint),
+                ProjectAccess {
+                    trusted,
+                    rules: ProjectRules::default(),
+                },
+            )
+            .expect("wiring")
+        };
+        let untrusted = build(false);
+        let allowed = untrusted.egress.allowed();
+        for pair in ["api.example.com:443", "mcp.example.com:443"] {
+            assert!(allowed.contains(&pair.to_owned()), "{allowed:?}");
+        }
+        assert!(untrusted.check_endpoints().is_ok());
+        assert!(
+            untrusted.egress.check("https://exfil.example/mcp").is_err(),
+            "an untrusted repository's server adds no destination"
+        );
+        let trusted = build(true);
+        assert!(trusted.egress.check("https://exfil.example/mcp").is_ok());
+
+        std::fs::write(
+            home.join(".anvil").join("mcp.toml"),
+            "[servers.lan]
+url = \"http://10.0.0.7:3000/mcp\"
+",
+        )
+        .expect("write");
+        let error = build(false).check_endpoints().expect_err("refused");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("MCP server `lan`") && text.contains("plain http"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn invalid_allow_tool_names_are_errors() {
-        let mut wiring = Wiring::new(config("")).expect("wiring");
+        let mut wiring = Wiring::new(config(""), ProjectAccess::default()).expect("wiring");
         let error = wiring
             .allow_tools(&["edit file".to_owned()])
             .expect_err("whitespace");
         assert!(format!("{error:#}").contains("--allow-tool"), "{error:#}");
-        let configured = Wiring::new(config("[permissions]\nallow_tools = [\"\"]\n"));
+        let configured = Wiring::new(
+            config("[permissions]\nallow_tools = [\"\"]\n"),
+            ProjectAccess::default(),
+        );
         assert!(configured.is_err());
     }
 
     #[tokio::test]
     async fn subagent_registry_shares_the_session_approvals() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wiring = Wiring::new(config("")).expect("wiring");
+        let wiring = Wiring::new(config(""), ProjectAccess::default()).expect("wiring");
         let main = wiring.registry(refusing()).expect("registry");
         main.session_approvals()
             .lock()

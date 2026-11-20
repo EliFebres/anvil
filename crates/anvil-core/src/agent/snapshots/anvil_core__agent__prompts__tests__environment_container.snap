@@ -1,0 +1,8 @@
+---
+source: crates/anvil-core/src/agent/prompts.rs
+expression: text
+---
+# Environment
+
+Operating system: Windows. Paths use `\` as the separator; the file tools also accept `/`.
+The shell tool runs each command with `sh -c` inside a Linux container where the project is mounted at `/workspace`, with no network. Use POSIX shell syntax and `/` in paths.

@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! ANVIL_LIVE_PROTOCOL=openai ANVIL_LIVE_BASE_URL=https://host/v1 \
-//! ANVIL_LIVE_MODEL=name ANVIL_LIVE_KEY_ENV=ANVIL_RUNPOD_KEY \
+//! ANVIL_LIVE_MODEL=name ANVIL_LIVE_KEY_ENV=ANVIL_ENDPOINT_KEY \
 //! cargo test -p anvil-core --test live -- --ignored --nocapture
 //! ```
 
@@ -37,6 +37,7 @@ async fn live_endpoint_answers_pong() {
         &cfg,
         &LimitsConfig::default(),
         TokenBudget::shared(100_000),
+        &provider::Egress::personal([cfg.base_url.as_str()], Vec::new()),
     )
     .expect("provider builds");
     let request = CompletionRequest {

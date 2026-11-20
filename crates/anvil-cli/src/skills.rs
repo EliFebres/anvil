@@ -34,7 +34,6 @@ pub async fn run(command: SkillCommand, home: Option<&Path>, cwd: &Path) -> anyh
             let source = Source::parse(&source, cwd)?;
             let scope = scope(project);
             let installed = install::install(&source, scope, home, cwd, force)
-                .await
                 .with_context(|| format!("installing {source}"))?;
             let verb = if installed.replaced {
                 "replaced"
@@ -50,9 +49,9 @@ pub async fn run(command: SkillCommand, home: Option<&Path>, cwd: &Path) -> anyh
             Ok(0)
         }
         SkillCommand::List => {
-            let set = SkillSet::discover(&skill_roots(cwd, home));
+            let set = SkillSet::discover(&skill_roots(Some(cwd), home));
             if set.is_empty() {
-                println!("no skills found; `anvil skill add <path | git URL | owner/repo>`");
+                println!("no skills found; `anvil skill add <directory>`");
             }
             for skill in set.skills() {
                 println!(
@@ -76,7 +75,7 @@ pub async fn run(command: SkillCommand, home: Option<&Path>, cwd: &Path) -> anyh
             Ok(0)
         }
         SkillCommand::Show { name } => {
-            let set = SkillSet::discover(&skill_roots(cwd, home));
+            let set = SkillSet::discover(&skill_roots(Some(cwd), home));
             let skill = set.get(&name).with_context(|| {
                 format!("no skill named `{name}`; `anvil skill list` shows them")
             })?;
@@ -103,6 +102,7 @@ fn scope(project: bool) -> Scope {
 pub fn source_label(skill: &Skill) -> String {
     match skill.source {
         Origin::Bundled => "bundled skills/".to_owned(),
+        Origin::Managed => "policy skill folder".to_owned(),
         origin => format!("{origin}/skills"),
     }
 }

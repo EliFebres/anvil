@@ -55,7 +55,7 @@ pub enum CompatError {
         source: ValidationError,
     },
 
-    /// `anvil skill add` could not fetch, find or copy the skill.
+    /// `anvil skill add` could not find or copy the skill.
     #[error("{detail}")]
     Install {
         /// What went wrong, with any hint about how to fix it.

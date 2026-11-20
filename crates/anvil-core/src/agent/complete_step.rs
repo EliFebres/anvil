@@ -61,7 +61,7 @@ impl Tool for CompleteStep {
             };
             let step = args.step;
             match tick(&plan, step) {
-                Tick::Ticked(ticked) => match std::fs::write(&path, ticked) {
+                Tick::Ticked(ticked) => match anvil_types::private_fs::write(&path, ticked) {
                     Ok(()) => ToolOutput::ok(format!("step {step} marked done")),
                     Err(error) => ToolOutput::error(format!("cannot write the plan: {error}")),
                 },

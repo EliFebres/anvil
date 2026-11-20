@@ -1,8 +1,11 @@
-//! `anvil config init`: writes a template configuration file.
+//! `anvil config init`: writes a template configuration file, either the
+//! user's own `~/.anvil/config.toml` or a repository's `.anvil/config.toml`,
+//! which may only add permission rules that tighten.
 
 use std::path::PathBuf;
 
 use anvil_types::config::CONFIG_TEMPLATE;
+use anvil_types::project::PROJECT_TEMPLATE;
 use anyhow::{Context, bail};
 
 use crate::wiring::home_dir;
@@ -34,8 +37,14 @@ pub fn run(global: bool) -> anyhow::Result<PathBuf> {
     let dir = path
         .parent()
         .context("config path has no parent directory")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    std::fs::write(&path, CONFIG_TEMPLATE)
+    anvil_types::private_fs::create_dir_all(dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let template = if global {
+        CONFIG_TEMPLATE
+    } else {
+        PROJECT_TEMPLATE
+    };
+    anvil_types::private_fs::write(&path, template)
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
 }

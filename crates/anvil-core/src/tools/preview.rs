@@ -1,17 +1,21 @@
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::agent::LoopEvent;
 use crate::provider::ToolCall;
 use crate::tools::ToolContext;
+use crate::tools::edit_file::{EditFileArgs, apply};
+use crate::tools::write_file::{WriteFileArgs, content_to_write};
 
 /// Files larger than this are not previewed, to keep the event small.
 const MAX_PREVIEW_BYTES: u64 = 1024 * 1024;
 
 /// The edit an `edit_file` or `write_file` call will make.
 ///
-/// The replacement follows the tool exactly: `write_file` replaces the
-/// whole file, `edit_file` replaces the first occurrence of `old`, or every
-/// one with `replace_all`. A call the tool would reject (bad arguments, a
+/// The replacement follows the tool exactly, through the same functions:
+/// `write_file` replaces the whole file and keeps a CRLF file CRLF, and
+/// `edit_file` replaces the one occurrence of `old`, or every one with
+/// `replace_all`, whatever the line endings. A call the tool would reject (bad arguments, a
 /// missing file, no match) gives nothing, as does any other tool.
 ///
 /// # Arguments
@@ -24,36 +28,28 @@ const MAX_PREVIEW_BYTES: u64 = 1024 * 1024;
 /// The event to emit, if the call edits a file.
 pub fn proposed_edit(call: &ToolCall, ctx: &ToolContext) -> Option<LoopEvent> {
     let args: Value = serde_json::from_str(&call.arguments_json).ok()?;
-    let path = ctx.resolve(args.get("path")?.as_str()?);
+    let path = ctx.checked_path(args.get("path")?.as_str()?, true).ok()?;
     match call.name.as_str() {
         "write_file" => {
-            let new = args.get("content")?.as_str()?.to_owned();
-            let old = match std::fs::metadata(&path) {
+            let args = WriteFileArgs::deserialize(&args).ok()?;
+            let content = args.content.as_str();
+            let (old, exists) = match std::fs::metadata(&path) {
                 Ok(meta) if meta.len() > MAX_PREVIEW_BYTES => return None,
-                Ok(_) => std::fs::read_to_string(&path).ok()?,
-                Err(_) => String::new(),
+                Ok(_) => (std::fs::read_to_string(&path).ok()?, true),
+                Err(_) => (String::new(), false),
             };
+            let (new, _) = content_to_write(exists.then_some(old.as_str()), content);
             Some(LoopEvent::ProposedEdit { path, old, new })
         }
         "edit_file" => {
-            let find = args.get("old")?.as_str()?;
-            let replace = args.get("new")?.as_str()?;
-            let replace_all = args
-                .get("replace_all")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if find.is_empty() || std::fs::metadata(&path).ok()?.len() > MAX_PREVIEW_BYTES {
+            let args = EditFileArgs::deserialize(&args).ok()?;
+            if args.old.is_empty() || std::fs::metadata(&path).ok()?.len() > MAX_PREVIEW_BYTES {
                 return None;
             }
             let old = std::fs::read_to_string(&path).ok()?;
-            if !old.contains(find) {
-                return None;
-            }
-            let new = if replace_all {
-                old.replace(find, replace)
-            } else {
-                old.replacen(find, replace, 1)
-            };
+            let new = apply(&old, &args.old, &args.new, args.replace_all)
+                .ok()?
+                .text;
             Some(LoopEvent::ProposedEdit { path, old, new })
         }
         _ => None,
@@ -78,7 +74,7 @@ mod tests {
         std::fs::write(dir.path().join("f.txt"), "a\nb\na\n").expect("write");
         let ctx = ToolContext::new(dir.path());
         let one = proposed_edit(
-            &call("edit_file", r#"{"path":"f.txt","old":"a","new":"z"}"#),
+            &call("edit_file", r#"{"path":"f.txt","old":"a\nb","new":"z\nb"}"#),
             &ctx,
         );
         match one {
@@ -89,6 +85,14 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+        assert!(
+            proposed_edit(
+                &call("edit_file", r#"{"path":"f.txt","old":"a","new":"z"}"#),
+                &ctx
+            )
+            .is_none(),
+            "an ambiguous match the tool refuses has no preview"
+        );
         let all = proposed_edit(
             &call(
                 "edit_file",
@@ -136,5 +140,92 @@ mod tests {
             &ctx,
         );
         assert!(matches!(over, Some(LoopEvent::ProposedEdit { old, .. }) if old == "old\n"));
+    }
+
+    #[test]
+    fn previews_follow_the_tools_on_crlf_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("f.txt"), "a\r\nb\r\n").expect("write");
+        let ctx = ToolContext::new(dir.path());
+        let edit = proposed_edit(
+            &call("edit_file", r#"{"path":"f.txt","old":"a\nb","new":"x\ny"}"#),
+            &ctx,
+        );
+        assert!(
+            matches!(&edit, Some(LoopEvent::ProposedEdit { new, .. }) if new == "x\r\ny\r\n"),
+            "{edit:?}"
+        );
+        let write = proposed_edit(
+            &call("write_file", r#"{"path":"f.txt","content":"x\ny\n"}"#),
+            &ctx,
+        );
+        assert!(
+            matches!(&write, Some(LoopEvent::ProposedEdit { new, .. }) if new == "x\r\ny\r\n"),
+            "{write:?}"
+        );
+    }
+
+    #[test]
+    fn no_preview_for_arguments_the_tool_rejects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("f.txt"), "a\r\nb\r\n").expect("write");
+        let ctx = ToolContext::new(dir.path());
+        let edit = proposed_edit(
+            &call(
+                "edit_file",
+                r#"{"path":"f.txt","old":"a","new":"z","replace_all":"yes"}"#,
+            ),
+            &ctx,
+        );
+        assert!(edit.is_none(), "{edit:?}");
+        let write = proposed_edit(
+            &call("write_file", r#"{"path":"f.txt","content":"x\n","mode":3}"#),
+            &ctx,
+        );
+        assert!(
+            write.is_some(),
+            "an unknown field is ignored by the tool too"
+        );
+    }
+
+    #[test]
+    fn write_file_and_its_preview_agree_on_line_endings() {
+        let cases: &[(Option<&str>, &str, &str)] = &[
+            (Some("a\r\nb\r\n"), "x\r\ny\r\n", "x\r\ny\r\n"),
+            (Some("a\r\nb\r\n"), "", ""),
+            (Some("a\r\nb\r\n"), "x\ny", "x\r\ny"),
+            (Some("a\r\nb\n"), "x\ny\n", "x\ny\n"),
+            (Some("a\r\r\nb\r\n"), "x\ny\n", "x\r\ny\r\n"),
+            (Some("\u{feff}a\r\n"), "x\n", "x\r\n"),
+            (Some("a\r\nb\r\n"), "x\ry", "x\ry"),
+            (Some("a\r\nb\r\n"), "x\r\ny\n", "x\r\ny\n"),
+            (Some("no break"), "x\n", "x\n"),
+            (None, "x\n", "x\n"),
+            (Some("\r\n\r\n"), "\n\n", "\r\n\r\n"),
+        ];
+        for (existing, content, want) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            if let Some(existing) = existing {
+                std::fs::write(dir.path().join("f.txt"), existing).expect("write");
+            }
+            let ctx = ToolContext::new(dir.path());
+            let args = serde_json::json!({"path": "f.txt", "content": content}).to_string();
+            let preview = proposed_edit(&call("write_file", &args), &ctx);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("rt");
+            let output = rt.block_on(crate::tools::Tool::run(
+                &crate::tools::write_file::WriteFile,
+                serde_json::from_str(&args).expect("json"),
+                &ctx,
+            ));
+            assert!(!output.is_error, "{}", output.content);
+            let written = std::fs::read_to_string(dir.path().join("f.txt")).expect("read");
+            assert_eq!(&written, want, "{existing:?} {content:?}");
+            assert!(
+                matches!(&preview, Some(LoopEvent::ProposedEdit { new, .. }) if new == want),
+                "{preview:?}"
+            );
+        }
     }
 }

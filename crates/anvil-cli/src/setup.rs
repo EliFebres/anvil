@@ -2,7 +2,10 @@
 //! overwriting a value that is already filled in.
 //!
 //! Files: `~/.anvil/.env` (keys) and `~/.anvil/config.toml` (providers and
-//! roles).
+//! roles). `anvil setup --endpoint <url>` writes one self-hosted provider
+//! instead (see [`endpoint`]).
+
+pub mod endpoint;
 
 use std::path::Path;
 #[cfg(not(unix))]
@@ -19,14 +22,9 @@ const UNFILLED: i32 = 2;
 
 /// The `~/.anvil/.env` template. Placeholders are quoted because a bare
 /// value with spaces is not valid `.env` syntax.
-pub const ENV_TEMPLATE: &str = r#"# anvil providers
-ANTHROPIC_API_KEY="<console.anthropic.com -> API keys>"
-OPENAI_API_KEY="<platform.openai.com -> API keys>"
-GEMINI_API_KEY="<aistudio.google.com -> Get API key>"
-
-# Prompt 7, leave blank for now
-# RUNPOD_API_KEY=
-# HF_TOKEN=
+pub const ENV_TEMPLATE: &str = r#"# The key of the model server in ~/.anvil/config.toml. Set it to any value
+# if the server needs none.
+ANVIL_ENDPOINT_KEY="<your model server's API key>"
 "#;
 
 /// What happened to one file.
@@ -67,7 +65,7 @@ impl std::fmt::Display for Outcome {
 pub fn run(home: Option<&Path>) -> anyhow::Result<i32> {
     let home = home.context("cannot determine the home directory")?;
     let anvil_dir = home.join(CONFIG_DIR);
-    std::fs::create_dir_all(&anvil_dir)
+    anvil_types::private_fs::create_dir_all(&anvil_dir)
         .with_context(|| format!("creating {}", anvil_dir.display()))?;
 
     let env_path = anvil_dir.join(ANVIL_ENV_FILE);
@@ -103,7 +101,8 @@ pub fn run(home: Option<&Path>) -> anyhow::Result<i32> {
 /// comment lines are appended with its first missing variable.
 fn write_env(path: &Path, template: &str) -> anyhow::Result<Outcome> {
     if !path.exists() {
-        std::fs::write(path, template).with_context(|| format!("writing {}", path.display()))?;
+        anvil_types::private_fs::write(path, template)
+            .with_context(|| format!("writing {}", path.display()))?;
         return Ok(Outcome::Written);
     }
     let existing =
@@ -137,7 +136,7 @@ fn write_env(path: &Path, template: &str) -> anyhow::Result<Outcome> {
     } else {
         "\n"
     };
-    std::fs::write(path, format!("{existing}{separator}{additions}"))
+    anvil_types::private_fs::write(path, format!("{existing}{separator}{additions}"))
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(Outcome::Extended(added))
 }
@@ -161,7 +160,7 @@ fn variable_name(line: &str) -> Option<String> {
 /// `[providers.<name>]` tables and `[roles]` keys are appended.
 fn write_config(path: &Path) -> anyhow::Result<Outcome> {
     if !path.exists() {
-        std::fs::write(path, format!("{SETUP_PROVIDERS}{OPTIONAL_SECTIONS}"))
+        anvil_types::private_fs::write(path, format!("{SETUP_PROVIDERS}{OPTIONAL_SECTIONS}"))
             .with_context(|| format!("writing {}", path.display()))?;
         return Ok(Outcome::Written);
     }
@@ -203,7 +202,8 @@ fn write_config(path: &Path) -> anyhow::Result<Outcome> {
     merged
         .validate()
         .with_context(|| format!("{} would not validate after the merge", path.display()))?;
-    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+    anvil_types::private_fs::write(path, text)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(Outcome::Extended(added))
 }
 
@@ -234,7 +234,12 @@ pub fn make_private(path: &Path) -> anyhow::Result<Vec<String>> {
     }
     #[cfg(not(unix))]
     {
-        let Ok(out) = Command::new("icacls").arg(path).output() else {
+        let Ok(out) = Command::new("icacls")
+            .arg(path)
+            .env_clear()
+            .envs(anvil_types::child_env::vars())
+            .output()
+        else {
             return Ok(Vec::new());
         };
         let listing = String::from_utf8_lossy(&out.stdout);
@@ -322,10 +327,7 @@ mod tests {
         );
         let values = read_values(&path).expect("parses");
         let names: Vec<&str> = values.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(
-            names,
-            ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"]
-        );
+        assert_eq!(names, ["ANVIL_ENDPOINT_KEY"]);
         assert!(values.iter().all(|(_, v)| is_placeholder(v)));
         assert_eq!(
             write_env(&path, ENV_TEMPLATE).expect("again"),
@@ -337,22 +339,16 @@ mod tests {
     fn env_merge_appends_missing_blocks_and_keeps_filled_lines() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(".env");
-        std::fs::write(&path, "OPENAI_API_KEY=filled-value-1234\nWEBHOOK_URL=\n").expect("write");
+        std::fs::write(&path, "OTHER_API_KEY=filled-value-1234\nWEBHOOK_URL=\n").expect("write");
         let outcome = write_env(&path, ENV_TEMPLATE).expect("merges");
         assert_eq!(
             outcome,
-            Outcome::Extended(vec![
-                "ANTHROPIC_API_KEY".to_owned(),
-                "GEMINI_API_KEY".to_owned(),
-                "RUNPOD_API_KEY".to_owned(),
-                "HF_TOKEN".to_owned(),
-            ])
+            Outcome::Extended(vec!["ANVIL_ENDPOINT_KEY".to_owned()])
         );
         let text = std::fs::read_to_string(&path).expect("read");
-        assert!(text.starts_with("OPENAI_API_KEY=filled-value-1234\nWEBHOOK_URL=\n"));
-        assert!(text.contains("# anvil providers\nANTHROPIC_API_KEY="));
-        assert!(text.contains("# Prompt 7, leave blank for now\n# RUNPOD_API_KEY=\n# HF_TOKEN="));
-        assert_eq!(text.matches("OPENAI_API_KEY").count(), 1);
+        assert!(text.starts_with("OTHER_API_KEY=filled-value-1234\nWEBHOOK_URL=\n"));
+        assert!(text.contains("needs none.\nANVIL_ENDPOINT_KEY="));
+        assert_eq!(text.matches("OTHER_API_KEY").count(), 1);
         assert_eq!(text.matches("WEBHOOK_URL").count(), 1);
         assert_eq!(
             write_env(&path, ENV_TEMPLATE).expect("again"),
@@ -364,25 +360,23 @@ mod tests {
     fn config_merge_keeps_comments_and_existing_entries() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, CONFIG_TEMPLATE).expect("write");
+        let mine = CONFIG_TEMPLATE
+            .replace("[providers.endpoint]", "[providers.mine]")
+            .replace("\"endpoint\"", "\"mine\"");
+        std::fs::write(&path, &mine).expect("write");
         let outcome = write_config(&path).expect("merges");
         assert_eq!(
             outcome,
-            Outcome::Extended(vec![
-                "providers.anthropic".to_owned(),
-                "providers.openai".to_owned(),
-                "providers.google".to_owned(),
-                "roles.reviewer".to_owned(),
-            ])
+            Outcome::Extended(vec!["providers.endpoint".to_owned()])
         );
         let text = std::fs::read_to_string(&path).expect("read");
-        assert!(text.contains("# anvil configuration.\n"), "comments kept");
-        assert!(text.contains("coder = \"runpod\""), "existing value kept");
-        assert!(text.contains("[providers.runpod]"));
-        assert!(text.contains("[providers.anthropic]"));
+        assert!(text.contains("# anvil configuration: "), "comments kept");
+        assert!(text.contains("coder = \"mine\""), "existing value kept");
+        assert!(text.contains("[providers.mine]"));
+        assert!(text.contains("[providers.endpoint]"));
         let config: AnvilConfig = toml::from_str(&text).expect("parses");
         config.validate().expect("validates");
-        assert_eq!(config.roles.reviewer.as_deref(), Some("openai"));
+        assert_eq!(config.roles.coder, "mine");
         assert_eq!(write_config(&path).expect("again"), Outcome::Kept);
         assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
     }
@@ -394,7 +388,7 @@ mod tests {
         assert_eq!(write_config(&path).expect("writes"), Outcome::Written);
         let config: AnvilConfig =
             toml::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parses");
-        assert_eq!(config.providers.len(), 3);
+        assert_eq!(config.providers.len(), 1);
     }
 
     #[test]

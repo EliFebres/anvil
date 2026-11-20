@@ -23,11 +23,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anvil_types::LimitsConfig;
+use anvil_types::policy::TranscriptMode;
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
 
 pub use checks::{ChangeCheckFailure, ChangeChecks, CheckCommand, CheckSource};
-pub use events::{EventSink, LoopEvent};
+pub use events::{EventSink, EventTap, LoopEvent, file_change_events, finished_events};
 pub use gate::{AutoApprove, PlanDecision, PlanGate, ScriptedGate};
 pub use prompts::{Instruction, PromptSection};
 pub use role::{
@@ -65,7 +66,7 @@ const CHECK_TAIL_LINES: usize = 80;
 const MAX_PARALLEL_CALLS: usize = 4;
 
 /// The tool whose permission rules cover a check command a plan declares.
-const SHELL_TOOL: &str = "shell";
+const SHELL_TOOL: &str = shell::SHELL_TOOL_NAME;
 
 /// Settings for one run.
 #[derive(Debug, Clone)]
@@ -84,6 +85,10 @@ pub struct LoopConfig {
     pub context_window: u32,
     /// The user's home directory, for `~/.anvil/ANVIL.md`.
     pub home_dir: Option<PathBuf>,
+    /// Whether the repository's own instruction files (`ANVIL.md`,
+    /// `CLAUDE.md` and nested `CLAUDE.md`) may load. False until the user
+    /// trusts the repository.
+    pub trusted_project: bool,
     /// Prompt sections supplied from outside the loop, such as a skill list,
     /// appended after the instruction files found on disk.
     pub extra_instructions: Vec<Instruction>,
@@ -190,6 +195,9 @@ pub struct AgentLoop {
     declared_check: Option<String>,
     /// `declared_check` when the permission rules allow it: what Verify runs.
     plan_check: Option<String>,
+    /// The detected or configured check command once Verify has asked the
+    /// permission rules about it; `None` until then.
+    project_check: Option<Option<String>>,
     /// Git tree of the working tree at session start.
     baseline: Option<String>,
     /// What to tell the model when Build is entered again.
@@ -214,8 +222,10 @@ pub struct AgentLoop {
 impl AgentLoop {
     /// Prepares a run. Nothing happens until [`AgentLoop::run`].
     ///
-    /// The session folder is granted write access for `write_file` and
-    /// `edit_file` without prompting, so the model can tick plan checkboxes.
+    /// The session's plan file is granted write access for `write_file`
+    /// and `edit_file` without prompting, so the model can tick plan
+    /// checkboxes and correct the plan; the rest of the session folder is
+    /// anvil's record, which file tools never write.
     ///
     /// # Arguments
     ///
@@ -230,7 +240,7 @@ impl AgentLoop {
     ///
     /// The loop.
     pub fn new(
-        config: LoopConfig,
+        mut config: LoopConfig,
         providers: LoopProviders,
         mut registry: ToolRegistry,
         mut ctx: ToolContext,
@@ -238,19 +248,27 @@ impl AgentLoop {
         events: EventSink,
     ) -> Self {
         ctx.session_dir = Some(config.session_dir.clone());
+        // The task goes to the provider, the transcript and the reviewer, so
+        // it is redacted once, before any of them sees it.
+        let task = ctx.guard.redact("user", &config.task);
+        config.task = task.text;
         registry.register(Box::new(complete_step::CompleteStep));
-        let session_glob = format!("{}/**", ctx.display_path(&config.session_dir));
+        let plan_file = ctx.display_path(&config.session_dir.join(PLAN_FILE));
         let rules = [
-            format!("write_file:{session_glob}"),
-            format!("edit_file:{session_glob}"),
+            format!("write_file:{plan_file}"),
+            format!("edit_file:{plan_file}"),
             complete_step::COMPLETE_STEP.to_owned(),
         ];
         for rule in rules {
             if let Err(error) = registry.permissions().allow_unsaved(&rule) {
-                tracing::warn!(%error, rule, "could not allow session folder writes");
+                tracing::warn!(%error, rule, "could not allow plan file writes");
             }
         }
-        let log = match SessionLog::open(&config.session_dir) {
+        let opened = match ctx.transcript {
+            TranscriptMode::Off => Err(None),
+            mode => SessionLog::open_in_mode(&config.session_dir, mode).map_err(Some),
+        };
+        let mut log = match opened {
             Ok(mut log) => {
                 if log.is_empty() {
                     let meta = SessionMeta {
@@ -262,6 +280,7 @@ impl AgentLoop {
                         created_at: chrono::Utc::now(),
                         task: config.task.clone(),
                         cwd: config.cwd.clone(),
+                        transcript: ctx.transcript,
                     };
                     if let Err(error) = log.append(&SessionRecord::Meta(meta)) {
                         tracing::warn!(%error, "cannot write the session meta record");
@@ -269,11 +288,21 @@ impl AgentLoop {
                 }
                 Some(log)
             }
-            Err(error) => {
+            Err(Some(error)) => {
                 tracing::warn!(%error, "session will not be persisted");
                 None
             }
+            Err(None) => None,
         };
+        if !task.counts.is_empty()
+            && let Some(log) = &mut log
+            && let Err(error) = log.append(&SessionRecord::Redacted {
+                source: "user".to_owned(),
+                counts: task.counts,
+            })
+        {
+            tracing::warn!(%error, "cannot append to the session log");
+        }
         Self {
             config,
             providers,
@@ -297,6 +326,7 @@ impl AgentLoop {
             pending_feedback: None,
             declared_check: None,
             plan_check: None,
+            project_check: None,
             review_notes: Vec::new(),
             lane: Lane::Full,
             last_text: String::new(),
@@ -390,7 +420,7 @@ impl AgentLoop {
     ///
     /// The result; the summary is also written to the session folder.
     pub async fn run(mut self) -> LoopResult {
-        if let Err(error) = std::fs::create_dir_all(&self.config.session_dir) {
+        if let Err(error) = anvil_types::private_fs::create_dir_all(&self.config.session_dir) {
             self.warn(format!("cannot create the session folder: {error}"));
         }
         if self.baseline.is_none() {
@@ -470,12 +500,36 @@ impl AgentLoop {
         self.log(SessionRecord::State { state, visit });
     }
 
-    /// Appends to the conversation and the session log.
+    /// Appends to the conversation and the session log. User text (the
+    /// task, feedback with check output) is redacted first; tool results
+    /// were redacted by the registry.
     fn push_message(&mut self, message: Message) {
+        let message = match message {
+            Message::User { text } => Message::user(self.redacted("user", &text)),
+            other => other,
+        };
         self.log(SessionRecord::Message {
             message: message.clone(),
         });
         self.conversation.push(message);
+    }
+
+    /// Redacts text the loop is about to send and records the kinds.
+    fn redacted(&mut self, source: &str, text: &str) -> String {
+        let out = self.ctx.guard.redact(source, text);
+        self.note_redactions(source, out.counts);
+        out.text
+    }
+
+    /// Records in the session log how many secrets of each kind were
+    /// redacted from one source.
+    fn note_redactions(&mut self, source: &str, counts: BTreeMap<String, usize>) {
+        if !counts.is_empty() {
+            self.log(SessionRecord::Redacted {
+                source: source.to_owned(),
+                counts,
+            });
+        }
     }
 
     /// Appends a record to the session log, if there is one.
@@ -489,11 +543,12 @@ impl AgentLoop {
 
     /// Builds the system prompt for a state, with instruction files found so far.
     fn system_prompt_for(&self, state: State, tools: &[ToolSpec]) -> String {
-        let mut instructions = discover_instructions(
-            self.config.home_dir.as_deref(),
-            &self.config.cwd,
-            &self.touched,
-        );
+        let project = self
+            .config
+            .trusted_project
+            .then_some(self.config.cwd.as_path());
+        let mut instructions =
+            discover_instructions(self.config.home_dir.as_deref(), project, &self.touched);
         instructions.extend(self.config.extra_instructions.iter().cloned());
         let mut sections = self.config.sections.clone();
         if state == State::Plan {
@@ -504,13 +559,25 @@ impl AgentLoop {
             tools,
             self.config.delegate_guidance,
         ));
+        let environment = self.environment();
         system_prompt(&PromptInputs {
             state,
+            environment: Some(&environment),
             instructions: &instructions,
             sections: &sections,
             tools,
             task: &self.config.task,
         })
+    }
+
+    /// Where the agent runs, from the session's shell and runner; the
+    /// shell is left out when the `shell` tool is not registered.
+    fn environment(&self) -> PromptSection {
+        let shell = self
+            .registry
+            .get(SHELL_TOOL)
+            .map(|_| shell::shell_fact(&self.ctx.shell, &self.ctx.runner));
+        prompts::environment_section(std::env::consts::OS, shell.as_deref())
     }
 
     /// Tells the planner whether a check command was detected, so its
@@ -538,27 +605,50 @@ impl AgentLoop {
         if declared == self.declared_check {
             return;
         }
-        self.plan_check = declared.clone().filter(|command| self.permitted(command));
+        self.plan_check = declared
+            .clone()
+            .filter(|command| self.permitted(command, "the plan's check command"));
         self.declared_check = declared;
     }
 
-    /// Whether the permission rules let anvil run a plan's check command;
-    /// warns when they do not.
-    fn permitted(&self, command: &str) -> bool {
+    /// Whether the permission rules let anvil run a check command as a
+    /// `shell` call; warns when they do not.
+    fn permitted(&self, command: &str, what: &str) -> bool {
         let args = serde_json::json!({ "command": command });
         match self.registry.permit(SHELL_TOOL, &args, &self.config.cwd) {
             Ok(()) => true,
             Err(reason) => {
-                self.warn(format!("the plan's check command will not run: {reason}"));
+                self.warn(format!("{what} will not run: {reason}"));
                 false
             }
         }
     }
 
+    /// The project's check command, asked about once per session.
+    ///
+    /// A command the user configured (`[tools] check`) runs as configured.
+    /// A command anvil detected from the project's files, such as
+    /// `just check` or `npm test`, runs the repository's own code, so it
+    /// goes through the permission rules like any `shell` call.
+    fn project_check(&mut self) -> Option<String> {
+        if let Some(decided) = &self.project_check {
+            return decided.clone();
+        }
+        let resolved = self.config.check.resolve(&self.config.cwd);
+        let decided = match self.config.check {
+            CheckCommand::Detect => {
+                resolved.filter(|command| self.permitted(command, "the detected check command"))
+            }
+            CheckCommand::Command(_) | CheckCommand::None => resolved,
+        };
+        self.project_check = Some(decided.clone());
+        decided
+    }
+
     /// The check commands Verify runs, in order: the detected or configured
     /// one, then the plan's own when it is a different command.
-    fn check_commands(&self) -> Vec<(CheckSource, String)> {
-        let detected = self.config.check.resolve(&self.config.cwd);
+    fn check_commands(&mut self) -> Vec<(CheckSource, String)> {
+        let detected = self.project_check();
         let declared = self
             .plan_check
             .clone()
@@ -612,7 +702,8 @@ impl AgentLoop {
             .compact(
                 &*summarizer,
                 &self.config.task,
-                &self.config.session_dir,
+                (self.ctx.transcript == TranscriptMode::Full)
+                    .then_some(self.config.session_dir.as_path()),
                 max_chars,
             )
             .await;
@@ -663,7 +754,7 @@ impl AgentLoop {
             };
             let plan = extract_plan(&text);
             let path = self.config.session_dir.join(PLAN_FILE);
-            if let Err(error) = std::fs::write(&path, &plan) {
+            if let Err(error) = anvil_types::private_fs::write(&path, &plan) {
                 self.warn(format!("cannot write {}: {error}", path.display()));
             }
             self.events.emit(LoopEvent::PlanWritten { path });
@@ -741,17 +832,21 @@ impl AgentLoop {
         }
         let diff = self.session_diff().await;
         let mut brief = format!(
-            "# Task\n\n{}\n\n# Round\n\n{}\n\n# Plan\n\n{}\n\n# Diff\n\n```diff\n{diff}\n```",
+            "# Task\n\n{}\n\n# Round\n\n{}\n\n# Plan\n\n{}\n\n# Diff\n\n{}",
             self.config.task,
             self.rounds.review + 1,
-            self.plan.as_deref().unwrap_or("(no plan)")
+            self.plan.as_deref().unwrap_or("(no plan)"),
+            self.ctx
+                .guard
+                .wrap("diff", &format!("```diff\n{diff}\n```"))
         );
         if let Lane::Checked { runs } = &self.lane {
             brief.push_str("\n\n# Check");
             for (command, tail) in runs {
-                brief.push_str(&format!("\n\n`{command}` passed:\n\n```\n{tail}\n```"));
+                brief.push_str(&format!("\n\n`{command}` passed:\n\n{tail}"));
             }
         }
+        let brief = self.redacted("review", &brief);
         let mut messages = vec![Message::user(brief)];
         let mut verdict = None;
         for attempt in 0..2 {
@@ -780,11 +875,17 @@ impl AgentLoop {
                 ));
             }
         }
+        // A review that never decides is not an approval: it goes back to
+        // Build like a request for changes, so the round limit ends it.
         let verdict = verdict.unwrap_or_else(|| {
             self.warn(
-                "the reviewer never gave a verdict; treating the review as approved".to_owned(),
+                "the reviewer never gave a verdict; treating the review as not approved".to_owned(),
             );
-            ReviewVerdict::Approve { notes: Vec::new() }
+            ReviewVerdict::Changes {
+                items: vec![
+                    "The reviewer gave no verdict, so the change is not approved. Check the change against the plan and end your turn with what you verified.".to_owned(),
+                ],
+            }
         });
         self.events.emit(LoopEvent::ReviewVerdict {
             verdict: verdict.clone(),
@@ -823,7 +924,7 @@ impl AgentLoop {
         if ticked == plan {
             return;
         }
-        match std::fs::write(&path, ticked) {
+        match anvil_types::private_fs::write(&path, ticked) {
             Ok(()) => self.events.emit(LoopEvent::PlanUpdated { path }),
             Err(error) => self.warn(format!("cannot write {}: {error}", path.display())),
         }
@@ -856,7 +957,7 @@ impl AgentLoop {
                     CheckSource::Detected | CheckSource::Standing => String::new(),
                 };
                 self.pending_feedback = Some(format!(
-                    "Verification failed. `{command}` exited with an error:\n```\n{tail}\n```\nFix the cause, then end your turn with what you changed.{hint}"
+                    "Verification failed. `{command}` exited with an error:\n{tail}\nFix the cause, then end your turn with what you changed.{hint}"
                 ));
                 return StateOutcome::VerifyFailed(tail);
             }
@@ -870,17 +971,24 @@ impl AgentLoop {
     }
 
     /// Runs one check command and reports it; returns whether it passed and
-    /// the last lines it printed.
+    /// the last lines it printed, fenced and wrapped as untrusted data for
+    /// the model.
     async fn run_check(&self, source: CheckSource, command: &str) -> (bool, String) {
         self.events.emit(LoopEvent::CheckStarted {
             command: command.to_owned(),
         });
-        let (passed, tail) = match shell::run_command(&self.ctx, command, CHECK_TIMEOUT).await {
+        let run = match self.registry.gate_refusal() {
+            Some(reason) => Err(reason),
+            None => shell::run_command(&self.ctx, command, CHECK_TIMEOUT)
+                .await
+                .map_err(|error| format!("could not run `{command}`: {error}")),
+        };
+        let (passed, tail) = match run {
             Ok(run) => (
                 run.succeeded(),
                 tail_lines(&run.into_output().content, CHECK_TAIL_LINES),
             ),
-            Err(error) => (false, format!("could not run `{command}`: {error}")),
+            Err(reason) => (false, reason),
         };
         self.events.emit(LoopEvent::CheckFinished {
             command: command.to_owned(),
@@ -888,7 +996,10 @@ impl AgentLoop {
             passed,
             output_tail: tail.clone(),
         });
-        (passed, tail)
+        (
+            passed,
+            self.ctx.guard.wrap("check", &format!("```\n{tail}\n```")),
+        )
     }
 
     /// Runs the checks supplied from outside the loop on the changed files.
@@ -896,6 +1007,9 @@ impl AgentLoop {
     /// Returns the failing outcome, or `None` when there are no checks or
     /// they all passed.
     async fn run_change_checks(&mut self) -> Option<StateOutcome> {
+        if self.registry.gate_refusal().is_some() {
+            return None;
+        }
         let checks = Arc::clone(self.change_checks.as_ref()?);
         let changed = self.changed_files().await;
         let label = "standing rule checks".to_owned();
@@ -916,9 +1030,12 @@ impl AgentLoop {
             .iter()
             .map(|failure| {
                 format!(
-                    "Standing rule `{}` check failed on the changed files:\n```\n{}\n```",
+                    "Standing rule `{}` check failed on the changed files:\n{}",
                     failure.name,
-                    failure.output.trim_end()
+                    self.ctx.guard.wrap(
+                        "rule_check",
+                        &format!("```\n{}\n```", failure.output.trim_end())
+                    )
                 )
             })
             .collect::<Vec<_>>()
@@ -1105,13 +1222,10 @@ impl AgentLoop {
         for turn in &execution.model_turns {
             self.record_completion(state, Role::Worker, turn);
         }
-        self.events.emit(LoopEvent::ToolFinished {
-            call_id: call.id.clone(),
-            name: call.name.clone(),
-            outcome: execution.outcome,
-            preview: preview(&execution.result.content),
-            stats: execution.stats,
-        });
+        for event in finished_events(call, &execution) {
+            self.events.emit(event);
+        }
+        self.note_redactions(&call.name, execution.redactions);
         execution.result
     }
 
@@ -1137,6 +1251,13 @@ impl AgentLoop {
 
     /// Adds one completion to the state's and the role's spend and reports it.
     fn record_completion(&mut self, state: State, role: Role, turn: &ModelTurn) {
+        self.log(SessionRecord::Turn {
+            state,
+            role,
+            usage: turn.usage,
+            latency_ms: turn.latency_ms,
+            retries: turn.retries,
+        });
         let spend = self.spend.entry(state).or_default();
         spend.turns += 1;
         spend.tokens = spend
@@ -1244,7 +1365,7 @@ impl AgentLoop {
         });
         let summary = self.summary(&status);
         let summary_path = self.config.session_dir.join(SUMMARY_FILE);
-        if let Err(error) = std::fs::write(&summary_path, &summary) {
+        if let Err(error) = anvil_types::private_fs::write(&summary_path, &summary) {
             tracing::warn!(%error, path = %summary_path.display(), "cannot write the summary");
         }
         self.events.emit(LoopEvent::Finished {
@@ -1392,6 +1513,8 @@ mod tests {
         /// The planner the next agent gets; `None` leaves the coder planning.
         planner: Option<Arc<FakeProvider>>,
         events: mpsc::UnboundedReceiver<LoopEvent>,
+        /// The transcript mode the next agent's context gets.
+        transcript: TranscriptMode,
     }
 
     impl Harness {
@@ -1414,11 +1537,16 @@ mod tests {
                 summarizer: Arc::new(FakeProvider::new(summarizer)),
                 planner: None,
                 events: rx,
+                transcript: TranscriptMode::Full,
             }
         }
 
+        fn sessions_root(&self) -> PathBuf {
+            self.dir.path().join(".anvil").join("sessions")
+        }
+
         fn session_dir(&self) -> PathBuf {
-            self.dir.path().join(".anvil").join("sessions").join("t1")
+            self.sessions_root().join("t1")
         }
 
         fn config(&self, check: CheckCommand) -> LoopConfig {
@@ -1430,6 +1558,7 @@ mod tests {
                 check,
                 context_window: 100_000,
                 home_dir: None,
+                trusted_project: true,
                 extra_instructions: Vec::new(),
                 sections: Vec::new(),
                 review_sections: Vec::new(),
@@ -1462,10 +1591,23 @@ mod tests {
                     summarizer: Arc::clone(&self.summarizer) as Arc<dyn Provider>,
                 },
                 registry,
-                ToolContext::new(self.dir.path()),
+                self.ctx(),
                 gate,
                 EventSink::new(tx),
             )
+        }
+
+        /// A tool context with a fixed delimiter nonce, so request
+        /// snapshots are stable.
+        fn ctx(&self) -> ToolContext {
+            ToolContext {
+                guard: crate::guard::DataGuard::with_nonce(
+                    Arc::new(anvil_types::redact::Redactor::builtin()),
+                    "testnonce",
+                ),
+                transcript: self.transcript,
+                ..ToolContext::new(self.dir.path())
+            }
         }
 
         fn default_agent(&mut self, check: CheckCommand, rules: &str) -> AgentLoop {
@@ -1552,7 +1694,7 @@ mod tests {
         );
         h.git_init();
         let agent = h.default_agent(
-            CheckCommand::Command("test -f fixed.txt".to_owned()),
+            CheckCommand::Command("cat fixed.txt".to_owned()),
             "allow = [\"write_file\"]",
         );
         let result = agent.run().await;
@@ -1631,7 +1773,7 @@ mod tests {
     async fn a_plan_declared_check_runs_with_no_model_turn_in_verify() {
         let mut h = Harness::new(
             vec![
-                plan_with_check("test -f hello.txt"),
+                plan_with_check("cat hello.txt"),
                 FakeProvider::tool_turn(vec![write_call("hello.txt")]),
                 FakeProvider::text_turn("built"),
             ],
@@ -1654,11 +1796,11 @@ mod tests {
         assert!(!result.spend.contains_key(&State::Verify));
         assert_eq!(
             check_events(&events),
-            [(CheckSource::Plan, "test -f hello.txt".to_owned(), true)]
+            [(CheckSource::Plan, "cat hello.txt".to_owned(), true)]
         );
         let brief = format!("{:?}", h.reviewer.requests()[0].messages);
         assert!(brief.contains("# Check"), "{brief}");
-        assert!(brief.contains("`test -f hello.txt` passed"), "{brief}");
+        assert!(brief.contains("`cat hello.txt` passed"), "{brief}");
         let plan_system = &h.coder.requests()[0].system;
         assert!(plan_system.contains("# Check command"), "{plan_system}");
         assert!(
@@ -1671,7 +1813,7 @@ mod tests {
     async fn a_failing_plan_declared_check_sends_its_output_to_build() {
         let mut h = Harness::new(
             vec![
-                plan_with_check("test -f fixed.txt"),
+                plan_with_check("cat fixed.txt"),
                 FakeProvider::tool_turn(vec![write_call("hello.txt")]),
                 FakeProvider::text_turn("built"),
                 FakeProvider::tool_turn(vec![write_call("fixed.txt")]),
@@ -1698,7 +1840,7 @@ mod tests {
         let rebuild = &h.coder.requests()[3];
         assert!(rebuild.messages.iter().any(|m| matches!(
             m,
-            Message::User { text } if text.contains("Verification failed") && text.contains("test -f fixed.txt")
+            Message::User { text } if text.contains("Verification failed") && text.contains("cat fixed.txt")
         )));
         let checks = check_events(&events);
         assert_eq!(
@@ -1714,14 +1856,14 @@ mod tests {
             name: "edit_file".to_owned(),
             arguments_json: serde_json::json!({
                 "path": ".anvil/sessions/t1/plan.md",
-                "old": "Check: test -f wrong-name.txt",
-                "new": "Check: test -f hello.txt"
+                "old": "Check: cat wrong-name.txt",
+                "new": "Check: cat hello.txt"
             })
             .to_string(),
         };
         let mut h = Harness::new(
             vec![
-                plan_with_check("test -f wrong-name.txt"),
+                plan_with_check("cat wrong-name.txt"),
                 FakeProvider::tool_turn(vec![write_call("hello.txt")]),
                 FakeProvider::text_turn("built"),
                 FakeProvider::tool_turn(vec![fix_check]),
@@ -1737,12 +1879,8 @@ mod tests {
         assert_eq!(
             check_events(&events),
             [
-                (
-                    CheckSource::Plan,
-                    "test -f wrong-name.txt".to_owned(),
-                    false
-                ),
-                (CheckSource::Plan, "test -f hello.txt".to_owned(), true)
+                (CheckSource::Plan, "cat wrong-name.txt".to_owned(), false),
+                (CheckSource::Plan, "cat hello.txt".to_owned(), true)
             ]
         );
         let rebuild = &h.coder.requests()[3];
@@ -1806,6 +1944,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_detected_check_does_not_run_without_permission_for_shell() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("```json\n{\"verdict\": \"pass\"}\n```"),
+            ],
+            vec![approve()],
+        );
+        // The repository's own justfile would run `just check`: its code.
+        std::fs::write(h.dir.path().join("justfile"), "check:\n    echo pwned\n")
+            .expect("justfile");
+        let agent = h.default_agent(CheckCommand::Detect, "");
+        assert_eq!(agent.run().await.status, Status::Done);
+        let events = h.drain();
+        assert!(check_events(&events).is_empty(), "the check did not run");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            LoopEvent::Warning(text) if text.contains("the detected check command will not run")
+        )));
+    }
+
+    #[tokio::test]
     async fn a_plan_check_the_permission_rules_refuse_is_not_run() {
         let mut h = Harness::new(
             vec![
@@ -1856,6 +2017,34 @@ mod tests {
         assert_eq!(result.spend[&State::Review].turns, 1);
         assert_eq!(h.coder.calls(), 2);
         assert_eq!(h.reviewer.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_closed_gate_keeps_the_loop_from_running_its_own_checks() {
+        struct Closed;
+        impl crate::tools::CallGate for Closed {
+            fn refusal(&self) -> Option<String> {
+                Some("refused: the audit log cannot be written".to_owned())
+            }
+        }
+        let mut coder = vec![FakeProvider::text_turn(PLAN)];
+        coder.extend((0..12).map(|_| FakeProvider::text_turn("built")));
+        let mut h = Harness::new(coder, (0..12).map(|_| approve()).collect());
+        let check = CheckCommand::Command("echo ran > ran.txt".to_owned());
+        let mut agent = h.default_agent(check, "");
+        agent.registry.set_gate(Arc::new(Closed));
+        let result = agent.run().await;
+        assert_ne!(result.status, Status::Done);
+        assert!(
+            !h.dir.path().join("ran.txt").exists(),
+            "the check command must not start"
+        );
+        let events = h.drain();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LoopEvent::CheckFinished { passed: false, output_tail, .. }
+                if output_tail.contains("audit log")
+        )));
     }
 
     #[tokio::test]
@@ -2262,21 +2451,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_review_without_a_verdict_is_not_an_approval() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("b1"),
+                FakeProvider::text_turn("b2"),
+                FakeProvider::text_turn("b3"),
+                FakeProvider::text_turn("b4"),
+            ],
+            (0..8).map(|_| FakeProvider::text_turn("no json")).collect(),
+        );
+        let agent = h.default_agent(CheckCommand::Command("exit 0".to_owned()), "");
+        let result = agent.run().await;
+        assert_eq!(
+            result.status,
+            Status::Incomplete {
+                reason: IncompleteReason::ReviewRoundsExhausted
+            }
+        );
+        let rebuild = &h.coder.requests()[2];
+        assert!(
+            rebuild.messages.iter().any(|m| matches!(
+                m,
+                Message::User { text } if text.contains("gave no verdict")
+            )),
+            "Build hears that the review has no verdict"
+        );
+    }
+
+    #[tokio::test]
     async fn unparsable_review_verdict_is_reasked_then_approved() {
         let mut h = Harness::new(
             vec![
                 FakeProvider::text_turn(PLAN),
                 FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("checked again"),
             ],
             vec![
                 FakeProvider::text_turn("hmm"),
                 FakeProvider::text_turn("still no json"),
+                approve(),
             ],
         );
         let agent = h.default_agent(CheckCommand::Command("exit 0".to_owned()), "");
         let result = agent.run().await;
         assert_eq!(result.status, Status::Done);
-        assert_eq!(h.reviewer.calls(), 2);
+        assert_eq!(h.reviewer.calls(), 3, "no verdict sends it back for review");
+        assert_eq!(h.coder.calls(), 3, "Build ran again before the approval");
         let retry = &h.reviewer.requests()[1];
         assert_eq!(retry.messages.len(), 3);
         let warnings = h
@@ -2436,11 +2658,61 @@ mod tests {
         assert!(events.iter().any(
             |e| matches!(e, LoopEvent::Compacted { dropped_messages, .. } if *dropped_messages > 0)
         ));
-        let snapshot = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        let snapshot = crate::context::load_session(&h.sessions_root(), "t1").expect("log");
         assert!(
             matches!(&snapshot.messages[0], Message::User { text } if text.contains("compacted"))
         );
         assert_eq!(snapshot.status, Some(Status::Done));
+    }
+
+    #[tokio::test]
+    async fn below_full_no_tool_output_or_compaction_file_and_off_keeps_no_log() {
+        for mode in [
+            TranscriptMode::Full,
+            TranscriptMode::Metadata,
+            TranscriptMode::Off,
+        ] {
+            let mut h = Harness::with_summarizer(
+                vec![
+                    FakeProvider::text_turn(PLAN),
+                    FakeProvider::tool_turn(vec![ToolCall {
+                        id: "big".to_owned(),
+                        name: "read_file".to_owned(),
+                        arguments_json: r#"{"path": "big.txt"}"#.to_owned(),
+                    }]),
+                    heavy_tool_turn("t1", 100),
+                    heavy_tool_turn("t2", 100),
+                    heavy_tool_turn("t3", 100),
+                    heavy_tool_turn("t4", 900),
+                    FakeProvider::text_turn("built"),
+                ],
+                vec![approve()],
+                vec![FakeProvider::text_turn("## Task\nsummary of earlier work")],
+            );
+            h.transcript = mode;
+            let line = "x".repeat(99);
+            let big: String = (0..1500).map(|_| format!("{line}\n")).collect();
+            std::fs::write(h.dir.path().join("big.txt"), big).expect("write");
+            let mut config = h.config(CheckCommand::Command("exit 0".to_owned()));
+            config.context_window = 1000;
+            let coder = Arc::clone(&h.coder) as Arc<dyn Provider>;
+            let agent = h.agent(config, coder, "", Box::new(AutoApprove));
+            assert_eq!(agent.run().await.status, Status::Done, "{mode:?}");
+            assert_eq!(
+                h.summarizer.calls(),
+                1,
+                "{mode:?}: the conversation was compacted"
+            );
+            let dir = h.session_dir();
+            let full = mode == TranscriptMode::Full;
+            assert_eq!(dir.join("tool-output").is_dir(), full, "{mode:?}");
+            assert_eq!(dir.join("compaction-1.md").exists(), full, "{mode:?}");
+            assert_eq!(
+                dir.join(crate::context::session::LOG_FILE).exists(),
+                mode != TranscriptMode::Off,
+                "{mode:?}"
+            );
+        }
     }
 
     /// Lets a test keep a handle on the prompt the registry owns.
@@ -2559,7 +2831,7 @@ mod tests {
         let first = agent.run().await;
         assert!(matches!(first.status, Status::Incomplete { .. }));
 
-        let snapshot = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        let snapshot = crate::context::load_session(&h.sessions_root(), "t1").expect("log");
         assert_eq!(snapshot.meta.task, "add a --dry-run flag");
         assert_eq!(snapshot.last_state, Some(State::Build));
         assert_eq!(
@@ -2567,7 +2839,7 @@ mod tests {
             5,
             "task, plan, intro, tool call, results"
         );
-        let sessions = crate::context::list_sessions(h.dir.path()).expect("list");
+        let sessions = crate::context::list_sessions(&h.sessions_root()).expect("list");
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].meta.id, "t1");
 
@@ -2606,7 +2878,7 @@ mod tests {
             m,
             Message::User { text } if text.contains("This session was resumed")
         )));
-        let reloaded = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        let reloaded = crate::context::load_session(&h.sessions_root(), "t1").expect("log");
         assert_eq!(reloaded.status, Some(Status::Done));
         assert!(reloaded.messages.len() > request.messages.len());
     }
@@ -2807,16 +3079,207 @@ mod tests {
         );
         h.git_init();
         let agent = h.default_agent(
-            CheckCommand::Command("test -f fixed.txt".to_owned()),
+            CheckCommand::Command("cat fixed.txt".to_owned()),
             "allow = [\"write_file\"]",
         );
         assert_eq!(agent.run().await.status, Status::Done);
-        // The prompt files check out with CRLF on Windows; the snapshot must
-        // be the same on every platform.
+        // The prompt files check out with CRLF on Windows, and `cat` words
+        // its error differently in each shell; the snapshot must be the same
+        // on every platform.
         let requests = serde_json::to_string_pretty(&h.coder.requests())
             .expect("requests serialize")
             .replace("\\r\\n", "\\n");
+        let cat_error = regex::Regex::new(r"```\\n[^`]*?\\n\[exit code: 1\]").expect("regex");
+        let requests = cat_error.replace_all(&requests, "```\\n<cat error>\\n[exit code: 1]");
+        // The environment section names the platform and its shell; its
+        // own tests in `prompts` pin each variant.
+        let environment = regex::Regex::new(r"# Environment\\n\\n.*?\\n\\n# State").expect("regex");
+        let requests =
+            environment.replace_all(&requests, "# Environment\\n\\n<environment>\\n\\n# State");
         insta::assert_snapshot!(requests);
+    }
+
+    #[tokio::test]
+    async fn a_secret_in_tool_output_does_not_reach_the_provider_or_the_transcript() {
+        let key = format!("sk-{}", "q7".repeat(16));
+        let aws = format!("{}{}", "AKIA", "QWERTYUIOP234567");
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::tool_turn(vec![ToolCall {
+                    id: "r1".to_owned(),
+                    name: "read_file".to_owned(),
+                    arguments_json: r#"{"path": "notes.txt"}"#.to_owned(),
+                }]),
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+        );
+        std::fs::write(
+            h.dir.path().join("notes.txt"),
+            format!("api = {key}\naws = {aws}\n"),
+        )
+        .expect("write");
+        let mut config = h.config(CheckCommand::Command("cat notes.txt".to_owned()));
+        config.task = format!("use the key {key} to fix the client");
+        let agent = h.agent(
+            config,
+            Arc::clone(&h.coder) as Arc<dyn Provider>,
+            "",
+            Box::new(AutoApprove),
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+
+        let sent = serde_json::to_string(&h.coder.requests()).expect("serialize")
+            + &serde_json::to_string(&h.reviewer.requests()).expect("serialize");
+        let transcript =
+            std::fs::read_to_string(h.session_dir().join(crate::context::session::LOG_FILE))
+                .expect("transcript");
+        for (what, text) in [("provider requests", &sent), ("transcript", &transcript)] {
+            assert!(!text.contains(&key), "the key reached the {what}");
+            assert!(!text.contains(&aws), "the AWS key reached the {what}");
+            assert!(text.contains("[REDACTED:api_key]"), "{what}");
+            assert!(text.contains("[REDACTED:aws_access_key]"), "{what}");
+        }
+        assert!(
+            sent.contains(r#"source=\"read_file\""#),
+            "the file read is wrapped as untrusted data"
+        );
+        assert!(transcript.contains(r#""type":"redacted","source":"read_file""#));
+        assert!(transcript.contains(r#""type":"redacted","source":"user""#));
+    }
+
+    /// A stand-in for an MCP server's tool: whatever it returns arrives
+    /// unredacted, as a server's response would.
+    struct LeakyServerTool(String);
+
+    impl crate::tools::Tool for LeakyServerTool {
+        fn name(&self) -> &str {
+            "mcp__vault__lookup"
+        }
+
+        fn description(&self) -> &str {
+            "returns a secret"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn access(&self) -> Access {
+            Access::Read
+        }
+
+        fn run<'a>(
+            &'a self,
+            _args: serde_json::Value,
+            _ctx: &'a ToolContext,
+        ) -> crate::tools::ToolFuture<'a> {
+            Box::pin(async move { crate::tools::ToolOutput::ok(format!("token: {}", self.0)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_and_mcp_results_reach_the_provider_redacted_by_the_registry() {
+        let shell_key = format!("sk-{}", "s8".repeat(16));
+        let server_key = format!("sk-{}", "m9".repeat(16));
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![
+                    ToolCall {
+                        id: "s1".to_owned(),
+                        name: "shell".to_owned(),
+                        arguments_json: serde_json::json!({"command": "cat build.log"}).to_string(),
+                    },
+                    ToolCall {
+                        id: "m1".to_owned(),
+                        name: "mcp__vault__lookup".to_owned(),
+                        arguments_json: "{}".to_owned(),
+                    },
+                ]),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+        );
+        // The key is in a file the shell prints, so only the tool result,
+        // not the model's own arguments, can carry it.
+        std::fs::write(h.dir.path().join("build.log"), format!("key={shell_key}\n"))
+            .expect("write");
+        let mut agent = h.default_agent(
+            CheckCommand::Command("exit 0".to_owned()),
+            "allow = [\"shell\"]",
+        );
+        agent
+            .registry
+            .register(Box::new(LeakyServerTool(server_key.clone())));
+        assert_eq!(agent.run().await.status, Status::Done);
+        let sent = serde_json::to_string(&h.coder.requests()).expect("serialize");
+        let transcript =
+            std::fs::read_to_string(h.session_dir().join(crate::context::session::LOG_FILE))
+                .expect("transcript");
+        for (what, text) in [("provider requests", &sent), ("transcript", &transcript)] {
+            assert!(
+                !text.contains(&shell_key),
+                "the shell's key reached the {what}"
+            );
+            assert!(
+                !text.contains(&server_key),
+                "the server's key reached the {what}"
+            );
+        }
+        assert!(sent.contains(r#"source=\"shell\""#), "{sent}");
+        assert!(sent.contains(r#"source=\"mcp__vault__lookup\""#), "{sent}");
+        assert!(sent.matches("[REDACTED:api_key]").count() >= 2, "{sent}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_file_and_folder_a_session_creates_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::tool_turn(vec![ToolCall {
+                    id: "big".to_owned(),
+                    name: "shell".to_owned(),
+                    arguments_json: r#"{"command": "seq 1 20000"}"#.to_owned(),
+                }]),
+                FakeProvider::text_turn("built"),
+            ],
+            vec![approve()],
+        );
+        let agent = h.default_agent(
+            CheckCommand::Command("true".to_owned()),
+            "allow = [\"shell\"]",
+        );
+        assert_eq!(agent.run().await.status, Status::Done);
+        let mut pending = vec![h.session_dir()];
+        let mut files = 0;
+        while let Some(dir) = pending.pop() {
+            let mode = std::fs::metadata(&dir).expect("meta").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", dir.display());
+            for entry in std::fs::read_dir(&dir)
+                .expect("read")
+                .map(|e| e.expect("entry"))
+            {
+                if entry.path().is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    files += 1;
+                    let mode = entry.metadata().expect("meta").permissions().mode() & 0o777;
+                    assert_eq!(mode, 0o600, "{}", entry.path().display());
+                }
+            }
+        }
+        assert!(
+            h.session_dir().join("tool-output").is_dir(),
+            "the full output was kept"
+        );
+        assert!(
+            files >= 4,
+            "session.jsonl, plan, summary and the tool output"
+        );
     }
 
     /// Gives the next agent a planner that replays `scripts`.
@@ -2978,7 +3441,7 @@ mod tests {
         );
         h.git_init();
         let agent = h.default_agent(
-            CheckCommand::Command("test -f ok.txt".to_owned()),
+            CheckCommand::Command("cat ok.txt".to_owned()),
             "allow = [\"write_file\"]",
         );
         let result = agent.run().await;
@@ -3088,7 +3551,7 @@ mod tests {
             .await;
         assert!(matches!(first.status, Status::Incomplete { .. }));
 
-        let snapshot = crate::context::load_session(h.dir.path(), "t1").expect("log");
+        let snapshot = crate::context::load_session(&h.sessions_root(), "t1").expect("log");
         assert_eq!(snapshot.last_state, Some(State::Build));
         assert_eq!(
             snapshot.messages.len(),
@@ -3227,7 +3690,11 @@ mod tests {
     fn contents(results: &[ToolResult]) -> Vec<String> {
         results
             .iter()
-            .map(|result| result.content.clone())
+            .map(|result| {
+                crate::guard::unwrap_untrusted(&result.content)
+                    .expect("a tool result is one untrusted-data element")
+                    .to_owned()
+            })
             .collect()
     }
 

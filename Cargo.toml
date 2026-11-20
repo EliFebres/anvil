@@ -3,11 +3,13 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/EliFebres/anvil"
+# Nothing here is published to crates.io; releases are binaries.
+publish = false
 
 [workspace.dependencies]
 # Workspace crates
@@ -15,7 +17,7 @@ anvil-types = { path = "crates/anvil-types" }
 anvil-core = { path = "crates/anvil-core" }
 anvil-compat = { path = "crates/anvil-compat" }
 anvil-memory = { path = "crates/anvil-memory" }
-anvil-telemetry = { path = "crates/anvil-telemetry" }
+anvil-audit = { path = "crates/anvil-audit" }
 anvil-tui = { path = "crates/anvil-tui" }
 
 # Serialization
@@ -78,6 +80,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 insta = { version = "1.49", features = ["json", "filters"] }
 tempfile = "3.27"
 wiremock = "0.6"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

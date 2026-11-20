@@ -5,7 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The anvil binary: a CLI coding agent. Argument parsing and wiring only."
+publish.workspace = true
+description = "Anvil is a coding agent harness for open-weight models in regulated, restricted-network environments."
 
 [[bin]]
 name = "anvil"
@@ -19,14 +20,14 @@ crossterm.workspace = true
 anvil-compat.workspace = true
 anvil-core.workspace = true
 anvil-memory.workspace = true
-anvil-telemetry.workspace = true
+anvil-audit.workspace = true
 anvil-tui.workspace = true
 anvil-types.workspace = true
 futures-util.workspace = true
+ignore.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true
 regex.workspace = true
-reqwest.workspace = true
 rustyline.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,14 +38,13 @@ toml_edit.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
-ulid.workspace = true
 unicode-width.workspace = true
 similar.workspace = true
-tempfile.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true
+ulid.workspace = true
 wiremock.workspace = true
 
 [lints]

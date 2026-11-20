@@ -2,7 +2,8 @@
 //!
 //! Rows: the `.env` files loaded, every API key, every provider, the tools
 //! on `PATH` and the key scan over tracked files. The skill, command, agent,
-//! hook and MCP reports follow unchanged.
+//! hook and MCP reports follow unchanged. `--egress` prints the
+//! destinations report of [`egress`] instead.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -16,9 +17,12 @@ use anvil_types::{AnvilConfig, Protocol};
 use tokio::process::Command;
 
 use crate::commands;
-use crate::legacy;
 use crate::secrets;
 use crate::wiring::Wiring;
+
+mod egress;
+
+pub use egress::egress;
 
 /// Wall clock allowed for one provider ping.
 const PING_TIMEOUT: Duration = Duration::from_secs(20);
@@ -160,12 +164,24 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
     let config = &wiring.config;
     let root = secrets::git_toplevel(&wiring.cwd);
 
+    for line in crate::policy::report(wiring.policy.as_deref()) {
+        println!("{line}");
+    }
+    println!(
+        "repository: {}",
+        if wiring.project.trusted {
+            "trusted; what it ships is loaded"
+        } else {
+            "not trusted; nothing it ships is loaded"
+        }
+    );
+    report_policy(&mut report, wiring.policy.as_deref());
     report_env(&mut report, options.env_files, options.loaded_env);
-    report_legacy(&mut report, wiring.home.as_deref(), &wiring.cwd);
     let bad_keys = report_keys(&mut report, config);
     report_providers(&mut report, wiring, &bad_keys).await;
     report_tools(&mut report).await;
     report_secrets(&mut report, root.as_deref(), options.env_files);
+    report_private_dirs(&mut report, wiring);
 
     print!("{}", report.render());
     let roles = &config.roles;
@@ -198,18 +214,72 @@ pub async fn run(wiring: &Wiring, options: Options<'_>) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-/// The `legacy` row: directories and variables still carrying the old name.
-fn report_legacy(report: &mut Report, home: Option<&Path>, cwd: &Path) {
-    let left = legacy::leftovers(home, cwd);
-    if left.is_empty() {
-        report.pass("legacy", "nothing left from the old name");
+/// The policy rows: whether one is installed, whether only an
+/// administrator can change it, and its hash.
+fn report_policy(report: &mut Report, policy: Option<&anvil_types::policy::LoadedPolicy>) {
+    let Some(loaded) = policy else {
+        report.skip(
+            "policy",
+            format!(
+                "unmanaged: no file at {}",
+                anvil_types::policy::system_path().display()
+            ),
+        );
         return;
+    };
+    report.pass("policy", format!("managed: {}", loaded.path.display()));
+    match anvil_types::policy::ownership::check(&loaded.path) {
+        Ok(()) => report.pass(
+            "policy:ownership",
+            "only an administrator can change the file and its folder",
+        ),
+        Err(detail) => report.fail(
+            "policy:ownership",
+            detail,
+            "give the file and its folder to an administrator (docs/ADMIN_GUIDE.md)",
+        ),
     }
-    report.fail(
-        "legacy",
-        format!("still present: {}", left.join(", ")),
-        "delete or merge the old directories into .anvil and rename the variables to ANVIL_*",
-    );
+    report.pass("policy:sha256", loaded.sha256.clone());
+}
+
+/// The `data:` rows: whether only the user (and SYSTEM and Administrators
+/// on Windows) can open `~/.anvil` and the project's `.anvil`, which hold
+/// transcripts, keys, trust decisions and memory.
+fn report_private_dirs(report: &mut Report, wiring: &Wiring) {
+    for (name, dir) in private_dirs(wiring) {
+        if !dir.is_dir() {
+            report.skip(name, format!("{} does not exist yet", dir.display()));
+            continue;
+        }
+        match anvil_types::policy::ownership::check_private(&dir) {
+            Ok(()) => report.pass(name, format!("only you can open {}", dir.display())),
+            Err(detail) => report.fail(name, "others can open it", detail),
+        }
+    }
+}
+
+/// Every folder anvil keeps data in, with its row name: `~/.anvil`, the
+/// project's `.anvil`, and the policy's `[data] transcript_dir` and
+/// `[audit] mirror_dir` when it sets them.
+pub(crate) fn private_dirs(wiring: &Wiring) -> Vec<(&'static str, PathBuf)> {
+    let mut dirs: Vec<(&'static str, PathBuf)> = wiring
+        .home
+        .iter()
+        .map(|home| ("data:~/.anvil", home.join(anvil_types::config::CONFIG_DIR)))
+        .collect();
+    dirs.push((
+        "data:.anvil",
+        wiring.cwd.join(anvil_types::config::CONFIG_DIR),
+    ));
+    if let Some(policy) = wiring.policy.as_deref() {
+        if let Some(dir) = &policy.policy.data.transcript_dir {
+            dirs.push(("data:transcript_dir", dir.clone()));
+        }
+        if let Some(dir) = &policy.policy.audit.mirror_dir {
+            dirs.push(("data:mirror_dir", dir.clone()));
+        }
+    }
+    dirs
 }
 
 /// The `env` row: which `.env` files were loaded.
@@ -337,7 +407,9 @@ async fn ping(wiring: &Wiring, name: &str) -> anyhow::Result<u128> {
 
 /// One `tool:<name>` row per tool anvil needs, with its version.
 async fn report_tools(report: &mut Report) {
-    match tool_output("git", &["--version"]).await {
+    let mut git = Command::from(anvil_core::git::standalone());
+    git.arg("--version");
+    match tool_output(git).await {
         Some(version) => report.pass("tool:git", version),
         None => report.fail(
             "tool:git",
@@ -357,8 +429,8 @@ async fn report_tools(report: &mut Report) {
 }
 
 /// The first line a tool prints, or `None` when it is missing or fails.
-async fn tool_output(program: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::time::timeout(SHORT_TIMEOUT, Command::new(program).args(args).output())
+async fn tool_output(mut command: Command) -> Option<String> {
+    let out = tokio::time::timeout(SHORT_TIMEOUT, command.kill_on_drop(true).output())
         .await
         .ok()?
         .ok()?;
@@ -390,7 +462,11 @@ async fn shell_candidate() -> Option<String> {
         candidates.push(format!("{program_files}\\Git\\bin\\sh.exe"));
     }
     for candidate in candidates {
-        if tool_output(&candidate, &["-c", "echo ok"]).await.as_deref() == Some("ok") {
+        let mut sh = Command::new(&candidate);
+        sh.args(["-c", "echo ok"])
+            .env_clear()
+            .envs(anvil_types::child_env::vars());
+        if tool_output(sh).await.as_deref() == Some("ok") {
             return Some(candidate);
         }
     }
@@ -455,5 +531,35 @@ mod tests {
     fn head_truncates_on_one_line() {
         assert_eq!(head("a\n  b", 10), "a b");
         assert_eq!(head("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn policy_rows_show_presence_ownership_and_hash() {
+        let mut report = Report::default();
+        report_policy(&mut report, None);
+        assert_eq!(report.checks[0].status, Status::Skip);
+        assert!(report.checks[0].detail.starts_with("unmanaged"));
+
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("policy.toml");
+        std::fs::write(
+            &path,
+            "version = 1\n[network]\nallowed_hosts = [\"m.example:443\"]\n",
+        )
+        .expect("write");
+        let loaded = anvil_types::policy::load(&path)
+            .expect("valid")
+            .expect("present");
+        let mut report = Report::default();
+        report_policy(&mut report, Some(&loaded));
+        let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["policy", "policy:ownership", "policy:sha256"]);
+        assert_eq!(report.checks[2].detail, loaded.sha256);
+        #[cfg(windows)]
+        assert_eq!(
+            report.checks[1].status,
+            Status::Fail,
+            "a file the user created is not administrator-owned"
+        );
     }
 }

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
@@ -8,6 +10,9 @@ use super::{
 
 /// Lines returned when the model does not set a limit.
 pub const DEFAULT_LIMIT: usize = 2000;
+
+/// The name the model calls this tool by.
+const READ_FILE_TOOL: &str = "read_file";
 
 /// Most files one call may read.
 pub const MAX_FILES: usize = 20;
@@ -54,7 +59,7 @@ pub struct ReadFile;
 
 impl Tool for ReadFile {
     fn name(&self) -> &str {
-        "read_file"
+        READ_FILE_TOOL
     }
 
     fn description(&self) -> &str {
@@ -101,17 +106,26 @@ impl Tool for ReadFile {
                         offset: args.offset,
                         limit: args.limit,
                     };
-                    match read_range(&range, ctx, usize::MAX) {
+                    let mut counts = BTreeMap::new();
+                    let output = match read_range(&range, ctx, usize::MAX, &mut counts) {
                         Ok(text) => ToolOutput::ok(text),
                         Err(error) => ToolOutput::error(error),
-                    }
+                    };
+                    ctx.guard.record(READ_FILE_TOOL, &counts);
+                    output.with_redactions(counts)
                 }
                 (None, Some(files)) => read_many(&files, ctx),
-                (Some(_), Some(_)) => {
-                    ToolOutput::error("pass either `path` or `files`, not both".to_owned())
-                }
+                (Some(_), Some(_)) => ToolOutput::error(
+                    "invalid arguments: both `path` and `files` were given; pass either `path` \
+                     (a string) for one file or `files` (an array of {path, offset?, limit?}) \
+                     for several, not both"
+                        .to_owned(),
+                ),
                 (None, None) => ToolOutput::error(
-                    "invalid arguments: pass `path` for one file or `files` for several".to_owned(),
+                    "invalid arguments: neither `path` nor `files` was given; pass `path` (a \
+                     string) for one file or `files` (an array of {path, offset?, limit?}) for \
+                     several"
+                        .to_owned(),
                 ),
             }
         })
@@ -122,21 +136,26 @@ impl Tool for ReadFile {
 /// of the output cap so one long file cannot push the others out.
 fn read_many(files: &[FileRange], ctx: &ToolContext) -> ToolOutput {
     if files.is_empty() {
-        return ToolOutput::error("`files` is empty; list at least one file".to_owned());
+        return ToolOutput::error(
+            "argument `files` is empty; it accepts 1 to 20 {path, offset?, limit?} entries"
+                .to_owned(),
+        );
     }
     if files.len() > MAX_FILES {
         return ToolOutput::error(format!(
-            "`files` lists {} entries; read at most {MAX_FILES} per call",
+            "argument `files` lists {} entries; it accepts at most {MAX_FILES} per call, so \
+             split the read",
             files.len()
         ));
     }
     let share = (DEFAULT_OUTPUT_CAP / files.len()).saturating_sub(HEADER_ALLOWANCE);
     let mut out = String::new();
     let mut failures = 0;
+    let mut counts = BTreeMap::new();
     for range in files {
         let shown = ctx.display_path(&ctx.resolve(&range.path));
         out.push_str(&format!("==> {shown} <==\n"));
-        match read_range(range, ctx, share) {
+        match read_range(range, ctx, share, &mut counts) {
             Ok(text) => out.push_str(&text),
             Err(error) => {
                 failures += 1;
@@ -147,21 +166,34 @@ fn read_many(files: &[FileRange], ctx: &ToolContext) -> ToolOutput {
             out.push('\n');
         }
     }
-    if failures == files.len() {
+    ctx.guard.record(READ_FILE_TOOL, &counts);
+    let output = if failures == files.len() {
         ToolOutput::error(out)
     } else {
         ToolOutput::ok(out)
-    }
+    };
+    output.with_redactions(counts)
 }
 
 /// Reads one range of one file, numbered, in at most `max_bytes`.
-fn read_range(range: &FileRange, ctx: &ToolContext, max_bytes: usize) -> Result<String, String> {
-    let path = ctx.resolve(&range.path);
+///
+/// The whole file is redacted before the range is cut out, so a key block
+/// is redacted even when only its middle lines are asked for; what was
+/// replaced is added to `counts`.
+fn read_range(
+    range: &FileRange,
+    ctx: &ToolContext,
+    max_bytes: usize,
+    counts: &mut BTreeMap<String, usize>,
+) -> Result<String, String> {
+    let path = ctx.checked_path(&range.path, false)?;
     let shown = ctx.display_path(&path);
     let bytes = std::fs::read(&path).map_err(|error| format!("cannot read {shown}: {error}"))?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{shown} is not valid UTF-8 text"))?;
+    let redacted = ctx.guard.redact_lines(&text);
+    crate::guard::add_counts(counts, redacted.counts);
     Ok(number_lines(
-        &text,
+        &redacted.text,
         range.offset.unwrap_or(1).max(1),
         range.limit.unwrap_or(DEFAULT_LIMIT),
         max_bytes,
@@ -186,7 +218,14 @@ fn number_lines(text: &str, offset: usize, limit: usize, max_bytes: usize) -> St
         if total == 0 {
             return "(empty file)".to_owned();
         }
-        return format!("(no lines at offset {offset}; the file has {total} lines)");
+        if limit == 0 {
+            return "(no lines: argument `limit` is 0; it accepts 1 or more, default 2000)"
+                .to_owned();
+        }
+        return format!(
+            "(no lines: argument `offset` is {offset}, past the end of the file's {total} \
+             lines; it accepts 1 to {total})"
+        );
     }
     if last_shown < total {
         out.push_str(&format!(
@@ -199,7 +238,7 @@ fn number_lines(text: &str, offset: usize, limit: usize, max_bytes: usize) -> St
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
@@ -221,7 +260,8 @@ mod tests {
         );
         assert_eq!(
             number_lines("a\nb", 5, 1, usize::MAX),
-            "(no lines at offset 5; the file has 2 lines)"
+            "(no lines: argument `offset` is 5, past the end of the file's 2 lines; it \
+             accepts 1 to 2)"
         );
         assert_eq!(number_lines("", 1, 1, usize::MAX), "(empty file)");
         assert_eq!(
@@ -263,6 +303,46 @@ mod tests {
             .run(json!({"files": [{"path": "nope"}]}), &ctx)
             .await;
         assert!(all_missing.is_error);
+    }
+
+    /// A file holding a fake key block between two ordinary lines.
+    pub(crate) fn key_file() -> String {
+        let label = ["PRIVATE", "KEY"].join(" ");
+        let line = "TUlJRXZRSUJBREFOQmdrcWhraUc5dzBCQVFFRkFBU0NCS2N3Z2dTakFnRUFBb0lC";
+        format!(
+            "first\n-----BEGIN {label}-----\n{line}\n{line}\n{line}\n{line}\nAQAB\n-----END {label}-----\nlast\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn a_key_block_is_redacted_whichever_lines_are_shown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("deploy_key.txt"), key_file()).expect("write");
+        let ctx = ToolContext::new(dir.path());
+        for args in [
+            json!({"path": "deploy_key.txt", "offset": 3, "limit": 1}),
+            json!({"path": "deploy_key.txt", "offset": 4}),
+            json!({"files": [{"path": "deploy_key.txt", "offset": 5, "limit": 2}]}),
+        ] {
+            let output = ReadFile.run(args.clone(), &ctx).await;
+            assert!(
+                !output.content.contains("TUlJ"),
+                "{args}: {}",
+                output.content
+            );
+            assert!(
+                !output.content.contains("AQAB"),
+                "{args}: {}",
+                output.content
+            );
+            assert_eq!(output.redactions.get("private_key"), Some(&1), "{args}");
+        }
+        let whole = ReadFile
+            .run(json!({"path": "deploy_key.txt"}), &ctx)
+            .await
+            .content;
+        assert!(whole.contains("     1\tfirst\n     2\t[REDACTED:private_key]\n"));
+        assert!(whole.contains("     9\tlast\n"), "{whole}");
     }
 
     #[tokio::test]
@@ -313,5 +393,76 @@ mod tests {
 
         let output = ReadFile.run(json!({"offset": 1}), &ctx).await;
         assert!(output.content.starts_with("invalid arguments"));
+    }
+
+    #[tokio::test]
+    async fn argument_errors_name_the_argument_what_was_wrong_and_what_it_accepts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("x.txt"), "one\ntwo\n").expect("write");
+        let ctx = ToolContext::new(dir.path());
+        let cases = [
+            (
+                json!({"path": 5}),
+                "argument `path` is the number 5; it must be a string",
+            ),
+            (
+                json!({"path": "x.txt", "offset": "2"}),
+                "argument `offset` is the string \"2\"; it must be a whole number of 0 or more",
+            ),
+            (
+                json!({"path": "x.txt", "limit": -1}),
+                "argument `limit` is the number -1; it must be a whole number of 0 or more",
+            ),
+            (
+                json!({"files": [{"offset": 1}]}),
+                "missing argument `files[0].path`: a string is required",
+            ),
+            (
+                json!({"files": "x.txt"}),
+                "argument `files` is the string \"x.txt\"; it must be an array of objects",
+            ),
+            (
+                json!({}),
+                "neither `path` nor `files` was given; pass `path` (a string) for one file",
+            ),
+            (
+                json!({"files": []}),
+                "argument `files` is empty; it accepts 1 to 20",
+            ),
+        ];
+        for (args, expected) in cases {
+            let output = ReadFile.run(args.clone(), &ctx).await;
+            assert!(output.is_error, "{args}");
+            assert!(
+                output.content.contains(expected),
+                "{args}: {}",
+                output.content
+            );
+        }
+        let output = ReadFile.run(json!({"path": 5}), &ctx).await;
+        assert!(
+            output.content.contains("Accepted arguments: `files`"),
+            "{}",
+            output.content
+        );
+        let past = ReadFile
+            .run(json!({"path": "x.txt", "offset": 9}), &ctx)
+            .await;
+        assert!(
+            past.content.contains(
+                "argument `offset` is 9, past the end of the file's 2 lines; it accepts 1 to 2"
+            ),
+            "{}",
+            past.content
+        );
+        let none = ReadFile
+            .run(json!({"path": "x.txt", "limit": 0}), &ctx)
+            .await;
+        assert!(
+            none.content
+                .contains("argument `limit` is 0; it accepts 1 or more"),
+            "{}",
+            none.content
+        );
     }
 }

@@ -1,263 +1,124 @@
 # Anvil
 
-Anvil is a coding agent you run from the terminal, written in Rust. It works with open-weight models served behind an OpenAI-compatible endpoint (vLLM, llama.cpp, a rented GPU) and with hosted APIs (Anthropic, OpenAI, Google). Models are configuration, not code: any endpoint can play any role.
+Anvil is a coding agent harness for open-weight models in regulated, restricted-network environments.
 
-## What it is
+Anvil is a command-line program, one binary, that runs on the developer's machine. It gives a language model tools to read, edit and test code, under rules the organization sets in a policy file. It does not host or run a model: it sends requests to a model endpoint the organization operates, usually a self-hosted OpenAI-compatible server, and to no host the configuration or policy does not name. It has no server, no account, no usage upload and no self-update. Without a policy file it runs unmanaged: the developer's configuration names the endpoints, and writes and commands ask first. It holds no certification and has had no independent security assessment.
 
-A coding agent for your own projects. Point it at a repository, give it a task, and it plans, builds, reviews and verifies the change with a real tool set (shell, files, search) under a permission model you control. It reads Claude Code's conventions (`CLAUDE.md`, `SKILL.md`, `.claude/commands`, `.claude/agents`, hooks, MCP servers), so an existing Claude Code setup works as is. It remembers standing rules and facts across sessions, and it records what it does (sizes, tokens, latencies, outcomes), never what it works on. It is one binary with no background process and no account.
+## How it works
 
-## Install
-
-A release build: download `anvil-x86_64-unknown-linux-gnu`, `anvil-x86_64-unknown-linux-musl` (static, any distribution) or `anvil-x86_64-pc-windows-msvc.exe` from the [releases page](https://github.com/EliFebres/anvil/releases), check it against the `## SHA256` section of the release notes, rename it to `anvil` (`anvil.exe`) and put it on your `PATH`. `anvil update` later fetches the newest release and checks the same hash before it swaps the binary.
-
-From source, with a Rust toolchain (edition 2024, rust-version 1.89 or newer) and git; Windows, macOS and Linux all work, and HTTP uses rustls, so there is no OpenSSL to install:
-
-```sh
-git clone https://github.com/EliFebres/anvil
-cd anvil
-cargo build --release      # target/release/anvil
+```mermaid
+flowchart LR
+    dev([Developer]) -- task, approvals --> anvil
+    subgraph machine [Developer machine]
+        anvil["Anvil<br/>policy, permission prompts,<br/>file boundary, redaction, audit log"]
+        files[(Project files)]
+        anvil -- "read, edit, run checks" --> files
+    end
+    anvil -- "HTTPS to allowed host:port only" --> model["Model endpoint<br/>hosted by the organization"]
 ```
 
-A source build does not know where its releases live; set `[update] repo = "EliFebres/anvil"` in the configuration if you want `anvil update` to work.
+In text: Anvil reads and changes project files and runs commands on the developer's machine, within the policy and the developer's answers to permission prompts. Anvil's own requests go only over HTTPS to the allowed `host:port` pairs: the model endpoint, plus any HTTP MCP server the configuration or a trusted repository names. Commands it runs are not covered. Every session writes a local audit log.
 
-## Configure a provider
+A task (`anvil "<task>"`) runs through four steps:
 
-Let anvil write its configuration:
+1. **Plan.** The model writes a plan; a person approves it or sends it back. `--yes` skips this unless the policy forbids it.
+2. **Build.** The model edits files; each write and shell command asks first unless a rule decides.
+3. **Verify.** Anvil runs the project's check command and the plan's; their exit codes decide, not a model. If a project has no check command at all, nothing deterministic runs; after review, the model checks the change itself with its tools.
+4. **Review.** A second model call (optionally another model) reviews the change and the check output, and may send it back to Build at most three times.
+
+## Why it is safe, and where it stops
+
+Each control is enforced in code and proven by tests CI runs; the IDs refer to [docs/SECURITY_TESTS.md](docs/SECURITY_TESTS.md), and [SECURITY.md](SECURITY.md) explains each.
+
+| control | what it does | proof |
+|---|---|---|
+| Network allowlist | Requests go only to allowed `host:port` pairs, over HTTPS except to loopback, without redirects, through one HTTP client. | NET-1 to NET-3, NET-7: `a_host_outside_the_allowed_set_is_refused_before_any_connection` |
+| No phoning home | The binary has no self-update, update check, usage report or webhook. | NET-11: `removed_commands_are_not_part_of_the_binary` |
+| Key handling | A key goes only to its own endpoint and is redacted from errors and logs; child programs get none. | NET-4, KEY-2, KEY-4: `a_child_process_that_prints_its_environment_shows_no_key` |
+| Managed policy | An administrator-owned file at a fixed path outranks user, flag and repository settings; a conflict stops Anvil, naming the key. | POL-1 to POL-4: `a_profile_cannot_loosen_the_policy` |
+| File boundary | File tools stay inside the project, refuse credential and key files, and never write files that grant permissions. | FS-1, FS-3, FS-5: `secret_paths_are_refused_inside_the_workspace_and_skipped_by_searches` |
+| Permission prompts | File writes and shell commands ask a person when no rule decides. | PERM-6: `the_built_in_writing_tools_and_the_shell_ask_when_no_rule_decides` |
+| Shell modes | The shell can be off, limited to listed programs started without a shell, or run in a docker or podman container without network access. | SH-1, SH-2, SH-5: `allowlist_mode_starts_the_program_without_a_shell` |
+| Repository trust | A cloned repository can only tighten rules; its hooks, MCP servers and skills load only after the user trusts that exact content. | TRUST-1 to TRUST-3: `a_hook_added_after_trust_does_not_run_until_trusted_again` |
+| Redaction | Known secret shapes in tool output are removed before reaching the model or disk; output is marked untrusted. | RED-1, RED-6: `a_secret_in_tool_output_does_not_reach_the_provider_or_the_transcript` |
+| Data kept on disk | The policy decides whether transcripts keep text, only sizes and digests, or nothing. | DATA-1: `a_metadata_transcript_keeps_sizes_and_digests_but_no_text` |
+| Audit log | Every session writes a hash-chained log of its events (prompts and arguments as sizes and digests by default), optionally mirrored, and stops when a required log fails. | AUD-1, AUD-5: `the_audit_chain_detects_edit_removal_and_reorder` |
+| Release integrity | Tagged, locked release builds ship checksums, an SBOM and build provenance. | SUP-3, SUP-4: `release_publishes_checksums_an_sbom_vendored_source_and_provenance` |
+
+[docs/CONTROLS.md](docs/CONTROLS.md) maps these to the NIST controls they support; Anvil claims compliance with no standard.
+
+### What Anvil does not do
+
+- **It does not sandbox approved shell commands on the host.** An approved command runs with the developer's rights and reaches any file or host they can. The container executor or `[shell] mode = "off"` is the boundary.
+- **It does not keep data from the model endpoint.** Everything a session reads is sent there; redaction catches known key shapes, not passwords or customer data.
+- **It does not prevent prompt injection.** The markers reduce it; permissions, the file boundary and the shell mode limit what follows.
+- **It does not sign binaries** with a publisher certificate, store keys in an operating system credential store, or tie audit records to a single sign-on identity.
+- **It cannot detect a local audit log cut at the end or rewritten whole**; a mirror the developer cannot rewrite covers that.
+
+Full list: SECURITY.md, "What is not enforced"; also [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
+
+## Quick start for a developer
+
+Install a verified release ([docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md)) or build it:
 
 ```sh
-anvil setup
+cargo build --release --locked                             # target/release/anvil
+export ANVIL_ENDPOINT_KEY=...                              # any value if no key is needed
+anvil setup --endpoint https://models.internal.example/v1  # writes ~/.anvil/config.toml
+anvil doctor                                               # checks keys, provider, policy
+anvil doctor --egress                                      # lists destinations, sends nothing
+cd ~/some-project && anvil "add a --json flag to the list command"
 ```
 
-This writes `~/.anvil/.env` (API keys) and `~/.anvil/config.toml` (providers and roles), never overwriting a value that is already filled in, and exits 2 while placeholders remain. Fill in the keys you have, then check everything:
+The key comes from the environment or `~/.anvil/.env`, never a configuration file. [docs/USAGE.md](docs/USAGE.md) covers configuration and every command.
 
-```sh
-anvil doctor
-```
+## For administrators
 
-Every provider is a `[providers.<name>]` table naming its protocol, base URL, the environment variable that holds its key, the model and its context window; `[roles]` maps `coder`, `summarizer`, `reviewer` and the optional `planner` and `worker` onto those names. An open-weight model behind an OpenAI-compatible server looks like this:
+The policy file is `/etc/anvil/policy.toml` (Linux, macOS) or `C:\ProgramData\anvil\policy.toml` (Windows). If anyone but an administrator can change it, Anvil refuses to start; if it is missing, Anvil runs unmanaged and says so at every session start. Start from `policies/restricted.toml`:
 
 ```toml
-[providers.local]
-protocol = "openai"
-base_url = "http://localhost:8000/v1"
-api_key_env = "ANVIL_LOCAL_KEY"   # any value your server accepts
-model = "<model name as served>"
-context_window = 131072
-supports_tools = true
-supports_reasoning = false
-
-[roles]
-coder = "local"
-summarizer = "local"
+version = 1
+[network]
+allowed_hosts = ["models.internal.example:443"]
+[shell]
+mode = "allowlist"
+allow = ["cargo test *", "git diff *"]
+[audit]
+required = true
+mirror_dir = "/var/log/anvil"
 ```
 
-A project can add `.anvil/config.toml` to override the global file, and `anvil config init` writes a commented template for either. Keys never live in configuration files: they come from the environment, `~/.anvil/.env` or the project's `.anvil/.env`, and `anvil scan-keys` fails if a tracked file contains one.
+Under a policy, `allowed_hosts` is the only list of destinations. Keys left out take the restrictive default: no shell, MCP servers, repository trust, `--yes` or transcript. An allowed program such as `cargo test` still runs project code; the container executor contains it.
 
-## Basic use
+- `anvil policy check --ownership <file>` validates a file; `anvil policy show` prints the one in force.
+- Verify a release with `sha256sum --check --ignore-missing SHA256SUMS` and `gh attestation verify <file> --repo EliFebres/anvil`.
+- The audit log is `audit.jsonl` in each session folder (`<project>/.anvil/sessions/<id>/` or the policy's `transcript_dir`), copied to `mirror_dir`; `anvil audit verify <file>` checks it.
 
-Work on a task in any repository:
+[docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md) has every key, Windows setup and air-gapped installation. Report a vulnerability privately as SECURITY.md describes.
 
-```sh
-cd ~/some-project
-anvil "add a --json flag to the list command"
-```
+## Documentation
 
-Or talk to it:
-
-```sh
-anvil chat
-```
-
-Scripts and CI get the line renderer automatically, or ask for it:
-
-```sh
-anvil --yes --plain run "bump the dependencies" > answer.txt
-```
-
-## Security model
-
-- anvil sends prompts, and the files and command output its tools read, to the providers you configure. It has no telemetry upload and no update check at startup; everything else that reaches the network (MCP servers, `anvil update`, webhooks, `anvil ticket submit`) is something you configure or run.
-- File writes, edits and shell commands ask first. Rules in `.anvil/permissions.toml` or a `--profile` change that; a few destructive commands (`rm -rf`, `git push --force`, `git reset --hard`, `Remove-Item -Recurse`) are refused even under `--yes` unless a rule names them.
-- Keys are read from the environment and `.env` files, never from configuration.
-- anvil trusts the repository it runs in: that repository's `.anvil/` and `.claude/` files can change providers, permissions, hooks and MCP servers. Read them before running anvil in code you did not write.
-
-[SECURITY.md](SECURITY.md) has the details, with file references: every network destination and what triggers it, what is stored where, where keys come from, the permission defaults, and how releases are built and verified.
-
-## What it does
-
-### The CLI
-
-| command | what happens |
+| document | what it holds |
 |---|---|
-| `anvil "<task>"` or `anvil run <task>` | One task through the state machine: `plan` (you approve the plan, which ends with a `Check:` command) → `build` → `verify` (your rules, the project's checks and the plan's check, with no model turn) → `review` (a second model, which sees the check output). A project with no check command at all is reviewed first and then verified by the model. Exit code 0 when done, 2 when incomplete. |
-| `anvil chat` | A conversation with tools, outside the state machine. `/plan`, `/build` and `/review` switch the prompt and tool set; `rule: <text>` saves a standing rule on the spot; `/compact`, `/model <name>`, `/cost`, `/ticket <text>`, `/help`. |
-| `anvil build <spec.md>` | Work through a specification across many sessions: a plan of work items, one fresh session per item, a commit per finished item. See [Long builds](#long-builds). `anvil build resume [id]` continues one, `anvil build status [id]` shows it. |
-| `anvil resume <id>` | Continue a saved session from where it stopped. `anvil sessions` lists them. |
-| `anvil status [--json] [--all]` | Where every session of this project stands, newest first: state, loop step, age, spend, task, id. See [Watching a session](#watching-a-session). |
-| `anvil --yes ...` | Unattended: approve the plan, allow every asked tool call, keep every proposed memory. Deny rules and the blocked commands still apply. |
-| `anvil --plain ...` | Keep the line renderer and stdin prompts. Chosen automatically when a standard stream is not a terminal. |
-| `anvil --profile <name> ...` | Layer `~/.anvil/profiles/<name>.toml` over the config; its `[permissions]` table replaces the project's. |
-
-#### The full-screen UI
-
-`anvil chat`, `anvil run` and `anvil resume` open a full-screen terminal UI: a scrolling transcript, a status line (state, model, permission mode, tokens, cost, context used, elapsed time) and a multi-line input with history and Tab completion of slash commands. Shift+Enter, Alt+Enter or Ctrl+J insert a line break; Shift+Tab cycles the permission mode; Ctrl+C cancels the turn, twice quits; `?` on an empty input lists the keys.
-
-<table>
-  <tr>
-    <td width="50%">
-      <img src="docs/ui-startup.png" alt="The startup screen: the ANVIL logo, version, project, coder, reviewer, mode, what loaded, the standing rules and recent sessions">
-      <p align="center"><b>Startup.</b> What is loaded, your standing rules and the last few sessions.</p>
-    </td>
-    <td width="50%">
-      <img src="docs/ui-build-session.png" alt="A build session: the user's request, the model's reply, an edit_file tool line and the diff it made">
-      <p align="center"><b>A build turn.</b> Every edit shows as a diff under its tool line; Enter expands any tool call.</p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <img src="docs/ui-permission-modal.png" alt="A permission prompt over the dimmed transcript showing the proposed diff with allow, deny and always choices">
-      <p align="center"><b>Permission.</b> An <code>ask</code> rule pauses the turn and shows exactly what would change.</p>
-    </td>
-    <td width="50%">
-      <img src="docs/ui-plan-approval.png" alt="A plan with its checklist and the question bar: y build, r revise, q quit">
-      <p align="center"><b>Plan approval.</b> Build it, send it back with feedback, or quit. The boxes tick as the model works through them.</p>
-    </td>
-  </tr>
-</table>
-
-Three kinds of state live under `~/.anvil/`, all plain files you can edit:
-
-- **Rules** (`rules.toml`): standing coding rules. They enter the system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
-- **Memory** (`memory/`): one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`, loaded under a token cap. At the end of a session the summarizer proposes new facts and you keep or drop each one. A run that finished with no reviewer rejection, no failed check and a diff under 50 lines has nothing new to teach, so it skips that turn and says so; `[memory] always_summarize = true` runs it every time.
-- **Telemetry** (`telemetry/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates, and with a planner configured adds a per-role table, each role priced by its own provider. A classifier turns them into signals, and `anvil ticket draft` has the summarizer write ticket drafts from the signals alone.
-
-#### Workers
-
-The `delegate` tool hands a piece of work to a subagent with its own conversation, so a broad search or an independent step does not fill the main one. Two agents ship with anvil and need no files in the project:
-
-- `explore` has the read-only tools and returns a short answer with file paths and line numbers.
-- `implement` has the write tools and the shell, under the same permission rules and prompts as the session (`permissions: inherit` in its definition), takes one self-contained step and returns what it changed.
-
-Both run on the `worker` role, which is optional in `[roles]` and falls back to the coder; an agent definition's `model:` may name `worker`, `planner`, `coder` or a provider. A file of the same name in the project's or your own `.claude/agents/` replaces a built-in one.
-
-Several `delegate` calls in one turn run at the same time, at most four, when the agent can only read; calls to an agent that may write run one after another, and while planning such a call is refused. Delegated turns appear under `worker` in the session's totals and draw on the same session budget. The Plan and Build prompts say when delegation pays for itself; `[prompt] delegate_guidance = false` removes that guidance.
-
-#### Watching a session
-
-Every `run`, `resume` and `chat` keeps a `status.json` in its session folder (`.anvil/sessions/<id>/`), replaced atomically on every change, so you can see from outside whether a session is working, stuck or waiting for you. `state` is one of `working`, `needs_input` (a permission prompt, a plan approval or a question is waiting), `blocked` (a budget ran out, the provider cannot be reached, or the loop stopped unfinished; `detail` says which), `done` and `failed`. It also holds the loop step, the tokens and cost so far, and when it started and last changed.
-
-`anvil status` lists the sessions of the current project from those files; `--json` prints them as a JSON array and `--all` covers every project that has run a session. A session that says `working` or `needs_input` but whose process is gone shows as `stale` (the running process holds a lock on `status.lock`; `stale` is never written to the file). Sessions from before status files existed are skipped.
-
-Two optional tables in `config.toml` make a session reach you:
-
-```toml
-# One short message (Discord, Slack or ntfy, chosen by the URL) when a session
-# needs you, is blocked, finishes or fails. Nothing for `working`.
-[notify]
-webhook_env = "ANVIL_WEBHOOK_URL"   # the environment variable that holds the URL
-
-# Report the session to herdr when it runs in a herdr pane: working, blocked
-# (with the reason) or idle, released when the session exits.
-[integrations]
-herdr = false
-```
-
-A failing webhook or a missing `herdr` never affects the session.
-
-#### Long builds
-
-`anvil build <spec.md>` hands anvil a specification and lets it work for a long time without one conversation growing until it fails. The planner role (the coder when there is none) splits the specification into work items, each with a title, a description, the area it concerns and an acceptance command that must exit 0. You approve the list the way you approve a plan (approve, revise with feedback, or abort; `--yes` skips it). Each item then runs as its own session through the normal plan, build, review and verify loop, which sees only the item, the specification (the whole file up to 24,000 characters, otherwise the section the planner named) and a short summary of the items already finished. An item is done only when anvil itself has run its acceptance command and the project's own check and both exited 0; the model's opinion never counts. Then everything is committed with the item's title as the message.
-
-A build needs a git repository on a branch, with a clean tree: no tracked changes and no untracked files that are not ignored, so commit the specification first or keep it outside the repository. `.anvil/` is left out of that check and out of the build's commits; the build's files live in `.anvil/builds/<id>/`: one `NN-<slug>.md` per item, `spec.md` (a copy), `state.json` and the build's own `status.json`, with the same schema and notifications as a session's. A build never pushes and touches only the branch it started on and its own `anvil-build/<id>/...` branches.
-
-```
-$ anvil build docs/spec.md --budget-usd 5
-build 01JC4ZQ8M2 planned: 3 work item(s)
-$ anvil build status
-build 01JC4ZQ8M2  needs_input  branch main
-spec docs/spec.md
-work item 2 (`Add the --shout flag`) failed 2 attempts: the acceptance command `cargo test shout` did not exit 0: ...; its last attempt is on branch `anvil-build/01JC4ZQ8M2/item-2-attempt-2`; fix the cause and run `anvil build resume 01JC4ZQ8M2`
-spent 61204 tokens, $0.84; 2 of 3 item(s) left
-
- 1. [done] Print the greeting  (attempts 1, 21877 tokens)  3f9a1c2e
- 2. [failed] Add the --shout flag  (attempts 2, 39327 tokens)
- 3. [pending] Document the flags  (attempts 0, 0 tokens)
-$ git switch main && anvil build resume --budget-usd 8
-resuming build 01JC4ZQ8M2: 2 item(s) left
-```
-
-`--budget-usd` and `--budget-tokens` cap the whole build and are checked between items; the build then stops as `blocked` with the reason, and `resume` accepts new caps. Each item's session gets an even share of what is left, through the usual session token limit. An item gets two attempts: after the first failure the second is told why; after the second, the build stops as `needs_input`, the failed attempt is committed on `anvil-build/<id>/item-<n>-attempt-<k>`, and your branch is back at the last good commit with a clean tree. `anvil build resume [id]` (the newest unfinished build by default) starts at the first item that is not done, even after a crash; an item left in progress has its changes saved to a side branch first. Exit code 0 when every item is done, 2 when the build stopped. A `--budget-usd` cap is only applied inside a session when the coder has a `price_per_mtoken`.
-
-#### Learning how you work
-
-Three more things build on those files.
-
-**Rules by relevance.** Each rule lists the `languages` it applies to. A session sends the coder and the reviewer only the rules for languages present in the project (from file extensions, honoring `.gitignore`, at most 5,000 files), plus every `*` rule and any rule for a language anvil cannot detect. An empty project has no languages yet, so it gets every rule. A Python-only rule stays out of a Rust-only project; the prompt is otherwise unchanged. The reviewer uses the project's languages too, since the changed files are not known when the prompt is built.
-
-**Learning from your edits.** At the end of a session in a git repository, anvil records the text files it changed (each at most 32 KiB, 128 KiB in all) with a SHA-256 of their bytes in `~/.anvil/memory/corrections/<repo>.toml`. At the start of the next session in that project, and whenever you run `anvil memory learn`, the files you edited since are compared with what anvil left, and the summarizer proposes rules from the difference. You keep or drop each one, exactly as with proposed facts; nothing reaches `rules.toml` until you keep it, and an edit is never proposed twice. Lock files, minified files, `target/`, `dist/`, `node_modules/` and anything in the project's `.gitignore` are skipped, the diff sent to the model is cut at 16 KiB, and when nothing was edited there is no model call. Each proposal names one language and says when a mechanical check is realistic. Under `--yes` the start-of-session step is skipped (nobody can answer); `anvil memory learn` picks the edits up later. `[memory] always_summarize` does not apply, because this step only runs a model when you really edited something.
-
-```
-$ anvil memory learn
-memory: you edited 2 file(s) anvil wrote; asking the summarizer for rules
-memory: 1 proposed rule(s), written to ~/.anvil/memory/proposed.md
-[rule] (python) Annotate every parameter and return type.
-  keep? [k]eep / [d]rop: k
-memory: kept 1 rule(s) in ~/.anvil/rules.toml
-```
-
-**Project templates.** `~/.anvil/templates/<name>/` holds a directory tree and a `template.toml` with `name` (the directory name), a one-line `description` and `languages`. A directory without a valid `template.toml` is ignored with a warning.
-
-```
-$ anvil template save rust-cli --description "A small Rust CLI with clap"   # saves the current directory
-$ anvil template save web ../site --force                                   # another directory, replacing `web`
-$ anvil new rust-cli ./my-tool                                              # copies the tree, not template.toml
-```
-
-`template save` honors `.gitignore` and skips `.git/` and `.anvil/`, and refuses to overwrite a template without `--force`. `anvil new` creates the directory, or fills an existing one that holds no files other than dot-directories such as `.git`; an unknown name lists the templates you have. When a task starts in such an empty directory, the Plan prompt lists each template's name and description so the plan can start from the one that fits (`anvil new <name> .`); with files present or no templates, the prompt is unchanged.
-
-#### Tickets
-
-`anvil ticket draft` has the summarizer turn telemetry signals into improvement tickets: a symptom, the interface wanted, an optional synthetic reproduction and acceptance checks, never project code or paths (a validator refuses a ticket that names a path outside the project or holds more than 40 lines of code). Drafts stay on your machine in `~/.anvil/tickets/draft/`; `anvil ticket list|show|review|drop` manage them.
-
-`anvil ticket submit` sends a ticket only when `[tickets] queue` names a git repository to receive it:
-
-```toml
-[tickets]
-queue = "https://github.com/<owner>/<queue-repository>.git"
-```
-
-The key is unset by default, so a stock install never pushes anywhere; `submit` then says what to set and sends nothing. With a queue set, it fetches the queue into `~/.anvil/queue.git` and pushes the ticket there as a `tickets/<id>` branch with your own git credentials. The current project's remotes are never used.
-
-Other commands: `anvil skill add|list|show|remove` (install Claude Code skills), `anvil compat check <dir>` (report what a `.claude` folder would load), `anvil doctor` (keys, providers, tools, keys in tracked files), `anvil update` (fetch the latest release and swap the binary), `anvil ticket` (above), `anvil memory learn`, `anvil new`, `anvil template save`.
-
-## Repository layout
-
-| path | what it holds |
-|---|---|
-| `crates/anvil-types` | Shared types: ticket schema, provider and roles config, telemetry references, skill manifest, session status, and their validators. `cargo run -p anvil-types -- --schema` prints the Ticket JSON Schema. |
-| `crates/anvil-core` | The agent loop, tool registry, provider adapters (OpenAI and Anthropic protocols) and context management. |
-| `crates/anvil-compat` | Claude Code compatibility: skills, `CLAUDE.md`, commands, agents, hooks, the MCP client. |
-| `crates/anvil-memory` | Cross-project memory and coding rules. |
-| `crates/anvil-telemetry` | Usage records, failure classification, ticket drafts. |
-| `crates/anvil-tui` | The palette and pure layout helpers the full-screen UI draws with. |
-| `crates/anvil-cli` | The `anvil` binary: argument parsing, wiring, the line renderer and the full-screen UI. |
-| `skills/` | Claude Code-format skills that ship with anvil. |
-| `SECURITY.md` | Network destinations, telemetry, keys, permissions and the release build, for a reviewer. |
-
-`CLAUDE.md` is the contract: conventions, which crate may depend on which, and what every check enforces.
-
-## License
-
-MIT or Apache-2.0, at your option: see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE). Contributions are accepted under the same terms.
+| [SECURITY.md](SECURITY.md) | What Anvil reads, stores and sends, who sets the limits, what is not enforced, how to report a vulnerability. |
+| [docs/SECURITY_TESTS.md](docs/SECURITY_TESTS.md) | Every security claim next to the test that proves it. |
+| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | Assets, trust boundaries, actors, and the OWASP Top 10 for Agentic Applications mapped to mitigations. |
+| [docs/CONTROLS.md](docs/CONTROLS.md) | Which NIST SP 800-53 and SP 800-171 controls Anvil's features support, with the test for each. |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Reference layouts, the data flow diagram, the shared responsibility table. |
+| [docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md) | Verifying a release, air-gapped installation, every policy key, rollout, audit collection, upgrades. |
+| [docs/PILOT_SCOPE.md](docs/PILOT_SCOPE.md) | A template for a first, time-boxed trial. |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | What is not done yet, including the host sandbox, FIPS and code signing. |
+| [docs/CODE_TOUR.md](docs/CODE_TOUR.md) | A reading order through the security code, with a test to run at each stop. |
+| [docs/USAGE.md](docs/USAGE.md) | Configuration, every command, the full-screen UI, workers, long builds, memory, rules and templates. |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Every design choice made while hardening Anvil, with the reason. |
+| [docs/HARDENING_REPORT.md](docs/HARDENING_REPORT.md) | What the hardening run did and did not do. |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each version. |
+| `policies/`, `profiles/` | Example managed policies and the `strict.toml` profile, each parsed by a test. |
 
 ## Development
 
-With [`just`](https://github.com/casey/just) installed:
+Anvil is a Rust workspace; [CLAUDE.md](CLAUDE.md) holds the conventions. `just check` runs formatting, clippy, tests and `anvil scan-keys`, as CI does on Ubuntu and Windows.
 
-```sh
-just check
-```
+## License
 
-That runs `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --all`, the key scan, and a grep that keeps the program's old name out of the tree. CI runs the same on Ubuntu and Windows, and `main` is protected: code reaches it only through pull requests. Prompts and tool schemas are pinned with `insta` snapshots; `cargo insta review` after a deliberate change.
-
-Releases are built by `.github/workflows/release.yml`; `anvil update` downloads the latest one for your platform, verifies its SHA256 and swaps the binary in place.
+MIT or Apache-2.0, at your option: see [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).

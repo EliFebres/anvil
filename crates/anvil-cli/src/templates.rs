@@ -149,6 +149,7 @@ mod tests {
         assert_eq!(section.heading, "Project templates");
         insta::assert_snapshot!(system_prompt(&PromptInputs {
             state: State::Plan,
+            environment: None,
             instructions: &[],
             sections: &[section],
             tools: &[],
