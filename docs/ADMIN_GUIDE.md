@@ -88,6 +88,6 @@ Hooks, MCP servers and skills the policy forbids are errors when the user's own 
 
 ## Inspecting a machine
 
-- `anvil policy show` prints every effective policy setting and whether the policy file or the default set it, then the user settings the policy bounds.
+- `anvil policy show` prints every key of the policy schema, set or not, and whether the policy file or the default set it; a key left unset shows what that means, such as `[limits] build_usd = (default: no ceiling)`. It then prints every user setting the policy constrains (providers, roles, `[network] allow_http_hosts`, `[tools] extra_dirs`, the `[permissions]` keys, `[memory] always_summarize`, `[limits] session_tokens`) with the layer that set it.
 - `anvil policy check <file> [--ownership]` validates a file and exits 1 with the reasons.
 - `anvil doctor` checks the policy, keys, providers and tools, one row per check.

@@ -445,10 +445,21 @@ pub fn startup_line(policy: Option<&LoadedPolicy>) -> String {
     }
 }
 
-/// Every effective policy setting, one `key = value  (layer)` line each.
+/// Policy keys that may be left unset, with what an unset key means.
+const UNSET_POLICY_KEYS: &[(&str, &str, &str)] = &[
+    ("data", "transcript_dir", "<project>/.anvil/sessions"),
+    ("data", "retention_days", "kept until deleted"),
+    ("limits", "session_tokens", "no ceiling"),
+    ("limits", "build_tokens", "no ceiling"),
+    ("limits", "build_usd", "no ceiling"),
+];
+
+/// Every effective policy setting, one `key = value  (layer)` line each,
+/// sorted by table and key.
 ///
 /// The layer is `policy` when the file sets the key and `default` when it
-/// takes the default.
+/// takes the default; a key left unset shows what that means, as
+/// `(default: ...)`.
 ///
 /// # Arguments
 ///
@@ -463,10 +474,13 @@ pub fn policy_lines(loaded: &LoadedPolicy) -> Vec<String> {
         .and_then(|text| toml::from_str(&text).ok())
         .unwrap_or_default();
     let effective = toml::Table::try_from(&loaded.policy).unwrap_or_default();
-    let mut lines = Vec::new();
+    let mut lines = std::collections::BTreeMap::new();
     for (table, value) in &effective {
         let Some(keys) = value.as_table() else {
-            lines.push(format!("{table} = {value}  (policy)"));
+            lines.insert(
+                (String::new(), table.clone()),
+                format!("{table} = {value}  (policy)"),
+            );
             continue;
         };
         for (key, value) in keys {
@@ -479,14 +493,39 @@ pub fn policy_lines(loaded: &LoadedPolicy) -> Vec<String> {
             } else {
                 "default"
             };
-            lines.push(format!("[{table}] {key} = {value}  ({layer})"));
+            lines.insert(
+                (table.clone(), key.clone()),
+                format!("[{table}] {key} = {value}  ({layer})"),
+            );
         }
     }
-    lines
+    for (table, key, meaning) in UNSET_POLICY_KEYS {
+        lines
+            .entry(((*table).to_owned(), (*key).to_owned()))
+            .or_insert_with(|| format!("[{table}] {key} = (default: {meaning})  (default)"));
+    }
+    lines.into_values().collect()
+}
+
+/// One user setting the policy constrains, with its layer: the user's
+/// when their configuration or profile sets it, otherwise `default`, shown
+/// as `(default: meaning)` when `unset` says what an unset key means.
+fn user_line(
+    loaded: &LoadedConfig,
+    layer: &str,
+    (table, key): (&str, &str),
+    value: &str,
+    unset: Option<&str>,
+) -> String {
+    match (sets(loaded, table, key), unset) {
+        (true, _) => format!("[{table}] {key} = {value}  ({layer})"),
+        (false, Some(meaning)) => format!("[{table}] {key} = (default: {meaning})  (default)"),
+        (false, None) => format!("[{table}] {key} = {value}  (default)"),
+    }
 }
 
 /// What `anvil policy show` prints: the policy's settings with their layer,
-/// then the user's settings the policy bounds, with theirs.
+/// then every user setting the policy constrains, with theirs.
 ///
 /// # Arguments
 ///
@@ -523,6 +562,7 @@ pub fn show(
         Some(name) => format!("{} + profile {name}", config_label(loaded)),
         None => config_label(loaded),
     };
+    let _ = writeln!(out, "user settings the policy constrains:");
     let config = &loaded.config;
     for (name, provider) in &config.providers {
         let _ = writeln!(
@@ -537,6 +577,59 @@ pub fn show(
         "roles coder = {}, summarizer = {}  ({layer})",
         roles.coder, roles.summarizer
     );
+    for (role, value, meaning) in [
+        ("planner", &roles.planner, "the coder"),
+        ("worker", &roles.worker, "the coder"),
+        ("reviewer", &roles.reviewer, "none"),
+    ] {
+        let _ = match value {
+            Some(provider) => writeln!(out, "roles {role} = {provider}  ({layer})"),
+            None => writeln!(out, "roles {role} = (default: {meaning})  (default)"),
+        };
+    }
+    let list = |items: &[String]| format!("{items:?}");
+    let shown: Vec<String> = config
+        .tools
+        .extra_dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect();
+    let rules = config.permissions.clone().unwrap_or_default();
+    let unmatched = match rules.unmatched {
+        Some(Unmatched::Allow) => "\"allow\"",
+        Some(Unmatched::Ask) => "\"ask\"",
+        Some(Unmatched::Deny) => "\"deny\"",
+        None => "",
+    };
+    let lines = [
+        (
+            ("network", "allow_http_hosts"),
+            list(&config.network.allow_http_hosts),
+            None,
+        ),
+        (("tools", "extra_dirs"), list(&shown), None),
+        (("permissions", "allow"), list(&rules.allow), None),
+        (("permissions", "ask"), list(&rules.ask), None),
+        (("permissions", "deny"), list(&rules.deny), None),
+        (
+            ("permissions", "default"),
+            unmatched.to_owned(),
+            Some("the tool's own; reads run, writes ask"),
+        ),
+        (
+            ("permissions", "allow_tools"),
+            list(&rules.allow_tools),
+            None,
+        ),
+        (
+            ("memory", "always_summarize"),
+            config.memory.always_summarize.to_string(),
+            None,
+        ),
+    ];
+    for (key, value, unset) in lines {
+        let _ = writeln!(out, "{}", user_line(loaded, &layer, key, &value, unset));
+    }
     let ceiling = policy.and_then(|p| p.policy.limits.session_tokens);
     let tokens = ceiling.map_or(config.limits.session_tokens, |c| {
         c.min(config.limits.session_tokens)
@@ -549,13 +642,6 @@ pub fn show(
         "default"
     };
     let _ = writeln!(out, "[limits] session_tokens = {tokens}  ({tokens_layer})");
-    if let Some(rules) = &config.permissions {
-        let _ = writeln!(
-            out,
-            "[permissions] allow = {:?}, ask = {:?}, deny = {:?}  ({layer})",
-            rules.allow, rules.ask, rules.deny
-        );
-    }
     out
 }
 
@@ -817,6 +903,109 @@ mod tests {
         assert_eq!(startup_line(None), "policy: unmanaged");
         let shown = show(None, None, None);
         assert!(shown.starts_with("policy: unmanaged"), "{shown}");
+    }
+
+    /// The `[table] key` of each `policy_lines` line.
+    fn keys_of(lines: &[String]) -> std::collections::BTreeSet<String> {
+        lines
+            .iter()
+            .filter_map(|line| line.split_once(" = ").map(|(key, _)| key.to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn policy_lines_name_every_key_of_the_schema_set_or_not() {
+        let dir = tempfile::tempdir().expect("dir");
+        let everything = policy(
+            dir.path(),
+            "[data]
+transcript_dir = '/srv/t'
+retention_days = 3
+[limits]
+session_tokens = 1
+build_tokens = 1
+build_usd = 1.0
+",
+        );
+        let every_key = keys_of(&policy_lines(&everything));
+        let minimal = policy(dir.path(), "");
+        let lines = policy_lines(&minimal);
+        assert_eq!(keys_of(&lines), every_key, "{lines:#?}");
+        let text = lines.join(
+            "
+",
+        );
+        for unset in [
+            "[data] transcript_dir = (default: <project>/.anvil/sessions)  (default)",
+            "[data] retention_days = (default: kept until deleted)  (default)",
+            "[limits] session_tokens = (default: no ceiling)  (default)",
+            "[limits] build_tokens = (default: no ceiling)  (default)",
+            "[limits] build_usd = (default: no ceiling)  (default)",
+        ] {
+            assert!(
+                text.contains(unset),
+                "{unset} missing in:
+{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_show_covers_every_user_key_the_policy_constrains() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".anvil")).expect("mkdir");
+        std::fs::write(
+            home.join(".anvil").join("config.toml"),
+            "[providers.corp]
+protocol = \"openai\"
+base_url = \"https://models.corp.example/v1\"
+api_key_env = \"PATH\"
+model = \"m\"
+context_window = 1000
+supports_tools = true
+supports_reasoning = false
+[roles]
+coder = \"corp\"
+summarizer = \"corp\"
+[permissions]
+allow = [\"read_file\"]
+[limits]
+session_tokens = 4000
+",
+        )
+        .expect("write");
+        let loaded = anvil_types::config::load_profile(Some(&home), None).expect("loads");
+        let managed = policy(
+            dir.path(),
+            "[features]
+hooks = false
+[limits]
+session_tokens = 5000
+",
+        );
+        let text = show(Some(&managed), Some(&loaded), None)
+            .replace(&dir.path().display().to_string(), "[dir]")
+            .replace('\\', "/");
+        for key in [
+            "[network] allow_http_hosts = []  (default)",
+            "[tools] extra_dirs = []  (default)",
+            "[permissions] allow = [\"read_file\"]  (your configuration",
+            "[permissions] ask = []  (default)",
+            "[permissions] deny = []  (default)",
+            "[permissions] default = (default: the tool's own; reads run, writes ask)  (default)",
+            "[permissions] allow_tools = []  (default)",
+            "[memory] always_summarize = false  (default)",
+            "[limits] session_tokens = 4000  (your configuration",
+            "roles planner = (default: the coder)  (default)",
+        ] {
+            assert!(
+                text.contains(key),
+                "{key} missing in:
+{text}"
+            );
+        }
+        insta::assert_snapshot!(text);
     }
 
     #[test]
