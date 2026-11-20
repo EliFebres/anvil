@@ -376,7 +376,8 @@ pub const CONTAINER_WORKSPACE: &str = "/workspace";
 
 /// The arguments that run `command` in a container: no network, the
 /// workspace as the only folder from the host (read-write, at
-/// [`CONTAINER_WORKSPACE`]), a read-only root file system with an
+/// [`CONTAINER_WORKSPACE`], with its `.git` mounted again read-only when
+/// it exists), a read-only root file system with an
 /// in-memory `/tmp`, the configured non-root user, every capability
 /// dropped, no privilege gain, and the process and memory limits. No
 /// variable of the host reaches the container; it gets `HOME=/tmp` and
@@ -412,6 +413,16 @@ pub fn container_args(
     }
     let pids = settings.pids_limit.to_string();
     let mount = format!("type=bind,source={source},target={CONTAINER_WORKSPACE}");
+    // A later mount covers an earlier one, so the git folder stays
+    // read-only: a command cannot plant a hook or a config program that
+    // the user's own git would run later on the host.
+    let git_mount = workspace.join(".git").exists().then(|| {
+        let git_dir = Path::new(&source).join(".git");
+        format!(
+            "type=bind,source={},target={CONTAINER_WORKSPACE}/.git,readonly",
+            git_dir.display()
+        )
+    });
     let bytecode = format!("{NO_BYTECODE}=1");
     let mut args: Vec<String> = [
         "run",
@@ -435,17 +446,26 @@ pub fn container_args(
         &settings.memory,
         "--mount",
         &mount,
-        "--workdir",
-        CONTAINER_WORKSPACE,
-        "--env",
-        "HOME=/tmp",
-        "--env",
-        &bytecode,
-        &settings.image,
     ]
     .iter()
     .map(|arg| (*arg).to_owned())
     .collect();
+    if let Some(git_mount) = git_mount {
+        args.extend(["--mount".to_owned(), git_mount]);
+    }
+    args.extend(
+        [
+            "--workdir",
+            CONTAINER_WORKSPACE,
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            &bytecode,
+            &settings.image,
+        ]
+        .iter()
+        .map(|arg| (*arg).to_owned()),
+    );
     args.extend(command.iter().cloned());
     Ok(args)
 }
@@ -1406,6 +1426,33 @@ mod tests {
 
     fn container_settings() -> ContainerSettings {
         toml::from_str("image = \"registry.example/build@sha256:0123\"\n").expect("settings")
+    }
+
+    #[test]
+    fn the_workspace_git_folder_is_mounted_read_only_over_the_workspace() {
+        let dir = tempfile::tempdir().expect("dir");
+        std::fs::create_dir_all(dir.path().join(".git").join("hooks")).expect("mkdir");
+        let command = vec!["cargo".to_owned(), "test".to_owned()];
+        let args = container_args(&container_settings(), "anvil-1", dir.path(), &command)
+            .expect("arguments");
+        let mounts: Vec<&String> = args
+            .iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| matches!(flag.as_str(), "--mount" | "-v" | "--volume"))
+            .map(|(_, value)| value)
+            .collect();
+        let source = dir.path().display().to_string();
+        assert_eq!(
+            mounts,
+            [
+                &format!("type=bind,source={source},target={CONTAINER_WORKSPACE}"),
+                &format!(
+                    "type=bind,source={},target={CONTAINER_WORKSPACE}/.git,readonly",
+                    dir.path().join(".git").display()
+                ),
+            ],
+            "the git folder is mounted read-only after the workspace, so it wins"
+        );
     }
 
     #[test]

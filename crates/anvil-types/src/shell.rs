@@ -151,6 +151,26 @@ fn default_memory() -> String {
     DEFAULT_CONTAINER_MEMORY.to_owned()
 }
 
+/// Whether `part` of a container `user` is a number or a name that starts
+/// with a letter or `_` and holds only letters, digits, `_`, `.` and `-`.
+fn is_user_or_group(part: &str) -> bool {
+    let numeric = !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    let named = part
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && part
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    numeric || named
+}
+
+/// Whether `part` of a container `user` names root: `root`, or a number
+/// that is 0 however many zeros it has.
+fn is_root(part: &str) -> bool {
+    part.eq_ignore_ascii_case("root") || (!part.is_empty() && part.bytes().all(|byte| byte == b'0'))
+}
+
 /// The serde default for [`ContainerSettings::pids_limit`].
 fn default_pids() -> u32 {
     DEFAULT_CONTAINER_PIDS
@@ -162,8 +182,10 @@ impl ContainerSettings {
     /// # Errors
     ///
     /// A message naming the key: an empty image, an image or memory value
-    /// that starts with `-` (it would be read as an option), a root user,
-    /// an empty memory limit, or a process limit of 0.
+    /// that starts with `-` (it would be read as an option), a user that is
+    /// not `uid[:gid]` (each a number, or a name that starts with a letter
+    /// or `_`), a user or group that is root in any spelling (`0`, `00`,
+    /// `root`), an empty memory limit, or a process limit of 0.
     pub fn validate(&self) -> Result<(), String> {
         let image = self.image.trim();
         if image.is_empty() || image.starts_with('-') || image.contains(char::is_whitespace) {
@@ -172,16 +194,16 @@ impl ContainerSettings {
                 self.image
             ));
         }
-        let uid = self.user.split(':').next().unwrap_or_default().trim();
-        if uid.is_empty() || uid == "0" || uid.eq_ignore_ascii_case("root") {
+        let parts: Vec<&str> = self.user.split(':').collect();
+        if parts.len() > 2 || !parts.iter().all(|part| is_user_or_group(part)) {
             return Err(format!(
-                "[shell.container] user `{}` must name a user other than root",
+                "[shell.container] user `{}` is not `uid[:gid]`, each a number or a name",
                 self.user
             ));
         }
-        if self.user.starts_with('-') || self.user.contains(char::is_whitespace) {
+        if parts.iter().any(|part| is_root(part)) {
             return Err(format!(
-                "[shell.container] user `{}` is not a user",
+                "[shell.container] user `{}` must name a user and group other than root",
                 self.user
             ));
         }
@@ -613,6 +635,49 @@ mod tests {
         ];
         for result in errors {
             assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn a_container_user_or_group_of_root_is_refused_in_every_spelling() {
+        let with_user = |user: &str| ContainerSettings {
+            user: user.to_owned(),
+            ..toml::from_str(
+                "image = \"build:1\"
+",
+            )
+            .expect("parses")
+        };
+        for user in [
+            "0",
+            "00",
+            "000:1000",
+            "root",
+            "ROOT",
+            "root:1000",
+            "65534:0",
+            "65534:00",
+            "1000:root",
+            "0:0",
+            "",
+            ":",
+            "65534:",
+            ":65534",
+            "+0",
+            "1:2:3",
+            "-1",
+        ] {
+            assert!(with_user(user).validate().is_err(), "{user:?} was accepted");
+        }
+        for user in [
+            "65534:65534",
+            "1000",
+            "1000:1000",
+            "builder",
+            "builder:staff",
+            "_ci",
+        ] {
+            assert_eq!(with_user(user).validate(), Ok(()), "{user:?}");
         }
     }
 
