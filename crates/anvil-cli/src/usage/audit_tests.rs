@@ -537,3 +537,94 @@ async fn permission_records_name_their_source_and_policy_refusals_their_key() {
         "only the policy's own refusal names a policy key"
     );
 }
+
+#[tokio::test]
+async fn the_wiring_attaches_a_failed_required_logs_gate_to_tools_providers_and_hooks() {
+    use futures_util::StreamExt;
+
+    let dir = tempfile::tempdir().expect("dir");
+    let project = dir.path().join("project");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&project).expect("project");
+    let script = dir.path().join("script.json");
+    std::fs::write(&script, r#"{"turns": [{"text": "hello"}]}"#).expect("script");
+    let hook = home.join(".claude").join("settings.json");
+    std::fs::create_dir_all(hook.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &hook,
+        r#"{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "git init -q hook-ran"}]}]}}"#,
+    )
+    .expect("hook");
+    let config: anvil_types::AnvilConfig = toml::from_str(&format!(
+        "{}\n[providers.scripted]\nprotocol = \"fake\"\nmodel = \"m\"\ncontext_window = 1000\nsupports_tools = true\nsupports_reasoning = false\nscript = '{}'\n",
+        anvil_types::config::CONFIG_TEMPLATE,
+        script.display()
+    ))
+    .expect("config parses");
+    let wiring = Wiring::new_in(
+        project.clone(),
+        Some(home),
+        config,
+        ProjectAccess::default(),
+    )
+    .expect("wiring");
+    let session = ulid::Ulid::generate().to_string();
+    let log = AuditLog::with_sinks(
+        &session,
+        identity(None),
+        true,
+        vec![(
+            PathBuf::from("mirror"),
+            Box::new(FailAfter(AtomicUsize::new(0))),
+        )],
+    );
+    let audit = Arc::new(SessionAudit::with_log(&wiring, log));
+    let usage = usage_for(&project, &session).with_shared_audit(Arc::clone(&audit));
+    // The production path: the session's usage hands the required log to
+    // the wiring, and everything below is built by the wiring itself.
+    usage.observe_permissions(&wiring);
+    // The session's first record cannot be written, which closes the gate.
+    audit.start(&wiring, "run", false);
+    assert!(audit.failure().is_some(), "the start record failed");
+
+    let registry = wiring
+        .registry(Box::new(StaticPrompt(PromptAnswer::Yes)))
+        .expect("registry");
+    let call = ToolCall {
+        id: "r1".to_owned(),
+        name: "list_dir".to_owned(),
+        arguments_json: r#"{"path": "."}"#.to_owned(),
+    };
+    let run = registry.execute(&call, &wiring.tool_context()).await;
+    assert!(run.result.is_error, "{}", run.result.content);
+    assert!(
+        run.result.content.contains("audit"),
+        "{}",
+        run.result.content
+    );
+
+    let provider = wiring.provider("scripted").expect("provider");
+    let first = provider
+        .complete(anvil_core::provider::CompletionRequest {
+            system: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_output_tokens: None,
+        })
+        .next()
+        .await;
+    assert!(
+        matches!(
+            first,
+            Some(Err(anvil_core::provider::ProviderError::Refused { .. }))
+        ),
+        "the provider answered after the log failed: {first:?}"
+    );
+
+    let runner = wiring.hook_runner().expect("the user's hook loads");
+    let _ = runner.session_start().await;
+    assert!(
+        !project.join("hook-ran").exists(),
+        "a hook ran after the log failed"
+    );
+}
