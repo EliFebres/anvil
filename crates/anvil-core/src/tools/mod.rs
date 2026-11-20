@@ -297,9 +297,9 @@ impl ToolContext {
     /// [`workspace::holds_secrets`]); and a write must not land in a git
     /// directory (see [`workspace::inside_git_dir`]), in a file that grants
     /// power (see [`workspace::grants_power`]), in a protected folder or in
-    /// a file a hook or MCP server runs, and
-    /// its spelling must be one Windows does not fold (see
-    /// [`workspace::win32_fold`]), so the path checked is the path written.
+    /// a file a hook or MCP server runs. For reads and writes alike, on
+    /// every system, its spelling must be one Windows does not fold (see
+    /// [`workspace::win32_fold`]), so the path checked is the path opened.
     ///
     /// # Arguments
     ///
@@ -316,10 +316,11 @@ impl ToolContext {
     pub fn checked_path(&self, path: &str, write: bool) -> Result<PathBuf, String> {
         // Windows strips trailing dots and spaces and reads `:` as a data
         // stream, so a name that folds differently could reach a file the
-        // checks below never saw.
-        if write && workspace::win32_fold(Path::new(path)).as_deref() != Some(Path::new(path)) {
+        // checks below never saw. Reads count too: `server.pem.` would
+        // pass the `*.pem` check and open the key.
+        if workspace::win32_fold(Path::new(path)).as_deref() != Some(Path::new(path)) {
             return Err(format!(
-                "`{path}` has a name that ends in a dot or a space or names a data stream (`:`); Windows would open a different file, so anvil's file tools never write it"
+                "`{path}` has a name that ends in a dot or a space or names a data stream (`:`); Windows would open a different file, so anvil's file tools refuse it"
             ));
         }
         let root = workspace::canonical(&self.cwd);

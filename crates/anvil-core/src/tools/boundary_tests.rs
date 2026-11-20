@@ -375,3 +375,98 @@ async fn a_policy_deny_glob_extends_the_secret_list() {
         list.result.content
     );
 }
+
+/// Spellings Win32 folds onto a secret, a denied file or git's config:
+/// a trailing dot or space, on any component.
+const FOLDED_SPELLINGS: [&str; 9] = [
+    "server.pem.",
+    "server.pem ",
+    ".env ",
+    ".env. ",
+    ".git/config.",
+    ".git/config ",
+    ".git./config",
+    "vault.kdbx.",
+    "notes.txt::$DATA",
+];
+
+#[tokio::test]
+async fn folded_names_are_refused_for_reads_and_searches_on_every_system() {
+    let project = tempfile::tempdir().expect("project");
+    for name in [
+        "server.pem",
+        ".env",
+        ".git/config",
+        "vault.kdbx",
+        "notes.txt",
+    ] {
+        let path = project.path().join(name);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&path, "needle\n").expect("write");
+    }
+    let mut ctx = ToolContext::new(project.path());
+    ctx.workspace.denied = workspace::deny_globs(&["**/*.kdbx".to_owned()]).expect("compiles");
+    for path in FOLDED_SPELLINGS {
+        for (tool, args) in [
+            ("read_file", json!({"path": path})),
+            ("outline", json!({"path": path})),
+            ("grep", json!({"pattern": "needle", "path": path})),
+            ("list_dir", json!({"path": path})),
+            ("glob", json!({"pattern": "*", "path": path})),
+        ] {
+            let run = unrestricted(&ctx, tool, args).await;
+            assert!(
+                run.result.is_error,
+                "{tool} {path:?}: {}",
+                run.result.content
+            );
+            assert!(
+                run.result
+                    .content
+                    .contains("Windows would open a different file"),
+                "{tool} {path:?}: {}",
+                run.result.content
+            );
+            assert!(!run.result.content.contains("needle"), "{tool} {path:?}");
+        }
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn boundary_windows_folded_junction_names_are_refused() {
+    let (project, outside, ctx) = project_and_outside();
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(project.path().join("jx"))
+        .arg(outside.path())
+        .output()
+        .expect("cmd runs");
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+    for path in ["jx./out.txt", "jx /out.txt", "jx.", "jx. "] {
+        for (tool, args) in [
+            ("read_file", json!({"path": path})),
+            ("outline", json!({"path": path})),
+            ("grep", json!({"pattern": "outside", "path": path})),
+            ("list_dir", json!({"path": path})),
+            ("glob", json!({"pattern": "*", "path": path})),
+        ] {
+            let run = unrestricted(&ctx, tool, args).await;
+            assert!(
+                run.result.is_error,
+                "{tool} {path:?}: {}",
+                run.result.content
+            );
+            assert!(
+                !run.result.content.contains("outside secret")
+                    && !run.result.content.contains("out.txt\n"),
+                "{tool} {path:?} reached the outside folder: {}",
+                run.result.content
+            );
+        }
+    }
+}
