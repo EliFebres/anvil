@@ -40,7 +40,7 @@ Source code, secrets or customer data reach a server the firm did not approve.
 - An approved shell command on the host can reach the network directly when it gets past the deny categories, which match text only. `allowlist` mode narrows this to what the allowed programs themselves do (a build script or test the model wrote can still open a connection); the container executor (`--network none`) closes it.
 - Secrets in a format redaction does not know (a password in a configuration file, a connection string, customer data) are sent and stored like any other text. A policy can keep transcripts to `metadata` or `off`.
 
-**Roadmap:** redaction beyond known shapes; operating-system sandboxing of shell commands with network control; an append-only, hash-chained audit log with export.
+**Roadmap:** redaction beyond known shapes; operating-system sandboxing of shell commands with network control; audit log export to syslog, the Windows Event Log and OpenTelemetry.
 
 ## 3. Supply chain
 

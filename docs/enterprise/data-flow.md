@@ -8,7 +8,8 @@ flowchart LR
         dev["Developer terminal"]
         anvil["anvil process"]
         repo[("Repository working tree")]
-        transcripts[("Session transcripts<br/>policy transcript_dir, or<br/>repo/.anvil/sessions")]
+        transcripts[("Session transcripts and audit.jsonl<br/>policy transcript_dir, or<br/>repo/.anvil/sessions")]
+        mirror[("Audit mirror<br/>policy [audit] mirror_dir")]
         home[("~/.anvil<br/>config, .env key, trust,<br/>memory, usage records")]
         children["Programs anvil starts:<br/>approved shell commands, checks<br/>(scrubbed environment)"]
     end
@@ -19,6 +20,7 @@ flowchart LR
     anvil --> children
     children --> repo
     anvil -- "writes" --> transcripts
+    anvil -- "appends audit records" --> mirror
     anvil -- "reads key and settings" --> home
     anvil -- "HTTPS, no redirects:<br/>prompts, file contents and<br/>command output the tools read" --> endpoint
     endpoint -- "model output (text, tool calls)" --> anvil

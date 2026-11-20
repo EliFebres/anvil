@@ -94,6 +94,9 @@ Two policies ship as starting points: `policies/restricted.toml` (one model serv
 | `[data] redaction` | `true` | Whether secrets are redacted from tool results, file contents, MCP results, hook output and prompts before they are sent or stored. Only the policy can turn it off; anvil then prints a note at startup. |
 | `[data] patterns` | none | Extra patterns to redact, as `[{ kind = "employee_id", regex = '\bEMP-[0-9]{6}\b' }]` (Rust `regex` syntax; the kind is lowercase letters, digits and `_`). A match becomes `[REDACTED:employee_id]`. |
 | `[data] transcript` | `"off"` | `"full"`: the session log keeps every message as the provider received it. `"metadata"`: roles, tool names, sizes, SHA-256 digests, token counts, timings, states and redaction counts, with no message text, file contents or command output. `"off"`: no session log. Below `"full"`, no untruncated tool output or compaction summary is written, sessions cannot be resumed, and the end-of-session memory step has nothing to read. `plan.md` and `summary.md` are still written. |
+| `[audit] required` | `true` | A session runs only while its audit log can be written: one whose `audit.jsonl` or mirror cannot be opened does not start, and a failed write stops it with a non-zero exit. Unmanaged sessions write the log without requiring it. |
+| `[audit] mirror_dir` | none | An absolute folder every session's records are also written to, as `<session id>.audit.jsonl`. Use a folder developers can append to but not rewrite, and collect it; see "Collecting audit logs". |
+| `[audit] record` | `"digest"` | `"digest"`: prompts and tool arguments as size and SHA-256. `"full"`: their text after redaction, which puts file paths, commands and the developer's prompts into the log. |
 | `[limits] session_tokens` | none | The most tokens one session may use; a larger user value is an error, and the default is capped. |
 | `[limits] build_tokens`, `build_usd` | none | The most an `anvil build` may spend; a larger flag is an error, and without a flag the ceiling is the cap. |
 
@@ -117,6 +120,15 @@ Hooks, MCP servers and skills the policy forbids are errors when the user's own 
 ### MCP listing approval
 
 A server may start only when the policy's `[features] mcp` allows it by name and program or URL. What it offers is approved separately: the first tool listing anvil sees from an allowed server is recorded as a SHA-256 of its tools' names, descriptions and input schemas in the user's `~/.anvil/mcp-approvals.toml`. When a later listing differs, for example because a server update changed a tool description, anvil does not use the server and says so. The developer reviews the new listing with `anvil mcp approve <name>`, which prints the tools and records them; under a policy this works only for a server the policy allows. The approval file belongs to the user, so it detects changes a server makes, not changes the user makes; to stop a server for everyone, remove it from `mcp_servers`.
+
+### Collecting audit logs
+
+Each session writes `audit.jsonl` in its session folder (`<project>/.anvil/sessions/<id>/`, or under `[data] transcript_dir`), whatever `[data] transcript` says. One line is one record; SECURITY.md ("Audit log") lists the fields and the canonical form.
+
+- A chain on the developer's disk shows a record edited, removed or moved inside the file, but not records cut from the end or a file rewritten whole by someone who can write it. Set `mirror_dir` to a folder outside the developer's control that they can append to (for example a share or a local folder with an append-only access list), collect it, and compare the mirror with the session folder: a mirror with more records than the session's own file shows a cut.
+- `anvil audit verify <file>` checks a collected file and exits 1 at the first break; `anvil audit show <file>` prints it readably. The Python check in `crates/anvil-audit/src/audit/chain.rs` does the same without anvil.
+- `[data] retention_days` and `anvil purge` delete session folders, the `audit.jsonl` in them included; they never touch the mirror.
+- Syslog, Windows Event Log and OpenTelemetry export are not built (docs/ROADMAP.md); collect the files instead.
 
 ## Inspecting a machine
 

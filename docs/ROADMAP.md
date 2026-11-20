@@ -7,10 +7,6 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 - **Provider tolerance for self-hosted servers.** Fall back to a client-side token estimate when a server reports no usage, support both `max_tokens` and `max_completion_tokens`, accept a stream that ends without `finish_reason`, use a long request timeout, retry on connection refused while a model loads, and make `api_key_env` optional; without this, budgets and statistics read zero and some vLLM and llama.cpp servers fail on the first turn.
 - **`anvil doctor` as the acceptance test for an endpoint.** A streaming round trip, one real tool call, a usage check, a warning when the server's context is smaller than the configured `context_window`, and latency; a reviewer then has one command that proves an endpoint works before a pilot starts.
 
-## Managed policy keys still to come
-
-- **`[audit]`**: a required audit sink, a mirror directory, and full or digested arguments.
-
 ## Network
 
 - **Proxy and TLS settings without a policy.** `[network] proxy`, `ca_bundle`, `client_cert` and `client_key` exist only in the managed policy, so an unmanaged developer behind a corporate proxy cannot use one (anvil ignores `HTTPS_PROXY`); a user-level equivalent would serve them without giving a repository a way in.
@@ -39,7 +35,8 @@ Work that is deliberately not done yet, with one sentence on why each matters. S
 
 ## Records and secrets
 
-- **Append-only, hash-chained audit log with export.** Transcripts are plain files today; a chained log lets a reviewer prove nothing was removed or changed after the fact.
+- **Audit log export to syslog, the Windows Event Log and OpenTelemetry.** The audit log is files today, in the session folder and the policy's mirror; sending each record to the firm's collector as it is written would move the evidence off the developer's machine without a shared folder.
+- **Shell-caused file changes in the audit log.** Only `write_file` and `edit_file` report the files they change; a snapshot of the tree before and after each command would record what a shell command changed too.
 - **Redaction beyond known shapes.** Redaction catches the built-in key shapes, secret environment values and policy patterns; a password or connection string in an ordinary file is still sent and stored, and detecting those needs format-aware or entropy-based rules that do not flood the model with false positives.
 - **Owner-only access lists on Windows at creation.** On Unix anvil creates its files 0600; on Windows they inherit the folder's access list and `anvil doctor` only reports a folder others can open.
 - **Operating-system credential store for the endpoint key.** The key lives in the environment or `~/.anvil/.env` behind file permissions; the Windows Credential Manager, the macOS Keychain or the Secret Service would keep it out of files.

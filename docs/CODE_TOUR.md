@@ -35,6 +35,7 @@ Back in `run`, `before_session` prints `policy: unmanaged` or the policy's path 
 
 `run_task` creates the session folder with `Wiring::new_session_dir`, which puts it under `Wiring::sessions_root()`: the policy's `transcript_dir` or the repository's `.anvil/sessions`. `run_session_in` then:
 
+- opens the audit log with `SessionUsage::start`, which calls `SessionAudit::open` in `crates/anvil-cli/src/audit.rs`: `audit.jsonl` in the session folder and the policy's mirror, before anything else, so a required log that cannot be written stops the session here. `observe_permissions` then hands the wiring the permission observer, the tap subagents report to, and, when the log is required, the `CallGate` that every provider and registry the wiring builds checks before it works;
 - starts the front end;
 - builds the tool registry with `Wiring::registry` (step 5);
 - builds the loop settings with `Wiring::loop_config`, including whether the repository's instruction files may load (`trusted_project`);
@@ -106,6 +107,12 @@ When the wiring builds a provider (`Wiring::provider`), `from_config` first call
 At the end, `memory::finish_session` runs the end-of-session summarizer only if `Wiring::memory_allowed` and the transcript is `full`, and the Stop hooks run if any are loaded.
 
 MCP servers are loaded before the session in `Wiring::load_mcp`, through `McpTools::load` and `McpStore` (`crates/anvil-compat/src/mcp/approval.rs`): a fresh listing is compared with the approved SHA-256 in `~/.anvil/mcp-approvals.toml`, a changed one drops the server, and the cache in `~/.anvil/mcp-cache/` is used only while it hashes to the approved listing.
+
+## 9. The audit log
+
+**`crates/anvil-cli/src/usage.rs` (`AuditTap`, `AuditedGate`), `crates/anvil-cli/src/audit.rs`, `crates/anvil-audit/src/audit/`.**
+
+The loop's `EventSink` carries a tap (`EventTap` in `crates/anvil-core/src/agent/events.rs`) that sees every event on the thread that emits it, before it is queued for the front end. `AuditTap` turns model completions, tool calls, tool results and file changes (`LoopEvent::FileChanged`, from `write_file` and `edit_file`) into records; the permission observer adds each decision with the `DecisionSource` that `ToolRegistry::check_permission` reports, `AuditedGate` adds plan answers, and `SessionUsage::prompt` adds prompts. A subagent's sink comes from `SubagentEnv::events`, so its records land in the same chain under its name. `AuditLog::append` seals each record (`chain::seal`) and writes it to the session file and the mirror; a failed write under `[audit] required` sets the gate, and `drive` in `commands.rs` stops the loop. `anvil audit verify` and `anvil audit show` read a file back through `chain::verify` and `show::render`.
 
 ## Where to look when demoing
 

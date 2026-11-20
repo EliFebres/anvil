@@ -28,7 +28,7 @@ Workspace lints enforce part of this mechanically: `unsafe_code = "forbid"`, `mi
 
 **`anvil-memory`** is cross-project memory and coding-style rules: rules filtered by the project's languages (`languages.rs`) and project templates (`templates.rs`). It makes no model calls; `anvil-cli` supplies the summarizer. It depends on `anvil-types` only. It must never depend on `anvil-core` or `anvil-compat`.
 
-**`anvil-audit`** records content-free usage on the local machine and sums it up for `anvil stats`; nothing it writes is sent anywhere. It consumes usage values the CLI derives from loop events and never calls into the agent loop, so it depends on `anvil-types` only. It must never depend on `anvil-core`.
+**`anvil-audit`** records content-free usage on the local machine and sums it up for `anvil stats`, and holds the audit log (`audit/`): the record, its canonical form and hash chain, the appender with its mirror, `verify` and `show`. Nothing it writes is sent anywhere. It consumes values the CLI derives from loop events and never calls into the agent loop, so it depends on `anvil-types` only. It must never depend on `anvil-core`. `anvil-cli/src/audit.rs` translates a session's events, decisions and plan answers into audit records and stops a session whose required log fails.
 
 **`anvil-tui`** is the palette and the small pure rendering helpers the full-screen UI draws with: `theme.rs` (`Theme`, `Shade`), `layout.rs` (text fitting, labels, `centered`), `widgets.rs` (panels, label-value rows, progress bars, status tokens), `wrap.rs` and the ANVIL `LOGO`. It never touches the terminal. It depends on no workspace crate except, if ever needed, `anvil-types`.
 
