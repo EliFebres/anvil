@@ -174,11 +174,11 @@ anvil --yes --plain run "bump the dependencies" > answer.txt
   </tr>
 </table>
 
-Three kinds of state live under `~/.anvil/`, all plain files you can edit:
+State lives under `~/.anvil/` in plain files you can edit. Besides the three below, it holds your trust decisions (`trust.toml`), the rules an `always` answer saved (`permissions/`), MCP listing approvals (`mcp-approvals.toml`), saved project templates (`templates/`) and skills you installed for every project (`skills/`); the files table in SECURITY.md lists each with what it holds.
 
 - **Rules** (`rules.toml`): standing coding rules. They enter the system prompt, the reviewer reports a violation as a note that cites the rule id (a note never sends the work back), and a rule with a `check` runs against the session's changed files in `verify`, where a failure does. `anvil rules list|add|remove|check`.
 - **Memory** (`memory/`): one fact per line in `tooling.md`, `workflow.md` and `projects/<repo>.md`, loaded under a token cap. At the end of a session the summarizer proposes new facts and you keep or drop each one. A run that finished with no reviewer rejection, no failed check and a diff under 50 lines has nothing new to teach, so it skips that turn and says so; `[memory] always_summarize = true` runs it every time.
-- **Usage records** (`usage/<date>.jsonl`, with a copy in the project's `.anvil/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates, and with a planner configured adds a per-role table, each role priced by its own provider. They never leave the machine.
+- **Usage records** (the project's `.anvil/usage/<date>.jsonl`, with a copy in `~/.anvil/usage/`): content-free records of every session. `anvil stats --since 7d` sums them up with cost estimates, and with a planner configured adds a per-role table, each role priced by its own provider. They never leave the machine.
 
 #### Workers
 

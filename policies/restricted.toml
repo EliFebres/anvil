@@ -69,7 +69,9 @@ delegation = false
 allow_trust = false
 
 [data]
-# Delete session transcripts older than 30 days when a session starts.
+# Delete session folders (the transcript and the session's audit.jsonl with
+# them) and build folders older than 30 days when a session starts. The
+# audit mirror under [audit] mirror_dir is kept.
 retention_days = 30
 # Redact secrets from everything the tools return (the default). Add
 # patterns for identifiers specific to the firm.

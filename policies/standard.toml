@@ -65,6 +65,8 @@ delegation = true
 allow_trust = true
 
 [data]
+# Delete session folders (with their audit.jsonl) and build folders older
+# than 90 days when a session starts; the audit mirror is kept.
 retention_days = 90
 # Keep the whole (redacted) conversation so sessions can be resumed.
 transcript = "full"
