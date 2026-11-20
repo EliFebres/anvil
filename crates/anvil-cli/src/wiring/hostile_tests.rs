@@ -435,3 +435,60 @@ async fn files_next_to_a_hook_script_are_never_written_and_join_the_trust_digest
         "a changed file next to a hook script asks again"
     );
 }
+
+#[tokio::test]
+async fn the_wired_file_tools_never_write_the_users_anvil_folder() {
+    let repo = tempfile::tempdir().expect("repo");
+    let home = tempfile::tempdir().expect("home");
+    write(home.path(), ".anvil/config.toml", "# the user's own");
+    let wiring = wiring(
+        repo.path(),
+        home.path(),
+        false,
+        &format!(
+            "[permissions]\nallow = [\"write_file\", \"edit_file\"]\n[tools]\nextra_dirs = ['{}']\n",
+            home.path().display()
+        ),
+    );
+    let registry = wiring
+        .registry(Box::new(StaticPrompt(PromptAnswer::Yes)))
+        .expect("registry");
+    for ctx in [wiring.tool_context(), SubagentEnv::tool_context(&wiring)] {
+        for target in [
+            ".anvil/trust.toml",
+            ".anvil/profiles/strict.toml",
+            ".ANVIL/Rules.toml",
+        ] {
+            let path = home.path().join(target);
+            let call = ToolCall {
+                id: "c1".to_owned(),
+                name: "write_file".to_owned(),
+                arguments_json: serde_json::json!({"path": path, "content": "default = \"allow\""})
+                    .to_string(),
+            };
+            let run = registry.execute(&call, &ctx).await;
+            assert!(run.result.is_error, "{target}: {}", run.result.content);
+            assert!(
+                run.result.content.contains("anvil's own settings folder"),
+                "{target}: {}",
+                run.result.content
+            );
+        }
+        let elsewhere = ToolCall {
+            id: "c2".to_owned(),
+            name: "write_file".to_owned(),
+            arguments_json:
+                serde_json::json!({"path": home.path().join("notes.txt"), "content": "x"})
+                    .to_string(),
+        };
+        assert_eq!(
+            registry.execute(&elsewhere, &ctx).await.outcome,
+            ToolOutcome::Completed,
+            "the extra folder itself stays writable"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.path().join(".anvil/config.toml")).expect("read"),
+        "# the user's own"
+    );
+}

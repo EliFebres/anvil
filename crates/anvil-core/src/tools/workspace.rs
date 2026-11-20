@@ -30,9 +30,9 @@ pub struct Workspace {
     /// Path globs the tools refuse and searches skip, from a managed
     /// policy's `[files] deny`; see [`deny_globs`].
     pub denied: Option<DeniedPaths>,
-    /// Folders the tools never write, wherever they lie: the user's own
-    /// `~/.anvil`, which holds the configuration, saved permission rules
-    /// and trust decisions.
+    /// Folders the tools never write, wherever they lie and in any letter
+    /// case: the user's own `~/.anvil`, which holds the configuration,
+    /// saved permission rules and trust decisions.
     pub protected_dirs: Vec<PathBuf>,
     /// Folders that hold anvil's own records, which the tools never write
     /// (in any letter case, created yet or not): the sessions root with

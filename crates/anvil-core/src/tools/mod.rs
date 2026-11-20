@@ -419,7 +419,7 @@ impl ToolContext {
                 .workspace
                 .protected_dirs
                 .iter()
-                .any(|dir| workspace::is_within(dir, &resolved))
+                .any(|dir| workspace::is_within_any_case(dir, &resolved))
         {
             return Err(format!(
                 "`{path}` is in anvil's own settings folder; anvil's file tools never write there"
