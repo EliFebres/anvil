@@ -156,6 +156,12 @@ pub fn sddl_problems(sddl: &str) -> Vec<String> {
         problems.push("has no access list, so everyone may change it".to_owned());
         return problems;
     };
+    if is_null_dacl(dacl) {
+        problems.push(
+            "has a null access list (NO_ACCESS_CONTROL), so everyone may change it".to_owned(),
+        );
+        return problems;
+    }
     for ace in dacl.split('(').skip(1) {
         let ace = ace.trim_end_matches(')');
         let fields: Vec<&str> = ace.split(';').collect();
@@ -201,6 +207,11 @@ pub fn private_sddl_problems(sddl: &str) -> Vec<String> {
     let Some(dacl) = section(sddl, 'D') else {
         return vec!["has no access list, so everyone may open it".to_owned()];
     };
+    if is_null_dacl(dacl) {
+        return vec![
+            "has a null access list (NO_ACCESS_CONTROL), so everyone may open it".to_owned(),
+        ];
+    }
     let mut problems = Vec::new();
     for ace in dacl.split('(').skip(1) {
         let ace = ace.trim_end_matches(')');
@@ -276,6 +287,15 @@ pub fn check_private(dir: &Path) -> Result<(), String> {
         "{}: anvil cannot check access on this system",
         dir.display()
     ))
+}
+
+/// Whether a DACL section is a null DACL: its flags, before the first
+/// entry, say `NO_ACCESS_CONTROL`, which grants everyone every right.
+fn is_null_dacl(dacl: &str) -> bool {
+    dacl.split('(')
+        .next()
+        .unwrap_or_default()
+        .contains("NO_ACCESS_CONTROL")
 }
 
 /// Whether a SID names an administrator principal.
@@ -447,6 +467,21 @@ mod tests {
             let sddl = format!("O:BAD:(A;;{rights};;;AU)");
             assert_eq!(sddl_problems(&sddl).len(), 1, "{rights}");
         }
+    }
+
+    #[test]
+    fn a_null_or_missing_access_list_is_a_problem() {
+        for sddl in [
+            "O:BAG:SYD:NO_ACCESS_CONTROL",
+            "O:BAG:SYD:PNO_ACCESS_CONTROL",
+            "O:BAG:SYD:AINO_ACCESS_CONTROL",
+            "O:BAG:SY",
+            "O:BAG:SYS:(AU;FA;FA;;;WD)",
+        ] {
+            assert!(!sddl_problems(sddl).is_empty(), "{sddl}");
+            assert!(!private_sddl_problems(sddl).is_empty(), "{sddl}");
+        }
+        assert!(sddl_problems("O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)").is_empty());
     }
 
     #[test]
