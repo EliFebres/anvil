@@ -1521,6 +1521,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_allowlisted_program_other_than_git_starts_without_a_shell() {
+        // cargo names an unknown subcommand back, so its output shows the
+        // argument it received: literal unless a shell expanded it.
+        let has_cargo = std::process::Command::new("cargo")
+            .arg("--version")
+            .env_clear()
+            .envs(child_env::vars())
+            .output()
+            .is_ok_and(|out| out.status.success());
+        if !has_cargo {
+            return;
+        }
+        let registry = shell_registry("allow = [\"shell\"]\n");
+        registry
+            .permissions()
+            .limit_shell(&["cargo *".to_owned()], "the test's [shell] allow")
+            .expect("patterns");
+        let dir = tempfile::tempdir().expect("dir");
+        let ctx = ToolContext {
+            runner: Runner {
+                direct: true,
+                container: None,
+            },
+            ..ToolContext::new(dir.path())
+        };
+        for word in ["$HOME", "%PATH%"] {
+            let run = shell_outcome(&registry, &ctx, &format!("cargo {word}")).await;
+            assert!(
+                run.result.content.contains(word),
+                "no shell expanded `{word}`: {}",
+                run.result.content
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn allowlist_mode_starts_the_program_without_a_shell() {
         if !has_git() {
             return;
