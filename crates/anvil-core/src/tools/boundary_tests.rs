@@ -144,9 +144,11 @@ async fn boundary_symlink_escape_is_refused() {
     ] {
         assert_every_tool_refuses(&ctx, &path, "outside secret").await;
     }
+    // The pattern is echoed in the result's header line, so the check looks for
+    // a match from the outside file, which would name it, not for the pattern.
     let grep = unrestricted(&ctx, "grep", json!({"pattern": "outside secret"})).await;
     assert!(
-        !grep.result.content.contains("outside secret"),
+        !grep.result.content.contains("out.txt"),
         "a search of the project does not follow links out: {}",
         grep.result.content
     );

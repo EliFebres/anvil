@@ -225,7 +225,16 @@ impl McpStore {
     /// server its files define, `user` for the user's own.
     fn scope(&self, server: &McpServer) -> String {
         let project = anvil_types::trust::repo_key(&self.project);
-        let source = anvil_types::trust::repo_key(&server.source);
+        // The folder is resolved rather than the file: a path that does not
+        // exist is not canonicalized, and a linked or short (8.3) spelling of
+        // the project would then put a repository's server in the user scope.
+        let source = match (server.source.parent(), server.source.file_name()) {
+            (Some(dir), Some(name)) => Path::new(&anvil_types::trust::repo_key(dir))
+                .join(name)
+                .display()
+                .to_string(),
+            _ => anvil_types::trust::repo_key(&server.source),
+        };
         if Path::new(&source).starts_with(&project) {
             project
         } else {
@@ -563,5 +572,39 @@ mod tests {
         let b = McpStore::new(Some(home.path().to_path_buf()), two.path());
         assert_eq!(b.approved(&server(&two.path().join(".mcp.json"))), None);
         assert!(a.approved(&server(&one.path().join(".mcp.json"))).is_some());
+    }
+
+    /// Links `link` to the folder `target`: a symlink on Unix, a junction on
+    /// Windows. `false` when the link cannot be made.
+    fn link_dir(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link).is_ok();
+        #[cfg(windows)]
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .is_ok_and(|out| out.status.success());
+        made
+    }
+
+    #[test]
+    fn a_missing_server_file_under_a_linked_spelling_stays_in_its_repository() {
+        let home = tempfile::tempdir().expect("home");
+        let base = tempfile::tempdir().expect("base");
+        let two = tempfile::tempdir().expect("two");
+        let real = base.path().join("real");
+        std::fs::create_dir(&real).expect("real");
+        let link = base.path().join("link");
+        assert!(link_dir(&real, &link), "the link could not be made");
+        let tools = [tool("t", "d")];
+        let a = McpStore::new(Some(home.path().to_path_buf()), &link);
+        a.check(&server(&link.join(".mcp.json")), &tools);
+        // Kept under the repository, a's approval is not the approval of the
+        // user's own server of the same name and definition.
+        let b = McpStore::new(Some(home.path().to_path_buf()), two.path());
+        assert_eq!(b.approved(&server(&home.path().join("mcp.toml"))), None);
+        assert!(a.approved(&server(&link.join(".mcp.json"))).is_some());
     }
 }
