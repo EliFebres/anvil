@@ -16,6 +16,7 @@ use std::path::Path;
 use anvil_compat::mcp::Transport;
 use anvil_compat::{AgentSet, CommandSet, HookConfig, Origin, ServerSet, SkillRoots, SkillSet};
 use anvil_core::context::discover_instructions;
+use anvil_core::tools::workspace::command_files;
 use anvil_types::project::PROJECT_PERMISSIONS_FILE;
 use anvil_types::trust::{TrustDecision, TrustStore};
 use anyhow::Context;
@@ -177,11 +178,39 @@ fn link_reason(link: &Path) -> String {
     )
 }
 
+/// The command lines hooks and MCP servers run: each hook command, and
+/// each server's program followed by its arguments, one per line.
+///
+/// # Arguments
+///
+/// * `hooks` - The loaded hooks.
+/// * `servers` - The loaded MCP servers.
+///
+/// # Returns
+///
+/// The lines, for [`anvil_core::tools::workspace::command_files`].
+pub fn commands_run(hooks: &HookConfig, servers: &ServerSet) -> Vec<String> {
+    let mut lines: Vec<String> = hooks
+        .events()
+        .into_iter()
+        .flat_map(|event| hooks.groups(event).iter())
+        .flat_map(|group| group.commands.iter().map(|c| c.command.clone()))
+        .collect();
+    for server in servers.servers() {
+        let Transport::Stdio { command, args, .. } = &server.transport;
+        lines.push(command.clone());
+        lines.extend(args.iter().cloned());
+    }
+    lines
+}
+
 /// The SHA-256 digest, in hex, of everything a trust decision covers.
 ///
 /// It covers the content of [`DIGEST_FILES`], every file under
-/// [`DIGEST_DIRS`], every `CLAUDE.md` in a subfolder (honoring
-/// `.gitignore`), and the instruction text as loaded, imports included.
+/// [`DIGEST_DIRS`], every file inside the repository that one of its hooks
+/// or MCP servers names ([`commands_run`]), every `CLAUDE.md` in a
+/// subfolder (honoring `.gitignore`), and the instruction text as loaded,
+/// imports included.
 /// Each file enters with its path, so adding, removing or renaming one
 /// changes the digest as much as editing it.
 ///
@@ -212,6 +241,19 @@ pub fn fingerprint(root: &Path) -> String {
             );
         }
     }
+    let lines = commands_run(
+        &HookConfig::load(Some(root), None),
+        &ServerSet::load(Some(root), None),
+    );
+    let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    files.extend(
+        command_files(root, lines.iter().map(String::as_str))
+            .into_iter()
+            .map(|path| match path.strip_prefix(&canonical_root) {
+                Ok(relative) => root.join(relative),
+                Err(_) => path,
+            }),
+    );
     let nested = ignore::WalkBuilder::new(root).follow_links(false).build();
     files.extend(
         nested

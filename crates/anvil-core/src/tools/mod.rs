@@ -277,7 +277,8 @@ impl ToolContext {
     /// for a read, a read-only folder; it must not hold secrets (see
     /// [`workspace::holds_secrets`]); and a write must not land in a git
     /// directory (see [`workspace::inside_git_dir`]), in a file that grants
-    /// power (see [`workspace::grants_power`]) or in a protected folder, and
+    /// power (see [`workspace::grants_power`]), in a protected folder or in
+    /// a file a hook or MCP server runs, and
     /// its spelling must be one Windows does not fold (see
     /// [`workspace::win32_fold`]), so the path checked is the path written.
     ///
@@ -335,6 +336,11 @@ impl ToolContext {
         {
             return Err(format!(
                 "`{path}` is in anvil's own settings folder; anvil's file tools never write there"
+            ));
+        }
+        if write && self.workspace.protected_files.contains(&resolved) {
+            return Err(format!(
+                "`{path}` is a script or program a hook or MCP server runs; anvil's file tools never write it, so a model cannot plant code that runs without a prompt"
             ));
         }
         let mut allowed: Vec<&Path> = vec![&self.cwd];

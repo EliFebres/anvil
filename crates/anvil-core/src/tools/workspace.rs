@@ -34,6 +34,11 @@ pub struct Workspace {
     /// `~/.anvil`, which holds the configuration, saved permission rules
     /// and trust decisions.
     pub protected_dirs: Vec<PathBuf>,
+    /// Files the tools never write, in canonical form: the scripts and
+    /// programs inside the workspace that a loaded hook or MCP server
+    /// runs, found with [`command_files`]. A model that could rewrite one
+    /// would run code later without a prompt.
+    pub protected_files: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -250,6 +255,45 @@ pub fn win32_fold(path: &Path) -> Option<PathBuf> {
     Some(folded)
 }
 
+/// The files inside `root` that command lines name: every word, and the
+/// value after `=` in a `--key=value` word, that resolves (relative to
+/// `root`) to an existing file inside `root`.
+///
+/// Words are split at white space, quotes and the shell's `;`, `|`, `&`,
+/// `(`, `)`, `<` and `>`, so `sh "scripts/fmt.sh" && ./x` names both
+/// scripts. It errs towards naming too much: a word that only happens to
+/// match a file still protects that file.
+///
+/// # Arguments
+///
+/// * `root` - The project root.
+/// * `lines` - Command lines: hook commands, and an MCP server's program
+///   and arguments.
+///
+/// # Returns
+///
+/// The files, canonical, sorted and without duplicates.
+pub fn command_files<'a>(root: &Path, lines: impl IntoIterator<Item = &'a str>) -> Vec<PathBuf> {
+    let base = canonical(root);
+    let mut files = std::collections::BTreeSet::new();
+    for line in lines {
+        let words = line.split(|c: char| c.is_whitespace() || "\"'`;|&()<>".contains(c));
+        for word in words.filter(|word| !word.is_empty()) {
+            let value = word.split_once('=').map(|(_, value)| value);
+            for candidate in std::iter::once(word).chain(value) {
+                let path = base.join(candidate);
+                if path.is_file()
+                    && let Ok(path) = std::fs::canonicalize(&path)
+                    && path.starts_with(&base)
+                {
+                    files.insert(path);
+                }
+            }
+        }
+    }
+    files.into_iter().collect()
+}
+
 /// Whether a lower-cased file name is `.env` or a `.env.*` that is not an example.
 fn is_env_file(name: &str) -> bool {
     name == ".env"
@@ -389,6 +433,34 @@ mod tests {
             fold("a/.../b"),
             None,
             "a name of only dots folds to nothing"
+        );
+    }
+
+    #[test]
+    fn command_files_names_existing_files_inside_the_root_only() {
+        let dir = tempfile::tempdir().expect("dir");
+        let root = canonical(dir.path());
+        std::fs::create_dir_all(root.join("scripts")).expect("mkdir");
+        std::fs::write(root.join("scripts").join("fmt.sh"), "x").expect("write");
+        std::fs::write(root.join("server.toml"), "x").expect("write");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("o.sh"), "x").expect("write");
+        let far = outside.path().join("o.sh").display().to_string();
+        let files = command_files(
+            &root,
+            [
+                "sh 'scripts/fmt.sh' && ./scripts/../missing.sh",
+                "--config=server.toml",
+                far.as_str(),
+                "node",
+            ],
+        );
+        assert_eq!(
+            files,
+            vec![
+                canonical(&root.join("scripts").join("fmt.sh")),
+                canonical(&root.join("server.toml")),
+            ]
         );
     }
 

@@ -830,8 +830,10 @@ impl Wiring {
     ///
     /// The context, with the configured shell and the folders outside the
     /// project the file tools may open: `[tools] extra_dirs`, and the
-    /// loaded skills' folders for reading their supporting files; and the
-    /// user's `~/.anvil`, which they never write.
+    /// loaded skills' folders for reading their supporting files; the
+    /// user's `~/.anvil`, which they never write; and the files in the
+    /// project that a loaded hook or MCP server runs, which they never
+    /// write either.
     pub fn tool_context(&self) -> ToolContext {
         ToolContext {
             shell: Shell::from_config(self.config.tools.shell.as_deref()),
@@ -854,6 +856,12 @@ impl Wiring {
                     .iter()
                     .map(|home| home.join(anvil_types::config::CONFIG_DIR))
                     .collect(),
+                protected_files: anvil_core::tools::workspace::command_files(
+                    &self.cwd,
+                    crate::trust::commands_run(&self.hooks, &self.mcp_servers)
+                        .iter()
+                        .map(String::as_str),
+                ),
             },
             ..ToolContext::new(self.cwd.clone())
         }

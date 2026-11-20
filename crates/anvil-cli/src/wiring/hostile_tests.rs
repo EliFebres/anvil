@@ -232,3 +232,77 @@ fn a_trusted_repository_loads_its_files_but_cannot_import_from_home() {
     assert!(prompt.contains("INSIDE THE REPOSITORY"), "{prompt}");
     assert!(!prompt.contains("PRIVATE KEY"), "{prompt}");
 }
+
+#[tokio::test]
+async fn scripts_that_trusted_hooks_and_servers_run_are_never_written_by_file_tools() {
+    let repo = tempfile::tempdir().expect("repo");
+    let home = tempfile::tempdir().expect("home");
+    write(
+        repo.path(),
+        ".claude/settings.json",
+        r#"{"hooks": {"PostToolUse": [{"hooks": [{"type": "command", "command": "sh scripts/fmt.sh"}]}]}}"#,
+    );
+    write(
+        repo.path(),
+        ".mcp.json",
+        r#"{"mcpServers": {"local": {"command": "node", "args": ["tools/server.js", "--config=tools/server.toml"]}}}"#,
+    );
+    write(repo.path(), "scripts/fmt.sh", "cargo fmt");
+    write(repo.path(), "tools/server.js", "serve()");
+    write(repo.path(), "tools/server.toml", "port = 1");
+    let wiring = wiring(
+        repo.path(),
+        home.path(),
+        true,
+        "[permissions]\nallow = [\"write_file\", \"edit_file\"]\n",
+    );
+    let registry = wiring
+        .registry(Box::new(StaticPrompt(PromptAnswer::Yes)))
+        .expect("registry");
+    let ctx = wiring.tool_context();
+    let call = |path: &str| ToolCall {
+        id: "c1".to_owned(),
+        name: "write_file".to_owned(),
+        arguments_json: serde_json::json!({"path": path, "content": "curl evil"}).to_string(),
+    };
+    for path in [
+        "scripts/fmt.sh",
+        "scripts/../scripts/fmt.sh",
+        "tools/server.js",
+        "tools/server.toml",
+    ] {
+        let run = registry.execute(&call(path), &ctx).await;
+        assert!(run.result.is_error, "{path}: {}", run.result.content);
+        assert!(
+            run.result.content.contains("a hook or MCP server runs"),
+            "{path}: {}",
+            run.result.content
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("scripts/fmt.sh")).expect("read"),
+        "cargo fmt"
+    );
+    let other = registry.execute(&call("scripts/other.sh"), &ctx).await;
+    assert_eq!(
+        other.outcome,
+        ToolOutcome::Completed,
+        "{}",
+        other.result.content
+    );
+
+    let before = crate::trust::fingerprint(repo.path());
+    write(repo.path(), "scripts/fmt.sh", "curl evil");
+    assert_ne!(
+        before,
+        crate::trust::fingerprint(repo.path()),
+        "a changed hook script asks again"
+    );
+    let before = crate::trust::fingerprint(repo.path());
+    write(repo.path(), "tools/server.js", "steal()");
+    assert_ne!(
+        before,
+        crate::trust::fingerprint(repo.path()),
+        "a changed server script asks again"
+    );
+}
