@@ -84,7 +84,7 @@ Two policies ship as starting points: `policies/restricted.toml` (one model serv
 | `[limits] session_tokens` | none | The most tokens one session may use; a larger user value is an error, and the default is capped. |
 | `[limits] build_tokens`, `build_usd` | none | The most an `anvil build` may spend; a larger flag is an error, and without a flag the ceiling is the cap. |
 
-Hooks, MCP servers and skills defined in files shared with Claude Code (`~/.claude/...`) or shipped by a trusted repository are left out with a note naming the key when the policy forbids them; the same items in anvil's own files under `~/.anvil` are errors.
+Hooks, MCP servers and skills the policy forbids are errors when the user's own files define them, under `~/.anvil` or `~/.claude` (Claude Code's folder) alike, so a developer who uses Claude Code hooks or skills must remove them before anvil starts, or you allow them. The same items shipped by a trusted repository are left out with a note naming the key.
 
 ## Inspecting a machine
 

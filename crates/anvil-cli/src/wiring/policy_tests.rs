@@ -258,27 +258,36 @@ fn the_session_budget_is_capped_and_an_explicit_excess_is_an_error() {
 }
 
 #[test]
-fn the_users_own_hooks_conflict_and_shared_or_project_hooks_do_not_load() {
-    let s = setup();
+fn the_users_hooks_conflict_and_project_hooks_do_not_load() {
     let hook =
         r#"{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo hi"}]}]}}"#;
-    write(&s.home.join(".anvil").join("settings.json"), hook);
-    assert!(
-        !wiring(&s, "", None).hooks.is_empty(),
-        "the user's own hook"
-    );
-    let text = refused(&s, "", load_policy(&s.policy_dir, ""));
-    assert!(text.contains("[features] hooks = false"), "{text}");
-    let on = wiring(
-        &s,
-        "",
-        Some(load_policy(&s.policy_dir, "[features]\nhooks = true\n")),
-    );
-    assert!(!on.hooks.is_empty());
+    for folder in [".anvil", ".claude"] {
+        let s = setup();
+        write(&s.home.join(folder).join("settings.json"), hook);
+        assert!(
+            !wiring(&s, "", None).hooks.is_empty(),
+            "the user's own hook in ~/{folder}"
+        );
+        let text = refused(&s, "", load_policy(&s.policy_dir, ""));
+        assert!(
+            text.contains("[features] hooks = false"),
+            "{folder}: {text}"
+        );
+        let on = wiring(
+            &s,
+            "",
+            Some(load_policy(
+                &s.policy_dir,
+                "[features]
+hooks = true
+",
+            )),
+        );
+        assert!(!on.hooks.is_empty());
+    }
 
     let s = setup();
     write(&s.project.join(".claude").join("settings.json"), hook);
-    write(&s.home.join(".claude").join("settings.json"), hook);
     let trusted = ProjectAccess {
         trusted: true,
         rules: ProjectRules::default(),
@@ -286,7 +295,7 @@ fn the_users_own_hooks_conflict_and_shared_or_project_hooks_do_not_load() {
     let unmanaged = try_wiring(&s, "", None, trusted.clone()).expect("wiring");
     assert!(!unmanaged.hooks.is_empty());
     let managed = try_wiring(&s, "", Some(load_policy(&s.policy_dir, "")), trusted)
-        .expect("a repository's or Claude Code's hooks are left out, not an error");
+        .expect("a repository's hooks are left out with a note, not an error");
     assert!(
         managed.hooks.is_empty(),
         "the policy wins over the project file"
@@ -349,8 +358,25 @@ fn skills_follow_the_policy_mode() {
             .join("SKILL.md"),
         "---\nname: mine\ndescription: d\n---\nbody\n",
     );
-    let off = wiring(&s, "", Some(load_policy(&s.policy_dir, "")));
-    assert!(off.skills.get("mine").is_none());
+    let text = refused(&s, "", load_policy(&s.policy_dir, ""));
+    assert!(
+        text.contains("[features] skills = \"off\""),
+        "a skill in ~/.claude is the user's own: {text}"
+    );
+    let bundled = refused(
+        &s,
+        "",
+        load_policy(
+            &s.policy_dir,
+            "[features]
+skills = \"bundled\"
+",
+        ),
+    );
+    assert!(
+        bundled.contains("[features] skills = \"bundled\""),
+        "{bundled}"
+    );
     let local = wiring(
         &s,
         "",

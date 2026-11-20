@@ -252,9 +252,9 @@ impl Wiring {
     ///
     /// - requests may go only to `[network] allowed_hosts`;
     /// - hooks, MCP servers and skills load only as `[features]` allows;
-    ///   one defined in anvil's own files under `~/.anvil` that the policy
-    ///   forbids is an error, one from a file shared with Claude Code or
-    ///   shipped by a repository is left out with a note naming the key;
+    ///   one defined in the user's own files under `~/.anvil` or
+    ///   `~/.claude` that the policy forbids is an error, one shipped by a
+    ///   repository or bundled is left out with a note naming the key;
     /// - saved `always` rules are an error unless `allow_always` is on, and
     ///   their allow rules may not cover a policy `deny` or `ask` rule;
     /// - `[limits] session_tokens` caps the session budget;
@@ -274,13 +274,17 @@ impl Wiring {
     ///
     /// # Errors
     ///
-    /// When anvil's own files define something the policy forbids, when
+    /// When the user's own files define something the policy forbids, when
     /// saved rules conflict with it, or when a `[files] deny` glob does not
     /// compile; each error names the policy key.
     pub fn with_policy(mut self, policy: Arc<LoadedPolicy>) -> anyhow::Result<Self> {
         let p = &policy.policy;
-        let own = self.home.as_ref().map(|home| home.join(".anvil"));
-        let is_own = |path: &Path| own.as_ref().is_some_and(|dir| path.starts_with(dir));
+        let own: Vec<PathBuf> = self
+            .home
+            .iter()
+            .flat_map(|home| [home.join(".anvil"), home.join(".claude")])
+            .collect();
+        let is_own = |path: &Path| own.iter().any(|dir| path.starts_with(dir));
         self.egress = Egress::managed(&p.network.allowed_hosts, p.network.require_tls);
 
         if !p.features.hooks {
