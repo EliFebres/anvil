@@ -247,11 +247,7 @@ fn open_append(path: &Path) -> Result<File, AuditError> {
         anvil_types::private_fs::create_dir_all(parent)
             .map_err(|error| AuditError::io(parent, &error))?;
     }
-    anvil_types::private_fs::owner_only()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|error| AuditError::io(path, &error))
+    anvil_types::private_fs::open_append(path).map_err(|error| AuditError::io(path, &error))
 }
 
 #[cfg(test)]

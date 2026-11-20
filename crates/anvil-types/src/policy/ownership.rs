@@ -216,8 +216,15 @@ pub fn private_sddl_problems(sddl: &str) -> Vec<String> {
             || PRIVATE_SIDS
                 .iter()
                 .any(|known| known.eq_ignore_ascii_case(sid));
-        if allows && !inherit_only && !private {
-            problems.push(format!("grants {sid} access ({})", fields[2]));
+        if allows && !private {
+            problems.push(if inherit_only {
+                format!(
+                    "passes {sid} access ({}) on to the files and folders created in it",
+                    fields[2]
+                )
+            } else {
+                format!("grants {sid} access ({})", fields[2])
+            });
         }
     }
     problems
@@ -379,6 +386,19 @@ mod tests {
             "read access counts: {problems:?}"
         );
         assert!(!private_sddl_problems(&format!("O:{user}")).is_empty());
+    }
+
+    #[test]
+    fn an_inherit_only_grant_to_others_is_not_private() {
+        let user = "S-1-5-21-4158986379-1985627759-715112919-1001";
+        for other in ["WD", "BU", "AU", "S-1-1-0"] {
+            let sddl = format!("O:{user}G:{user}D:PAI(A;OICI;FA;;;{user})(A;OICIIO;FA;;;{other})");
+            let problems = private_sddl_problems(&sddl);
+            assert_eq!(problems.len(), 1, "{other}: {problems:?}");
+            assert!(problems[0].contains("passes"), "{problems:?}");
+        }
+        let creator_owner = format!("O:{user}G:{user}D:PAI(A;OICI;FA;;;{user})(A;OICIIO;GA;;;CO)");
+        assert_eq!(private_sddl_problems(&creator_owner), Vec::<String>::new());
     }
 
     #[cfg(unix)]

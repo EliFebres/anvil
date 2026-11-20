@@ -34,10 +34,22 @@ pub async fn snapshot_tree(cwd: &Path, session_dir: &Path) -> Option<String> {
     let index = session_dir.join(INDEX_FILE);
     let _ = std::fs::remove_file(&index);
     let _ = anvil_types::private_fs::create_dir_all(session_dir);
-    git(cwd, &index, &["add", "-A", "--", ".", ":(exclude).anvil"]).await?;
-    let tree = git(cwd, &index, &["write-tree"]).await?;
+    let added = git(cwd, &index, &["add", "-A", "--", ".", ":(exclude).anvil"]).await;
+    // Git writes its index with the umask's mode; it lists every path.
+    narrow_index(&index);
+    added?;
+    let tree = git(cwd, &index, &["write-tree"]).await;
+    narrow_index(&index);
+    let tree = tree?;
     let tree = tree.trim().to_owned();
     if tree.is_empty() { None } else { Some(tree) }
+}
+
+/// Narrows the private index file git just wrote to its owner.
+fn narrow_index(index: &Path) {
+    if let Err(error) = anvil_types::private_fs::narrow_path(index) {
+        tracing::warn!(path = %index.display(), %error, "cannot make the git index owner-only");
+    }
 }
 
 /// The diff between a snapshot and the working tree now.
@@ -196,6 +208,28 @@ mod tests {
             .output()
             .map(|out| out.status.success())
             .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_private_git_index_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).expect("mkdir");
+        if !git_sync(&root, &["init", "-q"]) {
+            eprintln!("git not available; skipping");
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "one\n").expect("write");
+        let session = dir.path().join("session");
+        assert!(snapshot_tree(&root, &session).await.is_some());
+        let mode = std::fs::metadata(session.join(INDEX_FILE))
+            .expect("index")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[tokio::test]

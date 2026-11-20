@@ -42,6 +42,7 @@ impl StatusFile {
             .truncate(false)
             .write(true)
             .open(dir.join(LOCK_FILE))?;
+        anvil_types::private_fs::narrow(&lock)?;
         let lock = match lock.try_lock() {
             Ok(()) => Some(lock),
             Err(TryLockError::WouldBlock) => {
@@ -96,6 +97,7 @@ pub fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
             .create(true)
             .truncate(true)
             .open(&temp)?;
+        anvil_types::private_fs::narrow(&file)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);

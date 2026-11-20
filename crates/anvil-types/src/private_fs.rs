@@ -2,8 +2,9 @@
 //! them.
 //!
 //! On Unix every folder is created with mode 0700 and every file with
-//! 0600, whatever the umask; a file that already exists is narrowed to
-//! 0600 when it is written. On Windows a new file inherits the access list
+//! 0600, whatever the umask; a file or folder that already exists is
+//! narrowed when anvil reuses it, so one left wider by an earlier version
+//! or by hand is fixed on first use. On Windows a new file inherits the access list
 //! of its folder, which for a folder under the user's profile is already
 //! limited to the user, SYSTEM and Administrators; `anvil doctor` checks
 //! the access lists of `~/.anvil` and the project's `.anvil` instead.
@@ -12,7 +13,9 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-/// Creates a folder and its missing parents, owner-only on Unix.
+/// Creates a folder and its missing parents, owner-only on Unix. When the
+/// folder already exists it is narrowed to 0700; existing parents are left
+/// alone, since they may be the user's own folders.
 ///
 /// # Arguments
 ///
@@ -20,11 +23,11 @@ use std::path::Path;
 ///
 /// # Errors
 ///
-/// When a folder cannot be created.
+/// When a folder cannot be created or narrowed.
 pub fn create_dir_all(dir: impl AsRef<Path>) -> std::io::Result<()> {
     let dir = dir.as_ref();
     if dir.is_dir() {
-        return Ok(());
+        return narrow_dir(dir);
     }
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -54,8 +57,18 @@ pub fn owner_only() -> OpenOptions {
     OpenOptions::new()
 }
 
-/// Narrows an existing file to its owner on Unix; nothing elsewhere.
-fn restrict(file: &File) -> std::io::Result<()> {
+/// Narrows an open file to its owner (0600) on Unix; nothing elsewhere.
+/// Callers that open through [`owner_only`] call it, because the mode
+/// given there applies only to a file the open creates.
+///
+/// # Arguments
+///
+/// * `file` - The open file.
+///
+/// # Errors
+///
+/// When the mode cannot be changed.
+pub fn narrow(file: &File) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -63,6 +76,69 @@ fn restrict(file: &File) -> std::io::Result<()> {
     }
     #[cfg(not(unix))]
     let _ = file;
+    Ok(())
+}
+
+/// Narrows a file another program wrote, such as git's index file, to its
+/// owner (0600) on Unix; nothing elsewhere.
+///
+/// # Arguments
+///
+/// * `path` - The file; a missing one is not an error.
+///
+/// # Errors
+///
+/// When the mode of an existing file cannot be changed.
+pub fn narrow_path(path: impl AsRef<Path>) -> std::io::Result<()> {
+    let path = path.as_ref();
+    if !path.is_file() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Narrows an existing folder to 0700 on Unix when others may open it.
+fn narrow_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+/// Copies a file and makes the copy owner-only on Unix: 0600, or 0700
+/// when the source is executable by its owner, so a copied script still
+/// runs.
+///
+/// # Arguments
+///
+/// * `from` - The source file.
+/// * `to` - The copy; its folder must exist.
+///
+/// # Errors
+///
+/// When the file cannot be copied or its mode set.
+pub fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> std::io::Result<()> {
+    let (from, to) = (from.as_ref(), to.as_ref());
+    std::fs::copy(from, to)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = std::fs::metadata(from)?.permissions().mode() & 0o100 != 0;
+        let mode = if executable { 0o700 } else { 0o600 };
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(mode))?;
+    }
     Ok(())
 }
 
@@ -86,7 +162,7 @@ pub fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result
         .create(true)
         .truncate(true)
         .open(path)?;
-    restrict(&file)?;
+    narrow(&file)?;
     file.write_all(bytes.as_ref())
 }
 
@@ -110,7 +186,7 @@ pub fn open_append(path: impl AsRef<Path>) -> std::io::Result<File> {
         create_dir_all(parent)?;
     }
     let file = owner_only().create(true).append(true).open(path)?;
-    restrict(&file)?;
+    narrow(&file)?;
     Ok(file)
 }
 
@@ -152,5 +228,36 @@ mod tests {
         assert_eq!(mode(&file), 0o600);
         assert_eq!(mode(&loose), 0o600, "an existing file is narrowed");
         assert_eq!(mode(&dir.path().join("new")), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_folder_is_narrowed_and_a_copy_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+        let wide = dir.path().join("wide");
+        std::fs::create_dir(&wide).expect("mkdir");
+        std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        create_dir_all(&wide).expect("reuse");
+        assert_eq!(mode(&wide), 0o700, "an existing folder is narrowed");
+
+        let plain = dir.path().join("plain.txt");
+        std::fs::write(&plain, "x").expect("write");
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let script = dir.path().join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        copy(&plain, wide.join("plain.txt")).expect("copy");
+        copy(&script, wide.join("run.sh")).expect("copy");
+        assert_eq!(mode(&wide.join("plain.txt")), 0o600);
+        assert_eq!(mode(&wide.join("run.sh")), 0o700);
+
+        let written = dir.path().join("index");
+        std::fs::write(&written, "x").expect("write");
+        std::fs::set_permissions(&written, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        narrow_path(&written).expect("narrow");
+        assert_eq!(mode(&written), 0o600);
+        narrow_path(dir.path().join("missing")).expect("a missing file is fine");
     }
 }

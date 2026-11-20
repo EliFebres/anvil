@@ -104,11 +104,8 @@ fn append_line(path: &Path, line: &str) -> Result<(), UsageError> {
     if let Some(parent) = path.parent() {
         anvil_types::private_fs::create_dir_all(parent).map_err(|e| UsageError::io(parent, &e))?;
     }
-    let mut file = anvil_types::private_fs::owner_only()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| UsageError::io(path, &e))?;
+    let mut file =
+        anvil_types::private_fs::open_append(path).map_err(|e| UsageError::io(path, &e))?;
     file.write_all(line.as_bytes())
         .map_err(|e| UsageError::io(path, &e))
 }

@@ -190,10 +190,7 @@ impl FactStore {
         let needs_newline = std::fs::read(&path)
             .map(|bytes| !bytes.is_empty() && !bytes.ends_with(b"\n"))
             .unwrap_or(false);
-        let mut file = anvil_types::private_fs::owner_only()
-            .create(true)
-            .append(true)
-            .open(&path)
+        let mut file = anvil_types::private_fs::open_append(&path)
             .map_err(|error| MemoryError::io(&path, &error))?;
         let mut text = String::new();
         if needs_newline {

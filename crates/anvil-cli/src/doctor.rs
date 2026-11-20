@@ -246,15 +246,7 @@ fn report_policy(report: &mut Report, policy: Option<&anvil_types::policy::Loade
 /// on Windows) can open `~/.anvil` and the project's `.anvil`, which hold
 /// transcripts, keys, trust decisions and memory.
 fn report_private_dirs(report: &mut Report, wiring: &Wiring) {
-    let dirs = wiring
-        .home
-        .iter()
-        .map(|home| ("data:~/.anvil", home.join(anvil_types::config::CONFIG_DIR)))
-        .chain(std::iter::once((
-            "data:.anvil",
-            wiring.cwd.join(anvil_types::config::CONFIG_DIR),
-        )));
-    for (name, dir) in dirs {
+    for (name, dir) in private_dirs(wiring) {
         if !dir.is_dir() {
             report.skip(name, format!("{} does not exist yet", dir.display()));
             continue;
@@ -264,6 +256,30 @@ fn report_private_dirs(report: &mut Report, wiring: &Wiring) {
             Err(detail) => report.fail(name, "others can open it", detail),
         }
     }
+}
+
+/// Every folder anvil keeps data in, with its row name: `~/.anvil`, the
+/// project's `.anvil`, and the policy's `[data] transcript_dir` and
+/// `[audit] mirror_dir` when it sets them.
+pub(crate) fn private_dirs(wiring: &Wiring) -> Vec<(&'static str, PathBuf)> {
+    let mut dirs: Vec<(&'static str, PathBuf)> = wiring
+        .home
+        .iter()
+        .map(|home| ("data:~/.anvil", home.join(anvil_types::config::CONFIG_DIR)))
+        .collect();
+    dirs.push((
+        "data:.anvil",
+        wiring.cwd.join(anvil_types::config::CONFIG_DIR),
+    ));
+    if let Some(policy) = wiring.policy.as_deref() {
+        if let Some(dir) = &policy.policy.data.transcript_dir {
+            dirs.push(("data:transcript_dir", dir.clone()));
+        }
+        if let Some(dir) = &policy.policy.audit.mirror_dir {
+            dirs.push(("data:mirror_dir", dir.clone()));
+        }
+    }
+    dirs
 }
 
 /// The `env` row: which `.env` files were loaded.

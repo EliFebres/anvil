@@ -1094,3 +1094,27 @@ async fn mcp_approve_is_refused_under_a_policy() {
     let unmanaged = wiring(&s, "", None);
     assert!(!unmanaged.mcp_store().is_managed());
 }
+
+#[test]
+fn doctor_checks_the_policys_transcript_and_mirror_folders_too() {
+    let s = setup();
+    let transcripts = s.policy_dir.join("transcripts");
+    let mirror = s.policy_dir.join("mirror");
+    let policy = load_policy(
+        &s.policy_dir,
+        &format!(
+            "[data]\ntranscript_dir = '{}'\n[audit]\nmirror_dir = '{}'\n",
+            transcripts.display(),
+            mirror.display()
+        ),
+    );
+    let managed = wiring(&s, "", Some(policy));
+    let rows: Vec<(&str, PathBuf)> = crate::doctor::private_dirs(&managed);
+    assert!(
+        rows.contains(&("data:transcript_dir", transcripts)),
+        "{rows:?}"
+    );
+    assert!(rows.contains(&("data:mirror_dir", mirror)), "{rows:?}");
+    let unmanaged = wiring(&s, "", None);
+    assert_eq!(crate::doctor::private_dirs(&unmanaged).len(), 2);
+}

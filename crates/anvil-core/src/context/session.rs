@@ -443,11 +443,7 @@ impl SessionLog {
             detail: error.to_string(),
         };
         anvil_types::private_fs::create_dir_all(session_dir).map_err(io)?;
-        let file = anvil_types::private_fs::owner_only()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(io)?;
+        let file = anvil_types::private_fs::open_append(&path).map_err(io)?;
         Ok(Self { path, file, mode })
     }
 

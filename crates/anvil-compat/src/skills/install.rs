@@ -242,7 +242,8 @@ fn find_candidates(base: &Path, dir: &Path, depth: usize, found: &mut Vec<String
     }
 }
 
-/// Copies a directory tree, skipping `.git`.
+/// Copies a directory tree, skipping `.git`, owner-only on Unix (folders
+/// 0700, files 0600, or 0700 for a file its owner may run).
 fn copy_dir(from: &Path, to: &Path) -> Result<(), CompatError> {
     anvil_types::private_fs::create_dir_all(to).map_err(|error| CompatError::io(to, &error))?;
     let entries = std::fs::read_dir(from).map_err(|error| CompatError::io(from, &error))?;
@@ -257,7 +258,8 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), CompatError> {
         if source.is_dir() {
             copy_dir(&source, &target)?;
         } else {
-            std::fs::copy(&source, &target).map_err(|error| CompatError::io(&source, &error))?;
+            anvil_types::private_fs::copy(&source, &target)
+                .map_err(|error| CompatError::io(&source, &error))?;
         }
     }
     Ok(())
@@ -287,6 +289,36 @@ mod tests {
         }
         assert!(Source::parse("owner/repo", cwd.path()).is_err());
         assert!(Source::parse("./missing", cwd.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_global_install_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let home = tempfile::tempdir().expect("home");
+        let source_dir = cwd.path().join("src-skill");
+        std::fs::create_dir_all(source_dir.join("scripts")).expect("mkdir");
+        std::fs::write(
+            source_dir.join(SKILL_FILE),
+            "---\nname: caveman\ndescription: Terse voice.\n---\n\nBody.\n",
+        )
+        .expect("write");
+        std::fs::write(source_dir.join("scripts/x.sh"), "echo\n").expect("write");
+        std::fs::set_permissions(
+            source_dir.join(SKILL_FILE),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+        let source = Source::parse("src-skill", cwd.path()).expect("source");
+        let installed = install(&source, Scope::Global, Some(home.path()), cwd.path(), false)
+            .expect("installs");
+        let dir = installed.skill.dir.clone();
+        let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("scripts")), 0o700);
+        assert_eq!(mode(&dir.join(SKILL_FILE)), 0o600);
+        assert_eq!(mode(&dir.join("scripts/x.sh")), 0o600);
     }
 
     #[test]
