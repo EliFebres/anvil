@@ -194,10 +194,12 @@ const WORD_BREAKS: &str = ";&|<>()`{}\"'$";
 /// command line (`git -c alias.p=push p`), package installs (`pip
 /// install`, `npm install`, `cargo install`, `gem install`), privilege
 /// tools (`sudo`, `runas`, `doas`) and the destructive substrings of
-/// [`BLOCKED_COMMANDS`]. The command is split into words at whitespace and
-/// at every shell metacharacter; each word is compared by its program
-/// name, without folder or extension. This is a text match: a guard rail
-/// that a shell can get around, not a boundary.
+/// [`BLOCKED_COMMANDS`]. The command is matched as written and again with
+/// quotes, backticks and carets removed and white space collapsed, so
+/// `c''url` and `rm  -rf` are found. Each time it is split into words at
+/// whitespace and at every shell metacharacter, and each word is compared
+/// by its program name, without folder or extension. This is a text
+/// match: a guard rail that a shell can get around, not a boundary.
 ///
 /// # Arguments
 ///
@@ -208,6 +210,29 @@ const WORD_BREAKS: &str = ";&|<>()`{}\"'$";
 /// The matched phrase (such as `git push` or `curl`) and the category's
 /// name, or `None`.
 pub fn deny_category(command: &str) -> Option<(String, &'static str)> {
+    category_in(&without_quoting(command)).or_else(|| category_in(command))
+}
+
+/// Characters a shell removes from a word without changing the program it
+/// names: quotes (`c''url`, `c"u"rl`), PowerShell's backtick escape and
+/// cmd's caret escape.
+const QUOTING: &str = "'\"`^";
+
+/// `command` with the [`QUOTING`] characters removed and every run of
+/// white space turned into one space, so `c''url` reads `curl` and
+/// `rm  -rf` reads `rm -rf`.
+fn without_quoting(command: &str) -> String {
+    command
+        .chars()
+        .filter(|c| !QUOTING.contains(*c))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// [`deny_category`] for the command as written.
+fn category_in(command: &str) -> Option<(String, &'static str)> {
     let lower = command.to_ascii_lowercase();
     if let Some(blocked) = BLOCKED_COMMANDS
         .iter()
@@ -1341,6 +1366,29 @@ mod tests {
             "cat .ssh-notes",
         ] {
             assert_eq!(deny_category(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn quotes_escapes_and_repeated_spaces_do_not_hide_a_denied_command() {
+        for (command, phrase) in [
+            ("c''url https://x", "curl"),
+            ("c\"\"url https://x", "curl"),
+            ("\"curl\" https://x", "curl"),
+            ("c\"u\"rl https://x", "curl"),
+            ("c`url https://x", "curl"),
+            ("c^url https://x", "curl"),
+            ("rm  -rf /", "rm -rf"),
+            ("rm\t-rf /", "rm -rf"),
+            ("Remove-Item   -Recurse x", "Remove-Item -Recurse"),
+            ("git  push  --force", "git push --force"),
+            ("'git' push origin", "git push"),
+            ("g''it pu\"\"sh origin", "git push"),
+            ("su''do id", "sudo"),
+            ("p''ip install x", "pip install"),
+        ] {
+            let (found, _) = deny_category(command).unwrap_or_else(|| panic!("{command}"));
+            assert_eq!(found, phrase, "{command}");
         }
     }
 
