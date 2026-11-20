@@ -321,6 +321,45 @@ pub fn verify(text: &str) -> Result<Verified, AuditError> {
     Ok(Verified { records })
 }
 
+/// Checks a whole session or build log: [`verify`], plus at least one
+/// record, the first of which opens the session (`session_start`).
+///
+/// An appender may continue an empty file, so [`verify`] accepts one; a
+/// finished log is never empty, and a file that does not begin with its
+/// session's start had its head removed or was replaced.
+///
+/// # Arguments
+///
+/// * `text` - The file's contents.
+///
+/// # Returns
+///
+/// The records.
+///
+/// # Errors
+///
+/// As [`verify`], and [`AuditError::Broken`] at line 1 when the file holds
+/// no records or its first record is not `session_start`.
+pub fn verify_log(text: &str) -> Result<Verified, AuditError> {
+    let verified = verify(text)?;
+    match verified.records.first() {
+        None => Err(AuditError::Broken {
+            line: 1,
+            reason: "the file holds no records, and every log opens with session_start".to_owned(),
+        }),
+        Some(first) if !matches!(first.body.event, AuditEvent::SessionStart { .. }) => {
+            Err(AuditError::Broken {
+                line: 1,
+                reason: format!(
+                    "the first record is {}, not session_start: the head of the log was removed or replaced",
+                    first.body.event.tag()
+                ),
+            })
+        }
+        Some(_) => Ok(verified),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +426,29 @@ mod tests {
             .map(|key| line.find(&format!("\"{key}\":")).expect(key))
             .collect();
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{line}");
+    }
+
+    #[test]
+    fn a_log_must_hold_records_and_open_with_session_start() {
+        assert!(matches!(
+            verify_log(""),
+            Err(AuditError::Broken { line: 1, .. })
+        ));
+        let headless = verify_log(&file(&chain(2))).expect_err("a log without session_start");
+        assert!(headless.to_string().contains("session_start"), "{headless}");
+        let start = RecordBody {
+            event: AuditEvent::SessionStart {
+                mode: "run".to_owned(),
+                providers: Vec::new(),
+                roles: Default::default(),
+                flags: Default::default(),
+            },
+            ..body(0, GENESIS)
+        };
+        let (first, hash) = seal(&start).expect("seal");
+        let (second, _) = seal(&body(1, &hash)).expect("seal");
+        let log = verify_log(&file(&[first, second])).expect("a whole log verifies");
+        assert_eq!(log.records.len(), 2);
     }
 
     #[test]

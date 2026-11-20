@@ -494,7 +494,7 @@ pub fn verify_command(
     });
     let text = std::fs::read_to_string(&file)
         .with_context(|| format!("reading the audit log {}", file.display()))?;
-    let verified = match anvil_audit::audit::verify(&text) {
+    let verified = match anvil_audit::audit::verify_log(&text) {
         Ok(verified) => verified,
         Err(error) => {
             println!("{}: chain broken at {error}", file.display());

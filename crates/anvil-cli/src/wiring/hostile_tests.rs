@@ -306,3 +306,60 @@ async fn scripts_that_trusted_hooks_and_servers_run_are_never_written_by_file_to
         "a changed server script asks again"
     );
 }
+
+#[tokio::test]
+async fn file_tools_never_write_anvils_own_records() {
+    let repo = tempfile::tempdir().expect("repo");
+    let home = tempfile::tempdir().expect("home");
+    let wiring = wiring(
+        repo.path(),
+        home.path(),
+        false,
+        "[permissions]\nallow = [\"write_file\", \"edit_file\"]\n",
+    );
+    let registry = wiring
+        .registry(Box::new(StaticPrompt(PromptAnswer::Yes)))
+        .expect("registry");
+    let id = "01M7VKFSFR3FZJ9B8XT40ZD02V";
+    let session = wiring.sessions_root().join(id);
+    write(&session, "audit.jsonl", "sealed");
+    write(&session, "plan.md", "- [ ] step");
+    let mut ctx = wiring.tool_context();
+    ctx.session_dir = Some(session.clone());
+    let call = |path: &str| ToolCall {
+        id: "c1".to_owned(),
+        name: "write_file".to_owned(),
+        arguments_json: serde_json::json!({"path": path, "content": ""}).to_string(),
+    };
+    for path in [
+        format!(".anvil/sessions/{id}/audit.jsonl"),
+        format!(".anvil/sessions/{id}/session.jsonl"),
+        format!(".ANVIL/Sessions/{id}/AUDIT.jsonl"),
+        ".anvil/sessions/01M7VKJJG759AXZZZ2MDE396WA/audit.jsonl".to_owned(),
+        ".anvil/builds/01M7VKJJG759AXZZZ2MDE396WA/audit.jsonl".to_owned(),
+        ".anvil/logs/anvil.jsonl".to_owned(),
+        ".anvil/usage/2026-11-20.jsonl".to_owned(),
+        ".anvil/BUILDS/x/audit.jsonl".to_owned(),
+    ] {
+        let run = registry.execute(&call(&path), &ctx).await;
+        assert!(run.result.is_error, "{path}: {}", run.result.content);
+        assert!(
+            run.result.content.contains("anvil's own records"),
+            "{path}: {}",
+            run.result.content
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(session.join("audit.jsonl")).expect("read"),
+        "sealed"
+    );
+    let plan = registry
+        .execute(&call(&format!(".anvil/sessions/{id}/plan.md")), &ctx)
+        .await;
+    assert_eq!(
+        plan.outcome,
+        ToolOutcome::Completed,
+        "the session's own plan stays writable: {}",
+        plan.result.content
+    );
+}

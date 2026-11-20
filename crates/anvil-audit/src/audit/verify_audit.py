@@ -113,7 +113,7 @@ def open_line(line):
 
 def verify(data):
     segments = data.split(b"\n")
-    count, prev, session = 0, GENESIS, None
+    count, prev, session, first = 0, GENESIS, None, None
     for number, raw in enumerate(segments[:-1], 1):
         try:
             line = raw.decode("utf-8")
@@ -123,12 +123,16 @@ def verify(data):
         if record["seq"] != count or record["prev"] != prev:
             raise Broken(f"line {number}: a record was removed or moved")
         if session is None:
-            session = record["session"]
+            session, first = record["session"], record["event"]["type"]
         elif record["session"] != session:
             raise Broken(f"line {number}: the record belongs to another session")
         count, prev = count + 1, digest
     if segments[-1] != b"":
         raise Broken(f"line {len(segments)}: the last line has no newline")
+    if count == 0:
+        raise Broken("line 1: the file holds no records")
+    if first != "session_start":
+        raise Broken(f"line 1: the first record is {first}, not session_start")
     return count
 
 

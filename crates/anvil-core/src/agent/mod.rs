@@ -222,8 +222,10 @@ pub struct AgentLoop {
 impl AgentLoop {
     /// Prepares a run. Nothing happens until [`AgentLoop::run`].
     ///
-    /// The session folder is granted write access for `write_file` and
-    /// `edit_file` without prompting, so the model can tick plan checkboxes.
+    /// The session's plan file is granted write access for `write_file`
+    /// and `edit_file` without prompting, so the model can tick plan
+    /// checkboxes and correct the plan; the rest of the session folder is
+    /// anvil's record, which file tools never write.
     ///
     /// # Arguments
     ///
@@ -251,15 +253,15 @@ impl AgentLoop {
         let task = ctx.guard.redact("user", &config.task);
         config.task = task.text;
         registry.register(Box::new(complete_step::CompleteStep));
-        let session_glob = format!("{}/**", ctx.display_path(&config.session_dir));
+        let plan_file = ctx.display_path(&config.session_dir.join(PLAN_FILE));
         let rules = [
-            format!("write_file:{session_glob}"),
-            format!("edit_file:{session_glob}"),
+            format!("write_file:{plan_file}"),
+            format!("edit_file:{plan_file}"),
             complete_step::COMPLETE_STEP.to_owned(),
         ];
         for rule in rules {
             if let Err(error) = registry.permissions().allow_unsaved(&rule) {
-                tracing::warn!(%error, rule, "could not allow session folder writes");
+                tracing::warn!(%error, rule, "could not allow plan file writes");
             }
         }
         let opened = match ctx.transcript {

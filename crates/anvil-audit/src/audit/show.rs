@@ -1,6 +1,6 @@
 //! A readable view of an audit file for `anvil audit show`.
 
-use super::chain::{RecordBody, open_line, verify};
+use super::chain::{RecordBody, open_line, verify_log};
 use super::event::{AuditEvent, Content};
 
 /// Renders an audit file one line per record, after a header naming the
@@ -34,7 +34,7 @@ pub fn render(text: &str) -> String {
             Err(reason) => out.push_str(&format!("line {}: {reason}\n", index + 1)),
         }
     }
-    match verify(text) {
+    match verify_log(text) {
         Ok(verified) => out.push_str(&format!(
             "chain intact: {} records, last hash {}\n",
             verified.records.len(),
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn show_prints_each_record_and_the_verdict() {
-        let body = RecordBody {
+        let start = RecordBody {
             seq: 0,
             ts: "2026-11-19T21:00:00.000Z".to_owned(),
             session: "s1".to_owned(),
@@ -175,14 +175,26 @@ mod tests {
             commit: "abc".to_owned(),
             binary_sha256: "ff".to_owned(),
             policy: "unmanaged".to_owned(),
+            event: AuditEvent::SessionStart {
+                mode: "run".to_owned(),
+                providers: Vec::new(),
+                roles: Default::default(),
+                flags: Default::default(),
+            },
+            prev: GENESIS.to_owned(),
+        };
+        let (first, first_hash) = seal(&start).expect("seal");
+        let body = RecordBody {
+            seq: 1,
             event: AuditEvent::PolicyRefusal {
                 what: "shell `curl x`".to_owned(),
                 key: "permissions.deny".to_owned(),
             },
-            prev: GENESIS.to_owned(),
+            prev: first_hash,
+            ..start
         };
         let (line, _) = seal(&body).expect("seal");
-        let text = render(&format!("{line}\n"));
+        let text = render(&format!("{first}\n{line}\n"));
         assert!(
             text.starts_with("session s1 by dev@box, anvil 1.2.3"),
             "{text}"
@@ -191,8 +203,10 @@ mod tests {
             text.contains("policy refused shell `curl x` (permissions.deny)"),
             "{text}"
         );
-        assert!(text.contains("chain intact: 1 records"), "{text}");
-        let broken = render(&format!("{}\n", line.replace("dev", "eve")));
-        assert!(broken.contains("chain broken: line 1"), "{broken}");
+        assert!(text.contains("chain intact: 2 records"), "{text}");
+        let broken = render(&format!("{first}\n{}\n", line.replace("dev", "eve")));
+        assert!(broken.contains("chain broken: line 2"), "{broken}");
+        let headless = render(&format!("{line}\n"));
+        assert!(headless.contains("chain broken: line 1"), "{headless}");
     }
 }

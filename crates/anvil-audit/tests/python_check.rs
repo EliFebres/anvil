@@ -1,5 +1,5 @@
 //! The documented Python check (`src/audit/verify_audit.py`) and
-//! `anvil_audit::audit::verify` must agree on every file: intact logs with
+//! `anvil_audit::audit::verify_log` must agree on every file: intact logs with
 //! every event type, and each kind of tampering. Skipped when no Python 3 is
 //! on the PATH.
 
@@ -9,7 +9,7 @@ use std::process::Command;
 
 use anvil_audit::audit::chain::seal;
 use anvil_audit::audit::{
-    AuditEvent, Content, GENESIS, ProviderEntry, RecordBody, RecordMode, sha256_hex, verify,
+    AuditEvent, Content, GENESIS, ProviderEntry, RecordBody, RecordMode, sha256_hex, verify_log,
 };
 
 const SCRIPT: &str = include_str!("../src/audit/verify_audit.py");
@@ -196,7 +196,7 @@ fn cases() -> Vec<(&'static str, Vec<u8>, bool)> {
     hand_edit[0] = hand_edit[0].replacen("\"run\"", "\"chat\"", 1);
     vec![
         ("intact", file(&lines), true),
-        ("empty", Vec::new(), true),
+        ("empty", Vec::new(), false),
         ("end cut at a line", file(&lines[..5]), true),
         ("edited", file(&hand_edit), false),
         (
@@ -320,7 +320,7 @@ fn rust_verify_matches_the_expected_verdicts() {
     for (name, bytes, intact) in cases() {
         let verdict = String::from_utf8(bytes)
             .ok()
-            .is_some_and(|text| verify(&text).is_ok());
+            .is_some_and(|text| verify_log(&text).is_ok());
         assert_eq!(verdict, intact, "{name}");
     }
 }

@@ -1185,6 +1185,28 @@ impl Wiring {
         self.project.trusted.then_some(self.cwd.as_path())
     }
 
+    /// The folders that hold anvil's records, which file tools never write.
+    ///
+    /// # Returns
+    ///
+    /// The sessions root (the project's `.anvil/sessions` or the policy's
+    /// `transcript_dir`), the project's `.anvil/builds`, `.anvil/logs` and
+    /// `.anvil/usage`, and the policy's `[audit] mirror_dir` when it sets one.
+    pub fn records_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![
+            self.sessions_root(),
+            crate::build::state::builds_root(&self.cwd),
+            self.cwd.join(crate::logging::LOG_DIR),
+            anvil_audit::paths::project_usage_dir(&self.cwd),
+        ];
+        dirs.extend(
+            self.policy
+                .as_ref()
+                .and_then(|loaded| loaded.policy.audit.mirror_dir.clone()),
+        );
+        dirs
+    }
+
     /// Where tools run.
     ///
     /// # Returns
@@ -1193,9 +1215,10 @@ impl Wiring {
     /// (directly under an allowlist, in a container when configured), and
     /// the folders outside the project the file tools may open: `[tools]
     /// extra_dirs`, and the loaded skills' folders for reading their
-    /// supporting files; the user's `~/.anvil`, which they never write; and
-    /// the files in the project that a loaded hook or MCP server runs,
-    /// which they never write either.
+    /// supporting files; the user's `~/.anvil`, which they never write;
+    /// anvil's records ([`Wiring::records_dirs`]); and the files in the
+    /// project that a loaded hook or MCP server runs, which they never
+    /// write either.
     pub fn tool_context(&self) -> ToolContext {
         // A rules file that cannot be read counts as limiting, so commands
         // never fall back to a shell when an allowlist might be in force.
@@ -1225,6 +1248,7 @@ impl Wiring {
                     .iter()
                     .map(|home| home.join(anvil_types::config::CONFIG_DIR))
                     .collect(),
+                records_dirs: self.records_dirs(),
                 protected_files: anvil_core::tools::workspace::command_files(
                     &self.cwd,
                     crate::trust::commands_run(&self.hooks, &self.mcp_servers)

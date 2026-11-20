@@ -10,6 +10,8 @@ pub mod event;
 pub mod log;
 pub mod show;
 
-pub use chain::{AuditError, GENESIS, Identity, RecordBody, SealedRecord, Verified, verify};
+pub use chain::{
+    AuditError, GENESIS, Identity, RecordBody, SealedRecord, Verified, verify, verify_log,
+};
 pub use event::{AuditEvent, Content, ProviderEntry, RecordMode, sha256_hex};
 pub use log::{AUDIT_FILE, AuditLog, AuditTarget, Sink, mirror_file};

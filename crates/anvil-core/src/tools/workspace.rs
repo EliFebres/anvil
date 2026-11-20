@@ -34,6 +34,12 @@ pub struct Workspace {
     /// `~/.anvil`, which holds the configuration, saved permission rules
     /// and trust decisions.
     pub protected_dirs: Vec<PathBuf>,
+    /// Folders that hold anvil's own records, which the tools never write
+    /// (in any letter case, created yet or not): the sessions root with
+    /// every transcript and audit log, `.anvil/builds`, `.anvil/logs`,
+    /// `.anvil/usage` and the audit mirror. The one exception is the
+    /// current session's plan file, which Build may correct.
+    pub records_dirs: Vec<PathBuf>,
     /// Files the tools never write, in canonical form: the scripts and
     /// programs inside the workspace that a loaded hook or MCP server
     /// runs, found with [`command_files`]. A model that could rewrite one
@@ -343,6 +349,51 @@ fn is_env_file(name: &str) -> bool {
 /// `true` when `path` is `dir` or below it.
 pub fn is_within(dir: &Path, path: &Path) -> bool {
     path.starts_with(canonical(dir))
+}
+
+/// Whether `path` lies inside `dir`, ignoring letter case, with `dir`
+/// resolved as far as it exists.
+///
+/// For folders that must stay closed whether or not they exist yet: a
+/// folder anvil has not created is still compared in the canonical form
+/// of its nearest existing parent, and on a file system that ignores case
+/// `.ANVIL/Builds` is the same folder as `.anvil/builds`.
+///
+/// # Arguments
+///
+/// * `dir` - The folder.
+/// * `path` - A path already resolved against the file system.
+///
+/// # Returns
+///
+/// `true` when `path` is `dir` or below it.
+pub fn is_within_any_case(dir: &Path, path: &Path) -> bool {
+    let fold = |path: &Path| -> Vec<String> {
+        path.components()
+            .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let (dir, path) = (fold(&canonical_prefix(dir)), fold(path));
+    path.len() >= dir.len() && path[..dir.len()] == dir[..]
+}
+
+/// `path` with its longest existing ancestor in canonical form and the
+/// rest appended as written.
+pub(crate) fn canonical_prefix(path: &Path) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(current) {
+            return tail.iter().rev().fold(resolved, |out, part| out.join(part));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_owned());
+                current = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// The canonical form of `path`, or `path` itself when it cannot be resolved.

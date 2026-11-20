@@ -664,8 +664,17 @@ fn audit_verify_exits_non_zero_at_the_first_break_and_show_prints_the_records() 
             commit: "unknown".to_owned(),
             binary_sha256: "unknown".to_owned(),
             policy: "unmanaged".to_owned(),
-            event: AuditEvent::SessionEnd {
-                outcome: (*outcome).to_owned(),
+            event: if seq == 0 {
+                AuditEvent::SessionStart {
+                    mode: "run".to_owned(),
+                    providers: Vec::new(),
+                    roles: Default::default(),
+                    flags: Default::default(),
+                }
+            } else {
+                AuditEvent::SessionEnd {
+                    outcome: (*outcome).to_owned(),
+                }
             },
             prev: prev.clone(),
         };
@@ -736,4 +745,53 @@ fn audit_verify_exits_non_zero_at_the_first_break_and_show_prints_the_records() 
         stdout.contains("the mirror differs from the session file at line 3"),
         "{stdout}"
     );
+}
+
+#[test]
+fn audit_verify_fails_on_an_empty_log_and_on_one_that_does_not_open_the_session() {
+    use anvil_audit::audit::AuditEvent;
+    use anvil_audit::audit::chain::{GENESIS, RecordBody, seal};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let empty = dir.path().join("empty.jsonl");
+    std::fs::write(&empty, "").expect("write");
+    let out = anvil(dir.path())
+        .args(["audit", "verify"])
+        .arg(&empty)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "an empty log verified: {stdout}");
+    assert!(stdout.contains("no records"), "{stdout}");
+
+    let body = RecordBody {
+        seq: 0,
+        ts: "2026-11-19T21:00:00.000Z".to_owned(),
+        session: "01JBBBBBBBBBBBBBBBBBBBBBBB".to_owned(),
+        agent: "main".to_owned(),
+        user: "dev".to_owned(),
+        host: "box".to_owned(),
+        version: "0.0.0".to_owned(),
+        commit: "unknown".to_owned(),
+        binary_sha256: "unknown".to_owned(),
+        policy: "unmanaged".to_owned(),
+        event: AuditEvent::SessionEnd {
+            outcome: "done".to_owned(),
+        },
+        prev: GENESIS.to_owned(),
+    };
+    let (line, _) = seal(&body).expect("seal");
+    let headless = dir.path().join("headless.jsonl");
+    std::fs::write(&headless, format!("{line}\n")).expect("write");
+    let out = anvil(dir.path())
+        .args(["audit", "verify"])
+        .arg(&headless)
+        .output()
+        .expect("anvil runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "a log without its start verified: {stdout}"
+    );
+    assert!(stdout.contains("session_start"), "{stdout}");
 }

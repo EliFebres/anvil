@@ -57,7 +57,7 @@ flowchart LR
 | Repository to Anvil's configuration | `.anvil/`, `.claude/`, `.mcp.json`, instruction files | Tightening only until trusted; trust pinned to a digest (`TRUST-1` to `TRUST-7`). |
 | Anvil to the programs it starts | Environment, arguments | Cleared environment, no keys (`KEY-4`, `KEY-5`); allowlist and container modes (`SH-2`, `SH-3`, `SH-5`). |
 | User to policy | Configuration, profiles, flags, `ANVIL_HOME` | A conflict with the policy is an error (`POL-4`); the policy file must be administrator-owned (`POL-2`). |
-| Anvil to its records | Audit records, transcripts | Hash chain, canonical form, fail-closed writes, a mirror outside the session folder (`AUD-1` to `AUD-6`). |
+| Anvil to its records | Audit records, transcripts | File tools never write them (`FS-7`); hash chain, canonical form, a log that must open with `session_start`, fail-closed writes, a mirror outside the session folder (`AUD-1` to `AUD-6`). |
 
 ## Actors
 

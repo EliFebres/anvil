@@ -425,6 +425,12 @@ impl ToolContext {
                 "`{path}` is in anvil's own settings folder; anvil's file tools never write there"
             ));
         }
+        if write && self.writes_into_records(&resolved) {
+            return Err(format!(
+                "`{path}` is among anvil's own records (transcripts, audit logs, build state, logs and usage); anvil's file tools never write there, except the session's {}",
+                crate::agent::PLAN_FILE
+            ));
+        }
         if write && self.workspace.protected_files.contains(&resolved) {
             return Err(format!(
                 "`{path}` is a script or program a hook or MCP server runs; anvil's file tools never write it, so a model cannot plant code that runs without a prompt"
@@ -446,6 +452,28 @@ impl ToolContext {
             "`{path}` is outside the workspace {}; anvil's file tools stay inside it unless `[tools] extra_dirs` in ~/.anvil/config.toml lists the folder",
             self.cwd.display()
         ))
+    }
+
+    /// Whether a resolved path lies among anvil's records: a folder of
+    /// [`Workspace::records_dirs`] or the session folder, other than the
+    /// session's plan file.
+    fn writes_into_records(&self, resolved: &Path) -> bool {
+        let plan = self
+            .session_dir
+            .as_deref()
+            .map(|dir| workspace::canonical_prefix(&dir.join(crate::agent::PLAN_FILE)));
+        // Containment both ways is equality, compared the same way.
+        let is_plan = plan.as_deref().is_some_and(|plan| {
+            workspace::is_within_any_case(plan, resolved)
+                && workspace::is_within_any_case(resolved, plan)
+        });
+        !is_plan
+            && self
+                .workspace
+                .records_dirs
+                .iter()
+                .chain(self.session_dir.iter())
+                .any(|dir| workspace::is_within_any_case(dir, resolved))
     }
 
     /// Resolves a path argument against `cwd`.
