@@ -2,6 +2,50 @@
 
 The commands, the full-screen UI, workers, session status, long builds, rules and templates. README.md has the quick start; SECURITY.md has what each feature may touch.
 
+## Configuration
+
+Build from source with the Rust toolchain named in `rust-toolchain.toml`:
+
+```sh
+git clone https://github.com/EliFebres/anvil
+cd anvil
+cargo build --release --locked      # target/release/anvil
+```
+
+`anvil setup --endpoint <url> [--model <id>] [--key-env <NAME>]` reads the server's model list, writes one `endpoint` provider with the context size the server reports, and uses it for every role. `anvil config init --global` writes a commented template instead. The key is read from the environment or `~/.anvil/.env`, never from a configuration file or the repository. A non-loopback endpoint must use https unless you list its host in `[network] allow_http_hosts` (unmanaged only). The written `~/.anvil/config.toml` looks like this:
+
+```toml
+[providers.endpoint]
+protocol = "openai"
+base_url = "https://models.internal.example/v1"
+api_key_env = "ANVIL_ENDPOINT_KEY"
+model = "<model name as served>"
+context_window = 131072
+supports_tools = true
+supports_reasoning = false
+
+[roles]
+coder = "endpoint"
+summarizer = "endpoint"
+```
+
+A hosted API is a configuration option, never a default. It is configured the same way, with `protocol = "anthropic"` or `"openai"`; under a managed policy its host must be in `[network] allowed_hosts`:
+
+```toml
+[providers.anthropic]
+protocol = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+api_key_env = "ANTHROPIC_API_KEY"
+model = "<model id>"
+context_window = 200000
+supports_tools = true
+supports_reasoning = true
+```
+
+`[roles]` may also name a `reviewer`, a `planner` and a `worker`, each a provider above; each falls back to the coder.
+
+The first session in a repository that ships hooks, MCP servers, skills, commands, agents or instruction files asks whether to trust that content; until you do, none of it loads. A repository's own `.anvil/config.toml` can only add rules that refuse calls or make them ask (`anvil config init` writes that template).
+
 ## Basic use
 
 Work on a task in any repository:
