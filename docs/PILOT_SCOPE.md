@@ -18,7 +18,7 @@ The pilot ends on the end date unless a new version of this document extends it.
 
 - Named supervisor: [name, role]. Owns the pilot, approves participants and repositories, and can stop the pilot at any time.
 - Security contact: [name]. Reviews this document, the policy file and the incident log.
-- Participants: [names, at most five]. Each has read SECURITY.md and the threat model.
+- Participants: [names, at most five]. Each has read SECURITY.md and docs/THREAT_MODEL.md.
 
 ## 4. Repositories
 
@@ -37,7 +37,9 @@ The pilot ends on the end date unless a new version of this document extends it.
   - `[network] allowed_hosts` set to the one endpoint above, as `host:port`;
   - `allow_yes = false`, `allow_allow_tool = false`, `allow_always = false` and `require_plan_approval = true`;
   - `[permissions] ask = ["shell", "write_file", "edit_file"]`, so every command and write asks a person;
-  - `[features] hooks = false`, `mcp = "off"`, `memory = false`;
+  - `[features] hooks = false`, `mcp = "off"`, `memory = false`, and `[projects] allow_trust = false`;
+  - `[shell] mode = "allowlist"` with only the commands the work needs, or `"off"`, and `executor = "container"` where commands must not touch the workstation;
+  - `[audit] required = true` and `mirror_dir` set to a folder IT collects;
   - `[data] transcript_dir` set to [folder], `retention_days` to [days], and `transcript` to `"metadata"` (or `"full"` if sessions must be resumable).
 - `anvil doctor` run on each machine at the start, and its policy block attached to this document.
 - Version of anvil: [commit or release], built by [who] from [where].
