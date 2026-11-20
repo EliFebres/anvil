@@ -863,11 +863,17 @@ impl AgentLoop {
                 ));
             }
         }
+        // A review that never decides is not an approval: it goes back to
+        // Build like a request for changes, so the round limit ends it.
         let verdict = verdict.unwrap_or_else(|| {
             self.warn(
-                "the reviewer never gave a verdict; treating the review as approved".to_owned(),
+                "the reviewer never gave a verdict; treating the review as not approved".to_owned(),
             );
-            ReviewVerdict::Approve { notes: Vec::new() }
+            ReviewVerdict::Changes {
+                items: vec![
+                    "The reviewer gave no verdict, so the change is not approved. Check the change against the plan and end your turn with what you verified.".to_owned(),
+                ],
+            }
         });
         self.events.emit(LoopEvent::ReviewVerdict {
             verdict: verdict.clone(),
@@ -2433,21 +2439,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_review_without_a_verdict_is_not_an_approval() {
+        let mut h = Harness::new(
+            vec![
+                FakeProvider::text_turn(PLAN),
+                FakeProvider::text_turn("b1"),
+                FakeProvider::text_turn("b2"),
+                FakeProvider::text_turn("b3"),
+                FakeProvider::text_turn("b4"),
+            ],
+            (0..8).map(|_| FakeProvider::text_turn("no json")).collect(),
+        );
+        let agent = h.default_agent(CheckCommand::Command("exit 0".to_owned()), "");
+        let result = agent.run().await;
+        assert_eq!(
+            result.status,
+            Status::Incomplete {
+                reason: IncompleteReason::ReviewRoundsExhausted
+            }
+        );
+        let rebuild = &h.coder.requests()[2];
+        assert!(
+            rebuild.messages.iter().any(|m| matches!(
+                m,
+                Message::User { text } if text.contains("gave no verdict")
+            )),
+            "Build hears that the review has no verdict"
+        );
+    }
+
+    #[tokio::test]
     async fn unparsable_review_verdict_is_reasked_then_approved() {
         let mut h = Harness::new(
             vec![
                 FakeProvider::text_turn(PLAN),
                 FakeProvider::text_turn("built"),
+                FakeProvider::text_turn("checked again"),
             ],
             vec![
                 FakeProvider::text_turn("hmm"),
                 FakeProvider::text_turn("still no json"),
+                approve(),
             ],
         );
         let agent = h.default_agent(CheckCommand::Command("exit 0".to_owned()), "");
         let result = agent.run().await;
         assert_eq!(result.status, Status::Done);
-        assert_eq!(h.reviewer.calls(), 2);
+        assert_eq!(h.reviewer.calls(), 3, "no verdict sends it back for review");
+        assert_eq!(h.coder.calls(), 3, "Build ran again before the approval");
         let retry = &h.reviewer.requests()[1];
         assert_eq!(retry.messages.len(), 3);
         let warnings = h
