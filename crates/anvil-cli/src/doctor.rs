@@ -361,7 +361,9 @@ async fn ping(wiring: &Wiring, name: &str) -> anyhow::Result<u128> {
 
 /// One `tool:<name>` row per tool anvil needs, with its version.
 async fn report_tools(report: &mut Report) {
-    match tool_output("git", &["--version"]).await {
+    let mut git = Command::from(anvil_core::git::standalone());
+    git.arg("--version");
+    match tool_output(git).await {
         Some(version) => report.pass("tool:git", version),
         None => report.fail(
             "tool:git",
@@ -381,8 +383,8 @@ async fn report_tools(report: &mut Report) {
 }
 
 /// The first line a tool prints, or `None` when it is missing or fails.
-async fn tool_output(program: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::time::timeout(SHORT_TIMEOUT, Command::new(program).args(args).output())
+async fn tool_output(mut command: Command) -> Option<String> {
+    let out = tokio::time::timeout(SHORT_TIMEOUT, command.kill_on_drop(true).output())
         .await
         .ok()?
         .ok()?;
@@ -414,7 +416,11 @@ async fn shell_candidate() -> Option<String> {
         candidates.push(format!("{program_files}\\Git\\bin\\sh.exe"));
     }
     for candidate in candidates {
-        if tool_output(&candidate, &["-c", "echo ok"]).await.as_deref() == Some("ok") {
+        let mut sh = Command::new(&candidate);
+        sh.args(["-c", "echo ok"])
+            .env_clear()
+            .envs(anvil_types::child_env::vars());
+        if tool_output(sh).await.as_deref() == Some("ok") {
             return Some(candidate);
         }
     }

@@ -232,7 +232,12 @@ pub fn make_private(path: &Path) -> anyhow::Result<Vec<String>> {
     }
     #[cfg(not(unix))]
     {
-        let Ok(out) = Command::new("icacls").arg(path).output() else {
+        let Ok(out) = Command::new("icacls")
+            .arg(path)
+            .env_clear()
+            .envs(anvil_types::child_env::vars())
+            .output()
+        else {
             return Ok(Vec::new());
         };
         let listing = String::from_utf8_lossy(&out.stdout);

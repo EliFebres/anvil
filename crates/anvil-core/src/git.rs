@@ -133,6 +133,17 @@ pub fn command(cwd: &Path) -> Result<Command, GitError> {
     Ok(safe_git(cwd))
 }
 
+/// A git command that reads no repository, such as `git --version`, with
+/// [`SAFE_ARGS`] and the same cleared environment as [`command`]. It runs
+/// in the system temp folder, so no project's config applies.
+///
+/// # Returns
+///
+/// The command. Add the arguments, then run it.
+pub fn standalone() -> Command {
+    safe_git(&std::env::temp_dir())
+}
+
 /// `git` with [`SAFE_ARGS`], run in `cwd` with a cleared environment
 /// refilled from [`child_env::vars`] and [`GIT_VARS`].
 fn safe_git(cwd: &Path) -> Command {

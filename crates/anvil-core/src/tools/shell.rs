@@ -362,8 +362,9 @@ impl Shell {
 
     /// Prepares a command that runs `script` in this shell.
     ///
-    /// Nothing is spawned; the caller sets the working directory, standard
-    /// streams and environment before spawning.
+    /// Nothing is spawned; the caller sets the working directory and the
+    /// standard streams. The environment starts cleared and refilled from
+    /// [`child_env::vars`], so no caller can leave it out.
     ///
     /// # Arguments
     ///
@@ -374,7 +375,11 @@ impl Shell {
     /// The command, ready to configure.
     pub fn command(&self, script: &str) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.program);
-        command.args(&self.args).arg(script);
+        command
+            .args(&self.args)
+            .arg(script)
+            .env_clear()
+            .envs(child_env::vars());
         command
     }
 }
