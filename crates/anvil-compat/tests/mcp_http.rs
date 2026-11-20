@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anvil_compat::mcp::{McpClient, McpServer, McpTools, ServerSet, Transport};
+use anvil_compat::mcp::{McpClient, McpServer, McpStore, McpTools, ServerSet, Transport};
 use anvil_core::net::{Egress, HttpClient, http_client};
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, method, path};
@@ -130,7 +130,8 @@ async fn an_http_server_outside_the_allowed_set_receives_nothing() {
     let elsewhere = client(&["https://models.example/v1".to_owned()]);
     let project = tempfile::tempdir().expect("tempdir");
     let set = ServerSet::from_servers(vec![http_server(&url)]);
-    let tools = McpTools::load(&set, project.path(), &elsewhere, true).await;
+    let store = McpStore::new(None, project.path());
+    let tools = McpTools::load(&set, project.path(), &elsewhere, true, &store).await;
     let error = tools.reports()[0].tools.clone().expect_err("refused");
     assert!(error.to_string().contains("is not allowed"), "{error}");
     let managed = http_client(
@@ -138,7 +139,7 @@ async fn an_http_server_outside_the_allowed_set_receives_nothing() {
         Duration::from_secs(5),
     )
     .expect("client");
-    let tools = McpTools::load(&set, project.path(), &managed, true).await;
+    let tools = McpTools::load(&set, project.path(), &managed, true, &store).await;
     assert!(tools.reports()[0].tools.is_err());
     assert!(
         server
@@ -207,7 +208,8 @@ async fn a_server_that_echoes_its_bearer_token_in_an_error_body_leaks_nothing() 
     assert!(error.contains("[REDACTED:header]"), "{error}");
 
     let set = ServerSet::from_servers(vec![http_server(&bad)]);
-    let tools = McpTools::load(&set, project.path(), &http, true).await;
+    let store = McpStore::new(None, project.path());
+    let tools = McpTools::load(&set, project.path(), &http, true, &store).await;
     let report = tools.reports()[0].tools.clone().expect_err("refused");
     assert!(!report.to_string().contains("t0k3n"), "{report}");
 }

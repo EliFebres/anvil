@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anvil_compat::mcp::Transport;
+use anvil_compat::mcp::{McpStore, Transport};
 use anvil_compat::{
     AgentSet, CommandSet, DelegateTool, HookConfig, HookRunner, McpTools, ServerSet, SkillRoots,
     SkillSet, SkillTool, SubagentEnv,
@@ -636,12 +636,36 @@ impl Wiring {
                 return;
             }
         };
-        self.mcp = Arc::new(McpTools::load(&self.mcp_servers, &self.cwd, &http, false).await);
+        self.mcp = Arc::new(
+            McpTools::load(
+                &self.mcp_servers,
+                &self.cwd,
+                &http,
+                false,
+                &self.mcp_store(),
+            )
+            .await,
+        );
         for report in self.mcp.reports() {
             if let Err(error) = &report.tools {
                 eprintln!("warning: {error}");
             }
         }
+    }
+
+    /// Where MCP listing approvals and the tool cache live: under
+    /// `~/.anvil`, never in the repository.
+    ///
+    /// # Returns
+    ///
+    /// The store for this project.
+    pub fn mcp_store(&self) -> McpStore {
+        McpStore::new(
+            self.home
+                .as_ref()
+                .map(|home| home.join(anvil_types::config::CONFIG_DIR)),
+            &self.cwd,
+        )
     }
 
     /// A copy of this wiring bound to a session, so hooks can report it.

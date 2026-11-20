@@ -136,6 +136,12 @@ pub enum Command {
         #[command(subcommand)]
         command: CompatCommand,
     },
+    /// Approve what an MCP server offers.
+    Mcp {
+        /// Which MCP action to take.
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     /// Manage the standing coding rules in `~/.anvil/rules.toml`.
     Rules {
         /// Which rules action to take.
@@ -259,6 +265,18 @@ pub enum RulesCommand {
     Check {
         /// Files to check; relative paths resolve against the current directory.
         paths: Vec<std::path::PathBuf>,
+    },
+}
+
+/// Subcommands under `anvil mcp`.
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Connect to a server, print its tools and record that listing as
+    /// approved, after its listing changed. Under a managed policy only a
+    /// server the policy allows can be approved.
+    Approve {
+        /// The server name.
+        name: String,
     },
 }
 

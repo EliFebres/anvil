@@ -3,10 +3,13 @@
 //!
 //! Servers come from `.mcp.json`, the `mcpServers` key of
 //! `.claude/settings.json`, and `~/.anvil/mcp.toml`. Registration needs
-//! each server's tool list, but connecting at every startup would be slow,
-//! so the list is cached under `.anvil/mcp-cache/` keyed by a hash of the
-//! server's definition. A server with a fresh cache entry is not started
-//! until one of its tools is called.
+//! each server's tool list. The first listing a server returns is recorded
+//! as a SHA-256 in `~/.anvil/mcp-approvals.toml`; a later listing that
+//! differs stops the server until it is approved again (see [`approval`]).
+//! Connecting at every startup would be slow, so an approved list is
+//! cached under `~/.anvil/mcp-cache/<repository>/`, keyed by a SHA-256 of
+//! the server's definition. A server with a fresh cache entry is not
+//! started until one of its tools is called.
 //!
 //! Two transports are supported: local servers that anvil starts as a
 //! child process (stdio), and remote servers reached over the streamable
@@ -17,6 +20,7 @@
 //! a managed policy its `host:port` must be in `[network] allowed_hosts`
 //! and `[features] mcp` must allow it by name and URL.
 
+pub mod approval;
 pub mod client;
 pub mod http;
 pub mod jsonrpc;
@@ -24,7 +28,6 @@ pub mod stdio;
 pub mod tool;
 
 use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,6 +37,7 @@ use anvil_core::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use approval::{McpStore, Verdict};
 pub use client::{McpClient, ToolInfo};
 pub use jsonrpc::McpError;
 pub use tool::{LazyServer, McpTool, qualified_name};
@@ -42,9 +46,6 @@ use crate::error::LoadError;
 
 /// Per-request timeout when a server sets none.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Where tool lists are cached, relative to the project root.
-pub const CACHE_DIR: &str = ".anvil/mcp-cache";
 
 /// How to reach a server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -94,20 +95,6 @@ pub struct McpServer {
     pub timeout: Duration,
     /// The file it was defined in.
     pub source: PathBuf,
-}
-
-impl McpServer {
-    /// A hash of everything that changes what the server offers.
-    ///
-    /// # Returns
-    ///
-    /// The hash, used to validate cache entries.
-    pub fn config_hash(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.name.hash(&mut hasher);
-        self.transport.hash(&mut hasher);
-        hasher.finish()
-    }
 }
 
 /// Every server definition found.
@@ -547,15 +534,6 @@ impl McpServer {
     }
 }
 
-/// A cached tool list for one server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CacheEntry {
-    /// [`McpServer::config_hash`] when the list was fetched.
-    config_hash: u64,
-    /// The tools.
-    tools: Vec<ToolInfo>,
-}
-
 /// How one server fared during [`McpTools::load`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerReport {
@@ -577,27 +555,32 @@ pub struct McpTools {
 }
 
 impl McpTools {
-    /// Resolves every server's tool list, from the cache when it is valid
-    /// and by connecting otherwise.
+    /// Resolves every server's tool list, from the cache when it holds the
+    /// approved listing and by connecting otherwise.
     ///
     /// # Arguments
     ///
     /// * `set` - The servers.
-    /// * `cwd` - The project root; stdio servers run there and the cache
-    ///   lives under it.
+    /// * `cwd` - The project root; stdio servers run there.
     /// * `http` - The client HTTP servers are reached with.
     /// * `refresh` - Ignore the cache and connect to every server.
+    /// * `store` - The approvals and the cache.
     ///
     /// # Returns
     ///
-    /// The tools. A server that cannot be reached contributes no tools and
-    /// an error in its report; the others still load.
-    pub async fn load(set: &ServerSet, cwd: &Path, http: &HttpClient, refresh: bool) -> Self {
-        let cache_dir = cwd.join(CACHE_DIR);
+    /// The tools. A server that cannot be reached, or whose listing differs
+    /// from the approved one, contributes no tools and an error in its
+    /// report; the others still load.
+    pub async fn load(
+        set: &ServerSet,
+        cwd: &Path,
+        http: &HttpClient,
+        refresh: bool,
+        store: &McpStore,
+    ) -> Self {
         let mut tools = Self::default();
         for server in set.servers() {
-            let cache_path = cache_dir.join(format!("{}.json", safe_file_name(&server.name)));
-            if !refresh && let Some(cached) = read_cache(&cache_path, server.config_hash()) {
+            if !refresh && let Some(cached) = store.cached(server) {
                 tools.reports.push(ServerReport {
                     name: server.name.clone(),
                     tools: Ok(cached.len()),
@@ -619,9 +602,15 @@ impl McpTools {
                 Ok::<_, McpError>((client, list))
             }
             .await;
+            let listed = listed.and_then(|(client, list)| match store.check(server, &list) {
+                Verdict::Changed => Err(McpError::ListingChanged {
+                    server: server.name.clone(),
+                }),
+                Verdict::Approved | Verdict::Recorded => Ok((client, list)),
+            });
             match listed {
                 Ok((client, list)) => {
-                    write_cache(&cache_path, server.config_hash(), &list);
+                    store.store(server, &list);
                     tools.reports.push(ServerReport {
                         name: server.name.clone(),
                         tools: Ok(list.len()),
@@ -698,41 +687,6 @@ impl McpTools {
     /// `true` when nothing will be registered.
     pub fn is_empty(&self) -> bool {
         self.servers.iter().all(|(_, tools)| tools.is_empty())
-    }
-}
-
-/// A cache file name for a server name.
-fn safe_file_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-/// Reads a cache entry when it matches the server's current definition.
-fn read_cache(path: &Path, config_hash: u64) -> Option<Vec<ToolInfo>> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let entry: CacheEntry = serde_json::from_str(&text).ok()?;
-    (entry.config_hash == config_hash).then_some(entry.tools)
-}
-
-/// Writes a cache entry; failures are logged, never fatal.
-fn write_cache(path: &Path, config_hash: u64, tools: &[ToolInfo]) {
-    let entry = CacheEntry {
-        config_hash,
-        tools: tools.to_vec(),
-    };
-    let written = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, serde_json::to_vec_pretty(&entry).unwrap_or_default()));
-    if let Err(error) = written {
-        tracing::debug!(path = %path.display(), %error, "cannot write the mcp tool cache");
     }
 }
 
@@ -907,17 +861,36 @@ timeout_secs = 5
 
     #[test]
     fn cache_round_trips_and_rejects_a_changed_definition() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("cache").join("s.json");
+        let home = tempfile::tempdir().expect("home");
+        let project = tempfile::tempdir().expect("project");
+        let store = McpStore::new(Some(home.path().to_path_buf()), project.path());
         let tools = vec![ToolInfo {
             name: "echo".to_owned(),
             description: "d".to_owned(),
             input_schema: serde_json::json!({"type": "object"}),
             read_only: true,
         }];
-        write_cache(&path, 42, &tools);
-        assert_eq!(read_cache(&path, 42), Some(tools));
-        assert_eq!(read_cache(&path, 43), None);
-        assert_eq!(safe_file_name("my server/1"), "my_server_1");
+        let server = McpServer {
+            name: "my server/1".to_owned(),
+            transport: Transport::Stdio {
+                command: "srv".to_owned(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+            timeout: DEFAULT_TIMEOUT,
+            source: home.path().join("mcp.toml"),
+        };
+        assert_eq!(store.check(&server, &tools), Verdict::Recorded);
+        store.store(&server, &tools);
+        assert_eq!(store.cached(&server), Some(tools));
+        let changed = McpServer {
+            transport: Transport::Stdio {
+                command: "other".to_owned(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+            ..server
+        };
+        assert_eq!(store.cached(&changed), None);
     }
 }

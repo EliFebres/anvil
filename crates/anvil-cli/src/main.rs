@@ -400,6 +400,12 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             wiring.load_mcp().await;
             build::execute(args, wiring, cli.yes).await
         }
+        Some(Command::Mcp {
+            command: cli::McpCommand::Approve { name },
+        }) => {
+            let wiring = project_wiring(&env, profile, ask_trust)?;
+            commands::mcp_approve(&wiring, &name).await
+        }
         Some(Command::Chat) => {
             let mut wiring = project_wiring(&env, profile, ask_trust)?;
             wiring.allow_tools(&cli.allow_tools)?;

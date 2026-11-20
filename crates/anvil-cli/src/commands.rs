@@ -287,6 +287,55 @@ async fn run_stop_hooks(
     }
 }
 
+/// Connects to one MCP server, prints its tools and records that listing
+/// as the approved one (`anvil mcp approve <name>`).
+///
+/// # Arguments
+///
+/// * `wiring` - The servers the user's files, a trusted repository and the
+///   policy allow.
+/// * `name` - The server name.
+///
+/// # Returns
+///
+/// Zero once the listing is recorded.
+///
+/// # Errors
+///
+/// When no allowed server has that name, it cannot be reached, or the
+/// approvals file cannot be written.
+pub async fn mcp_approve(wiring: &Wiring, name: &str) -> anyhow::Result<i32> {
+    let Some(server) = wiring.mcp_servers.get(name) else {
+        anyhow::bail!(
+            "no MCP server `{name}` is defined{}",
+            if wiring.policy.is_some() {
+                " and allowed by the managed policy's [features] mcp; ask the administrator"
+            } else {
+                " in ~/.anvil/mcp.toml or a trusted repository"
+            }
+        );
+    };
+    let http = wiring.http_client()?;
+    let client = anvil_compat::mcp::McpClient::connect(server, &wiring.cwd, &http)
+        .await
+        .with_context(|| format!("connecting to MCP server `{name}`"))?;
+    let tools = client
+        .list_tools()
+        .await
+        .with_context(|| format!("listing the tools of `{name}`"))?;
+    println!("mcp server `{name}` ({}) lists:", server.transport.target());
+    for tool in &tools {
+        println!("- {}: {}", tool.name, tool.description.trim());
+    }
+    let digest = anvil_compat::mcp::approval::listing_digest(&tools);
+    wiring
+        .mcp_store()
+        .approve(server, &digest)
+        .context("writing ~/.anvil/mcp-approvals.toml")?;
+    println!("approved this listing of `{name}` (sha256:{digest})");
+    Ok(0)
+}
+
 /// Continues a saved session.
 ///
 /// # Arguments
@@ -459,7 +508,8 @@ pub(crate) async fn report_mcp(wiring: &Wiring) -> usize {
         }
     };
     let started = Instant::now();
-    let tools = anvil_compat::McpTools::load(servers, &wiring.cwd, &http, true).await;
+    let tools =
+        anvil_compat::McpTools::load(servers, &wiring.cwd, &http, true, &wiring.mcp_store()).await;
     let millis = started.elapsed().as_millis();
     let mut failures = 0;
     for report in tools.reports() {

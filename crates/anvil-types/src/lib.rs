@@ -15,6 +15,7 @@ pub mod config;
 pub mod dotenv;
 pub mod error;
 pub mod policy;
+pub mod private_fs;
 pub mod project;
 pub mod redact;
 pub mod shell;

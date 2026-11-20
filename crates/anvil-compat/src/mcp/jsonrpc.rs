@@ -246,6 +246,15 @@ pub enum McpError {
         detail: String,
     },
 
+    /// The server's tool listing differs from the one approved for it.
+    #[error(
+        "mcp server `{server}` now lists different tools, descriptions or schemas than when it was approved; it is not used until `anvil mcp approve {server}` records the new listing"
+    )]
+    ListingChanged {
+        /// The server name.
+        server: String,
+    },
+
     /// An HTTP server answered with a failure status.
     #[error("mcp server `{server}`: HTTP {status}: {detail}")]
     Http {
