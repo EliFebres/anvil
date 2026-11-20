@@ -85,8 +85,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// * `cfg` - The entry.
 /// * `limits` - Retry, timeout and budget settings.
 /// * `budget` - The session budget shared by every provider.
-/// * `egress` - Where requests may go; the entry's `base_url` is checked
-///   before anything else, so a refused endpoint never sees a request.
+/// * `egress` - Where requests may go and how connections are made. The
+///   entry's `base_url` is checked here, before the key is read, and every
+///   request is checked again when it is sent.
 ///
 /// # Returns
 ///
@@ -97,7 +98,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`ProviderError::Refused`] when `egress` does not allow the endpoint,
 /// [`ProviderError::MissingApiKey`] when the configured environment variable
 /// is unset or empty, or [`ProviderError::Transport`] when the HTTP client
-/// cannot be built.
+/// cannot be built (such as an unreadable `[network] ca_bundle`).
 pub fn from_config(
     name: &str,
     cfg: &ProviderConfig,
@@ -117,7 +118,7 @@ pub fn from_config(
             read_api_key(&cfg.api_key_env)?
         }
     };
-    build(name, cfg, api_key, limits, budget)
+    build(name, cfg, api_key, limits, budget, egress)
 }
 
 /// Reads the API key from the environment.
@@ -137,8 +138,9 @@ pub(crate) fn build(
     api_key: String,
     limits: &LimitsConfig,
     budget: SharedBudget,
+    egress: &Egress,
 ) -> Result<Box<dyn Provider>, ProviderError> {
-    let client = crate::net::http_client(CONNECT_TIMEOUT)
+    let client = crate::net::http_client(egress, CONNECT_TIMEOUT)
         .map_err(|error| ProviderError::transport(error.to_string()))?;
     let adapter: Box<dyn Provider> = match cfg.protocol {
         Protocol::Openai => Box::new(OpenAiProvider::new(name, cfg, api_key, limits, client)),
@@ -188,7 +190,7 @@ mod tests {
             &config(Protocol::Openai, true),
             &LimitsConfig::default(),
             TokenBudget::shared(10),
-            &Egress::default(),
+            &Egress::personal(["http://localhost:8000/v1"], Vec::new()),
         );
         assert!(matches!(
             result,
@@ -206,10 +208,65 @@ mod tests {
                     "key".to_owned(),
                     &LimitsConfig::default(),
                     TokenBudget::shared(10),
+                    &Egress::personal(["http://localhost:8000/v1"], Vec::new()),
                 );
                 assert!(provider.is_ok(), "{protocol:?} tools={supports_tools}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_provider_redirected_elsewhere_sends_its_key_nowhere_else() {
+        use futures_util::StreamExt;
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let home = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/v1/chat/completions", other.uri())),
+            )
+            .mount(&home)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&other)
+            .await;
+        let mut cfg = config(Protocol::Openai, true);
+        cfg.base_url = format!("{}/v1", home.uri());
+        let provider = build(
+            "test",
+            &cfg,
+            "k1".to_owned(),
+            &LimitsConfig::default(),
+            TokenBudget::shared(1000),
+            &Egress::personal([home.uri(), other.uri()], Vec::new()),
+        )
+        .expect("builds");
+        let items: Vec<_> = provider
+            .complete(CompletionRequest::default())
+            .collect()
+            .await;
+        assert!(
+            matches!(
+                items.last(),
+                Some(Err(ProviderError::Http { status: 302, .. }))
+            ),
+            "{items:?}"
+        );
+        let sent = home.received_requests().await.expect("recorded");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0]
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer k1"),
+            "the key went to its own host"
+        );
+        let leaked = other.received_requests().await.expect("recorded");
+        assert!(leaked.is_empty(), "the other host received nothing");
     }
 
     #[tokio::test]

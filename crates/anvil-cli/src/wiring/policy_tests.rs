@@ -352,6 +352,87 @@ fn mcp_servers_need_the_mode_and_a_matching_name_and_program() {
 }
 
 #[test]
+fn http_mcp_servers_need_a_url_rule_and_an_allowed_host() {
+    let s = setup();
+    let mcp = s.home.join(".anvil").join("mcp.toml");
+    write(
+        &mcp,
+        "[servers.docs]
+url = \"https://models.corp.example/mcp\"
+",
+    );
+    let text = refused(&s, "", load_policy(&s.policy_dir, ""));
+    assert!(text.contains("[features] mcp = \"off\""), "{text}");
+    let by_command = refused(
+        &s,
+        "",
+        load_policy(
+            &s.policy_dir,
+            "[features]
+mcp = \"allowlist\"
+mcp_servers = [{ name = \"docs\", command = \"https://models.corp.example/mcp\" }]
+",
+        ),
+    );
+    assert!(by_command.contains("mcp_servers"), "{by_command}");
+    let listed = wiring(
+        &s,
+        "",
+        Some(load_policy(
+            &s.policy_dir,
+            "[features]
+mcp = \"allowlist\"
+mcp_servers = [{ name = \"docs\", url = \"https://models.corp.example/mcp\" }]
+",
+        )),
+    );
+    assert_eq!(listed.mcp_servers.servers().len(), 1);
+    assert!(listed.check_endpoints().is_ok());
+
+    write(
+        &mcp,
+        "[servers.docs]
+url = \"https://mcp.elsewhere.example/mcp\"
+",
+    );
+    let text = refused(
+        &s,
+        "",
+        load_policy(
+            &s.policy_dir,
+            "[features]
+mcp = \"on\"
+",
+        ),
+    );
+    assert!(text.contains("[network] allowed_hosts"), "{text}");
+}
+
+#[test]
+fn the_policy_network_table_sets_how_connections_are_made() {
+    let s = setup();
+    let pki = s.policy_dir.join("pki");
+    let extra = format!(
+        "ca_bundle = '{}'
+proxy = \"system\"
+",
+        pki.join("ca.pem").display()
+    );
+    let managed = wiring(&s, "", Some(load_policy(&s.policy_dir, &extra)));
+    let connection = managed.egress.connection();
+    assert_eq!(connection.ca_bundle, Some(pki.join("ca.pem")));
+    assert_eq!(connection.proxy, anvil_types::policy::ProxyMode::System);
+    let error = managed
+        .provider("corp")
+        .err()
+        .expect("the bundle is missing");
+    assert!(
+        format!("{error:#}").contains("[network] ca_bundle"),
+        "{error:#}"
+    );
+}
+
+#[test]
 fn skills_follow_the_policy_mode() {
     let s = setup();
     write(

@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use anvil_compat::mcp::Transport;
 use anvil_compat::{
     AgentSet, CommandSet, DelegateTool, HookConfig, HookRunner, McpTools, ServerSet, SkillRoots,
     SkillSet, SkillTool, SubagentEnv,
@@ -12,6 +13,7 @@ use anvil_core::agent::{
     ChangeChecks, CheckCommand, Instruction, LoopConfig, LoopProviders, PromptSection,
 };
 use anvil_core::context;
+use anvil_core::net::{self, HttpClient};
 use anvil_core::provider::{self, Egress, Provider, SharedBudget, TokenBudget};
 use anvil_core::tools::shell::SHELL_TOOL_NAME;
 use anvil_core::tools::workspace::{DeniedPaths, deny_globs};
@@ -22,7 +24,7 @@ use anvil_core::tools::{
 use anvil_types::policy::{LoadedPolicy, McpMode, SkillsMode};
 use anvil_types::shell::ShellMode;
 use anvil_types::trust::user_permissions_path;
-use anvil_types::{AnvilConfig, ProjectRules, PromptConfig};
+use anvil_types::{AnvilConfig, ProjectRules, PromptConfig, Protocol};
 use anyhow::Context;
 
 use crate::memory::{self, RuleChecks};
@@ -33,6 +35,28 @@ use crate::terminal::TerminalPrompt;
 mod shell;
 
 pub use shell::ShellSettings;
+
+/// How long an HTTP MCP request waits for a TCP connection.
+const MCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Every URL the configuration names: provider `base_url`s (fake providers
+/// send nothing) and HTTP MCP server `url`s. In unmanaged mode these are
+/// the only hosts requests may go to.
+fn endpoint_urls(config: &AnvilConfig, servers: &ServerSet) -> Vec<String> {
+    let providers = config
+        .providers
+        .values()
+        .filter(|entry| entry.protocol != Protocol::Fake)
+        .map(|entry| entry.base_url.clone());
+    let mcp = servers
+        .servers()
+        .iter()
+        .filter_map(|server| match &server.transport {
+            Transport::Http { url, .. } => Some(url.clone()),
+            Transport::Stdio { .. } => None,
+        });
+    providers.chain(mcp).collect()
+}
 
 /// The name of a skills mode as the policy file spells it.
 fn skills_mode(mode: SkillsMode) -> &'static str {
@@ -94,7 +118,8 @@ pub struct Wiring {
     pub config: AnvilConfig,
     /// What the repository may contribute.
     pub project: ProjectAccess,
-    /// Where provider requests may go.
+    /// Where provider and HTTP MCP requests may go, and how connections
+    /// are made.
     pub egress: Egress,
     /// The managed policy, when one is installed.
     pub policy: Option<Arc<LoadedPolicy>>,
@@ -232,7 +257,10 @@ impl Wiring {
             SessionApprovals::preapproved(config_allow_tools(&config))
                 .context("permissions.allow_tools in the configuration")?,
         ));
-        let egress = Egress::personal(config.network.allow_http_hosts.clone());
+        let egress = Egress::personal(
+            endpoint_urls(&config, &mcp_servers),
+            config.network.allow_http_hosts.clone(),
+        );
         let shell = ShellSettings::resolve(&config.shell, None);
         Ok(Self {
             cwd,
@@ -261,8 +289,10 @@ impl Wiring {
     ///
     /// This is the one place the policy changes a session:
     ///
-    /// - requests may go only to `[network] allowed_hosts`;
-    /// - hooks, MCP servers and skills load only as `[features]` allows;
+    /// - requests may go only to `[network] allowed_hosts`, with the
+    ///   policy's CA bundle, client certificate and proxy mode;
+    /// - hooks, MCP servers and skills load only as `[features]` allows,
+    ///   and an HTTP MCP server only when its host is also allowed;
     ///   one defined in the user's own files under `~/.anvil` or
     ///   `~/.claude` that the policy forbids is an error, one shipped by a
     ///   repository or bundled is left out with a note naming the key;
@@ -297,7 +327,7 @@ impl Wiring {
             .flat_map(|home| [home.join(".anvil"), home.join(".claude")])
             .collect();
         let is_own = |path: &Path| own.iter().any(|dir| path.starts_with(dir));
-        self.egress = Egress::managed(&p.network.allowed_hosts, p.network.require_tls);
+        self.egress = Egress::from_policy(&p.network);
 
         if !p.features.hooks {
             let sources: BTreeSet<PathBuf> = self
@@ -326,11 +356,20 @@ impl Wiring {
             McpMode::Allowlist => "[features] mcp_servers",
             McpMode::On => "[features] mcp",
         };
-        let dropped = self.mcp_servers.retain(|server| {
-            let anvil_compat::mcp::Transport::Stdio { command, .. } = &server.transport;
-            policy.allows_mcp_server(&server.name, command)
+        let egress = self.egress.clone();
+        let dropped = self.mcp_servers.retain(|server| match &server.transport {
+            Transport::Stdio { command, .. } => policy.allows_mcp_server(&server.name, command),
+            Transport::Http { url, .. } => {
+                policy.allows_mcp_url(&server.name, url) && egress.check(url).is_ok()
+            }
         });
         for server in dropped {
+            let mcp_key = match &server.transport {
+                Transport::Http { url, .. } if policy.allows_mcp_url(&server.name, url) => {
+                    "[network] allowed_hosts"
+                }
+                _ => mcp_key,
+            };
             if is_own(&server.source) {
                 return Err(conflict(
                     mcp_key,
@@ -499,6 +538,50 @@ impl Wiring {
         }
     }
 
+    /// Checks every endpoint the configuration names against the egress
+    /// rules, so a refused one stops anvil at startup instead of at its
+    /// first request.
+    ///
+    /// # Errors
+    ///
+    /// The first provider `base_url` or HTTP MCP server `url` the rules
+    /// refuse, with the reason and the rule's key.
+    pub fn check_endpoints(&self) -> anyhow::Result<()> {
+        for (name, entry) in &self.config.providers {
+            if entry.protocol != Protocol::Fake {
+                self.egress
+                    .check(&entry.base_url)
+                    .with_context(|| format!("provider `{name}`"))?;
+            }
+        }
+        for server in self.mcp_servers.servers() {
+            if let Transport::Http { url, .. } = &server.transport {
+                self.egress.check(url).with_context(|| {
+                    format!(
+                        "the MCP server `{}` in {}",
+                        server.name,
+                        server.source.display()
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The HTTP client for MCP servers, built from [`Wiring::egress`].
+    ///
+    /// # Returns
+    ///
+    /// The client.
+    ///
+    /// # Errors
+    ///
+    /// When a `[network]` certificate, key or proxy cannot be used.
+    pub fn http_client(&self) -> anyhow::Result<HttpClient> {
+        net::http_client(&self.egress, MCP_CONNECT_TIMEOUT)
+            .context("building the HTTP client from the [network] settings")
+    }
+
     /// Resolves every MCP server's tool list so [`Wiring::registry`] can
     /// register them: from the cache when it is current, by connecting
     /// otherwise. Servers that cannot be reached are logged and skipped.
@@ -506,7 +589,14 @@ impl Wiring {
         if self.mcp_servers.is_empty() {
             return;
         }
-        self.mcp = Arc::new(McpTools::load(&self.mcp_servers, &self.cwd, false).await);
+        let http = match self.http_client() {
+            Ok(http) => http,
+            Err(error) => {
+                eprintln!("warning: no MCP server loads: {error:#}");
+                return;
+            }
+        };
+        self.mcp = Arc::new(McpTools::load(&self.mcp_servers, &self.cwd, &http, false).await);
         for report in self.mcp.reports() {
             if let Err(error) = &report.tools {
                 eprintln!("warning: {error}");
@@ -1286,6 +1376,75 @@ supports_reasoning = false
         let listed = format!("{endpoint}\n[network]\nallow_http_hosts = [\"10.0.0.5\"]\n");
         let wiring = Wiring::new(config(&listed), ProjectAccess::default()).expect("wiring");
         assert!(wiring.provider("gpu").is_ok());
+    }
+
+    #[test]
+    fn unmanaged_egress_allows_the_users_endpoints_and_a_trusted_repositorys_only() {
+        let dir = tempfile::tempdir().expect("dir");
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(home.join(".anvil")).expect("mkdir");
+        std::fs::create_dir_all(&project).expect("mkdir");
+        std::fs::write(
+            home.join(".anvil").join("mcp.toml"),
+            "[servers.docs]
+url = \"https://mcp.example.com/mcp\"
+",
+        )
+        .expect("write");
+        std::fs::write(
+            project.join(".mcp.json"),
+            r#"{"mcpServers": {"exfil": {"url": "https://exfil.example/mcp"}}}"#,
+        )
+        .expect("write");
+        let endpoint = r#"
+[providers.cloud]
+protocol = "openai"
+base_url = "https://api.example.com/v1"
+api_key_env = "PATH"
+model = "m"
+context_window = 1000
+supports_tools = true
+supports_reasoning = false
+"#;
+        let build = |trusted: bool| {
+            Wiring::new_in(
+                project.clone(),
+                Some(home.clone()),
+                config(endpoint),
+                ProjectAccess {
+                    trusted,
+                    rules: ProjectRules::default(),
+                },
+            )
+            .expect("wiring")
+        };
+        let untrusted = build(false);
+        let allowed = untrusted.egress.allowed();
+        for pair in ["api.example.com:443", "mcp.example.com:443"] {
+            assert!(allowed.contains(&pair.to_owned()), "{allowed:?}");
+        }
+        assert!(untrusted.check_endpoints().is_ok());
+        assert!(
+            untrusted.egress.check("https://exfil.example/mcp").is_err(),
+            "an untrusted repository's server adds no destination"
+        );
+        let trusted = build(true);
+        assert!(trusted.egress.check("https://exfil.example/mcp").is_ok());
+
+        std::fs::write(
+            home.join(".anvil").join("mcp.toml"),
+            "[servers.lan]
+url = \"http://10.0.0.7:3000/mcp\"
+",
+        )
+        .expect("write");
+        let error = build(false).check_endpoints().expect_err("refused");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("MCP server `lan`") && text.contains("plain http"),
+            "{text}"
+        );
     }
 
     #[test]

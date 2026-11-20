@@ -7,9 +7,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::McpServer;
+use anvil_core::net::HttpClient;
+
+use super::http::HttpTransport;
 use super::jsonrpc::{McpError, PROTOCOL_VERSION, Response};
 use super::stdio::StdioTransport;
+use super::{McpServer, Transport};
 
 /// A boxed future returned by a transport.
 pub type RpcFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, McpError>> + Send + 'a>>;
@@ -93,6 +96,8 @@ impl McpClient {
     ///
     /// * `server` - The server definition.
     /// * `cwd` - The working directory for stdio servers.
+    /// * `http` - The client HTTP servers are reached with; its egress
+    ///   rules decide whether the server's URL may be called.
     ///
     /// # Returns
     ///
@@ -101,15 +106,29 @@ impl McpClient {
     /// # Errors
     ///
     /// Any [`McpError`] from spawning, connecting or the handshake.
-    pub async fn connect(server: &McpServer, cwd: &std::path::Path) -> Result<Self, McpError> {
-        let launch = server.launch()?;
-        let transport: Box<dyn RpcTransport> = Box::new(StdioTransport::spawn(
-            &server.name,
-            &launch.command,
-            &launch.args,
-            &launch.env,
-            cwd,
-        )?);
+    pub async fn connect(
+        server: &McpServer,
+        cwd: &std::path::Path,
+        http: &HttpClient,
+    ) -> Result<Self, McpError> {
+        let transport: Box<dyn RpcTransport> = match &server.transport {
+            Transport::Stdio { .. } => {
+                let launch = server.launch()?;
+                Box::new(StdioTransport::spawn(
+                    &server.name,
+                    &launch.command,
+                    &launch.args,
+                    &launch.env,
+                    cwd,
+                )?)
+            }
+            Transport::Http { url, .. } => Box::new(HttpTransport::new(
+                &server.name,
+                url,
+                server.http_headers()?,
+                http.clone(),
+            )),
+        };
         let mut client = Self {
             name: server.name.clone(),
             transport,

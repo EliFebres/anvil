@@ -108,7 +108,23 @@ pub fn shipped(root: &Path) -> Vec<String> {
         }
     }
     for server in ServerSet::load(Some(root), None).servers() {
-        let Transport::Stdio { command, args, env } = &server.transport;
+        let (command, args, env) = match &server.transport {
+            Transport::Stdio { command, args, env } => (command, args, env),
+            Transport::Http { url, headers } => {
+                let names: Vec<&str> = headers.keys().map(String::as_str).collect();
+                let headers = if names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" with the headers {}", names.join(", "))
+                };
+                items.push(format!(
+                    "MCP server {}: contacts `{url}`{headers} ({})",
+                    server.name,
+                    server.source.display()
+                ));
+                continue;
+            }
+        };
         let env: String = env
             .iter()
             .map(|(key, value)| format!(" {key}={value}"))
@@ -197,9 +213,10 @@ pub fn commands_run(hooks: &HookConfig, servers: &ServerSet) -> Vec<String> {
         .flat_map(|group| group.commands.iter().map(|c| c.command.clone()))
         .collect();
     for server in servers.servers() {
-        let Transport::Stdio { command, args, .. } = &server.transport;
-        lines.push(command.clone());
-        lines.extend(args.iter().cloned());
+        if let Transport::Stdio { command, args, .. } = &server.transport {
+            lines.push(command.clone());
+            lines.extend(args.iter().cloned());
+        }
     }
     lines
 }

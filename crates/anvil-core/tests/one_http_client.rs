@@ -1,6 +1,8 @@
-//! Every outbound HTTP request goes through `anvil_core::net`. `clippy.toml`
-//! forbids building a reqwest client elsewhere; this test makes sure no
-//! file switches that lint off or builds a client some other way.
+//! Every outbound HTTP request goes through `anvil_core::net`, whose
+//! client checks each request against the egress rules. `clippy.toml`
+//! forbids building a reqwest client elsewhere; these tests make sure no
+//! file, test code included, switches that lint off or builds or holds a
+//! client some other way, and that no other crate depends on reqwest.
 
 use std::path::{Path, PathBuf};
 
@@ -8,11 +10,15 @@ use std::path::{Path, PathBuf};
 const ALLOWED: &str = "crates/anvil-core/src/net.rs";
 
 /// Text that builds a client or turns the guard off.
-const FORBIDDEN: [&str; 5] = [
+const FORBIDDEN: [&str; 9] = [
     "reqwest::Client::new",
     "reqwest::Client::builder",
+    "Client::new(",
+    "Client::builder(",
+    "Client::default(",
     "ClientBuilder::new",
     "reqwest::get(",
+    "reqwest::blocking",
     "disallowed_methods",
 ];
 
@@ -60,5 +66,30 @@ fn only_the_net_module_builds_an_http_client() {
         offenders.is_empty(),
         "HTTP clients must be built in {ALLOWED} only:\n{}",
         offenders.join("\n")
+    );
+}
+
+#[test]
+fn only_anvil_core_depends_on_reqwest() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(root.join("crates"))
+        .expect("crates/")
+        .filter_map(Result::ok)
+    {
+        let manifest = entry.path().join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap_or_default();
+        if entry.file_name() != "anvil-core" && text.contains("reqwest") {
+            offenders.push(manifest.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "only anvil-core may depend on reqwest:
+{}",
+        offenders.join(
+            "
+"
+        )
     );
 }

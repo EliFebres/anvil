@@ -19,6 +19,7 @@ use super::error::ProviderError;
 use super::retry::{Attempt, RetryPolicy, is_retryable_status, parse_retry_after, retry};
 use super::sse::{SseFrame, SseParser};
 use super::types::Event;
+use crate::net::{HttpRequest, SendError};
 
 /// Raw response bytes, chunked however the network delivered them.
 pub(crate) type ByteStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, ProviderError>> + Send>>;
@@ -173,7 +174,8 @@ async fn forward(tx: &mpsc::Sender<Result<Event, ProviderError>>, items: Items) 
 ///
 /// # Arguments
 ///
-/// * `builder` - The fully prepared request.
+/// * `builder` - The fully prepared request; the egress rules are checked
+///   when it is sent.
 /// * `api_key` - The key the request carries; removed from any error body
 ///   the server returns, so a server that echoes it cannot put it in a log
 ///   or a transcript.
@@ -181,17 +183,22 @@ async fn forward(tx: &mpsc::Sender<Result<Event, ProviderError>>, items: Items) 
 /// # Returns
 ///
 /// The body byte stream on 2xx; `Retry` on connection failures, 408, 429 and
-/// 5xx; `Fatal` on every other status or an unbuildable request.
-pub(crate) async fn send_attempt(
-    builder: reqwest::RequestBuilder,
-    api_key: String,
-) -> Attempt<ByteStream> {
+/// 5xx; `Fatal` on every other status, a refused or an unbuildable request.
+pub(crate) async fn send_attempt(builder: HttpRequest, api_key: String) -> Attempt<ByteStream> {
     let response = match builder.send().await {
         Ok(response) => response,
-        Err(error) if error.is_builder() => {
+        Err(SendError::Refused(error)) => {
+            return Attempt::Fatal(ProviderError::Refused {
+                detail: error.to_string(),
+            });
+        }
+        Err(error @ SendError::BadHeader { .. }) => {
             return Attempt::Fatal(ProviderError::transport(error.to_string()));
         }
-        Err(error) => {
+        Err(SendError::Http(error)) if error.is_builder() => {
+            return Attempt::Fatal(ProviderError::transport(error.to_string()));
+        }
+        Err(SendError::Http(error)) => {
             return Attempt::Retry {
                 error: ProviderError::transport(error.to_string()),
                 retry_after: None,

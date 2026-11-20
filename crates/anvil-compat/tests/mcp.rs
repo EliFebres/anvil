@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anvil_compat::mcp::{McpError, McpServer, McpTools, ServerSet, Transport};
+use anvil_core::net::{Egress, HttpClient, http_client};
 use anvil_core::provider::ToolCall;
 use anvil_core::tools::{Permissions, PromptAnswer, StaticPrompt, ToolOutcome, ToolRegistry};
 use serde_json::json;
@@ -43,6 +44,15 @@ fn fake_server(env: BTreeMap<String, String>) -> McpServer {
     }
 }
 
+/// A client that allows no HTTP endpoint; these servers are local.
+fn http() -> HttpClient {
+    http_client(
+        &Egress::personal(Vec::<String>::new(), Vec::new()),
+        Duration::from_secs(5),
+    )
+    .expect("client")
+}
+
 fn fresh_registry() -> ToolRegistry {
     ToolRegistry::new(
         Permissions::empty(),
@@ -63,7 +73,7 @@ async fn registers_the_servers_tools_and_round_trips_a_call() {
     let project = tempfile::tempdir().expect("tempdir");
     let set = ServerSet::from_servers(vec![fake_server(BTreeMap::new())]);
 
-    let tools = McpTools::load(&set, project.path(), false).await;
+    let tools = McpTools::load(&set, project.path(), &http(), false).await;
     assert_eq!(tools.reports().len(), 1);
     assert_eq!(tools.reports()[0].tools, Ok(1));
     assert!(!tools.reports()[0].from_cache);
@@ -87,7 +97,7 @@ async fn registers_the_servers_tools_and_round_trips_a_call() {
 
     // The second load registers from the cache without connecting, and the
     // first call connects lazily.
-    let cached = McpTools::load(&set, project.path(), false).await;
+    let cached = McpTools::load(&set, project.path(), &http(), false).await;
     assert!(cached.reports()[0].from_cache);
     let mut registry = fresh_registry();
     cached.register(&mut registry);
@@ -100,7 +110,7 @@ async fn a_server_that_dies_mid_call_gives_a_clear_error() {
     let project = tempfile::tempdir().expect("tempdir");
     let env = BTreeMap::from([("FAKE_MCP_DIE_ON_CALL".to_owned(), "1".to_owned())]);
     let set = ServerSet::from_servers(vec![fake_server(env)]);
-    let tools = McpTools::load(&set, project.path(), true).await;
+    let tools = McpTools::load(&set, project.path(), &http(), true).await;
     assert_eq!(tools.reports()[0].tools, Ok(1));
 
     let mut registry = fresh_registry();
@@ -137,7 +147,7 @@ async fn a_missing_command_is_reported_without_stopping_the_others() {
         source: PathBuf::from("test"),
     };
     let set = ServerSet::from_servers(vec![missing, fake_server(BTreeMap::new())]);
-    let tools = McpTools::load(&set, project.path(), true).await;
+    let tools = McpTools::load(&set, project.path(), &http(), true).await;
     assert!(matches!(
         tools.reports()[0].tools,
         Err(McpError::Spawn { .. })

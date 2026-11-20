@@ -441,8 +441,15 @@ pub(crate) async fn report_mcp(wiring: &Wiring) -> usize {
     if servers.is_empty() {
         return 0;
     }
+    let http = match wiring.http_client() {
+        Ok(http) => http,
+        Err(error) => {
+            println!("mcp error: {error:#}");
+            return servers.servers().len();
+        }
+    };
     let started = Instant::now();
-    let tools = anvil_compat::McpTools::load(servers, &wiring.cwd, true).await;
+    let tools = anvil_compat::McpTools::load(servers, &wiring.cwd, &http, true).await;
     let millis = started.elapsed().as_millis();
     let mut failures = 0;
     for report in tools.reports() {

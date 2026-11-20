@@ -38,7 +38,8 @@ ulid.workspace = true
 insta.workspace = true
 tempfile.workspace = true
 wiremock.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio-rustls.workspace = true
+tokio = { workspace = true, features = ["test-util", "net"] }
 
 [lints]
 workspace = true

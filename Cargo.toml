@@ -80,6 +80,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 insta = { version = "1.49", features = ["json", "filters"] }
 tempfile = "3.27"
 wiremock = "0.6"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

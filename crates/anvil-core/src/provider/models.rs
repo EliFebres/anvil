@@ -27,7 +27,8 @@ pub struct ServedModel {
 ///
 /// * `base_url` - The endpoint, such as `https://gpu.example/v1`.
 /// * `api_key` - Sent as a bearer token when given.
-/// * `egress` - Where requests may go; checked before anything is sent.
+/// * `egress` - Where requests may go and how connections are made;
+///   checked before anything is sent.
 /// * `timeout` - Wall clock for the whole request.
 ///
 /// # Returns
@@ -51,18 +52,23 @@ pub async fn list_models(
     egress.check(base).map_err(|error| ProviderError::Refused {
         detail: error.to_string(),
     })?;
-    let client = net::http_client(CONNECT_TIMEOUT)
+    let client = net::http_client(egress, CONNECT_TIMEOUT)
         .map_err(|error| ProviderError::transport(error.to_string()))?;
-    let mut request = client.get(format!("{base}/models"));
+    let mut request = client.get(&format!("{base}/models"));
     if let Some(key) = api_key {
-        request = request.bearer_auth(key);
+        request = request.api_key("authorization", &format!("Bearer {key}"), base);
     }
     let response = tokio::time::timeout(timeout, request.send())
         .await
         .map_err(|_| ProviderError::Timeout {
             after_s: timeout.as_secs(),
         })?
-        .map_err(|error| ProviderError::transport(error.to_string()))?;
+        .map_err(|error| match error {
+            net::SendError::Refused(error) => ProviderError::Refused {
+                detail: error.to_string(),
+            },
+            other => ProviderError::transport(other.to_string()),
+        })?;
     let status = response.status().as_u16();
     let body = response
         .text()
@@ -149,7 +155,7 @@ mod tests {
         let models = list_models(
             &base,
             Some("k1"),
-            &Egress::default(),
+            &Egress::personal([base.as_str()], Vec::new()),
             Duration::from_secs(5),
         )
         .await

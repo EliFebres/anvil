@@ -37,7 +37,7 @@ async fn live_endpoint_answers_pong() {
         &cfg,
         &LimitsConfig::default(),
         TokenBudget::shared(100_000),
-        &provider::Egress::default(),
+        &provider::Egress::personal([cfg.base_url.as_str()], Vec::new()),
     )
     .expect("provider builds");
     let request = CompletionRequest {

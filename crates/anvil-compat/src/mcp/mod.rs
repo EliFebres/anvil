@@ -8,11 +8,17 @@
 //! server's definition. A server with a fresh cache entry is not started
 //! until one of its tools is called.
 //!
-//! Only local servers that anvil starts as a child process (stdio) are
-//! supported. A definition with a `url` is refused, so no MCP server can
-//! make anvil contact a host other than the model endpoint.
+//! Two transports are supported: local servers that anvil starts as a
+//! child process (stdio), and remote servers reached over the streamable
+//! HTTP transport (a definition with a `url`). An HTTP server is contacted
+//! only through `anvil_core::net`'s client, so the egress rules apply to
+//! every request: in unmanaged mode its URL joins the allowed set because
+//! the user's own (or a trusted repository's) definition names it; under
+//! a managed policy its `host:port` must be in `[network] allowed_hosts`
+//! and `[features] mcp` must allow it by name and URL.
 
 pub mod client;
+pub mod http;
 pub mod jsonrpc;
 pub mod stdio;
 pub mod tool;
@@ -23,6 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anvil_core::net::HttpClient;
 use anvil_core::tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,7 +46,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Where tool lists are cached, relative to the project root.
 pub const CACHE_DIR: &str = ".anvil/mcp-cache";
 
-/// How to reach a server. Stdio is the only transport.
+/// How to reach a server.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Transport {
     /// A child process speaking JSON-RPC over stdin and stdout.
@@ -51,6 +58,29 @@ pub enum Transport {
         /// Extra environment variables.
         env: BTreeMap<String, String>,
     },
+    /// A remote server: one HTTP POST per message (streamable HTTP).
+    Http {
+        /// The endpoint, an `http://` or `https://` URL.
+        url: String,
+        /// Extra request headers, such as `Authorization`, sent only to
+        /// the endpoint's host; `${VAR}` references are expanded.
+        headers: BTreeMap<String, String>,
+    },
+}
+
+impl Transport {
+    /// What the definition starts or contacts, for messages and policy
+    /// rules.
+    ///
+    /// # Returns
+    ///
+    /// The `command` of a local server or the `url` of an HTTP server.
+    pub fn target(&self) -> &str {
+        match self {
+            Self::Stdio { command, .. } => command,
+            Self::Http { url, .. } => url,
+        }
+    }
 }
 
 /// One server definition.
@@ -312,14 +342,31 @@ fn parse_server(name: &str, entry: &Value, path: &Path) -> Result<McpServer, Mcp
         .and_then(Value::as_f64)
         .filter(|secs| *secs > 0.0)
         .map_or(DEFAULT_TIMEOUT, Duration::from_secs_f64);
+    let config_error = |detail: String| McpError::Config {
+        path: path.to_path_buf(),
+        detail,
+    };
     let transport = match (string("url"), string("command")) {
-        (Some(_), _) => {
-            return Err(McpError::Config {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "server `{name}` is remote; anvil starts only local stdio servers and contacts no MCP URL"
-                ),
-            });
+        (Some(_), Some(_)) => {
+            return Err(config_error(format!(
+                "server `{name}` has both `command` and `url`"
+            )));
+        }
+        (Some(url), None) => {
+            if string("type").as_deref() == Some("sse") {
+                return Err(config_error(format!(
+                    "server `{name}` uses the older SSE transport; anvil speaks only streamable HTTP"
+                )));
+            }
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err(config_error(format!(
+                    "server `{name}` has the url `{url}`, which is not http or https"
+                )));
+            }
+            Transport::Http {
+                url,
+                headers: map("headers"),
+            }
         }
         (None, Some(command)) if command.is_empty() => {
             return Err(McpError::Config {
@@ -434,19 +481,18 @@ impl McpServer {
     ///
     /// # Errors
     ///
-    /// [`McpError::Spawn`] naming a referenced variable that children do not
-    /// receive, with how to allow it.
+    /// [`McpError::Spawn`] for an HTTP server, which is not started, or
+    /// naming a referenced variable that children do not receive, with how
+    /// to allow it.
     pub fn launch(&self) -> Result<Launch, McpError> {
-        let Transport::Stdio { command, args, env } = &self.transport;
-        let refuse = |variable: String| McpError::Spawn {
-            server: self.name.clone(),
-            command: command.clone(),
-            detail: format!(
-                "the definition uses `${{{variable}}}`, which anvil does not pass to the \
-                 programs it starts; add `{variable}` to `[tools] pass_env` in \
-                 ~/.anvil/config.toml to allow it"
-            ),
+        let Transport::Stdio { command, args, env } = &self.transport else {
+            return Err(McpError::Spawn {
+                server: self.name.clone(),
+                command: self.transport.target().to_owned(),
+                detail: "an HTTP server is contacted, not started".to_owned(),
+            });
         };
+        let refuse = |variable: String| self.unpassed(variable);
         Ok(Launch {
             command: expand_env(command).map_err(refuse)?,
             args: args
@@ -460,6 +506,44 @@ impl McpServer {
                 .collect::<Result<_, String>>()
                 .map_err(refuse)?,
         })
+    }
+}
+
+impl McpServer {
+    /// The error for a `${VAR}` reference to a variable children do not
+    /// receive.
+    fn unpassed(&self, variable: String) -> McpError {
+        McpError::Spawn {
+            server: self.name.clone(),
+            command: self.transport.target().to_owned(),
+            detail: format!(
+                "the definition uses `${{{variable}}}`, which anvil does not pass to the \
+                 programs it starts; add `{variable}` to `[tools] pass_env` in \
+                 ~/.anvil/config.toml to allow it"
+            ),
+        }
+    }
+
+    /// An HTTP server's headers with every `${VAR}` expanded, under the
+    /// same rule as a local server's environment.
+    ///
+    /// # Returns
+    ///
+    /// The headers; empty for a local server.
+    ///
+    /// # Errors
+    ///
+    /// [`McpError::Spawn`] naming a referenced variable that children do
+    /// not receive, with how to allow it.
+    pub fn http_headers(&self) -> Result<BTreeMap<String, String>, McpError> {
+        let Transport::Http { headers, .. } = &self.transport else {
+            return Ok(BTreeMap::new());
+        };
+        headers
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), expand_env(value)?)))
+            .collect::<Result<_, String>>()
+            .map_err(|variable| self.unpassed(variable))
     }
 }
 
@@ -501,13 +585,14 @@ impl McpTools {
     /// * `set` - The servers.
     /// * `cwd` - The project root; stdio servers run there and the cache
     ///   lives under it.
+    /// * `http` - The client HTTP servers are reached with.
     /// * `refresh` - Ignore the cache and connect to every server.
     ///
     /// # Returns
     ///
     /// The tools. A server that cannot be reached contributes no tools and
     /// an error in its report; the others still load.
-    pub async fn load(set: &ServerSet, cwd: &Path, refresh: bool) -> Self {
+    pub async fn load(set: &ServerSet, cwd: &Path, http: &HttpClient, refresh: bool) -> Self {
         let cache_dir = cwd.join(CACHE_DIR);
         let mut tools = Self::default();
         for server in set.servers() {
@@ -519,13 +604,17 @@ impl McpTools {
                     from_cache: true,
                 });
                 tools.servers.push((
-                    Arc::new(LazyServer::new(server.clone(), cwd.to_path_buf())),
+                    Arc::new(LazyServer::new(
+                        server.clone(),
+                        cwd.to_path_buf(),
+                        http.clone(),
+                    )),
                     cached,
                 ));
                 continue;
             }
             let listed = async {
-                let client = McpClient::connect(server, cwd).await?;
+                let client = McpClient::connect(server, cwd, http).await?;
                 let list = client.list_tools().await?;
                 Ok::<_, McpError>((client, list))
             }
@@ -542,6 +631,7 @@ impl McpTools {
                         Arc::new(LazyServer::connected(
                             server.clone(),
                             cwd.to_path_buf(),
+                            http.clone(),
                             client,
                         )),
                         list,
@@ -663,7 +753,29 @@ mod tests {
             "broken": {"args": ["x"]}
         }}"#;
         let servers = parse_definitions(json, Path::new(".mcp.json")).expect("parses");
-        assert_eq!(server_names(&servers), ["playwright"]);
+        assert_eq!(server_names(&servers), ["playwright", "remote"]);
+        assert_eq!(
+            servers[1].transport,
+            Transport::Http {
+                url: "https://example.test/mcp".to_owned(),
+                headers: BTreeMap::from([(
+                    "Authorization".to_owned(),
+                    "Bearer ${ANVIL_TEST_TOKEN:-anon}".to_owned()
+                )]),
+            },
+            "an http server parses; the older sse transport is refused"
+        );
+        assert_eq!(servers[1].transport.target(), "https://example.test/mcp");
+        assert!(
+            servers[1].launch().is_err(),
+            "an http server is not started"
+        );
+        assert!(
+            servers[1]
+                .http_headers()
+                .is_err_and(|error| error.to_string().contains("pass_env")),
+            "a header may name only variables children receive"
+        );
         assert_eq!(
             servers[0].transport,
             Transport::Stdio {
@@ -685,7 +797,18 @@ mod tests {
 
         let toml = "[servers.docs]\nurl = \"http://localhost:3000/mcp\"\ntimeout_secs = 5\n\n[servers.local]\ncommand = \"python\"\nargs = [\"server.py\"]\n";
         let servers = parse_definitions(toml, Path::new("mcp.toml")).expect("parses");
-        assert_eq!(server_names(&servers), ["local"]);
+        assert_eq!(server_names(&servers), ["docs", "local"]);
+        for refused in [
+            r#"{"mcpServers": {"x": {"url": "ftp://example.test/mcp"}}}"#,
+            r#"{"mcpServers": {"x": {"url": "https://example.test/mcp", "command": "y"}}}"#,
+        ] {
+            assert!(
+                parse_definitions(refused, Path::new(".mcp.json"))
+                    .expect("parses")
+                    .is_empty(),
+                "{refused}"
+            );
+        }
         let toml = "[servers.local]
 command = \"python\"
 timeout_secs = 5
@@ -752,7 +875,9 @@ timeout_secs = 5
             r#"{{"mcpServers": {{"x": {{"command": "node", "args": ["--k=${{{name}}}"], "env": {{"STOLEN": "${{{name}}}"}}}}}}}}"#
         );
         let servers = parse_definitions(&json, Path::new(".mcp.json")).expect("parses");
-        let Transport::Stdio { args, env, .. } = &servers[0].transport;
+        let Transport::Stdio { args, env, .. } = &servers[0].transport else {
+            panic!("a stdio server");
+        };
         assert!(!args.concat().contains(&value));
         assert!(!env.values().any(|text| text.contains(&value)));
         let error = servers[0]

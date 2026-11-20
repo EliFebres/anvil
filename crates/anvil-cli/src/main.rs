@@ -119,8 +119,17 @@ fn start(cli: Cli) -> anyhow::Result<i32> {
 /// # Errors
 ///
 /// When the configuration, the repository's rules or the trust file are
-/// malformed.
+/// malformed, or when the egress rules refuse an endpoint the
+/// configuration names.
 fn project_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow::Result<Wiring> {
+    let wiring = unchecked_wiring(env, profile, ask_trust)?;
+    wiring.check_endpoints()?;
+    Ok(wiring)
+}
+
+/// [`project_wiring`] without the endpoint check, for `anvil doctor`, which
+/// reports a refused endpoint as a row instead of stopping.
+fn unchecked_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow::Result<Wiring> {
     let home = env.home.as_deref();
     let loaded = load_profile(home, profile)?;
     if let Some(policy) = &env.policy {
@@ -140,19 +149,18 @@ fn project_wiring(env: &Env, profile: Option<&str>, ask_trust: bool) -> anyhow::
     }
 }
 
-/// The egress rules `anvil setup --endpoint` probes under: the policy's
-/// endpoints, or unmanaged mode with the user's own http hosts if a
-/// configuration already exists.
-fn setup_egress(env: &Env) -> anyhow::Result<anvil_core::provider::Egress> {
+/// The egress rules `anvil setup --endpoint` probes under: the policy's,
+/// or unmanaged mode allowing the URL the user typed, with their own http
+/// hosts if a configuration already exists.
+fn setup_egress(env: &Env, url: &str) -> anvil_core::provider::Egress {
     use anvil_core::provider::Egress;
     if let Some(loaded) = &env.policy {
-        let network = &loaded.policy.network;
-        return Ok(Egress::managed(&network.allowed_hosts, network.require_tls));
+        return Egress::from_policy(&loaded.policy.network);
     }
     let hosts = load_profile(env.home.as_deref(), None)
         .map(|loaded| loaded.config.network.allow_http_hosts)
         .unwrap_or_default();
-    Ok(Egress::personal(hosts))
+    Egress::personal([url], hosts)
 }
 
 /// Prepares a session: says which policy is in force (on stderr, for the
@@ -212,7 +220,7 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             key_env,
         }) => match endpoint {
             Some(url) => {
-                let egress = setup_egress(&env)?;
+                let egress = setup_egress(&env, &url);
                 let args = setup::endpoint::EndpointArgs {
                     url: &url,
                     model: model.as_deref(),
@@ -301,7 +309,7 @@ async fn dispatch(cli: Cli, env: Env, ui: UiKind) -> anyhow::Result<i32> {
             commands::compat_check(&path, config.as_ref())
         }
         Some(Command::Doctor) => {
-            let wiring = project_wiring(&env, profile, false)?;
+            let wiring = unchecked_wiring(&env, profile, false)?;
             let options = doctor::Options {
                 env_files: &env.env_files,
                 loaded_env: &env.loaded_env,
